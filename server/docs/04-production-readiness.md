@@ -97,6 +97,26 @@ These are absences, not defects, but they are load-bearing for the product:
   hand, but the container still runs a single uvicorn worker, so a real
   multi-worker failover has never happened. Exercise it before scaling out, and
   expect a gap of up to one lease period (15s) when a leader dies.
+- **Backups are not scheduled and do not leave the host.**
+  `scripts/backup.sh` works and the restore has been rehearsed
+  (`06-backup-and-restore.md`), but nothing runs it on a timer, nothing alerts
+  if it stops producing files, and the dumps sit on the same disk as the
+  database they protect. That covers a bad migration; it does not cover the
+  machine. The CA key and `SECRETS_ENCRYPTION_KEY` also need somewhere to live
+  that is not beside the dump.
+- **Certificates expire and nothing renews them.** The private CA is good for
+  ten years, the server certificates for 825 days. There is no renewal path and
+  no warning: the first sign will be every station failing to connect at once.
+  Renewing the server certificates is safe (stations pin the CA, not the leaf);
+  renewing the CA is not, and means re-enrolling every station.
+- **TLS is server-authenticated only.** Stations prove who they are with a
+  bearer credential over a verified channel, not with a client certificate.
+  mTLS is the documented upgrade (`contract/enrolment.md` §3) and changes the
+  credential type without changing the lifecycle.
+- **The console's certificate is from a private CA**, so a browser shows a
+  warning until someone trusts it. Fine for operators on known machines, wrong
+  for a public deployment - that wants a real domain and a public certificate,
+  while stations keep pinning the private CA.
 - **The seeded development password is in the repository.**
   `backend/scripts/seed_dev.py` hardcodes `percepta-dev-2026` for
   `admin@`, `operator@` and `viewer@percepta.local`, and that file is pushed to
@@ -107,16 +127,6 @@ These are absences, not defects, but they are load-bearing for the product:
   bootstrap command that takes a password from the environment and prints
   nothing. Until that exists, standing up a real deployment means either running
   the dev seed (wrong) or inserting a user by hand (undocumented).
-- **Close the broker's `default` user.** This is the one that matters.
-  Enrolment is built, every station gets its own Redis principal pinned to its
-  own channels, and that pinning is verified
-  (`scripts/verify_enrolment.py` proves a station cannot publish as another).
-  But `default` is still `on nopass ~* &* +@all`, and the platform's own
-  components use it, so **an unauthenticated client can still publish as any
-  station**. Closing it means setting `requirepass` or disabling `default`,
-  giving the app, the ingest and the recorder their own credentials, and only
-  then is the isolation real rather than described. Nothing in the application
-  changes; this is configuration and rollout.
 - **Enrolment gaps.** No console UI for issuing codes (the API exists at
   `/api/stations/{id}/enrolment`, nothing renders it). No configuration
   delivery - `config_version` is issued at enrolment but `config.set` is not

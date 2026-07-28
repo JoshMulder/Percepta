@@ -11,6 +11,7 @@ place in the platform where an unauthenticated caller can cause a write.
 """
 
 import logging
+import pathlib
 import uuid
 from datetime import UTC, datetime
 
@@ -64,6 +65,12 @@ class CredentialOut(BaseModel):
 
 class BrokerOut(BaseModel):
     url: str
+    #: The CA the station pins, per contract/enrolment.md §4. Sent once, at
+    #: enrolment, over a connection the station could not yet verify - which is
+    #: the standard trust-on-first-use compromise, and is why the enrolment
+    #: token is short-lived and single-station. Everything afterwards is
+    #: verified against this.
+    ca_pem: str | None = None
     telemetry_topic: str
     audio_topic: str
     command_topic: str
@@ -89,9 +96,28 @@ def _source(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+def _ca_pem() -> str | None:
+    """The CA certificate, or None if this deployment has not generated one.
+
+    None means the station has nothing to verify against and must refuse to
+    treat the link as secure. It is not a reason to fall back to plaintext -
+    a station that silently downgrades is worse than one that will not start,
+    because nobody finds out.
+    """
+    try:
+        return pathlib.Path(settings.tls_ca_file).read_text()
+    except Exception:
+        log.warning(
+            "No CA certificate at %s - stations will be enrolled with nothing "
+            "to pin. Run scripts/make_certs.sh.", settings.tls_ca_file,
+        )
+        return None
+
+
 def _broker(station_id: uuid.UUID) -> BrokerOut:
     return BrokerOut(
         url=settings.station_broker_url or settings.redis_url,
+        ca_pem=_ca_pem(),
         telemetry_topic=f"gsu/{station_id}/telemetry",
         audio_topic=f"gsu/{station_id}/audio",
         command_topic=f"cmd/gsu/{station_id}",
@@ -180,7 +206,11 @@ def claim(body: ClaimRequest, request: Request) -> EnrolResponse:
 
         station_id = issued.station.id
         organization_id = issued.station.organization_id
-        provisioned = broker_acl.provision(station_id, issued.secret)
+        # Sync from the database rather than from the secret in hand: it
+        # recomputes the exact set of hashes that should work, so revocation of
+        # the previous credential takes effect in the same call.
+        db.flush()
+        provisioned = broker_acl.sync_station(db, station_id)
         issued.credential.broker_provisioned = provisioned
         response = _response(issued)
         db.commit()
@@ -241,11 +271,11 @@ def renew(
 
         station, current = found
         issued = enrolment.renew(db, station=station, current=current)
-        # Both secrets: the station just proved it holds `secret`, and that one
-        # must keep working for the overlap window in case this response never
-        # arrives. Passing both rewrites the broker's password set to exactly
-        # the pair that should work, dropping anything older.
-        provisioned = broker_acl.provision(station.id, issued.secret, secret)
+        # Recomputed from the database, which already knows the outgoing
+        # credential stays valid for the overlap window - so the broker ends up
+        # accepting exactly the pair that should work, and nothing older.
+        db.flush()
+        provisioned = broker_acl.sync_station(db, station.id)
         issued.credential.broker_provisioned = provisioned
         station_id = station.id
         organization_id = station.organization_id

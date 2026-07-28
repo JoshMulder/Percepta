@@ -31,19 +31,60 @@ services:
     # is re-acquired), revocation pushes (the 60s revalidation poll is the
     # backstop), single-use stream ticket ids (they expire in 60s anyway) and
     # live fan-out. None of it survives a restart usefully, so persistence is off.
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    # requirepass closes the `default` user. Without it any process that can
+    # reach the port has the run of the broker, which makes the per-station ACL
+    # users decorative - they bind whoever uses them and nobody who does not.
+    #
+    # ACL users themselves are deliberately NOT persisted: the platform rebuilds
+    # every station principal from the credential hashes in Postgres at start-up
+    # (services/broker_acl.sync_all), which is one source of truth instead of
+    # two that can disagree.
+    command:
+      - "redis-server"
+      - "--save"
+      - ""
+      - "--appendonly"
+      - "no"
+      - "--requirepass"
+      - "${REDIS_PASSWORD:?REDIS_PASSWORD must be set}"
+      # TLS only. `--port 0` disables the plaintext listener outright rather
+      # than leaving it available beside the encrypted one: a station
+      # misconfigured to redis:// would otherwise send its credential in clear
+      # and appear to work perfectly, which is the worst kind of failure.
+      #
+      # Clients are not asked for certificates yet - they authenticate with
+      # their per-station ACL password. mTLS is the documented upgrade
+      # (contract/enrolment.md §3) and this changes only the credential type.
+      - "--port"
+      - "0"
+      - "--tls-port"
+      - "6379"
+      - "--tls-cert-file"
+      - "/certs/redis.crt"
+      - "--tls-key-file"
+      - "/certs/redis.key"
+      - "--tls-ca-cert-file"
+      - "/certs/ca.crt"
+      - "--tls-auth-clients"
+      - "no"
+    volumes:
+      - ./certs:/certs:ro
     ports:
       # Loopback only, and on 6380 rather than 6379 because a development host
       # often already runs its own Redis - connecting to the wrong one looks
       # exactly like a station publishing nothing, which is a bad hour.
       #
-      # This is here so tooling outside the compose network can reach the broker:
-      # contract/conformance/check_station.py, and a station implementation being
-      # developed on the host. Remove it in production, where nothing outside
-      # the network should reach Redis at all.
-      - "127.0.0.1:6380:6379"
+      # Bound to REDIS_BIND, which defaults to loopback. Set it to 0.0.0.0 to
+      # let a ground station on the same network reach the broker - needed for a
+      # real station, and safe only because requirepass is now set.
+      #
+      # TLS, so this is safe to expose. The station verifies the certificate
+      # against the CA it was pinned at enrolment, which is stronger here than
+      # public PKI: it trusts exactly one issuer rather than every CA on earth.
+      - "${REDIS_BIND:-127.0.0.1}:6380:6379"
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "--tls", "--cacert", "/certs/ca.crt",
+             "-a", "${REDIS_PASSWORD}", "--no-auth-warning", "ping"]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -62,7 +103,15 @@ services:
     env_file:
       - .env
     command: python -m backend.scripts.start_app
+    # The image runs as uid/gid 10001. The TLS private key is group-readable
+    # by the host user that generated it rather than world-readable, so the
+    # container is given that group as a supplementary one. The alternative is
+    # chmod 644 on a private key, which is how keys end up in backups and
+    # archives they should never have reached.
+    group_add:
+      - "${PERCEPTA_CERT_GID:-1000}"
     volumes:
+      - ./certs:/certs:ro
       # Only the backend source, deliberately not ./app:/app. Mounting the whole
       # directory would shadow /app/static, which is built into the image by the
       # console stage and does not exist on the host - the console would 404 with

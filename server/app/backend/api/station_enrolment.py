@@ -187,6 +187,8 @@ def revoke_credentials(
     station.enrolled_at = None
     db.commit()
 
+    # sync_station with nothing valid deprovisions, and also kills any live
+    # connection - see broker_acl.deprovision.
     dropped = broker_acl.deprovision(station_id)
 
     record(

@@ -331,6 +331,24 @@ def revoke_credentials(
     return live
 
 
+def valid_credential_hashes(db: Session, *, station_id: uuid.UUID) -> list[str]:
+    """The SHA-256 hashes of every credential this station may currently
+    authenticate with.
+
+    Exactly what the broker's principal should accept. Recomputing from here
+    rather than remembering what was last handed out means renewal overlap,
+    revocation and plain expiry all take effect the same way, and none of them
+    needs the platform to hold a plaintext secret.
+    """
+    rows = db.execute(
+        select(StationCredential).where(
+            StationCredential.ground_station_id == station_id,
+            StationCredential.revoked_at.is_(None),
+        )
+    ).scalars().all()
+    return [row.secret_hash for row in rows if is_valid(row)]
+
+
 def has_valid_credential(db: Session, *, station_id: uuid.UUID) -> bool:
     """Whether any credential for this station currently works."""
     rows = db.execute(

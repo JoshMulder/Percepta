@@ -10,6 +10,7 @@ against a development stack but not against production.
 
 import asyncio
 import logging
+import pathlib
 import sys
 import uuid
 
@@ -20,6 +21,7 @@ from sqlalchemy import select
 from backend.core.config import settings
 from backend.database.models.ground_station import GroundStation
 from backend.database.session import PrivilegedSessionLocal
+from backend.realtime.bus import url_without_credentials
 from backend.services import broker_acl, enrolment
 
 logging.basicConfig(level=logging.WARNING, format="%(message)s")
@@ -53,7 +55,16 @@ async def main() -> int:
         db.commit()
         station_id = station.id
 
-    client = httpx.AsyncClient(timeout=15.0)
+    # Verified against the platform's own CA rather than with verification
+    # turned off. This script exists to prove the enrolment path behaves; a
+    # version of it that skipped TLS verification would be proving something
+    # slightly different from what a real station does.
+    client = httpx.AsyncClient(
+        timeout=15.0,
+        verify=settings.tls_ca_file
+        if pathlib.Path(settings.tls_ca_file).exists()
+        else True,
+    )
     try:
         print(f"\nVerifying enrolment against {BASE}\n")
 
@@ -120,10 +131,16 @@ async def main() -> int:
 
         # Authenticate as the station and prove the pin holds.
         try:
+            # Credential-free URL: redis-py lets the URL override these
+            # kwargs, so the platform's own password would be used instead of
+            # the station's. See bus.url_without_credentials.
             as_station = redis.Redis.from_url(
-                settings.redis_url,
+                url_without_credentials(settings.redis_url),
                 username=broker_acl.principal(station_id),
                 password=secret,
+                ssl_ca_certs=settings.tls_ca_file
+                if settings.redis_url.startswith("rediss://")
+                else None,
             )
             as_station.publish(f"gsu/{station_id}/telemetry", "{}")
             check("station may publish on its own channel", True)

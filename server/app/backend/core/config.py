@@ -58,6 +58,12 @@ class Settings(BaseSettings):
     # stream-ticket single-use tracking.
     redis_url: str = "redis://localhost:6379/0"
 
+    # Certificate authority the platform verifies the broker against, and the
+    # one a station is given to pin at enrolment. One CA signs the broker and
+    # the API, so a station trusts exactly one issuer rather than every public
+    # CA in existence.
+    tls_ca_file: str = "/certs/ca.crt"
+
     # --- Real-time ----------------------------------------------------------
     # How often an open WebSocket revalidates its session and station grants,
     # independently of the Redis revocation push. Bounds worst-case staleness if
@@ -70,7 +76,7 @@ class Settings(BaseSettings):
 
     # Where the simulator posts its own enrolment. Development only - it is the
     # API talking to itself from inside the container.
-    simulator_enrol_url: str = "http://localhost:8000"
+    simulator_enrol_url: str = "https://localhost:8000"
 
     # Stations the simulator must leave alone, comma-separated uuids.
     #

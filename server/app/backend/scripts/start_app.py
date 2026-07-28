@@ -69,6 +69,22 @@ def main() -> None:
 
     ensure_platform_admin()
 
+    # Redis keeps ACL users in memory only, so a broker restart would silently
+    # lock out every station until each happened to re-enrol. Rebuilt here from
+    # the credential hashes in Postgres, which needs no plaintext secret.
+    try:
+        from backend.database.session import PrivilegedSessionLocal
+        from backend.services import broker_acl
+
+        with PrivilegedSessionLocal() as db:
+            count = broker_acl.sync_all(db)
+        logger.info("Broker principals synchronised for %d station(s).", count)
+    except Exception:
+        logger.exception(
+            "Could not synchronise broker principals. Stations may be unable to "
+            "authenticate until this is retried."
+        )
+
     if not settings.rls_enabled:
         logger.warning(
             "APP_DB_PASSWORD is unset - starting with ROW-LEVEL SECURITY BYPASSED."
@@ -76,20 +92,39 @@ def main() -> None:
 
     port = os.environ.get("APP_PORT", "8000")
     workers = os.environ.get("WEB_CONCURRENCY", "1")
-    logger.info("Starting uvicorn on :%s (%s worker(s)).", port, workers)
-    os.execvp(
+
+    argv = [
         "uvicorn",
-        [
-            "uvicorn",
-            "backend.main:app",
-            "--host",
-            "0.0.0.0",
-            "--port",
-            port,
-            "--workers",
-            workers,
-        ],
-    )
+        "backend.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        port,
+        "--workers",
+        workers,
+    ]
+
+    # TLS is served directly rather than through a reverse proxy: one process,
+    # one port, and no way to reach the API in clear. That last part matters
+    # more than it looks - a station misconfigured to http:// would send its
+    # enrolment token and receive its credential in plaintext, and would appear
+    # to work perfectly while doing it.
+    cert = os.environ.get("APP_TLS_CERT", "/certs/api.crt")
+    key = os.environ.get("APP_TLS_KEY", "/certs/api.key")
+    if os.path.exists(cert) and os.path.exists(key):
+        argv += ["--ssl-certfile", cert, "--ssl-keyfile", key]
+        logger.info("Starting uvicorn on :%s over TLS (%s worker(s)).", port, workers)
+    else:
+        # Refusing to start would be worse: a developer with no certs generated
+        # yet should get a working stack and a loud warning, not a container
+        # that will not boot. But say plainly what is exposed.
+        logger.warning(
+            "No TLS certificate at %s - serving PLAINTEXT HTTP on :%s. "
+            "Enrolment tokens and station credentials cross this in clear. "
+            "Run scripts/make_certs.sh before any station is enrolled over a "
+            "network you do not control.", cert, port,
+        )
+    os.execvp("uvicorn", argv)
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ import base64
 import json
 import logging
 import math
+import pathlib
 import random
 import sys
 import uuid
@@ -377,7 +378,16 @@ async def ensure_enrolled(sim) -> bool:
     }
     for attempt in range(10):
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            # Verifies the API against the same CA a real station pins, rather
+            # than skipping verification because it is talking to itself. A
+            # development shortcut here would be a shortcut the reference
+            # implementation appears to endorse.
+            async with httpx.AsyncClient(
+                timeout=10.0,
+                verify=settings.tls_ca_file
+                if pathlib.Path(settings.tls_ca_file).exists()
+                else True,
+            ) as client:
                 response = await client.post(url, json=body)
             if response.status_code == 200:
                 data = response.json()

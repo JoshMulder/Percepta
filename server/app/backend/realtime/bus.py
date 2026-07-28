@@ -46,6 +46,45 @@ def group_channel(group: str) -> str:
     return f"rt:g:{group}"
 
 
+def redacted_url(url: str) -> str:
+    """A connection URL safe to log.
+
+    The broker URL carries a password, and a log line is the easiest place in
+    the system for a secret to end up somewhere it was never meant to be - a
+    terminal, a bug report, a log aggregator with wider access than the host.
+    Nothing needs the password to understand a log line; the host and scheme
+    are the useful part.
+    """
+    import re
+
+    return re.sub(r"://([^/@]*):([^/@]*)@", r"://\1:***@", url)
+
+
+def url_without_credentials(url: str) -> str:
+    """Strip any embedded username and password from a connection URL.
+
+    Needed because of a trap in redis-py: `ConnectionPool.from_url` ends with
+    `kwargs.update(url_options)`, so **the URL wins over the keyword
+    arguments**. Connecting as a station with
+
+        Redis.from_url(settings.redis_url, username=..., password=...)
+
+    silently authenticates as whoever the URL names instead - which, now that
+    the platform's own URL carries a password, means the station credential is
+    ignored and the connection either fails confusingly or succeeds with far
+    more privilege than intended. Both are worse than an error.
+
+    Anything connecting as somebody else must pass a credential-free URL.
+    """
+    from urllib.parse import urlsplit, urlunsplit
+
+    parts = urlsplit(url)
+    netloc = parts.hostname or ""
+    if parts.port:
+        netloc = f"{netloc}:{parts.port}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+
 def command_channel(station_id) -> str:
     """Outbound commands for one ground station.
 
@@ -115,7 +154,7 @@ class RedisBus:
         await self._pubsub.subscribe(REVOKE_CHANNEL)
         self._running = True
         self._reader = asyncio.create_task(self._read_loop())
-        log.info("Realtime bus connected (%s).", self.url)
+        log.info("Realtime bus connected (%s).", redacted_url(self.url))
 
     async def stop(self) -> None:
         self._running = False

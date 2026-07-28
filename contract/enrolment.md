@@ -155,9 +155,9 @@ token rather than by the rate limit alone.
   "broker": {
     "url": "mqtts://broker.example:8883",
     "ca_pem": "…",                   // pinned; the station verifies the platform
-                                     // NOT YET SENT - the development broker has
-                                     // no TLS. Expect it to appear; do not
-                                     // require it yet.
+                                     // against this CA and no other. SENT.
+                                     // Persist it beside the credential and use
+                                     // it for the broker and this API both.
     "username": "gsu:{station_id}",  // the broker principal to authenticate as
     "telemetry_topic": "gsu/{station_id}/telemetry",
     "audio_topic": "gsu/{station_id}/audio",
@@ -246,6 +246,11 @@ credential has already expired it cannot renew either. That is a site visit.
 
 - The station syncs time before enrolling and refuses to enrol with an
   implausible clock, saying so.
+- **A GPS receiver is the intended long-term time source.** It solves this
+  properly on hardware with no battery-backed clock, which is the case on the
+  current Raspberry Pi. Until one is fitted, an RTC module is the cheap interim;
+  NTP alone does not help a box that cannot reach the network because its clock
+  is wrong.
 - If the hardware has no battery-backed clock, this must be stated in the
   station's own docs — it changes the boot sequence.
 - **Renew early and often.** Begin at half the credential's life, retry with
@@ -380,7 +385,10 @@ someone to physically re-enter the code.
 until it expires or is revoked; `claim_count` records how often it was used, and
 issuing a new code revokes any outstanding one.
 
-**`ca_pem` is not yet sent**, because the development broker has no TLS.
+**`ca_pem` is sent.** Both the broker and the API serve TLS from one private CA,
+and the plaintext listeners are disabled outright rather than merely
+discouraged - a station misconfigured to `redis://` or `http://` fails instead
+of sending its credential in clear and appearing to work.
 
 **Two fields were added**: `credential.renew_after` and `broker.username`. Both
 are additive and safe to ignore.

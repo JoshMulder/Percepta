@@ -59,6 +59,28 @@ payload or silence. See `README.md`. Keep sending it on the normal cadence - a
 station that goes quiet is a station that has failed, and "I have no receiver"
 is something you have to keep saying.
 
+## Transport security
+
+Both channels are TLS, verified against the CA handed over at enrolment - not
+against the system trust store. A station trusts exactly one issuer, which is
+stronger here than public PKI rather than weaker.
+
+The plaintext listeners are **disabled**, not deprioritised. A station pointed at
+`redis://` or `http://` fails to connect rather than quietly sending its
+credential in clear, because a silent downgrade is the failure nobody finds out
+about.
+
+Two traps, both of which have already cost someone an hour:
+
+- **redis-py lets a URL override keyword arguments.** `ConnectionPool.from_url`
+  ends with `kwargs.update(url_options)`, so connecting with a credential-
+  carrying URL *and* `username=`/`password=` authenticates as whoever the URL
+  names. The `broker.url` handed over at enrolment is deliberately credential-
+  free for this reason.
+- **`redis-cli` accepts a CA that Python refuses.** A CA without
+  `basicConstraints` and `keyUsage` works on the command line and fails in
+  `ssl`. Testing with `redis-cli` alone proves nothing about your client.
+
 ## Broker
 
 Redis pub/sub today; MQTT over TLS is the intended production transport

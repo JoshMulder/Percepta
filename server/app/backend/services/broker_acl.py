@@ -9,14 +9,19 @@ Redis today, MQTT in production. The shape is deliberately the same in both -
 one principal per station, channel patterns derived from the station id - so
 this becomes a different client library rather than a different design.
 
-READ THIS BEFORE BELIEVING THE STATIONS ARE ISOLATED. Creating a restricted user
-does not restrict anyone who does not use it. Redis' `default` user is still
-open on the development stack, and the platform's own connections use it, so a
-process that simply does not authenticate has the run of the broker. Provisioning
-here is real and correct, and it enforces nothing until `default` is locked down
-(`requirepass`, or `ACL SETUSER default off`) and the platform's own components
-are given credentials. That is a deployment change, tracked in
-`docs/04-production-readiness.md`, not a code change here.
+The broker requires authentication. `REDIS_PASSWORD` sets `requirepass`, so the
+`default` user is no longer open and an unauthenticated client is refused
+outright - which is what makes the per-station pinning below an actual boundary
+rather than a description of one.
+
+**Principals are rebuilt from the database, never from a remembered plaintext.**
+Redis accepts an already-SHA-256-hashed password as `#<hex>`, and
+`station_credentials.secret_hash` is exactly that hash. So the platform can
+reconstruct the exact set of passwords a station should accept without ever
+holding one, which buys three things at once: ACL users survive a Redis restart
+because `sync_all` rebuilds them at start-up, revocation is precise because the
+set is recomputed from what is currently valid, and the platform still cannot
+hand out a station's credential.
 
 Everything in this module is fail-soft. A broker that is unreachable must not
 block an enrolment: the technician is on site, the credential is already issued
@@ -75,69 +80,67 @@ def _client() -> redis.Redis:
     return redis.Redis.from_url(settings.redis_url)
 
 
-def provision(station_id: uuid.UUID | str, *secrets: str) -> bool:
-    """Create or update the station's principal so it accepts exactly `secrets`.
+def provision_hashes(station_id: uuid.UUID | str, hashes: list[str]) -> bool:
+    """Make the station's principal accept exactly these SHA-256 password
+    hashes, and no others.
 
-    **Replaces the password set rather than adding to it.** This used to add,
-    which meant a revoked credential kept authenticating at the broker forever:
-    the platform stopped trusting it, the broker did not, and the station went
-    on publishing. Since only hashes are stored, no later call could remove a
-    secret by value - so the set has to be rewritten at the moment the
-    plaintexts are in hand.
-
-    That is workable because the two callers both hold everything they need.
-    A claim passes the one new secret. A renewal passes the outgoing secret and
-    the incoming one, because the station just presented the outgoing one to
-    authenticate - which is exactly the overlap `enrolment.RENEWAL_OVERLAP`
-    describes, and nothing older.
-
-    Residual, and worth knowing: a superseded password stays accepted here until
-    the *next* renewal or claim rewrites the set, so it can outlive the overlap
-    window the database enforces. It is always a credential legitimately issued
-    to this same station, never another's, and the platform-side check in the
-    ingest still refuses the data. Closing it properly needs the broker to carry
-    expiry, which mTLS gives for free.
+    `resetpass` first, so this is a replacement rather than an addition. It used
+    to add, which meant a revoked credential kept authenticating forever: the
+    platform stopped trusting it and the broker did not.
     """
     user = principal(station_id)
-    if not secrets:
-        log.error("Refusing to provision %s with no secrets.", user)
-        return False
+    if not hashes:
+        # No valid credential means no principal, not a principal with no way
+        # in - an account that exists and accepts nothing is a puzzle later.
+        return deprovision(station_id)
     try:
-        client = _client()
-        client.execute_command(
+        _client().execute_command(
             "ACL", "SETUSER", user,
             "on",
             "resetkeys",
             "resetchannels",
-            # Clears every previously accepted password before the new set is
-            # applied. Without it this call is additive and revocation leaks.
             "resetpass",
             *_channels(station_id),
             *_ALLOWED_COMMANDS,
-            *(f">{secret}" for secret in secrets),
+            # `#<hex>` is an already-hashed password. The platform never holds
+            # the plaintext, and does not need to.
+            *(f"#{h}" for h in hashes),
         )
         return True
     except Exception:
         log.exception(
-            "Could not provision broker principal %s. The credential is issued "
-            "and valid; the broker does not know about it yet.", user,
+            "Could not provision broker principal %s. Its credential is valid; "
+            "the broker does not know about it yet.", user,
         )
         return False
 
 
-def drop_secret(station_id: uuid.UUID | str, secret: str) -> bool:
-    """Remove one secret from a principal, leaving any others working."""
-    try:
-        _client().execute_command(
-            "ACL", "SETUSER", principal(station_id), f"<{secret}"
-        )
-        return True
-    except Exception:
-        log.exception(
-            "Could not remove a secret from broker principal %s.",
-            principal(station_id),
-        )
-        return False
+def sync_station(db, station_id: uuid.UUID) -> bool:
+    """Rebuild one station's principal from what the database currently
+    considers valid. Idempotent, and the only correct way to apply a change -
+    issue, renewal, revocation and expiry all reduce to "recompute the set"."""
+    from backend.services.enrolment import valid_credential_hashes
+
+    return provision_hashes(station_id, valid_credential_hashes(db, station_id=station_id))
+
+
+def sync_all(db) -> int:
+    """Rebuild every station's principal. Run at start-up, because Redis holds
+    ACL users in memory and a broker restart would otherwise silently lock out
+    every station until each happened to re-enrol. Returns how many were
+    provisioned."""
+    from sqlalchemy import select
+
+    from backend.database.models.ground_station import GroundStation
+
+    done = 0
+    stations = db.execute(
+        select(GroundStation.id).where(GroundStation.is_active.is_(True))
+    ).scalars().all()
+    for station_id in stations:
+        if sync_station(db, station_id):
+            done += 1
+    return done
 
 
 def deprovision(station_id: uuid.UUID | str) -> bool:

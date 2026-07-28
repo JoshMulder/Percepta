@@ -20,6 +20,7 @@ subscribers *after* the ingest, which is a platform-side question.
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -39,6 +40,12 @@ SCHEMAS = Path(__file__).resolve().parent.parent / "schemas"
 #: Every telemetry kind a station is expected to produce, and how long to wait
 #: before calling it absent. Weather is slow by design; the rest are 1 Hz.
 EXPECTED = {"adsb": 8, "power": 8, "radio": 8, "light": 8, "weather": 20}
+
+#: Kinds the contract defines but does not require a station to send. Validated
+#: when present - a station that reports health must report it correctly - and
+#: never demanded, because a station is not less conformant for staying quiet
+#: about itself.
+OPTIONAL_KINDS = {"health"}
 
 #: How long a command has to be reflected in telemetry. Generous: a station on a
 #: slow tick is not a broken station, and this waits only as long as it needs to.
@@ -78,7 +85,12 @@ def load(name: str) -> Draft202012Validator:
 
 
 def collect(pubsub, station: str, seconds: float, legacy: bool) -> list[dict]:
-    """Everything this station published in the window."""
+    """Everything this station published in the window, in order.
+
+    Order matters for the audio-gating check: it pairs each audio frame with the
+    squelch state the station last reported, so the frames have to arrive in the
+    sequence they were sent.
+    """
     out: list[dict] = []
     end = time.time() + seconds
     while time.time() < end:
@@ -167,12 +179,44 @@ def main() -> int:
     # 6380, not 6379: that is where compose publishes the platform's broker, on
     # loopback. A development host frequently has its own Redis on 6379, and
     # connecting to it looks identical to a station that is publishing nothing.
-    ap.add_argument("--redis", default="redis://localhost:6380/0")
+    # rediss by default: the broker is TLS-only, and a plaintext default would
+    # send a station credential in clear the first time someone pasted one in.
+    ap.add_argument(
+        "--redis",
+        default=os.environ.get("PERCEPTA_BROKER_URL", "rediss://localhost:6380/0"),
+        help="broker URL; PERCEPTA_BROKER_URL is used if set",
+    )
+    ap.add_argument(
+        "--ca",
+        default=os.environ.get("PERCEPTA_CA_FILE"),
+        help="CA certificate to verify the broker against; PERCEPTA_CA_FILE if set",
+    )
+    ap.add_argument(
+        "--insecure", action="store_true",
+        help="skip certificate verification (development only)",
+    )
     ap.add_argument("--legacy", action="store_true",
                     help="listen on internal fan-out channels (platform-side debugging)")
     args = ap.parse_args()
 
-    r = redis.Redis.from_url(args.redis)
+    # TLS: the broker requires it, and the certificate is verified against the
+    # platform's CA rather than the system trust store - the same CA a station
+    # is given to pin at enrolment. --insecure exists for a developer poking at
+    # a stack they built five minutes ago, and says so loudly, because a harness
+    # that quietly skips verification teaches people that skipping is normal.
+    kwargs = {}
+    if args.redis.startswith("rediss://"):
+        if args.insecure:
+            kwargs["ssl_cert_reqs"] = None
+            print("  ! certificate verification DISABLED (--insecure)\n")
+        elif args.ca:
+            kwargs["ssl_ca_certs"] = args.ca
+        else:
+            sys.exit(
+                "This broker uses TLS. Pass --ca <path to ca.crt> so the "
+                "certificate can be verified, or --insecure to skip it."
+            )
+    r = redis.Redis.from_url(args.redis, **kwargs)
     telemetry_schema = load("telemetry.schema.json")
     audio_schema = load("audio.schema.json")
 
@@ -214,7 +258,7 @@ def main() -> int:
     for kind, payloads in sorted(by_kind.items()):
         if kind == "audio":
             errs = sorted(audio_schema.iter_errors(payloads[0]), key=str)
-        elif kind in EXPECTED:
+        elif kind in EXPECTED or kind in OPTIONAL_KINDS:
             errs = sorted(telemetry_schema.iter_errors(payloads[0]), key=str)
         else:
             notes.append(f"unknown kind '{kind}' ignored, as the contract allows")
@@ -223,26 +267,41 @@ def main() -> int:
               "; ".join(e.message for e in errs[:2]))
 
     print("\n3. Audio is gated")
-    audio = by_kind.get("audio", [])
-    radio_frames = by_kind.get("radio", [])
-    if not radio_frames:
-        if "radio" in unavailable_now(by_kind):
-            notes.append("radio unavailable, so audio gating was not tested")
-        else:
-            check("audio only while squelch is open", False, "no radio telemetry")
-    elif any(r.get("squelch_open") for r in radio_frames):
-        # This used to look at the *last* radio frame only, and failed an honest
-        # station whenever the squelch happened to open during the window and
-        # close again before it ended: the audio was legitimate, and the final
-        # frame said "closed". A harness that fails a correct station one run in
-        # three is a harness people learn to re-run rather than believe.
-        notes.append(
-            "squelch opened during the window, so audio-while-closed was not "
-            "tested - re-run to catch it closed throughout"
-        )
+    # Tests the rule directly: every audio frame must sit after a radio frame
+    # reporting the squelch open. Two earlier versions were weaker. Looking at
+    # the last radio frame in the window failed an honest station whose squelch
+    # closed before the window ended; skipping whenever the squelch was ever
+    # open never failed anyone, but also never tested anything - a station could
+    # regress into ungated audio and pass run after run.
+    #
+    # Walking the stream in order has neither problem. It needs no quiet
+    # channel, and every audio frame the station sends is checked.
+    if "radio" in unavailable_now(by_kind):
+        notes.append("radio unavailable, so audio gating was not tested")
+    elif not by_kind.get("radio"):
+        check("audio only while squelch is open", False, "no radio telemetry")
     else:
-        check("audio only while squelch is open", not audio,
-              f"{len(audio)} audio frames while squelched")
+        squelch_open: bool | None = None
+        ungated = 0
+        unknown = 0
+        for payload in seen:
+            if payload.get("kind") == "radio":
+                squelch_open = bool(
+                    payload.get("squelch_open") or payload.get("monitor")
+                )
+            elif payload.get("kind") == "audio":
+                if squelch_open is None:
+                    # Audio before any radio frame: nothing to judge it against.
+                    unknown += 1
+                elif not squelch_open:
+                    ungated += 1
+        detail = f"{ungated} audio frame(s) sent while the squelch was closed"
+        check("audio only while squelch is open", ungated == 0, detail)
+        if unknown:
+            notes.append(
+                f"{unknown} audio frame(s) arrived before any radio telemetry "
+                "and could not be judged"
+            )
 
     print("\n4. Commands take effect")
     unavailable_kinds = unavailable_now(by_kind)

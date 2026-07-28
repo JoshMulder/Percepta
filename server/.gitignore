@@ -9,3 +9,10 @@ storage/
 
 # Claude Code local, machine-specific settings
 .claude/settings.local.json
+
+# Private CA and server keys. Never committed: the CA key is what lets anyone
+# impersonate the platform to every station that has pinned it.
+certs/
+
+# Database dumps. Contain every tenant's data.
+backups/
