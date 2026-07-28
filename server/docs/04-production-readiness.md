@@ -97,6 +97,16 @@ These are absences, not defects, but they are load-bearing for the product:
   hand, but the container still runs a single uvicorn worker, so a real
   multi-worker failover has never happened. Exercise it before scaling out, and
   expect a gap of up to one lease period (15s) when a leader dies.
+- **The seeded development password is in the repository.**
+  `backend/scripts/seed_dev.py` hardcodes `percepta-dev-2026` for
+  `admin@`, `operator@` and `viewer@percepta.local`, and that file is pushed to
+  GitHub. It is deliberate and the script's own docstring says it has no place
+  in a production bring-up - but it means those three accounts must never exist
+  on anything real, and there is currently **no other way to create the first
+  admin**. A production bring-up needs one: an invite flow, or a one-shot
+  bootstrap command that takes a password from the environment and prints
+  nothing. Until that exists, standing up a real deployment means either running
+  the dev seed (wrong) or inserting a user by hand (undocumented).
 - **Close the broker's `default` user.** This is the one that matters.
   Enrolment is built, every station gets its own Redis principal pinned to its
   own channels, and that pinning is verified

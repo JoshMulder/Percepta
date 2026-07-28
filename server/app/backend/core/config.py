@@ -72,6 +72,16 @@ class Settings(BaseSettings):
     # API talking to itself from inside the container.
     simulator_enrol_url: str = "http://localhost:8000"
 
+    # Stations the simulator must leave alone, comma-separated uuids.
+    #
+    # The simulator drives every active station, which is right for a stack whose
+    # only stations are seeded ones and wrong the moment a real station - or
+    # another developer's - shares the database. Two publishers on one station's
+    # channels produce contradictory telemetry, and because the simulator
+    # re-enrols on startup it also revokes the other party's credential every
+    # time it restarts. Both failures look like the other station being broken.
+    simulator_exclude_stations: str = ""
+
     stream_revalidate_seconds: int = 60
 
     # Lifetime of a media stream ticket. Deliberately short: the ticket only has

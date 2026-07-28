@@ -74,7 +74,7 @@ export function SettingsEnrolment({
   return (
     <div className="settings-sections">
       <section className="settings-section">
-        <h3>{stationName ?? "Station"}</h3>
+        <h3>Enrolment</h3>
         <dl className="settings-facts">
           <dt>Enrolled</dt>
           <dd>

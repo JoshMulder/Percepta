@@ -132,6 +132,17 @@ export const api = {
       }),
     }),
 
+  createStation: (body: {
+    name: string;
+    timezone: string;
+    latitude: number | null;
+    longitude: number | null;
+  }) =>
+    request<StationSummary>("/api/stations", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
   stationConfig: (id: string) =>
     request<StationConfig>(`/api/stations/${id}/config`),
 

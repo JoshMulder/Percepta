@@ -1,16 +1,19 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from zoneinfo import ZoneInfo
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.auth.authorization import capabilities_for, visible_station_ids
-from backend.auth.dependencies import get_identity
+from backend.auth.dependencies import get_identity, require_admin
 from backend.auth.identity import Identity
 from backend.database.dependencies import get_db
 from backend.database.models.device import Device
 from backend.database.models.ground_station import GroundStation
+from backend.services.audit import record
 
 router = APIRouter(prefix="/api/stations", tags=["stations"])
 
@@ -99,6 +102,67 @@ def list_stations(
         .order_by(GroundStation.name)
     ).scalars()
     return [_summary(s) for s in rows]
+
+
+class StationCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    timezone: str = Field(default="UTC", min_length=1, max_length=64)
+    latitude: float | None = Field(default=None, ge=-90, le=90)
+    longitude: float | None = Field(default=None, ge=-180, le=180)
+
+
+@router.post("", response_model=StationSummary, status_code=201)
+def create_station(
+    body: StationCreate,
+    request: Request,
+    identity: Identity = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> StationSummary:
+    """Create a station record, before any hardware exists.
+
+    Admin only, and the organisation comes from the caller's session rather than
+    the request body - creating a record is the moment a site is bound to a
+    tenant, and that binding is never something a client gets to name.
+
+    The record is deliberately useful on its own: it can be configured and
+    granted to users straight away, and it is what an enrolment code is later
+    issued against. Position may be left empty now and filled in once the
+    hardware is on site.
+    """
+    try:
+        ZoneInfo(body.timezone)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown timezone {body.timezone!r}. Use an IANA zone, e.g. Pacific/Auckland.",
+        ) from exc
+
+    station = GroundStation(
+        organization_id=identity.organization_id,
+        name=body.name.strip(),
+        timezone=body.timezone,
+        latitude=body.latitude,
+        longitude=body.longitude,
+    )
+    db.add(station)
+    db.flush()
+    # Built before the commit: the org context is SET LOCAL and lasts one
+    # transaction, so reading the row back afterwards finds nothing.
+    summary = _summary(station)
+    station_id = station.id
+    db.commit()
+
+    record(
+        action="station.created",
+        organization_id=identity.organization_id,
+        actor_user_id=identity.user_id,
+        target_type="ground_station",
+        target_id=str(station_id),
+        ground_station_id=station_id,
+        ip_address=request.client.host if request.client else None,
+        detail={"name": summary.name, "timezone": summary.timezone},
+    )
+    return summary
 
 
 @router.get("/{station_id}/power/history", response_model=list[PowerPoint])

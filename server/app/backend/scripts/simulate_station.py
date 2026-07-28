@@ -433,6 +433,12 @@ async def run() -> None:
         log.error("Realtime bus is not available; the console would see nothing.")
         return
 
+    excluded = {
+        part.strip().lower()
+        for part in settings.simulator_exclude_stations.split(",")
+        if part.strip()
+    }
+
     with PrivilegedSessionLocal() as db:
         rows = db.execute(
             select(GroundStation).where(GroundStation.is_active.is_(True))
@@ -440,7 +446,12 @@ async def run() -> None:
         sims = [
             StationSim(s.id, s.organization_id, s.name, s.latitude, s.longitude)
             for s in rows
+            if str(s.id).lower() not in excluded
         ]
+        skipped = [s.name for s in rows if str(s.id).lower() in excluded]
+
+    if skipped:
+        log.info("Leaving alone (SIMULATOR_EXCLUDE_STATIONS): %s", ", ".join(skipped))
 
     if not sims:
         log.error("No active ground stations. Run seed_dev first.")

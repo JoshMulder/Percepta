@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Capability, Me } from "../types";
 import { SettingsAccount } from "./SettingsAccount";
-import { SettingsEnrolment } from "./SettingsEnrolment";
 import { SettingsOrganization } from "./SettingsOrganization";
 import { SettingsStation } from "./SettingsStation";
 
@@ -21,12 +20,11 @@ import { SettingsStation } from "./SettingsStation";
  * unpleasant to use. Different job, different rules.
  */
 
-type Tab = "account" | "station" | "enrolment" | "organization";
+type Tab = "account" | "station" | "organization";
 
 export function Settings({
   me,
   stationId,
-  stationName,
   capabilities,
   onClose,
   onProfileChanged,
@@ -34,7 +32,6 @@ export function Settings({
 }: {
   me: Me;
   stationId: string | null;
-  stationName: string | null;
   capabilities: Capability[];
   onClose: () => void;
   onProfileChanged: (displayName: string) => void;
@@ -43,13 +40,15 @@ export function Settings({
   // Tabs are hidden rather than disabled when they are not available. A
   // disabled tab advertises a capability the user does not have and invites
   // them to ask why; an absent one says nothing.
-  const canConfigure = capabilities.includes("config.write") && stationId !== null;
   const isAdmin = me.roles.includes("admin");
+  // An admin can configure every station in the org, so the tab is offered even
+  // when the console happens to be looking at one they have not been granted
+  // explicitly. For everyone else it follows the station in front of them.
+  const canConfigure = isAdmin || capabilities.includes("config.write");
 
   const tabs: { id: Tab; label: string }[] = [
     { id: "account", label: "My account" },
-    ...(canConfigure ? [{ id: "station" as Tab, label: "Station" }] : []),
-    ...(canConfigure ? [{ id: "enrolment" as Tab, label: "Enrolment" }] : []),
+    ...(canConfigure ? [{ id: "station" as Tab, label: "Stations" }] : []),
     ...(isAdmin ? [{ id: "organization" as Tab, label: "Organisation" }] : []),
   ];
 
@@ -104,15 +103,12 @@ export function Settings({
             {tab === "account" && (
               <SettingsAccount me={me} onProfileChanged={onProfileChanged} />
             )}
-            {tab === "station" && stationId && (
+            {tab === "station" && (
               <SettingsStation
-                stationId={stationId}
-                stationName={stationName}
+                initialStationId={stationId}
+                canCreate={isAdmin}
                 onSaved={onStationsChanged}
               />
-            )}
-            {tab === "enrolment" && stationId && (
-              <SettingsEnrolment stationId={stationId} stationName={stationName} />
             )}
             {tab === "organization" && <SettingsOrganization me={me} />}
           </div>

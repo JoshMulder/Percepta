@@ -2409,6 +2409,7 @@ body {
 .settings-pane .field input[type="text"],
 .settings-pane .field input[type="password"],
 .settings-pane .field input[type="number"],
+.settings-pane .field select,
 .settings-pane .field input:not([type]) {
   background: var(--panel-2);
   border: 1px solid var(--line);
@@ -2418,6 +2419,7 @@ body {
   font: inherit;
   width: 100%;
 }
+.settings-pane .field select:focus-visible,
 .settings-pane .field input:focus-visible {
   outline: 2px solid var(--brand);
   outline-offset: -1px;
@@ -2563,3 +2565,16 @@ body {
   .settings-tab { border-left: none; border-bottom: 2px solid transparent; white-space: nowrap; }
   .settings-tab.active { border-left-color: transparent; border-bottom-color: var(--brand); }
 }
+
+/* The station selector sits above the panes it drives, with Add new beside it
+   rather than below — creating a station and choosing one are the same
+   decision at the same moment. */
+.station-picker {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--line);
+}
+.station-picker .field { margin-bottom: 0; flex: 1 1 auto; max-width: 340px; }
+.station-picker .btn { flex: 0 0 auto; }

@@ -652,7 +652,6 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
         <Settings
           me={me}
           stationId={stationId}
-          stationName={stations.find((s) => s.id === stationId)?.name ?? null}
           capabilities={caps}
           onClose={() => setSettingsOpen(false)}
           onProfileChanged={setDisplayName}
@@ -744,7 +743,6 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
         <Settings
           me={me}
           stationId={stationId}
-          stationName={stations.find((s) => s.id === stationId)?.name ?? null}
           capabilities={caps}
           onClose={() => setSettingsOpen(false)}
           onProfileChanged={setDisplayName}
