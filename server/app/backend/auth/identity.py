@@ -78,15 +78,25 @@ def resolve_identity(db: Session, token: str | None) -> Identity | None:
     if membership is None:
         return None
 
-    # Bind the org for row-level security before any business query runs.
-    # Platform god-mode (cross-org read) is not wired up yet; when it is, it
-    # sets bypass=True here and nowhere else.
-    set_request_org_context(db, organization_id=organization_id, bypass=False)
+    # God mode is a property of the *session's active organisation*, not of the
+    # person. A platform admin working inside a customer's org sees exactly what
+    # that org's own members see, and RLS binds them to it. Only while their
+    # active org is the platform org itself do they read across tenants.
+    #
+    # This is the one place bypass is ever set from a request.
+    # Imported here rather than at module scope: auth.platform imports
+    # auth.dependencies, which imports this module.
+    from backend.auth.platform import PLATFORM_ORGANIZATION_ID
+
+    is_platform_admin = organization_id == PLATFORM_ORGANIZATION_ID
+    set_request_org_context(
+        db, organization_id=organization_id, bypass=is_platform_admin
+    )
 
     return Identity(
         user_id=user_id,
         organization_id=organization_id,
         session_id=session_id,
         roles=tuple(membership.roles or []),
-        is_platform_admin=False,
+        is_platform_admin=is_platform_admin,
     )

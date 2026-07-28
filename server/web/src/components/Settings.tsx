@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { Capability, Me } from "../types";
 import { SettingsAccount } from "./SettingsAccount";
 import { SettingsOrganization } from "./SettingsOrganization";
+import { SettingsPlatform } from "./SettingsPlatform";
 import { SettingsStation } from "./SettingsStation";
 
 /**
@@ -20,7 +21,7 @@ import { SettingsStation } from "./SettingsStation";
  * unpleasant to use. Different job, different rules.
  */
 
-type Tab = "account" | "station" | "organization";
+type Tab = "account" | "station" | "organization" | "platform";
 
 export function Settings({
   me,
@@ -50,6 +51,9 @@ export function Settings({
     { id: "account", label: "My account" },
     ...(canConfigure ? [{ id: "station" as Tab, label: "Stations" }] : []),
     ...(isAdmin ? [{ id: "organization" as Tab, label: "Organisation" }] : []),
+    // Only while the active org IS the platform org. A platform admin working
+    // inside a customer's organisation does not get this.
+    ...(me.is_platform_admin ? [{ id: "platform" as Tab, label: "Platform" }] : []),
   ];
 
   const [tab, setTab] = useState<Tab>("account");
@@ -111,6 +115,7 @@ export function Settings({
               />
             )}
             {tab === "organization" && <SettingsOrganization me={me} />}
+            {tab === "platform" && <SettingsPlatform />}
           </div>
         </div>
       </div>

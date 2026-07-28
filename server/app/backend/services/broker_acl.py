@@ -75,13 +75,33 @@ def _client() -> redis.Redis:
     return redis.Redis.from_url(settings.redis_url)
 
 
-def provision(station_id: uuid.UUID | str, secret: str) -> bool:
-    """Create or update the station's principal, adding this secret.
+def provision(station_id: uuid.UUID | str, *secrets: str) -> bool:
+    """Create or update the station's principal so it accepts exactly `secrets`.
 
-    Adds rather than replaces: a renewed credential must work before the old
-    one stops, so for the overlap window the principal accepts both.
+    **Replaces the password set rather than adding to it.** This used to add,
+    which meant a revoked credential kept authenticating at the broker forever:
+    the platform stopped trusting it, the broker did not, and the station went
+    on publishing. Since only hashes are stored, no later call could remove a
+    secret by value - so the set has to be rewritten at the moment the
+    plaintexts are in hand.
+
+    That is workable because the two callers both hold everything they need.
+    A claim passes the one new secret. A renewal passes the outgoing secret and
+    the incoming one, because the station just presented the outgoing one to
+    authenticate - which is exactly the overlap `enrolment.RENEWAL_OVERLAP`
+    describes, and nothing older.
+
+    Residual, and worth knowing: a superseded password stays accepted here until
+    the *next* renewal or claim rewrites the set, so it can outlive the overlap
+    window the database enforces. It is always a credential legitimately issued
+    to this same station, never another's, and the platform-side check in the
+    ingest still refuses the data. Closing it properly needs the broker to carry
+    expiry, which mTLS gives for free.
     """
     user = principal(station_id)
+    if not secrets:
+        log.error("Refusing to provision %s with no secrets.", user)
+        return False
     try:
         client = _client()
         client.execute_command(
@@ -89,9 +109,12 @@ def provision(station_id: uuid.UUID | str, secret: str) -> bool:
             "on",
             "resetkeys",
             "resetchannels",
+            # Clears every previously accepted password before the new set is
+            # applied. Without it this call is additive and revocation leaks.
+            "resetpass",
             *_channels(station_id),
             *_ALLOWED_COMMANDS,
-            f">{secret}",
+            *(f">{secret}" for secret in secrets),
         )
         return True
     except Exception:

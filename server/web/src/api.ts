@@ -4,6 +4,9 @@ import type {
   MapConfig,
   Me,
   OrganizationDetail,
+  PlatformOrg,
+  PlatformOverview,
+  PlatformUser,
   StationConfig,
   StationDetail,
   StationSummary,
@@ -181,6 +184,35 @@ export const api = {
           capabilities,
         }),
       },
+    ),
+
+  platform: () => request<PlatformOverview>("/api/platform"),
+
+  createOrganization: (name: string) =>
+    request<PlatformOrg>("/api/platform/organizations", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    }),
+
+  createUser: (body: { email: string; display_name: string; password: string | null }) =>
+    request<PlatformUser>("/api/platform/users", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  setMembership: (userId: string, organizationId: string, roles: string[]) =>
+    request<{ user_id: string; organization_id: string; roles: string[] }>(
+      `/api/platform/users/${userId}/memberships`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ organization_id: organizationId, roles }),
+      },
+    ),
+
+  removeMembership: (userId: string, organizationId: string) =>
+    request<{ removed: boolean; station_grants_removed: number }>(
+      `/api/platform/users/${userId}/memberships/${organizationId}`,
+      { method: "DELETE" },
     ),
 
   setMemberRoles: (userId: string, roles: string[]) =>

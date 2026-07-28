@@ -101,6 +101,17 @@ class Settings(BaseSettings):
     # It changes no authorisation and no isolation: a demo deployment enforces
     # exactly the same tenancy as a real one. It only changes what the operator
     # is told about where the numbers came from.
+    # The first administrator, created at start-up if absent. Membership of the
+    # platform organisation is what platform access *is*, so this needs no extra
+    # column and no second permission mechanism.
+    #
+    # Changing the password here does not reset an existing account - that would
+    # make an environment variable a silent password-reset channel, and the reset
+    # would never appear in the audit log.
+    platform_admin_email: str | None = None
+    platform_admin_password: str | None = None
+    platform_admin_name: str | None = None
+
     demo_mode: bool = False
 
     # --- Basemap ------------------------------------------------------------

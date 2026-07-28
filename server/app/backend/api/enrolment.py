@@ -241,7 +241,11 @@ def renew(
 
         station, current = found
         issued = enrolment.renew(db, station=station, current=current)
-        provisioned = broker_acl.provision(station.id, issued.secret)
+        # Both secrets: the station just proved it holds `secret`, and that one
+        # must keep working for the overlap window in case this response never
+        # arrives. Passing both rewrites the broker's password set to exactly
+        # the pair that should work, dropping anything older.
+        provisioned = broker_acl.provision(station.id, issued.secret, secret)
         issued.credential.broker_provisioned = provisioned
         station_id = station.id
         organization_id = station.organization_id

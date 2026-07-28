@@ -2578,3 +2578,15 @@ body {
 }
 .station-picker .field { margin-bottom: 0; flex: 1 1 auto; max-width: 340px; }
 .station-picker .btn { flex: 0 0 auto; }
+
+/* Platform tables are text, not checkboxes, so they read left-aligned. */
+.org-table td { text-align: left; }
+.org-table select {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--text);
+  font: inherit;
+  padding: 3px 6px;
+}
+.org-table .btn { padding: 2px 8px; font-size: 12px; }

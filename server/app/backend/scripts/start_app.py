@@ -63,6 +63,12 @@ def main() -> None:
 
     ensure_app_role()
 
+    # After the app role, before serving: it writes with the privileged engine
+    # and the API must not accept a request before a first admin can exist.
+    from backend.scripts.ensure_platform_admin import ensure_platform_admin
+
+    ensure_platform_admin()
+
     if not settings.rls_enabled:
         logger.warning(
             "APP_DB_PASSWORD is unset - starting with ROW-LEVEL SECURITY BYPASSED."

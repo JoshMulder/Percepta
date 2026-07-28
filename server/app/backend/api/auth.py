@@ -9,6 +9,7 @@ from backend.auth.cookies import clear_access_cookie, set_access_cookie
 from backend.auth.dependencies import get_identity
 from backend.auth.identity import Identity
 from backend.auth.password import verify_password
+from backend.auth.platform import PLATFORM_ORGANIZATION_ID
 from backend.auth.security import create_access_token
 from backend.core.config import settings
 from backend.database.dependencies import get_db
@@ -50,6 +51,9 @@ class MeResponse(BaseModel):
     # Session bootstrap carries it rather than a separate endpoint: the console
     # needs it before it renders anything, and this is already the first call.
     demo_mode: bool = False
+    # True only while the active org IS the platform org - it is a property of
+    # the session, not of the person. See auth/platform.py.
+    is_platform_admin: bool = False
 
 
 def _audit(
@@ -166,6 +170,9 @@ def login(
         organization_id=str(organization.id),
         roles=roles,
         demo_mode=settings.demo_mode,
+        # Derived from the org this session was minted for, matching exactly what
+        # resolve_identity will decide on every later request.
+        is_platform_admin=organization.id == PLATFORM_ORGANIZATION_ID,
     )
 
 
@@ -203,4 +210,5 @@ def me(
         organization_id=str(identity.organization_id),
         roles=list(identity.roles),
         demo_mode=settings.demo_mode,
+        is_platform_admin=identity.is_platform_admin,
     )

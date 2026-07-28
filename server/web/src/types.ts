@@ -22,6 +22,10 @@ export interface Me {
   /** Deployment is showing synthetic data. Badged everywhere, and suppresses
    *  sensor-fault indication - in demo the simulator is the sensor. */
   demo_mode: boolean;
+  /** True only while the active org IS the platform org — a property of the
+   *  session, not the person. A platform admin working inside a customer's org
+   *  is bound by RLS exactly like its own members. */
+  is_platform_admin: boolean;
 }
 
 export interface StationSummary {
@@ -267,5 +271,34 @@ export interface OrganizationDetail {
   /** radio.transmit is deliberately absent and stays absent until certified
    *  transmit hardware exists. */
   grantable_capabilities: Capability[];
+  roles: string[];
+}
+
+/* ---- Platform administration ---- */
+
+export interface PlatformOrg {
+  id: string;
+  name: string;
+  is_platform: boolean;
+  member_count: number;
+  station_count: number;
+}
+
+export interface PlatformUser {
+  user_id: string;
+  email: string;
+  display_name: string;
+  is_active: boolean;
+  is_platform_admin: boolean;
+  memberships: {
+    organization_id: string;
+    organization_name: string;
+    roles: string[];
+  }[];
+}
+
+export interface PlatformOverview {
+  organizations: PlatformOrg[];
+  users: PlatformUser[];
   roles: string[];
 }
