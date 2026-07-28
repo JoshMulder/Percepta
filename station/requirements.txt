@@ -3,6 +3,13 @@
 # its image and never need to install anything.
 #
 #   python -m venv .venv && .venv/bin/pip install -r requirements.txt
+#
+# 5.0 is a floor, not a preference. The station passes ssl_cert_reqs,
+# ssl_check_hostname and ssl_ca_certs explicitly rather than trusting redis-py's
+# defaults, which have differed between versions — and an older client that does
+# not accept them is refused at start-up rather than connected on weaker terms
+# (gsu/transport/redis_transport.py). Pure Python, so there is nothing to
+# compile on ARMv7 and no toolchain needed on the Pi.
 redis>=5.0
 
 # Development only: the offline schema tests read contract/schemas/ directly.

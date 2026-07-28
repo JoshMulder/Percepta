@@ -34,7 +34,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from . import registry
-from .serialio import SerialPort
+from .serialio import SerialPort, list_ports
 
 log = logging.getLogger("gsu.inventory")
 
@@ -181,6 +181,26 @@ class Inventory:
     def resources(self) -> list[Resource]:
         return scan_rtlsdr()
 
+    def serial_ports(self) -> list[Resource]:
+        """Serial ports present now, stable `by-id` names first.
+
+        Not merged into `resources()`: a tuner is *allocated* — exclusively, by
+        serial number, one band at a time — and a serial port is simply a name
+        to type. Presenting them as the same kind of thing would put ttyUSB0 in
+        the receiver dropdown.
+        """
+        return [
+            Resource(
+                id=port.path,
+                kind="serial",
+                serial="",
+                model=Path(port.path).name,
+                detail=port.target if port.stable else
+                       "numbering changes between boots — prefer the by-id name",
+            )
+            for port in list_ports()
+        ]
+
     def allocations(self) -> dict[str, list[str]]:
         """Which slots claim each resource id."""
         claims: dict[str, list[str]] = {}
@@ -206,7 +226,12 @@ class Inventory:
                 )
         for slot, entry in self.fitted.items():
             device = registry.get(entry.type_id) if entry.type_id else None
-            if device and device.resource and not entry.resource:
+            # Only for devices this build can actually drive. Demanding a tuner
+            # allocation for a device with no driver would raise a critical
+            # condition about a receiver that could not be used if it were
+            # assigned — noise on top of the real message, which is that the
+            # driver does not exist.
+            if device and device.resource and device.driver and not entry.resource:
                 problems.append(
                     f"{slot}: {device.label} needs a {device.resource} assigned to it."
                 )

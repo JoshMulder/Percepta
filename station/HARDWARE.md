@@ -150,12 +150,70 @@ station with a wrong clock cannot authenticate, and if it believes its credentia
 has expired it cannot renew either — a site visit for a bad number.
 
 The station refuses to enrol with an implausible clock and says so, and reports
-`clock.implausible` as a critical health condition rather than proceeding. That
-covers the boot-at-epoch case. It does **not** cover a site that loses both
-power and connectivity for long enough to matter.
+`clock.implausible` as a critical health condition rather than proceeding. It
+also now reports **what is disciplining the clock** — NTP, GPS or nothing — in
+every health frame and on the setup page (`gsu/clock.py`, `discipline()`), so
+"is that box's clock being kept" is answerable from a desk. That covers the
+boot-at-epoch case and makes the silent case visible. It does **not** cover a
+site that loses both power and connectivity for long enough to matter.
 
-**An RTC module is a few pounds** and removes an entire class of unattended
-failure. I would fit one.
+### The three sources, and what each is worth here
+
+| | Accuracy | Survives a power cut | Needs the link | Cost |
+|---|---|---|---|---|
+| NTP over the uplink | ~10 ms | no | **yes** | nothing |
+| DS3231 RTC | ±2 ppm, ~1 min/year | **yes** | no | ~£4 |
+| GPS + PPS via chrony | <1 µs | no (but re-acquires in seconds) | no | ~£20 + an antenna with sky view |
+
+They are complementary rather than alternatives, and the failure each one covers
+is different:
+
+- **NTP alone** is what is fitted today. It fails in exactly the case that
+  matters most: the box reboots during an outage, comes up with no idea of the
+  time, cannot reach anything to find out, and therefore cannot authenticate to
+  the platform that would have told it. Its clock is wrong *because* the link is
+  down, and the link is what would fix it.
+- **An RTC** breaks that circle for a few pounds. It does not need the network,
+  it does not need sky, and it holds time across a power cut — which is the only
+  thing standing between "the site lost power overnight" and "the site lost
+  power overnight and now needs a visit".
+- **GPS** is the best clock of the three and the owner's stated intent, but it
+  needs an antenna with a clear view and it re-acquires from cold rather than
+  holding. It is the right long-term source and it is not a substitute for the
+  RTC, because a GPS with no fix and no RTC still boots not knowing the year.
+
+### Recommendation: fit a DS3231 now, and GPS when it arrives
+
+**A DS3231 module is about £4** and removes an entire class of unattended
+failure. It goes on the I²C header pins (3.3 V, GND, SDA on GPIO 2, SCL on
+GPIO 3) and needs one line in `/boot/firmware/config.txt`:
+
+```
+dtoverlay=i2c-rtc,ds3231
+```
+
+After a reboot `/sys/class/rtc/rtc0` exists, the kernel reads the clock at boot
+before anything else runs, and `gsu preflight` stops warning about it. Use a
+DS3231 rather than a DS1307: the DS1307 is ±2 minutes a month, which is enough
+drift to matter across a long outage, and it wants 5 V.
+
+The reason to fit it even with GPS planned is the order of events at boot: the
+RTC is read by the kernel in the first second, and a GPS fix takes 30 seconds to
+several minutes from cold. The agent is trying to renew a credential in between.
+
+**GPS goes into chrony, not into this software.** `gpsd` feeds chrony over SHM
+and the PPS line is a kernel `pps-gpio` device. The station's code needs no
+change at all when it arrives — `discipline()` starts reporting `source: "gps"`
+because chrony's reference id becomes `PPS`. The configuration is in
+DEPLOYMENT.md §11, and the reasoning for keeping GPS timing out of the agent is
+in `gsu/clock.py`: a Python loop reading `$GPRMC` and calling `settimeofday`
+would be a worse clock than the NTP it replaced, and would fight chrony for the
+privilege.
+
+**What I would spend, in order:** the DS3231 first because it is £4 and closes
+the failure that strands sites; the GPS second because it is better and is
+already the plan; and nothing at all on making the software cleverer about time,
+because the software is not the weak part.
 
 ---
 
@@ -196,3 +254,27 @@ decision, not fixed**: there will be no gauge, and the console strikes the
 reading through. **The RTC is still worth spending money on** — it is a few
 pounds against a class of unattended lockout that no amount of station-side care
 fully removes.
+
+---
+
+## 7. What is deployed, and what is only written
+
+The distinction that matters when reading anything above: some of this has been
+run against real hardware and some has not, and this section is the honest
+register of which.
+
+| | Status |
+|---|---|
+| The agent, the loop, telemetry, enrolment, renewal | Run continuously on x86-64. Not run on a Pi |
+| TLS to the broker, CA pinning, refusal to downgrade | **Verified against a real TLS-only Redis with a per-station ACL.** Not on ARM |
+| The NMEA and MAVLink decoders | Unit-tested against synthetic and hand-worked frames. Never fed by a real instrument |
+| The serial layer beneath them (`serialio.py`) | **Never opened a real UART.** Its error paths are tested; its success path is not |
+| RTL-SDR airband | No driver. Reports `not supported by this software build` |
+| Pi camera | No driver, and no media channel in the contract to carry one |
+| The systemd unit | Parses cleanly under `systemd-analyze verify`. Never started on a Pi |
+| `install.sh` | Syntax-checked and read through. **Never run end to end on a Pi** |
+| ARMv7 itself | Nothing in this repository has executed on it |
+
+`python -m gsu bench` and `python -m gsu preflight` are both in the build so
+that the first two rows of that table can be closed by whoever first has the
+hardware in front of them, rather than by arithmetic here.

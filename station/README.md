@@ -114,12 +114,11 @@ keep the transport behind a small interface and none of the rest cares.
   `../contract/enrolment.md` §10 lists it, and §11 records where the platform
   deviated from the spec and why. Read §6 before designing the boot sequence —
   clock, expiry and renewal are what strand a remote site.
-- **The broker's `default` user is still open.** Your per-station principal
-  exists and is genuinely pinned to your own channels, but nothing yet forces
-  anyone to use it, so unauthenticated clients still work. Build as though they
-  do not: authenticate as `gsu:{station_id}` from the start, because when
-  `default` is closed, code that never authenticated stops working everywhere at
-  once.
+- **The broker's `default` user is now closed** and the transport is TLS only.
+  This station authenticates as `gsu:{station_id}` and verifies the broker
+  against the CA it was pinned at enrolment — see `gsu/tls.py`. It was written
+  that way while `default` was still open, which is why closing it changed
+  nothing here.
 - **Five decisions in `../contract/enrolment.md` §9 need a human** — compute
   platform, who installs, token lifetime, broker hosting, update path. Do not
   invent answers to those.
@@ -142,6 +141,8 @@ Everything above is the brief. What follows is what was built against it.
 ```
 gsu/
   agent.py       the loop: sense, alert, record, then publish
+  tls.py         the pinned CA, and the rules about when this box may talk at
+                 all. No mode disables verification; no path downgrades
   transport/     the only code that knows the broker is Redis (mqtt.py is a
                  documented stub, not a plausible-looking untested client)
   devices/       the supported-device registry, the inventory (intent vs fact),
@@ -152,6 +153,9 @@ gsu/
   sensors/       interfaces, and simulated implementations behind them
   console.py     the local setup and device-selection app (enrolment.md §5, §7)
   enrolment.py   claim, renew with backoff, and alarm early
+  clock.py       plausibility, and what is disciplining this clock
+deploy/          systemd unit, installer, environment, udev rule, and the
+                 device inventory for the Pi described in HARDWARE.md
 ```
 
 ## Running it
@@ -165,26 +169,43 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt
 # Run. Console on http://127.0.0.1:8088
 GSU_BROKER_URL=redis://127.0.0.1:6380/0 .venv/bin/python -m gsu run
 
+.venv/bin/python -m gsu preflight  # everything that must be true before it works
 .venv/bin/python -m gsu devices    # what is fitted, and what was found
 .venv/bin/python -m gsu bench      # what a tick costs — run this on the Pi
 .venv/bin/python -m unittest discover -s tests -t . -q
 ```
 
-`GSU_BROKER_URL` overrides only the broker *address*; the username and topics
-still come from enrolment. It exists because the platform currently hands out a
-container-internal hostname.
+**To put one on a Raspberry Pi, read `DEPLOYMENT.md`.** It goes from a blank SD
+card to an enrolled station: `deploy/install.sh`, a systemd unit, and what to
+check before driving away.
+
+`GSU_BROKER_URL` overrides only the broker *address* — an address and nothing
+else, never credentials — and the username and topics still come from enrolment.
+It exists because the platform hands out an address that may only be routable
+from inside its own network.
 
 Other environment: `GSU_HOME` (state directory), `GSU_PLATFORM_URL`,
 `GSU_SETUP_HOST`/`GSU_SETUP_PORT`/`GSU_SETUP=0`, `GSU_AIRBAND_TRAFFIC`
 (`off`/`low`/`busy`), `GSU_ENROL_TOKEN`.
 
+Trust: `GSU_CA_FILE` (a CA installed out of band, needed for the first
+enrolment call), `GSU_TLS_TRUST` (`pinned` by default, or `system`),
+`GSU_REQUIRE_TLS=1` (refuse plaintext outright). **Neither of the last two can
+turn verification off**, and nothing here falls back to plaintext when TLS
+fails — see `gsu/tls.py` and DECISIONS.md item 22.
+
 ## Read next
 
+- **DEPLOYMENT.md** — the runbook: blank SD card to enrolled station, how to
+  tell it is working, how to read the logs, how to recover.
 - **DECISIONS.md** — every assumption that needs a human, and the five open
-  decisions from `contract/enrolment.md` §9, still open.
-- **CONTRACT-QUESTIONS.md** — nine things the contract could not express when
+  decisions from `contract/enrolment.md` §9, still open. Items 21–34 are the
+  deployment session and all need review.
+- **CONTRACT-QUESTIONS.md** — ten things the contract could not express when
   this was built. Four are settled (`available: false`, optional
   `humidity_pct`, positionless contacts stay dropped, and the conformance
-  harness); the rest are open. Nothing in `contract/` was edited from this side.
+  harness); the rest are open, and item 10 is new now that TLS has landed.
+  Nothing in `contract/` was edited from this side.
 - **HARDWARE.md** — what the Pi 2B, the single RTL2838 and the Airmar 110WX can
-  and cannot carry, measured where measurable and marked where not.
+  and cannot carry, measured where measurable and marked where not. §7 is the
+  register of what has actually been run against hardware and what has not.

@@ -29,7 +29,7 @@ import threading
 import time
 from datetime import UTC, datetime
 
-from . import AGENT_VERSION, clock
+from . import AGENT_VERSION, clock, tls
 from .commands import CommandRouter, build_handlers
 from .config import AgentConfig, SiteConfig
 from .credentials import CredentialStore, Enrolment
@@ -38,7 +38,7 @@ from .enrolment import EnrolmentClient, Renewer
 from .health import Health
 from .radio.receiver import RadioController
 from .store import LocalStore
-from .transport import Transport, build_transport
+from .transport import Transport, build_transport, redact_url
 
 log = logging.getLogger("gsu.agent")
 
@@ -82,7 +82,9 @@ class Agent:
         self.site = SiteConfig.load(config.site_config_path)
         self.store = LocalStore(config.store_path, config.recordings_dir)
         self.credentials = CredentialStore(config.credential_path)
-        self.client = EnrolmentClient(config.platform_url)
+        self.ca = tls.CaStore(config.ca_path)
+        self.trust = self._resolve_trust()
+        self.client = EnrolmentClient(config.platform_url, trust=self.trust)
         self.inventory = Inventory(config.devices_path)
 
         self.enrolment: Enrolment | None = None
@@ -115,6 +117,78 @@ class Agent:
         self._published = 0
         self._started = time.monotonic()
         self._credential_mtime: float | None = None
+
+    # --- trust ----------------------------------------------------------
+
+    def _resolve_trust(self) -> tls.Trust:
+        """What this box will verify the platform and broker against.
+
+        A trust root that cannot be read is a fault to *report*, never a reason
+        to proceed without one: the fallback is "no CA", which refuses every
+        TLS URL, and never "no verification". The station keeps sensing and
+        recording either way — that is the whole design — it simply does not
+        talk to anything it cannot identify.
+        """
+        try:
+            trust = tls.resolve(
+                self.ca,
+                installed=self.config.ca_file,
+                mode=self.config.tls_trust,
+                require_tls=self.config.require_tls,
+            )
+        except tls.Refusal as exc:
+            self.health.raise_condition("tls.trust_unusable", "critical", str(exc))
+            log.error("%s", exc)
+            return tls.Trust(require_tls=self.config.require_tls)
+        if trust.mode == tls.TRUST_SYSTEM:
+            self.health.raise_condition(
+                "tls.not_pinned", "warning",
+                "Verifying against the operating system's CA bundle rather than "
+                "the platform's own CA. Verification is on, but any CA the OS "
+                "trusts is accepted. Unset GSU_TLS_TRUST to pin.",
+            )
+        log.info("TLS trust: %s.", trust.describe())
+        return trust
+
+    def _persist_ca(self, enrolment: Enrolment) -> None:
+        """Keep the CA from the enrolment response, and pin to it from now on.
+
+        `contract/enrolment.md` §4 calls `ca_pem` pinned, which only means
+        anything if it is stored: a CA re-fetched over an unverified channel
+        every boot is pinned to nothing. A CA that *changes* is either a planned
+        rotation or somebody else's certificate, and from here those look
+        identical — so it is accepted (the response that carried it was itself
+        verified) and said out loud.
+        """
+        pem = enrolment.broker.ca_pem
+        if not pem:
+            return
+        # Persisted even when an installed CA is present and takes precedence:
+        # if the installed file is ever removed, the box should still be pinned
+        # to something rather than falling back to trusting anything.
+        try:
+            changed = self.ca.save(pem)
+        except (ValueError, OSError) as exc:
+            self.health.raise_condition(
+                "tls.ca_unwritable", "critical",
+                f"The platform sent a CA that could not be stored at "
+                f"{self.config.ca_path}: {exc}",
+            )
+            return
+        self.health.clear("tls.ca_unwritable")
+        if changed:
+            log.warning(
+                "The platform's CA changed (now SHA-256 %s). Pinning to the new "
+                "one; if this was not a planned rotation, it is worth asking why.",
+                tls.fingerprint(pem),
+            )
+            self.store.record_event(
+                "tls.ca_rotated", "warning",
+                f"Pinned CA replaced; SHA-256 {tls.fingerprint(pem)}.",
+            )
+        # Re-resolve so the API client and the next transport use it.
+        self.trust = self._resolve_trust()
+        self.client.trust = self.trust
 
     # --- devices --------------------------------------------------------
 
@@ -243,21 +317,41 @@ class Agent:
                 self.transport.stop()
             self.enrolment = enrolment
 
+            self._persist_ca(enrolment)
+
             # The platform states its own broker address, which on a development
             # stack is frequently only routable from inside it. The override
             # exists for that; the username and topics still come from
             # enrolment, because those are identity rather than deployment.
             url = self.config.broker_url or enrolment.broker.url
-            self.transport = build_transport(
-                url,
-                username=enrolment.broker.username,
-                password=enrolment.credential.secret,
-            )
-            self.transport.start()
+            try:
+                self.transport = build_transport(
+                    url,
+                    username=enrolment.broker.username,
+                    password=enrolment.credential.secret,
+                    trust=self.trust,
+                )
+            except tls.Refusal as exc:
+                # Refusing to publish is the correct outcome, and everything
+                # below still happens: sensing, recording, local alerting and
+                # credential renewal are unaffected, and `_publish` already
+                # returns False when there is no transport. The one thing that
+                # must not happen is connecting anyway.
+                self.transport = None
+                self.health.raise_condition("uplink.refused", "critical", str(exc))
+                self.store.record_event("uplink.refused", "critical", str(exc))
+                log.error(
+                    "NOT PUBLISHING. %s The station is still sensing, recording "
+                    "and alerting locally.", exc,
+                )
+            else:
+                self.health.clear("uplink.refused")
+                self.transport.start()
 
             handlers = build_handlers(self.radio, self.light, self._apply_config)
             self.router = CommandRouter(enrolment.broker.command_topic, handlers)
-            self.transport.subscribe(enrolment.broker.command_topic, self._on_command)
+            if self.transport is not None:
+                self.transport.subscribe(enrolment.broker.command_topic, self._on_command)
 
             # The site's own details are things the station needs while the
             # platform is unreachable, so they come from the stored enrolment
@@ -325,6 +419,9 @@ class Agent:
 
     def _on_renewed(self, enrolment: Enrolment) -> None:
         self.enrolment = enrolment
+        # A renewal returns the whole response, CA included, so this is where a
+        # rotated CA arrives on a station that never re-enrols.
+        self._persist_ca(enrolment)
         if self.transport is not None:
             self.transport.set_credentials(
                 enrolment.broker.username, enrolment.credential.secret
@@ -422,7 +519,10 @@ class Agent:
                     and self._anything_missing()
                 ):
                     self.build_devices()
-                if self.transport is not None and not self.transport.connected:
+                if self.transport is None or not self.transport.connected:
+                    # Also checked when there is no transport at all: a refused
+                    # uplink is exactly the case a technician fixes by
+                    # re-enrolling, which brings a new CA with it.
                     self.reload_credential_if_changed()
                 # Absolute schedule rather than sleep(tick): a slow tick must
                 # not make the cadence drift away from 1 Hz for ever.
@@ -628,8 +728,43 @@ class Agent:
                     )
                 self._battery_state = state
 
+    def security(self) -> dict:
+        """How this station's link is protected, as a fact rather than a hope.
+
+        Rendered on the local console and carried in the health frame, because
+        "am I actually on TLS, and against which CA" is not a question anyone
+        should have to answer by reading source or a packet capture.
+        """
+        url = None
+        if self.transport is not None:
+            url = self.transport.url
+        elif self.enrolment is not None:
+            url = self.config.broker_url or self.enrolment.broker.url
+        return {
+            # Redacted: the local console has no authentication and this frame
+            # goes over the wire. Neither is a place for a pasted password.
+            "broker_url": redact_url(url),
+            "broker_tls": tls.is_tls(url) if url else None,
+            "platform_tls": tls.is_tls(self.config.platform_url),
+            "trust": self.trust.to_dict(),
+            "publishing": self.transport is not None,
+            "tls_failed": bool(getattr(self.transport, "tls_failed", False)),
+        }
+
     def _update_link_state(self) -> None:
         up = bool(self.transport and self.transport.connected)
+        # A certificate the station will not accept is a different fault from a
+        # link that is down, and an operator acts differently on the two.
+        if getattr(self.transport, "tls_failed", False):
+            self.health.raise_condition(
+                "uplink.tls_failed", "critical",
+                f"The broker's certificate did not verify against "
+                f"{self.trust.describe()}. Nothing is being published, and this "
+                "station will not connect without verifying. "
+                f"Last error: {self.transport.last_error}",
+            )
+        elif up:
+            self.health.clear("uplink.tls_failed")
         if self._link_up is None:
             self._link_up = up
             return
@@ -669,6 +804,7 @@ class Agent:
         # absent at boot and has since started talking must stop being reported
         # as missing without anyone restarting anything.
         self._report_capabilities()
+        self._check_clock()
         credential = self.enrolment.credential if self.enrolment else None
         transport = self.transport
         return {
@@ -688,6 +824,11 @@ class Agent:
                 "expires_at": credential.expires_at.isoformat() if credential else None,
                 "renewal_failures": self.renewer.failures if self.renewer else 0,
             },
+            # Two things a remote box cannot be asked in person: whether its
+            # link is verified, and whether its clock is disciplined by
+            # anything. Both are cheap to state and expensive to guess.
+            "security": self.security(),
+            "clock": clock.discipline().to_dict(),
             "devices": [report.to_dict() for report in self.inventory.report()],
             # The console's reason to render "no receiver" rather than an empty
             # panel that looks like quiet airspace.
@@ -697,6 +838,29 @@ class Agent:
             "storage": self.store.stats(),
             "uptime_s": round(time.monotonic() - self._started, 1),
         }
+
+    def _check_clock(self) -> None:
+        """Whether anything is keeping this clock honest.
+
+        `contract/enrolment.md` §6 is about a clock that is *wrong*; this is the
+        condition that precedes it. A Pi has no battery-backed clock, so between
+        boot and the first NTP exchange its time is whatever the filesystem
+        suggested, and a box that never syncs at all is one credential lifetime
+        away from a site visit. Reported rather than acted on: sensing and
+        recording do not need a correct clock, and enrolling does — which is
+        already refused separately.
+        """
+        state = clock.discipline()
+        if state.synchronised is False:
+            self.health.raise_condition(
+                "clock.unsynchronised", "warning",
+                f"The clock is not disciplined by anything ({state.detail}). "
+                "This box has no battery-backed clock, so its time is only as "
+                "good as its last sync. Check NTP reachability; fit an RTC or a "
+                "GPS time source (HARDWARE.md §4).",
+            )
+        else:
+            self.health.clear("clock.unsynchronised")
 
     def _unsourced_fields(self) -> dict:
         """Fields the console renders for which this station has no sensor."""
@@ -714,7 +878,7 @@ class Agent:
             "station": self.enrolment.site.name if self.enrolment else None,
             "station_id": self.enrolment.station_id if self.enrolment else None,
             "telemetry_topic": self.enrolment.broker.telemetry_topic if self.enrolment else None,
-            "broker": (self.config.broker_url or self.enrolment.broker.url)
+            "broker": redact_url(self.config.broker_url or self.enrolment.broker.url)
             if self.enrolment else None,
             "platform": self.config.platform_url,
             "link": bool(self.transport and self.transport.connected),
@@ -736,6 +900,9 @@ class Agent:
             "events": [event.to_dict() for event in self.store.recent_events(15)],
             "storage": self.store.stats(),
             "clock": datetime.now(UTC).isoformat(),
+            "clock_source": clock.discipline().to_dict(),
+            "security": self.security(),
+            "serial_ports": [port.to_dict() for port in self.inventory.serial_ports()],
             "config_version": self.site.version,
         }
 

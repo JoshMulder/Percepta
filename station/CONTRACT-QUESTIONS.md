@@ -8,7 +8,9 @@ of a proposed change and what the station does about it.
 and `ed02b31`, station side done and conformant). They are kept here with what
 shipped, because the reasoning is why the schema and the harness look the way
 they do. **Item 5 is with the owner. Items 4, 6, 7 and 9 are open** — the event
-channel and the camera media path are the two that matter most.
+channel and the camera media path are the two that matter most. **Item 10 is
+new**: TLS has landed, and `enrolment.md` §4 and §11 now describe a state of the
+world that has passed.
 
 ---
 
@@ -289,3 +291,87 @@ which 128 kbit/s is audio, against 10.7 kbit/s for all telemetry combined.
 Nothing to change in the contract — the note already says Opus is coming — but
 the number is worth having right when the case is made. Encoding is behind one
 function (`gsu/radio/audio.py`) as the schema asks.
+
+---
+
+## 10. TLS has landed, and four things about it are now under-specified
+
+**Where** `enrolment.md` §4, §11, §3; `transport.md` "Broker".
+
+The station now connects over `rediss://` and `https://`, verifying both against
+the `ca_pem` from the enrolment response, pinned and persisted 0600. Five
+observations, in descending order of how much they would cost to get wrong.
+
+### 10a. The CA needs `basicConstraints` and `keyUsage`, and nothing says so
+
+Python's `ssl` module rejects a CA certificate that carries neither, with *"CA
+cert does not include key usage extension"*. `redis-cli --cacert` accepts such a
+certificate happily — so a CA can be tested, appear to work, and still be
+refused by every station in the fleet.
+
+**Proposed**, in §3 or §4 beside `ca_pem`: state that the CA must carry
+`basicConstraints=critical,CA:TRUE` and `keyUsage=critical,keyCertSign,cRLSign`,
+and that verifying it with `redis-cli` is not evidence a station will accept it.
+This costs one sentence now and a fleet-wide outage the first time a CA is
+rotated by somebody who has not hit it before.
+
+*(Found and fixed on the platform side already; writing it down is what stops it
+recurring at the next rotation.)*
+
+### 10b. `ca_pem` is scoped under `broker` and is used for the API too
+
+§4 puts `ca_pem` inside the `broker` object, and its comment says "the station
+verifies the platform" — the broker's CA, described as verifying the platform.
+In practice one CA signs both, and the station uses it for both. That works, but
+it is inferred rather than stated, and a deployment that later fronts the API
+with a different certificate would break stations silently.
+
+**Proposed, additive:** either a sentence in §4 saying explicitly that the same
+CA signs the API and the broker, or a `platform.ca_pem` alongside it for the day
+they differ. The station reads `broker.ca_pem` today and would read either.
+
+### 10c. Nothing says how the CA gets onto the box for the *first* call
+
+The first `POST /api/enrol` happens before anything has been pinned, and that
+call carries the enrolment token and receives the credential. If it is verified
+against the system trust store, the pinning that follows is decorative — the
+identity was handed over on a connection nobody checked.
+
+The station's answer is `GSU_CA_FILE`: a CA installed with the image or carried
+by the technician, and a refusal to enrol over `https://` without one. §5 says
+what the technician does and does not mention carrying a CA; §3 discusses
+credential types and not trust roots.
+
+**Proposed:** a paragraph in §5 stating that the platform CA is provisioned out
+of band, before enrolment, and that its fingerprint is verified by a person
+against a channel that is not the same one that delivered the file. That last
+part is the whole root of the chain and it is currently nobody's documented job.
+
+### 10d. `broker.url` must be credential-free, and it is worth saying why
+
+redis-py's `ConnectionPool.from_url` ends with `kwargs.update(url_options)`, so
+credentials in the URL **override** those passed alongside it. A `broker.url`
+carrying `user:pass@` would make a station authenticate as whatever the URL
+names rather than as `gsu:{station_id}` — quietly leaving the tenancy model that
+`README.md` rule 1 rests on.
+
+The URL the platform sends is already credential-free and deliberately so. The
+station strips and warns regardless.
+
+**Proposed:** one line in §4 under `broker.url` — "carries no credentials; the
+station authenticates as `broker.username` with its own secret" — so that a
+future change to that field has the reason attached to it.
+
+### 10e. §4 and §11 are now stale, in a way that reads as permission
+
+§4's comment on `ca_pem` still says `NOT YET SENT … do not require it yet`, and
+§11 still lists *"`ca_pem` is not yet sent, because the development broker has
+no TLS."* Both were true and are not any more. A station written against the
+document as it stands would treat the CA as optional — which is precisely the
+"do not require verification" behaviour the pinning exists to prevent.
+
+**Proposed:** delete both notes and replace them with the requirement: a station
+**must** pin `ca_pem`, **must** verify the broker and the API against it, and
+**must not** fall back to plaintext or to the system trust store if verification
+fails. `transport.md`'s "Broker" section, which still says "Redis pub/sub
+today", could say Redis-over-TLS in the same commit.

@@ -91,12 +91,43 @@ class DeviceType:
     notes: str = ""
 
 
-SERIAL_PARAMETERS = (
-    Parameter("port", "Serial port", "text", "/dev/ttyUSB0",
-              help="Prefer a /dev/serial/by-id/… path: it survives a reboot, "
-                   "ttyUSB numbering does not."),
-    Parameter("baud", "Baud", "number", 4800, help="4800 for NMEA 0183; the "
-              "ping RX Pro ships at 57600 or 115200."),
+#: Serial parameters, with the baud that device actually ships at.
+#:
+#: The port default is **empty on purpose**. A default of `/dev/ttyUSB0` is a
+#: trap on this box: two USB-UARTs are fitted, they enumerate in the order the
+#: kernel probed them, and that order changes between boots — so the weather
+#: head and the ADS-B receiver swap over and each driver reads the other's
+#: traffic. That presents as both instruments failing, which is a long way from
+#: the real fault. An empty value produces a message naming the ports that are
+#: actually present, which is a better first boot than a plausible wrong guess.
+def _serial_parameters(baud: int, baud_help: str) -> tuple[Parameter, ...]:
+    return (
+        Parameter(
+            "port", "Serial port", "text", "",
+            help="Use a /dev/serial/by-id/… name. It is derived from the "
+                 "adapter's own identity and survives a reboot; ttyUSB "
+                 "numbering does not, and two adapters will swap over. The "
+                 "setup page lists what is plugged in.",
+        ),
+        Parameter("baud", "Baud", "number", baud, help=baud_help),
+    )
+
+
+NMEA_SERIAL_PARAMETERS = _serial_parameters(
+    4800, "4800 is the NMEA 0183 standard rate and the 110WX default.",
+)
+
+#: uAvionix ship the ping RX Pro at 57600. It is configurable on the device, so
+#: this is a default rather than a constant — but a wrong baud reads as silence,
+#: not as an error, which is why it is stated here rather than assumed.
+MAVLINK_SERIAL_PARAMETERS = _serial_parameters(
+    57600, "57600 is the ping RX Pro's factory rate. If it was reconfigured, "
+           "a wrong value here looks exactly like a dead receiver: bytes "
+           "arrive and no frame ever parses.",
+)
+
+MODBUS_SERIAL_PARAMETERS = _serial_parameters(
+    19200, "19200 8N1 is the Victron VE.Direct/Modbus default.",
 )
 
 
@@ -109,7 +140,7 @@ REGISTRY: tuple[DeviceType, ...] = (
         vendor="uAvionix",
         connection="serial",
         driver="gsu.devices.pingrx:PingRxAdsb",
-        parameters=SERIAL_PARAMETERS,
+        parameters=MAVLINK_SERIAL_PARAMETERS,
         provides=("icao", "callsign", "latitude", "longitude", "altitude",
                   "track", "speed", "range_km", "bearing", "alert"),
         notes="Emits ADSB_VEHICLE. Position, altitude, heading, velocity and "
@@ -191,7 +222,7 @@ REGISTRY: tuple[DeviceType, ...] = (
         vendor="Airmar",
         connection="serial",
         driver="gsu.devices.airmar:AirmarWeather",
-        parameters=SERIAL_PARAMETERS + (
+        parameters=NMEA_SERIAL_PARAMETERS + (
             Parameter("humidity_module", "Relative humidity module fitted",
                       "bool", False, required=False,
                       help="Airmar sell the 110WX with and without the RH "
@@ -218,7 +249,7 @@ REGISTRY: tuple[DeviceType, ...] = (
         label="Generic NMEA 0183 weather head",
         connection="serial",
         driver="gsu.devices.airmar:AirmarWeather",
-        parameters=SERIAL_PARAMETERS + (
+        parameters=NMEA_SERIAL_PARAMETERS + (
             Parameter("humidity_module", "Reports humidity", "bool", True,
                       required=False),
         ),
@@ -251,7 +282,7 @@ REGISTRY: tuple[DeviceType, ...] = (
         vendor="Victron",
         connection="serial",
         driver=None,
-        parameters=SERIAL_PARAMETERS + (
+        parameters=MODBUS_SERIAL_PARAMETERS + (
             Parameter("unit_id", "Modbus unit id", "number", 1),
         ),
         provides=("soc_pct", "battery_v", "pv_w", "load_w", "runtime_h"),

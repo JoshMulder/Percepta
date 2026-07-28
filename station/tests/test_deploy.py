@@ -1,0 +1,231 @@
+"""The deployment: the serial path, the clock, and the files that install it.
+
+These are the things that will be wrong on the first real box, and none of them
+can be proved here — there is no Pi, no UART, no camera and no SDR on this
+machine. So the tests cover what *can* be checked without hardware: that the
+failures are specific rather than generic, that the shipped inventory says what
+this station actually has, and that the unit file has not quietly lost a line.
+"""
+
+from __future__ import annotations
+
+import re
+import tempfile
+import unittest
+from pathlib import Path
+
+from gsu import clock
+from gsu.agent import Agent
+from gsu.config import AgentConfig
+from gsu.devices import registry
+from gsu.devices.serialio import SerialPort, list_ports
+
+DEPLOY = Path(__file__).resolve().parent.parent / "deploy"
+
+
+class SerialFailureTests(unittest.TestCase):
+    """A first connection fails in one of a handful of ways. Each says which.
+
+    The serial layer has never spoken to a real UART, so the quality of its
+    error messages is the difference between a five-minute fix and a return
+    visit. These end up in `unavailable_reason` and on the setup page.
+    """
+
+    def message(self, path: str, baud: int = 4800) -> str:
+        with self.assertRaises((FileNotFoundError, OSError, ValueError)) as caught:
+            SerialPort(path, baud)
+        return str(caught.exception)
+
+    def test_no_port_configured_says_so_and_lists_what_is_there(self):
+        message = self.message("")
+        self.assertIn("no serial port set", message)
+        self.assertTrue("Ports present now" in message or "No serial ports" in message)
+
+    def test_a_missing_port_names_the_stable_alternative(self):
+        message = self.message("/dev/ttyUSB99")
+        self.assertIn("no such serial port", message)
+        self.assertIn("by-id", message)
+
+    def test_a_path_that_is_not_a_serial_device_says_that_precisely(self):
+        # Otherwise "could not open /etc" reads as a permissions problem.
+        message = self.message("/etc")
+        self.assertIn("not a serial device", message)
+
+    def test_a_character_device_that_is_not_a_tty_is_still_caught(self):
+        message = self.message("/dev/null")
+        self.assertIn("not a serial port", message)
+
+    def test_an_unsupported_baud_lists_the_supported_ones(self):
+        message = self.message("/dev/null", 1234)
+        self.assertTrue("unsupported baud" in message or "not a serial port" in message)
+
+    def test_listing_ports_never_raises_and_prefers_stable_names(self):
+        ports = list_ports()
+        stable = [port for port in ports if port.stable]
+        self.assertEqual(ports[:len(stable)], stable, "stable names must come first")
+        for port in ports:
+            self.assertTrue(port.path.startswith("/dev/"))
+
+
+class SerialDefaultTests(unittest.TestCase):
+    def parameters(self, type_id: str) -> dict:
+        device = registry.get(type_id)
+        return {parameter.name: parameter for parameter in device.parameters}
+
+    def test_no_device_defaults_to_a_ttyusb_path(self):
+        # Two USB-UARTs are fitted and their numbering swaps between boots, so
+        # a plausible default is worse than none: each driver would silently
+        # read the other's traffic, which looks like both instruments failing.
+        for type_id in ("uavionix-ping-rx-pro", "airmar-110wx",
+                        "generic-nmea-weather", "victron-mppt-modbus"):
+            port = self.parameters(type_id)["port"]
+            self.assertEqual(port.default, "", type_id)
+            self.assertIn("by-id", port.help, type_id)
+
+    def test_each_device_defaults_to_its_own_baud(self):
+        self.assertEqual(self.parameters("airmar-110wx")["baud"].default, 4800)
+        self.assertEqual(self.parameters("uavionix-ping-rx-pro")["baud"].default, 57600)
+
+
+class ClockTests(unittest.TestCase):
+    def test_discipline_reports_something_and_never_raises(self):
+        state = clock.discipline(force=True)
+        self.assertIn(state.source, ("gps", "ntp", "rtc-only", "none", "unknown"))
+        self.assertIn(state.synchronised, (True, False, None))
+        self.assertIsInstance(state.rtc_present, bool)
+        self.assertTrue(state.detail)
+        self.assertEqual(set(state.to_dict()),
+                         {"synchronised", "source", "detail", "rtc_present"})
+
+    def test_it_is_cached_because_it_is_asked_every_health_frame(self):
+        first = clock.discipline(force=True)
+        self.assertIs(clock.discipline(), first)
+
+    def test_a_gps_reference_would_be_reported_as_gps(self):
+        # The drop-in the owner intends: chrony disciplined by PPS or GPS needs
+        # no station-side change at all, and this is the line that proves the
+        # reporting half of that claim without a receiver to hand.
+        self.assertIn("PPS", clock.GPS_REFERENCE_IDS)
+        self.assertIn("GPS", clock.GPS_REFERENCE_IDS)
+
+
+class ShippedInventoryTests(unittest.TestCase):
+    """deploy/devices.pi.json must describe the box in HARDWARE.md."""
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.home = Path(self._dir.name)
+        (self.home / "devices.json").write_text(
+            (DEPLOY / "devices.pi.json").read_text()
+        )
+        self.agent = Agent(AgentConfig(home=self.home, setup_enabled=False,
+                                       single_instance=False))
+
+    def tearDown(self):
+        self.agent.shutdown()
+        self._dir.cleanup()
+
+    def test_the_four_real_devices_are_selected(self):
+        fitted = {slot: entry.type_id for slot, entry in self.agent.inventory.fitted.items()}
+        self.assertEqual(fitted["adsb"], "uavionix-ping-rx-pro")
+        self.assertEqual(fitted["weather"], "airmar-110wx")
+        self.assertEqual(fitted["radio"], "rtlsdr-airband")
+        self.assertEqual(fitted["camera"], "raspberry-pi-csi")
+
+    def test_nothing_is_simulated(self):
+        for report in self.agent.inventory.report():
+            self.assertFalse(report.simulated, report.slot)
+
+    def test_the_driverless_devices_say_exactly_that(self):
+        reports = {report.slot: report for report in self.agent.inventory.report()}
+        for slot in ("radio", "camera"):
+            self.assertIn("not supported by this software build", reports[slot].detail)
+
+    def test_the_streams_with_no_driver_are_declared_unavailable(self):
+        sent: list[dict] = []
+        self.agent._publish = lambda topic, payload: sent.append(payload) or True
+        self.agent.step(1.0, weather_due=True)
+        radio = [payload for payload in sent if payload["kind"] == "radio"]
+        self.assertTrue(radio)
+        self.assertIs(radio[0]["available"], False)
+        self.assertIn("not supported by this software build",
+                      radio[0]["unavailable_reason"])
+        # ...and never an empty payload that reads as "nothing on frequency".
+        self.assertNotIn("squelch_open", radio[0])
+
+    def test_no_serial_port_is_guessed_for_this_site(self):
+        for slot in ("adsb", "weather"):
+            self.assertEqual(self.agent.inventory.fitted[slot].params["port"], "")
+
+    def test_a_driverless_device_does_not_also_demand_a_tuner(self):
+        # It would be a critical condition about a receiver that could not be
+        # used if it were assigned — noise on top of the real message.
+        self.assertEqual(self.agent.inventory.conflicts(), [])
+
+
+class UnitFileTests(unittest.TestCase):
+    """The systemd unit, checked for the lines that are easy to lose."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.unit = (DEPLOY / "gsu.service").read_text()
+        # The comments explain what is *not* there, so the directives have to be
+        # read on their own or every explanation reads as a violation.
+        cls.directives = "\n".join(
+            line for line in cls.unit.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        )
+        cls.install = (DEPLOY / "install.sh").read_text()
+
+    def test_it_does_not_wait_for_the_network(self):
+        # The whole design keeps working with the link down; a unit ordered
+        # after network-online would not start at all on a site with no signal.
+        self.assertNotIn("network-online.target", self.directives)
+        # ...and not after time-sync either, which waits on the network in turn.
+        self.assertNotIn("time-sync.target", self.directives)
+        self.assertIn("After=local-fs.target network.target", self.directives)
+
+    def test_it_restarts_for_ever(self):
+        self.assertIn("Restart=always", self.unit)
+        self.assertIn("StartLimitIntervalSec=0", self.unit)
+
+    def test_the_hardening_the_brief_asked_for_is_present(self):
+        for directive in ("NoNewPrivileges=yes", "PrivateTmp=yes",
+                          "ProtectSystem=strict", "User=gsu", "ProtectHome=yes",
+                          "CapabilityBoundingSet=", "SystemCallFilter=@system-service"):
+            self.assertIn(directive, self.unit)
+
+    def test_it_keeps_the_device_access_the_hardware_needs(self):
+        # PrivateDevices=yes would take away the UARTs and the SDR.
+        self.assertNotIn("PrivateDevices=yes", self.directives)
+        self.assertIn("SupplementaryGroups=dialout", self.unit)
+        self.assertIn("AF_NETLINK", self.unit)   # or DNS resolution breaks
+
+    def test_the_radio_is_given_time_to_shut_down_gracefully(self):
+        # A dongle killed mid-transfer needs a physical replug, which here is a
+        # truck (server/docs/05-radio-integration.md).
+        self.assertIn("KillSignal=SIGTERM", self.unit)
+        timeout = re.search(r"TimeoutStopSec=(\d+)", self.unit)
+        self.assertTrue(timeout and int(timeout.group(1)) >= 30)
+
+    def test_the_paths_in_the_unit_and_the_installer_agree(self):
+        exec_start = re.search(r"ExecStart=(\S+)", self.unit).group(1)
+        self.assertTrue(exec_start.startswith("/opt/percepta/station"))
+        self.assertIn("PREFIX=/opt/percepta/station", self.install)
+        state = re.search(r"StateDirectory=(\S+)", self.unit).group(1)
+        self.assertIn(f"STATE=/var/lib/{state}", self.install)
+        self.assertIn(f"GSU_HOME=/var/lib/{state}",
+                      (DEPLOY / "gsu.env.example").read_text())
+
+    def test_the_shipped_environment_requires_tls(self):
+        env = (DEPLOY / "gsu.env.example").read_text()
+        self.assertIn("GSU_REQUIRE_TLS=1", env)
+        self.assertRegex(env, r"GSU_PLATFORM_URL=https://")
+        self.assertRegex(env, r"GSU_BROKER_URL=rediss://")
+        # The setup console has no authentication; it must not be shipped bound
+        # to anything routable.
+        self.assertIn("GSU_SETUP_HOST=127.0.0.1", env)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -64,6 +64,22 @@ class AgentConfig:
     #: default reflects that; "busy" is for exercising the audio path.
     airband_traffic: str = "low"
 
+    # --- trust (gsu/tls.py) ---------------------------------------------
+    #: A CA installed with the image, used for the *first* enrolment call —
+    #: before that call returns there is no pinned CA, so the bootstrap has to
+    #: arrive out of band or it is not a bootstrap.
+    ca_file: str | None = None
+
+    #: "pinned" (the platform's own CA, per contract/enrolment.md §4) or
+    #: "system" (the OS bundle, for a publicly-signed platform). There is no
+    #: mode that disables verification.
+    tls_trust: str = "pinned"
+
+    #: Refuse plaintext even before a CA has ever been seen. Off by default so
+    #: the development stack — a local Redis container with no TLS — still
+    #: works; **on** in the deployed environment file.
+    require_tls: bool = False
+
     #: Refuse to start a second agent for the same station. Two instances
     #: publishing independent worlds onto one channel makes the console flicker
     #: between them, which looks like a platform bug rather than an operator
@@ -83,6 +99,9 @@ class AgentConfig:
             setup_enabled=_env("GSU_SETUP", "1") not in ("0", "false", "no"),
             airband_traffic=_env("GSU_AIRBAND_TRAFFIC", "low"),
             single_instance=_env("GSU_SINGLE_INSTANCE", "1") not in ("0", "false"),
+            ca_file=_env("GSU_CA_FILE"),
+            tls_trust=_env("GSU_TLS_TRUST", "pinned"),
+            require_tls=_env("GSU_REQUIRE_TLS", "0") not in ("0", "false", "no"),
         )
 
     # --- paths ----------------------------------------------------------
@@ -99,6 +118,12 @@ class AgentConfig:
     @property
     def credential_path(self) -> Path:
         return self.home / "credential.json"
+
+    @property
+    def ca_path(self) -> Path:
+        # Beside the credential, and 0600 like it. They are one identity: the
+        # secret says who this box is, the CA says who it may say that to.
+        return self.home / "platform-ca.pem"
 
     @property
     def site_config_path(self) -> Path:

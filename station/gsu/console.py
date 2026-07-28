@@ -268,16 +268,25 @@ class Console:
                 "<button type=submit>Set this station up</button>"
                 "</form></div>"
             )
+        security = state.get("security") or {}
+        trust = security.get("trust") or {}
+        clock_state = state.get("clock_source") or {}
         rows = [
             ("Platform", state["platform"], "ok"),
             ("Enrolled", "yes" if state["enrolled"] else "not yet",
              "ok" if state["enrolled"] else "warn"),
             ("Link to the platform", "up" if state["link"] else "down",
              "ok" if state["link"] else "bad"),
+            # Whether the uplink is encrypted and verified, in the same list as
+            # everything else a technician checks before leaving site. It is
+            # not a question that should need a packet capture to answer.
+            self._security_row(security, trust),
             ("Telemetry sent", f"{state['published']} frames", "ok"),
             ("Dropped while offline", f"{state['dropped']} frames",
              "ok" if not state["dropped"] else "warn"),
             ("Station clock", state["clock"], "ok"),
+            ("Clock kept by", self._clock_wording(clock_state),
+             "ok" if clock_state.get("synchronised") else "warn"),
         ]
         out.append("<div class=card>")
         for label, value, css in rows:
@@ -296,6 +305,39 @@ class Console:
                 )
             out.append("</ul></div>")
         return "".join(out)
+
+    @staticmethod
+    def _security_row(security: dict, trust: dict) -> tuple[str, str, str]:
+        """One line answering "is this link safe to leave running".
+
+        Deliberately blunt in the failure cases. A station that has stopped
+        publishing because it will not accept a certificate looks, from every
+        other row on this page, exactly like a station with no signal — and the
+        two need completely different people called.
+        """
+        if security.get("tls_failed"):
+            return ("Uplink security",
+                    "REFUSED — the broker's certificate did not verify", "bad")
+        if not security.get("publishing") and security.get("broker_url"):
+            return ("Uplink security", "REFUSED — see the conditions below", "bad")
+        if security.get("broker_tls") is None:
+            return ("Uplink security", "no broker yet", "warn")
+        if not security.get("broker_tls"):
+            return ("Uplink security", "PLAINTEXT — development only", "bad")
+        if trust.get("mode") == "system":
+            return ("Uplink security", "TLS, system CA bundle (not pinned)", "warn")
+        fingerprint = (trust.get("fingerprint") or "")[:23]
+        return ("Uplink security", f"TLS, CA pinned {fingerprint}…", "ok")
+
+    @staticmethod
+    def _clock_wording(state: dict) -> str:
+        source = state.get("source", "unknown")
+        wording = {
+            "gps": "GPS", "ntp": "NTP", "rtc-only": "a hardware RTC, not synced",
+            "none": "nothing — the time is a guess",
+            "unknown": "cannot tell",
+        }.get(source, source)
+        return wording if state.get("rtc_present") else f"{wording} (no RTC fitted)"
 
     def _section_devices(self, state: dict) -> str:
         out = ["<h2>What is fitted</h2>"]
@@ -362,6 +404,25 @@ class Console:
                             sel = " selected" if str(value) == str(choice) else ""
                             out.append(f"<option{sel}>{html.escape(str(choice))}</option>")
                         out.append("</select>")
+                    elif parameter.name == "port":
+                        # The single most likely thing to be got wrong on a
+                        # first install, so the ports that exist right now are
+                        # offered rather than described. A free-text field is
+                        # kept underneath it: the device may not be plugged in
+                        # yet, and refusing to save a port that is currently
+                        # absent would be worse than saving one that is.
+                        out.append(
+                            f"<input type=text id='{name}' name='{name}' "
+                            f"list='ports-{slot}' value='{html.escape(str(value))}' "
+                            "placeholder='/dev/serial/by-id/…'>"
+                        )
+                        out.append(f"<datalist id='ports-{slot}'>")
+                        for port in state.get("serial_ports") or []:
+                            out.append(
+                                f"<option value='{html.escape(port['id'])}'>"
+                                f"{html.escape(port['detail'] or port['model'])}</option>"
+                            )
+                        out.append("</datalist>")
                     else:
                         field_type = {
                             "password": "password", "number": "number",
@@ -409,6 +470,28 @@ class Console:
                 "from an identical one — program it with rtl_eeprom before fitting "
                 "a second.</div></div>"
             )
+
+        # What is actually plugged in, listed once. On a box with two USB-UARTs
+        # this is the page a technician reads to work out which is which.
+        ports = state.get("serial_ports") or []
+        out.append("<div class=card><div class=k>Serial ports present now</div><ul>")
+        if not ports:
+            out.append(
+                "<li class=warn>None. Neither USB-UART is enumerating — check "
+                "the leads, then <code>dmesg | tail</code>.</li>"
+            )
+        for port in ports:
+            out.append(
+                f"<li><code>{html.escape(port['id'])}</code>"
+                + (f" <span class=muted>→ {html.escape(port['detail'])}</span>"
+                   if port["detail"] else "")
+                + "</li>"
+            )
+        out.append(
+            "</ul><div class=muted>Use the <code>/dev/serial/by-id/…</code> "
+            "names. They come from the adapter's own identity; ttyUSB numbering "
+            "changes between boots and two adapters will swap over.</div></div>"
+        )
         return "".join(out)
 
     def _section_gaps(self, state: dict) -> str:

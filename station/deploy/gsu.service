@@ -1,0 +1,119 @@
+# The ground station agent, as a systemd service.
+#
+# Installed to /etc/systemd/system/gsu.service by deploy/install.sh.
+#
+# Two constraints from station/README.md shape everything here:
+#
+#   "The link drops, routinely."  So this unit must start, and keep running,
+#   with no network at all. There is no network-online.target dependency and no
+#   Requires= on anything remote. A box that will not boot without the platform
+#   is a box that stops working when the link does.
+#
+#   "Nobody is there."  So it restarts for ever, with no start-rate limit. A
+#   service that gives up after five attempts is a site visit; on a remote site
+#   the correct behaviour for a crash loop is to keep trying and keep saying so.
+#
+# Everything under [Service] that is not Exec* is hardening. The comments say
+# what each one buys and, where it matters, what it would break — a hardening
+# line nobody understands is a line somebody deletes at 2am.
+
+[Unit]
+Description=Percepta ground station agent
+Documentation=file:/opt/percepta/station/DEPLOYMENT.md
+# Ordering only, never a requirement: local filesystems must be mounted before
+# state is written, and if the network happens to be up first, good.
+After=local-fs.target network.target
+Wants=network.target
+# Deliberately NOT After=time-sync.target: that waits for NTP, which waits for
+# the network. The agent handles an implausible clock itself — it refuses to
+# enrol and raises a health condition (contract/enrolment.md §6) — and it must
+# be sensing and recording long before it knows what time it is.
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+User=gsu
+Group=gsu
+# dialout: the two USB-UARTs (Airmar, ping RX Pro).
+# video:   the Pi camera, for when a driver exists.
+# plugdev: the RTL-SDR dongle, via the udev rule installed alongside this.
+SupplementaryGroups=dialout video plugdev
+
+WorkingDirectory=/opt/percepta/station
+EnvironmentFile=/etc/percepta/gsu.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/percepta/station/.venv/bin/python -m gsu run
+
+Restart=always
+RestartSec=5s
+# The radio must be stopped through its own shutdown path, never killed: a
+# dongle killed mid-transfer needs a physical replug, and on this site that is a
+# truck (server/docs/05-radio-integration.md, obligation 2). SIGTERM reaches the
+# agent's handler, which shuts the receiver down in order; 45s is generous
+# enough that systemd never has to escalate to SIGKILL.
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=45s
+
+# --- state ---------------------------------------------------------------
+# /var/lib/percepta-gsu, created 0700 and owned by gsu. The credential and the
+# pinned CA live in here at 0600, so the directory must not be world-readable.
+StateDirectory=percepta-gsu
+StateDirectoryMode=0700
+UMask=0077
+
+# --- hardening -----------------------------------------------------------
+# The agent needs: its state directory, two serial devices, a USB SDR, the
+# network, and nothing else at all.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectProc=invisible
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+# The agent reads the clock and never sets it — that is chrony's job. This also
+# drops CAP_SYS_TIME, so a compromised agent cannot strand the site by moving
+# the clock past its own credential's expiry.
+ProtectClock=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RemoveIPC=yes
+# No capabilities whatsoever. Nothing here needs one.
+CapabilityBoundingSet=
+AmbientCapabilities=
+# AF_NETLINK is not optional despite looking it: glibc's getaddrinfo() uses it
+# to enumerate local addresses, so removing it breaks DNS resolution and the
+# station cannot find the broker.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# CPython and the one pure-Python dependency (redis) need no writable-executable
+# pages. If a native extension is ever added and the service fails to start with
+# a memory-protection error, this is the first line to try removing — and the
+# reason should be written down when it is.
+MemoryDenyWriteExecute=yes
+
+# PrivateDevices is deliberately NOT set: it would replace /dev with a minimal
+# set and take away /dev/ttyUSB*, /dev/serial/by-id and the SDR. The device
+# allow-list below is the narrower control instead.
+DeviceAllow=char-ttyUSB rw
+DeviceAllow=char-ttyACM rw
+DeviceAllow=char-ttyAMA rw
+DeviceAllow=/dev/vchiq rw
+DeviceAllow=char-usb_device rw
+
+# A remote box with a full disk is a site visit, and so is one that swaps itself
+# to death on an SD card. The agent's own footprint is small; this is a fence,
+# not a target.
+MemoryMax=384M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

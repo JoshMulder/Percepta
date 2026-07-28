@@ -7,9 +7,12 @@ anything. That is worse than an honest gap: it looks tested.
 What it has to do, so the work is bounded and the seam is provably the only one:
 
 * Connect to `broker.url` from the enrolment response, verifying the server
-  against `broker.ca_pem` — **pinned**, not the system trust store. `ca_pem` is
-  not sent yet (`contract/enrolment.md` §11); when it is, it lands in
-  `credentials.Broker.ca_pem` and is passed straight to the TLS context here.
+  against `broker.ca_pem` — **pinned**, not the system trust store. That part is
+  now built and in use on the Redis path: `gsu/tls.py` persists the CA and
+  `Trust.context()` produces the verifying context. This class takes the same
+  `Trust` and must call `trust.check(url, …)` before connecting and
+  `trust.context()` to wrap the socket. No fallback to plaintext, and no
+  `CERT_NONE`, on this transport either.
 * Authenticate as `broker.username` with the credential secret as the password,
   and later as an mTLS client certificate (§3) — at which point this class grows
   a keypair and CSR and nothing above the transport changes.
@@ -33,7 +36,8 @@ from . import Handler, Transport
 
 
 class MqttTransport(Transport):
-    def __init__(self, url: str, username: str | None = None, password: str | None = None):
+    def __init__(self, url: str, username: str | None = None,
+                 password: str | None = None, trust=None):
         raise NotImplementedError(
             "MQTT transport is not built. Production is MQTT over TLS with a "
             "per-station credential; see the module docstring for exactly what "

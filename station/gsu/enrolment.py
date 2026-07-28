@@ -9,8 +9,16 @@ CGNAT (`contract/enrolment.md` §1):
 
 Written against stdlib HTTP on purpose. This runs on an unattended box that must
 boot with whatever is in the image; the fewer things that have to be installable
-in the field, the better. When `ca_pem` starts arriving (§11) the TLS context is
-the one thing here that needs to grow.
+in the field, the better.
+
+**All three go over TLS verified against the pinned CA** (`gsu/tls.py`), the
+same one the broker is checked with — §4 sends one `ca_pem` and one CA signs
+both. There is a bootstrap in here worth being explicit about: the *first*
+`POST /api/enrol` happens before any CA has been pinned, so it can only be
+verified against a CA installed with the image (`GSU_CA_FILE`). Without one this
+client refuses the call and says what to install, rather than reaching for the
+system trust store — that would make the pinning decorative, since the first
+call is the one that hands over a token and receives an identity.
 
 **Renewal is the part that strands sites.** §6 is unambiguous: renew early,
 back off, and treat failure as a health alarm long before it is an outage. The
@@ -32,6 +40,7 @@ from datetime import timedelta
 
 from . import clock
 from .credentials import CredentialStore, Enrolment
+from .tls import Refusal, Trust
 
 log = logging.getLogger("gsu.enrolment")
 
@@ -69,9 +78,11 @@ class Standing:
 
 
 class EnrolmentClient:
-    def __init__(self, platform_url: str, ca_pem: str | None = None) -> None:
+    def __init__(self, platform_url: str, trust: Trust | None = None) -> None:
         self.platform_url = platform_url.rstrip("/")
-        self._ca_pem = ca_pem
+        #: Reassigned when a claim brings back a CA the box did not have — the
+        #: next call is then pinned to it. Never reassigned to something weaker.
+        self.trust = trust or Trust()
 
     # --- exchanges ------------------------------------------------------
 
@@ -111,17 +122,20 @@ class EnrolmentClient:
     # --- plumbing -------------------------------------------------------
 
     def _context(self) -> ssl.SSLContext | None:
+        """A verifying context pinned to the platform's CA, or None for a
+        plaintext development URL that policy has already allowed."""
         if not self.platform_url.startswith("https"):
             return None
-        if self._ca_pem:
-            # Pinned to the platform's own CA once it sends one (§11).
-            context = ssl.create_default_context(cadata=self._ca_pem)
-        else:
-            context = ssl.create_default_context()
-        return context
+        return self.trust.context()
 
     def _request(self, method: str, path: str, payload: dict | None, secret: str | None):
         url = f"{self.platform_url}{path}"
+        # Before the socket, not after: a refusal is a decision this station
+        # made, and it must never be reachable by retrying on weaker terms.
+        try:
+            self.trust.check(self.platform_url, "the platform API")
+        except Refusal as exc:
+            raise EnrolmentError(str(exc), retryable=False) from exc
         data = json.dumps(payload).encode() if payload is not None else None
         request = urllib.request.Request(url, data=data, method=method)
         request.add_header("Content-Type", "application/json")
@@ -147,6 +161,19 @@ class EnrolmentClient:
                 retryable=exc.code >= 500 or exc.code == 429,
             ) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            reason = getattr(exc, "reason", exc)
+            if isinstance(reason, ssl.SSLError):
+                # A certificate that does not verify is not a dropped link, and
+                # telling a technician to "check the aerial" would send them
+                # after the wrong thing entirely.
+                raise EnrolmentError(
+                    f"The platform at {self.platform_url} presented a certificate "
+                    f"this station will not accept ({self.trust.describe()}): "
+                    f"{reason}. Nothing was sent. This is either the wrong CA on "
+                    "the box or the wrong certificate on the platform — the "
+                    "station will not connect without checking.",
+                    retryable=False,
+                ) from exc
             raise EnrolmentError(
                 f"Could not reach the platform at {self.platform_url}: {exc}",
                 retryable=True,

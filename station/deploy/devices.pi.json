@@ -1,0 +1,80 @@
+{
+  "_comment": [
+    "The device inventory for the Pi 2B station described in HARDWARE.md, as",
+    "shipped by deploy/install.sh when the box has no inventory of its own.",
+    "",
+    "It is INTENT, not detection. The station keeps the two apart on purpose",
+    "(contract/enrolment.md §7): this file says what someone believes is",
+    "fitted, and the station reports separately what it actually found. A",
+    "camera that has failed and a camera that was never fitted look identical",
+    "in a database and completely different at the site.",
+    "",
+    "Two of the four devices below have no driver in this build. That is",
+    "deliberate and is reported as 'not supported by this software build' —",
+    "their telemetry streams are published as available:false with that",
+    "reason, on the normal cadence, rather than being faked or going quiet.",
+    "",
+    "The serial ports are EMPTY and have to be set on the setup page, because",
+    "only the box knows its own /dev/serial/by-id/ names. Anything else would",
+    "be a guess that works until the first reboot swaps the two adapters over."
+  ],
+
+  "fitted": {
+    "adsb": {
+      "_comment": "uAvionix ping RX Pro, MAVLink over USB-UART at 57600. Driver written and unit-tested; the serial layer beneath it has never spoken to a real UART. NOT YET CONNECTED as of HARDWARE.md — until it is, this slot reports the port as missing and adsb goes out as available:false.",
+      "type_id": "uavionix-ping-rx-pro",
+      "params": {
+        "port": "",
+        "baud": 57600
+      },
+      "resource": null
+    },
+
+    "weather": {
+      "_comment": "Airmar 110WX, NMEA 0183 at 4800. Set humidity_module true ONLY if the RH variant was ordered — without it there is no humidity source and the field is published absent, never zero. mast_offset_deg is the mast's true bearing: the instrument has no compass, and a wrong value here rotates every wind reading at the site.",
+      "type_id": "airmar-110wx",
+      "params": {
+        "port": "",
+        "baud": 4800,
+        "humidity_module": false,
+        "mast_offset_deg": 0
+      },
+      "resource": null
+    },
+
+    "radio": {
+      "_comment": "RTL2838 on airband. No driver in this build: the radio stream reports available:false with 'not supported by this software build'. Selected anyway so the platform and the console can see that the hardware is fitted and what is missing is software.",
+      "type_id": "rtlsdr-airband",
+      "params": {
+        "gain": 37.2,
+        "ppm": 0
+      },
+      "resource": null
+    },
+
+    "camera": {
+      "_comment": "Pi camera on the CSI ribbon. No driver in this build, and the contract has no media channel to carry anything it produced (CONTRACT-QUESTIONS item 7), so there is nowhere for a frame to go even if there were one.",
+      "type_id": "raspberry-pi-csi",
+      "params": {
+        "resolution": "1920x1080",
+        "framerate": 15,
+        "bitrate_kbps": 2000
+      },
+      "resource": null
+    },
+
+    "power": {
+      "_comment": "Nothing specified for this site yet. Not fitted is a different statement from fitted-and-broken, so the slot is left empty rather than pointed at a Victron that is not there.",
+      "type_id": "",
+      "params": {},
+      "resource": null
+    },
+
+    "light": {
+      "_comment": "No relay fitted. Same reasoning as power.",
+      "type_id": "",
+      "params": {},
+      "resource": null
+    }
+  }
+}

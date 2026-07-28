@@ -1,0 +1,20 @@
+# RTL-SDR dongles readable by the station agent without root.
+#
+# Installed to /etc/udev/rules.d/99-percepta-sdr.rules. The agent runs as the
+# unprivileged `gsu` user, which is in `plugdev`; without this the dongle is
+# root-only and the station reports a receiver it can see in sysfs and cannot
+# open — a confusing fault, because the device is plainly there.
+#
+# 0bda:2838 is the RTL2838 fitted here; 0bda:2832 is the same chip in older
+# dongles. Both are listed in gsu/devices/inventory.py RTLSDR_IDS, and the two
+# lists should stay in step.
+#
+# After installing: sudo udevadm control --reload && sudo udevadm trigger
+
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="2838", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="2832", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+
+# The kernel's DVB driver claims RTL2832U devices on sight and then the SDR
+# tools cannot open them. Blacklisting is done in modprobe.d rather than here —
+# see DEPLOYMENT.md — but the symptom is worth naming at the point somebody is
+# reading udev rules: "device busy" on a dongle nothing else is using.

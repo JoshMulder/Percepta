@@ -25,6 +25,49 @@ from typing import Callable
 Handler = Callable[[str, dict], None]
 
 
+def split_credentials(url: str) -> tuple[str, str | None, str | None]:
+    """Separate any `user:pass@` in a broker URL from the address.
+
+    This exists because of a genuine trap in redis-py: `ConnectionPool.from_url`
+    ends with `kwargs.update(url_options)`, so **the URL wins over the keyword
+    arguments**. A URL carrying its own credentials silently discards the
+    station's identity — which either fails as `WRONGPASS`, or succeeds as
+    whoever the URL names, which is much worse. A station that authenticates as
+    something other than `gsu:{station_id}` has quietly left the tenancy model
+    the whole platform rests on.
+
+    So the address and the identity are separated here and the identity is
+    always passed as arguments. The platform's `broker.url` is deliberately
+    credential-free; this defends the case where someone puts a password into
+    `GSU_BROKER_URL` because it worked in `redis-cli`.
+    """
+    scheme, separator, rest = url.partition("://")
+    if not separator:
+        return url, None, None
+    authority, slash, tail = rest.partition("/")
+    if "@" not in authority:
+        return url, None, None
+    userinfo, _, host = authority.rpartition("@")
+    username, _, password = userinfo.partition(":")
+    return f"{scheme}://{host}{slash}{tail}", (username or None), (password or None)
+
+
+def redact_url(url: str | None) -> str | None:
+    """A URL safe to show on the console and to publish in health telemetry.
+
+    The local console has no authentication and health frames cross the wire;
+    neither is a place to render a password that somebody pasted into an
+    environment variable.
+    """
+    if not url:
+        return url
+    address, username, password = split_credentials(url)
+    if username is None and password is None:
+        return url
+    scheme, _, rest = address.partition("://")
+    return f"{scheme}://{'user' if username else ''}:***@{rest}"
+
+
 class Transport(ABC):
     """One link to the platform. Everything above this is broker-agnostic."""
 
@@ -70,19 +113,28 @@ class Transport(ABC):
         exactly like a quiet site."""
 
 
-def build_transport(url: str, username: str | None, password: str | None) -> Transport:
+def build_transport(
+    url: str,
+    username: str | None,
+    password: str | None,
+    trust=None,
+) -> Transport:
     """Pick a transport from the broker URL the platform handed out.
 
     The one function that has to change when production moves to MQTT, and the
     reason `mqtt.py` exists as a stub rather than as a surprise.
+
+    `trust` is the station's pinned CA (`gsu/tls.py`). Every transport takes it
+    and every transport must refuse rather than connect without it, which is
+    why it is a parameter here and not a lookup inside one implementation.
     """
     scheme = (url.split("://", 1)[0] or "").lower()
     if scheme in ("redis", "rediss", "unix"):
         from .redis_transport import RedisTransport
 
-        return RedisTransport(url, username=username, password=password)
+        return RedisTransport(url, username=username, password=password, trust=trust)
     if scheme in ("mqtt", "mqtts", "ssl", "tcp", "ws", "wss"):
         from .mqtt import MqttTransport
 
-        return MqttTransport(url, username=username, password=password)
+        return MqttTransport(url, username=username, password=password, trust=trust)
     raise ValueError(f"No transport knows how to speak {scheme!r} (from {url!r})")

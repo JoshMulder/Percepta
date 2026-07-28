@@ -4,3 +4,6 @@ var/
 .venv/
 __pycache__/
 *.pyc
+
+# Wheels staged for an offline install on a box with no network.
+deploy/wheels/
