@@ -57,6 +57,8 @@ class MeResponse(BaseModel):
     # True only while the active org IS the platform org - it is a property of
     # the session, not of the person. See auth/platform.py.
     is_platform_admin: bool = False
+    # In someone else's organisation via platform access.
+    is_guest: bool = False
 
 
 def _org_name(db: Session, organization_id) -> str:
@@ -190,6 +192,7 @@ def login(
         # Derived from the org this session was minted for, matching exactly what
         # resolve_identity will decide on every later request.
         is_platform_admin=organization.id == PLATFORM_ORGANIZATION_ID,
+        is_guest=False,
     )
 
 
@@ -355,6 +358,7 @@ def switch_organization(
         roles=roles or [UserRole.ADMIN.value],
         demo_mode=settings.demo_mode,
         is_platform_admin=target_id == PLATFORM_ORGANIZATION_ID,
+        is_guest=not roles,
     )
 
 
@@ -394,4 +398,5 @@ def me(
         roles=list(identity.roles),
         demo_mode=settings.demo_mode,
         is_platform_admin=identity.is_platform_admin,
+        is_guest=identity.is_guest,
     )

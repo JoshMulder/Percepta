@@ -4,7 +4,7 @@ import { memo } from "react";
 import { api } from "../api";
 import type { Capability, RadioPayload } from "../types";
 import { IconSpeaker } from "./Icons";
-import { has, NotPermitted } from "./Panels";
+import { NotPermitted } from "./Panels";
 
 /**
  * Airband receiver controls, ported from Remote-Radio's own client so an
@@ -40,9 +40,6 @@ const CHANNEL_HZ = 25_000;
 // acceptable while presets live in localStorage and are per-browser, but worth
 // remembering if they ever move server-side.
 const PRESET_SLOTS = 4;
-
-// Meter span: floor around -90 dBFS, saturation near -10.
-const pct = (db: number) => Math.max(0, Math.min(100, ((db + 90) / 80) * 100));
 
 /**
  * Remote-Radio's parser, verbatim in behaviour.
@@ -186,15 +183,9 @@ function RadioPanelInner({
   if (!canListen) return <NotPermitted what="the radio" />;
 
   const hz = pending ?? radio?.freq_hz ?? 0;
-  const auto = pendingAuto ?? radio?.auto_squelch ?? false;
-  const threshold =
-    pendingSquelch ?? (radio ? Math.round(radio.threshold_db) : -40);
   // Silent covers both reasons there is no sound: the operator muted it, or the
   // browser has not let us start. They look the same and are fixed the same way.
   const silent = muted || audioState === "blocked";
-  const gain = radio?.gain ?? "auto";
-  const gains = radio?.gains ?? [];
-  const ppm = radio?.ppm ?? 0;
   const mhz = radio || pending ? (hz / 1e6).toFixed(3) : "---.---";
 
   const tune = (raw: number) => {
@@ -282,46 +273,9 @@ function RadioPanelInner({
     api.monitor(stationId, on).catch(() => {});
   };
 
-  const setSquelch = (db: number) => {
-    if (!canControl) return;
-    // Hold the dragged value locally so the handle tracks the pointer, and let
-    // the station's own report take over once it agrees.
-    setPendingSquelch(db);
-    // Moving the slider leaves auto - that is what the operator is saying by
-    // moving it. Reflected immediately so the AUTO chip goes out under the
-    // finger rather than a second later.
-    if (auto) setPendingAuto(false);
-    setError(null);
-    api.squelch(stationId, db).catch(() => {
-      setPendingSquelch(null);
-      setPendingAuto(null);
-      setError("Squelch change failed");
-    });
-    if (squelchSettle.current) window.clearTimeout(squelchSettle.current);
-    squelchSettle.current = window.setTimeout(() => setPendingSquelch(null), 4000);
-  };
 
-  const setGain = (value: string) => {
-    const next = value === "auto" ? "auto" : Number(value);
-    api.setGain(stationId, next).catch(() => setError("Gain change failed"));
-  };
 
-  const setPpm = (value: number) => {
-    api.setPpm(stationId, value).catch(() => setError("Correction change failed"));
-  };
 
-  const toggleAuto = () => {
-    if (!canControl) return;
-    const next = !auto;
-    setPendingAuto(next);
-    setError(null);
-    api.autoSquelch(stationId, next).catch(() => {
-      setPendingAuto(null);
-      setError("Auto squelch change failed");
-    });
-    if (autoSettle.current) window.clearTimeout(autoSettle.current);
-    autoSettle.current = window.setTimeout(() => setPendingAuto(null), 5000);
-  };
 
   // Priority: a failed command first, then what this user cannot do, then why
   // there is no sound. Only one can be acted on at a time.
@@ -365,6 +319,25 @@ function RadioPanelInner({
             aria-label="Frequency in MHz"
           />
           <span className="unit">MHz</span>
+          <span
+            className={`led${radio?.squelch_open ? " on" : ""}${
+              radio?.monitor ? " monitor" : ""
+            }`}
+            title={
+              radio?.monitor
+                ? "Monitor — squelch held open"
+                : radio?.squelch_open
+                  ? "Channel open"
+                  : "Squelched"
+            }
+            aria-label={
+              radio?.monitor
+                ? "Monitor, squelch held open"
+                : radio?.squelch_open
+                  ? "Channel open"
+                  : "Squelched"
+            }
+          />
         </div>
 
         <div className="step-col">
@@ -433,70 +406,11 @@ function RadioPanelInner({
         )}
       </div>
 
-      <div className="meter-label">
-        <span>SIGNAL</span>
-        <span className="rssi">{radio ? `${radio.rssi_db.toFixed(0)} dB` : "--"}</span>
-        <span className="floor">
-          SQL <b>{radio ? `${threshold.toFixed(0)} dB` : "--"}</b>
-        </span>
-        <button
-          type="button"
-          className={`chip toggle${auto ? " on" : ""}`}
-          disabled={!canControl}
-          onClick={toggleAuto}
-          title={
-            auto
-              ? "Riding the noise floor — click for a fixed threshold"
-              : "Ride the squelch automatically above the noise floor"
-          }
-        >
-          AUTO
-        </button>
-        <span
-          className={`led${radio?.squelch_open ? " on" : ""}${
-            radio?.monitor ? " monitor" : ""
-          }`}
-          title={
-            radio?.monitor
-              ? "Monitor — squelch held open"
-              : radio?.squelch_open
-                ? "Channel open"
-                : "Squelched"
-          }
-          aria-label={
-            radio?.monitor
-              ? "Monitor, squelch held open"
-              : radio?.squelch_open
-                ? "Channel open"
-                : "Squelched"
-          }
-        />
-      </div>
-
-      <div className="meter">
-        <div
-          className={`meter-fill${radio?.squelch_open ? " open" : ""}`}
-          style={{ width: `${radio ? pct(radio.rssi_db) : 0}%` }}
-        />
-        {radio && (
-          <div className="meter-floor" style={{ left: `${pct(radio.noise_floor_db)}%` }} />
-        )}
-        <input
-          className="squelch-overlay"
-          type="range"
-          min={-110}
-          max={-10}
-          step={1}
-          value={threshold}
-          // Deliberately NOT disabled while auto is on: moving it is how an
-          // operator leaves auto, and a slider they have to first find a
-          // separate button to unlock is a slider they will fight.
-          disabled={!canControl}
-          onChange={(e) => setSquelch(Number(e.target.value))}
-          title="Drag to set the squelch threshold (leaves AUTO)"
-          aria-label="Squelch threshold"
-        />
-      </div>
+      {/* SIGNAL readout, squelch slider and AUTO moved to Settings -> Radio.
+          They are set at commissioning and then left for months, and they cost
+          three rows of a sidebar whose height sets the scale of the whole
+          console. The channel-open light stays, inline with the frequency: it
+          is the only part of that block an operator reads at a glance. */}
 
       {/*
         While the browser is holding audio, the slider shows zero.
@@ -575,46 +489,6 @@ function RadioPanelInner({
           aria-label="Volume"
         />
       </div>
-
-      {has(caps, "config.write") && (
-        <details className="radio-config">
-          <summary>Receiver setup</summary>
-          <label className="cfg-row">
-            <span>RF gain</span>
-            <select value={String(gain)} onChange={(e) => setGain(e.target.value)}>
-              <option value="auto">Auto</option>
-              {gains.map((g) => (
-                <option key={g} value={g}>
-                  {g.toFixed(1)} dB
-                </option>
-              ))}
-            </select>
-          </label>
-          <p className="hint">
-            Auto desenses the tuner near a strong transmitter — a stronger
-            signal can then read <em>lower</em> on the meter.
-          </p>
-          {/* Correction stays - a fitted receiver still has a crystal error
-              worth trimming once at commissioning. The calibrate routine that
-              solved it from a test transmission does not: it existed to work
-              around a cheap SDR, and a certified receiver does not need
-              someone standing there keying a carrier. */}
-          <label className="cfg-row">
-            <span>Correction</span>
-            <span className="ppm-row">
-              <input
-                type="number"
-                min={-1000}
-                max={1000}
-                step={1}
-                value={ppm}
-                onChange={(e) => setPpm(Number(e.target.value))}
-              />
-              <span className="unit">ppm</span>
-            </span>
-          </label>
-        </details>
-      )}
 
       {/*
         One status line, always present, showing whichever message matters most.

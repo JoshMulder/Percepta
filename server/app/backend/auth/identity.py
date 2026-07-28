@@ -38,6 +38,11 @@ class Identity:
     session_id: uuid.UUID
     roles: tuple[str, ...]
     is_platform_admin: bool
+    #: Working inside an organisation this user is not a member of, reached
+    #: through platform access. They act as an admin of it and are bound by RLS
+    #: exactly like its own members - but it is somebody else's tenant, and the
+    #: console says so loudly rather than leaving it to be inferred.
+    is_guest: bool = False
 
 
 def resolve_identity(db: Session, token: str | None) -> Identity | None:
@@ -106,6 +111,7 @@ def resolve_identity(db: Session, token: str | None) -> Identity | None:
             session_id=session_id,
             roles=(UserRole.ADMIN.value,),
             is_platform_admin=False,
+            is_guest=True,
         )
 
     # God mode is a property of the *session's active organisation*, not of the

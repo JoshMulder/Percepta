@@ -65,14 +65,9 @@ export function OrgSwitcher({ me }: { me: Me }) {
           </option>
         ))}
       </select>
-      {/* A tenant reached through platform access rather than membership is
-          someone else's, and an operator acting in it should be able to see
-          that at a glance rather than infer it from the name. */}
-      {current && !current.is_member && !current.is_platform && (
-        <span className="org-guest" title="Reached through platform access, not membership">
-          GUEST
-        </span>
-      )}
+      {/* No badge here any more. The whole header turns amber for this state,
+          which is far harder to stop noticing than a chip that becomes
+          furniture after an hour. */}
     </div>
   );
 }

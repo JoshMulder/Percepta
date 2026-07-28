@@ -2671,3 +2671,25 @@ body {
   border-radius: var(--s1);
   padding: 0.05rem var(--s2);
 }
+
+/* An elevated session - platform administration, or working inside someone
+   else's organisation. Amber across the entire header rather than a badge in
+   the corner: this is the state where acting on the wrong organisation does
+   real damage, and a small chip is something you stop seeing after an hour. */
+.topbar.elevated {
+  background: linear-gradient(
+    180deg,
+    rgba(232, 176, 75, 0.20),
+    rgba(232, 176, 75, 0.09)
+  );
+  border-bottom-color: var(--warn);
+  box-shadow: inset 0 -1px 0 var(--warn);
+}
+.topbar.elevated .who,
+.topbar.elevated .link-state {
+  color: var(--warn);
+}
+.topbar.elevated .org-switch select {
+  border-color: var(--warn);
+  color: var(--warn);
+}

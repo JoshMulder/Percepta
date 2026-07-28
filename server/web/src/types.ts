@@ -29,6 +29,9 @@ export interface Me {
    *  session, not the person. A platform admin working inside a customer's org
    *  is bound by RLS exactly like its own members. */
   is_platform_admin: boolean;
+  /** Working inside an organisation you are not a member of, reached through
+   *  platform access. Someone else's tenant. */
+  is_guest: boolean;
 }
 
 export interface StationSummary {

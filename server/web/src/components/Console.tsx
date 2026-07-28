@@ -617,7 +617,21 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
   ];
 
   const header = (
-    <header className="topbar">
+    // Amber across the whole header whenever this session reaches beyond an
+    // ordinary membership - god mode in the platform org, or working inside
+    // somebody else's tenant. A small badge is easy to stop seeing after the
+    // first hour; a header that is the wrong colour is not, and this is exactly
+    // the state where acting on the wrong organisation does real damage.
+    <header
+      className={`topbar${me.is_platform_admin || me.is_guest ? " elevated" : ""}`}
+      title={
+        me.is_guest
+          ? "You are in this organisation as a platform administrator, not as a member"
+          : me.is_platform_admin
+            ? "Platform administration — you can see and change every organisation"
+            : undefined
+      }
+    >
       <Logo />
       <div className="station-select">
         <select
@@ -746,6 +760,8 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
         <Settings
           me={me}
           stationId={stationId}
+          stationName={stations.find((s) => s.id === stationId)?.name ?? null}
+          radio={radio}
           capabilities={caps}
           onClose={() => setSettingsOpen(false)}
           onProfileChanged={setDisplayName}
@@ -857,6 +873,8 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
         <Settings
           me={me}
           stationId={stationId}
+          stationName={stations.find((s) => s.id === stationId)?.name ?? null}
+          radio={radio}
           capabilities={caps}
           onClose={() => setSettingsOpen(false)}
           onProfileChanged={setDisplayName}

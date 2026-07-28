@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import type { Capability, Me } from "../types";
+import type { Capability, Me, RadioPayload } from "../types";
 import { SettingsAccount } from "./SettingsAccount";
 import { SettingsOrganization } from "./SettingsOrganization";
 import { SettingsPlatform } from "./SettingsPlatform";
+import { SettingsRadio } from "./SettingsRadio";
 import { SettingsStation } from "./SettingsStation";
 
 /**
@@ -21,11 +22,13 @@ import { SettingsStation } from "./SettingsStation";
  * unpleasant to use. Different job, different rules.
  */
 
-type Tab = "account" | "station" | "organization" | "platform";
+type Tab = "account" | "radio" | "station" | "organization" | "platform";
 
 export function Settings({
   me,
   stationId,
+  stationName,
+  radio,
   capabilities,
   onClose,
   onProfileChanged,
@@ -33,6 +36,10 @@ export function Settings({
 }: {
   me: Me;
   stationId: string | null;
+  stationName: string | null;
+  /** Live radio telemetry for the station being watched. The Radio pane shows a
+   *  signal meter, which only exists for the station currently subscribed. */
+  radio: RadioPayload | null;
   capabilities: Capability[];
   onClose: () => void;
   onProfileChanged: (displayName: string) => void;
@@ -47,8 +54,14 @@ export function Settings({
   // explicitly. For everyone else it follows the station in front of them.
   const canConfigure = isAdmin || capabilities.includes("config.write");
 
+  // Radio needs only radio.listen: the meter and the squelch belong to whoever
+  // is listening, not to whoever administers the site. Gain and correction
+  // inside it are gated on config.write separately.
+  const canRadio = capabilities.includes("radio.listen") && stationId !== null;
+
   const tabs: { id: Tab; label: string }[] = [
     { id: "account", label: "My account" },
+    ...(canRadio ? [{ id: "radio" as Tab, label: "Radio" }] : []),
     ...(canConfigure ? [{ id: "station" as Tab, label: "Stations" }] : []),
     ...(isAdmin ? [{ id: "organization" as Tab, label: "Organisation" }] : []),
     // Only while the active org IS the platform org. A platform admin working
@@ -106,6 +119,14 @@ export function Settings({
           <div className="settings-pane">
             {tab === "account" && (
               <SettingsAccount me={me} onProfileChanged={onProfileChanged} />
+            )}
+            {tab === "radio" && (
+              <SettingsRadio
+                radio={radio}
+                caps={capabilities}
+                stationId={stationId}
+                stationName={stationName}
+              />
             )}
             {tab === "station" && (
               <SettingsStation
