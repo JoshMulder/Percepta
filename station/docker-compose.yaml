@@ -1,0 +1,22 @@
+# A broker for developing a station against, with no dependency on the platform.
+#
+# The conformance script talks to a broker, not to the platform - so a station
+# can be built, run and checked entirely on its own machine, publishing to this
+# and having the script read it back. Nothing here needs the server to exist or
+# to be reachable.
+#
+# Integration against the real platform is a separate, later step: point at its
+# broker instead of this one. See station/README.md.
+name: percepta-station
+
+services:
+  broker:
+    image: redis:7-alpine
+    container_name: station-broker
+    restart: unless-stopped
+    # Nothing here is worth persisting: it is a message bus for development.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      # 6380 to match the platform's published port, so the conformance script's
+      # default works unchanged whichever broker you are pointed at.
+      - "127.0.0.1:6380:6379"

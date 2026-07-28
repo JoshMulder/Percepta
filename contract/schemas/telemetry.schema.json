@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://percepta/contract/telemetry.schema.json",
+  "title": "Ground station telemetry",
+  "description": "One object per message on gsu/{station_id}/telemetry. Discriminated by `kind`. Unknown fields are ignored by the platform, and unknown kinds are dropped rather than erroring - so a new sensor can be added station-side before the platform renders it.",
+  "type": "object",
+  "required": ["kind"],
+  "oneOf": [
+    { "$ref": "#/$defs/adsb" },
+    { "$ref": "#/$defs/weather" },
+    { "$ref": "#/$defs/power" },
+    { "$ref": "#/$defs/radio" },
+    { "$ref": "#/$defs/light" }
+  ],
+  "$defs": {
+    "adsb": {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "adsb" },
+        "aircraft": {
+          "type": "array",
+          "description": "The complete current picture, not a delta. An empty array means no contacts, which is different from sending nothing - sending nothing is what a failed receiver looks like.",
+          "items": { "$ref": "#/$defs/aircraft" }
+        }
+      },
+      "required": ["kind", "aircraft"]
+    },
+    "aircraft": {
+      "type": "object",
+      "properties": {
+        "icao": { "type": "string", "description": "24-bit address, hex. The identity the platform tracks a contact by." },
+        "callsign": { "type": ["string", "null"] },
+        "latitude": { "type": ["number", "null"], "minimum": -90, "maximum": 90, "description": "Null until a position has been decoded; a Mode S response alone gives none." },
+        "longitude": { "type": ["number", "null"], "minimum": -180, "maximum": 180 },
+        "altitude": { "type": ["number", "null"], "description": "Metres." },
+        "track": { "type": ["number", "null"], "minimum": 0, "exclusiveMaximum": 360, "description": "Degrees true. Null if unknown - the console draws a dot rather than pointing it in an invented direction." },
+        "speed": { "type": ["number", "null"], "description": "Knots." },
+        "range_km": { "type": "number", "minimum": 0, "description": "From the station." },
+        "bearing": { "type": "number", "minimum": 0, "exclusiveMaximum": 360, "description": "Degrees true, station to aircraft." },
+        "alert": { "type": "boolean", "description": "Close and low enough to be worth flagging. The station decides, because the threshold belongs with the site." }
+      },
+      "required": ["icao", "range_km", "bearing"]
+    },
+    "weather": {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "weather" },
+        "wind_kt": { "type": "number", "minimum": 0 },
+        "gust_kt": { "type": "number", "minimum": 0 },
+        "wind_dir_deg": { "type": "number", "minimum": 0, "exclusiveMaximum": 360, "description": "Direction the wind comes FROM - meteorological convention, the opposite of a movement vector. Getting this backwards is the classic wind-rose bug." },
+        "temperature_c": { "type": "number" },
+        "humidity_pct": { "type": "number", "minimum": 0, "maximum": 100 },
+        "pressure_hpa": { "type": ["number", "null"] },
+        "visibility_km": { "type": ["number", "null"] },
+        "sky": { "enum": ["clear", "partly", "cloudy", "rain", "fog"], "description": "Present weather, reported by the station rather than inferred by the console - so the icon can never contradict the numbers beside it." },
+        "is_day": { "type": "boolean" },
+        "rain_rate_mmh": { "type": "number", "minimum": 0 },
+        "rain_mm_today": { "type": "number", "minimum": 0, "description": "Running total since local midnight, in the station's own timezone." }
+      },
+      "required": ["kind", "wind_kt", "gust_kt", "wind_dir_deg", "temperature_c", "humidity_pct"]
+    },
+    "power": {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "power" },
+        "soc_pct": { "type": "number", "minimum": 0, "maximum": 100, "description": "Battery state of charge. Recorded to history at one sample per minute." },
+        "battery_v": { "type": "number" },
+        "pv_w": { "type": "number", "description": "In from the array." },
+        "load_w": { "type": "number", "description": "Out to the load." },
+        "runtime_h": { "type": ["number", "null"], "description": "Hours left at the current draw; null while charging." }
+      },
+      "required": ["kind", "soc_pct"]
+    },
+    "radio": {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "radio" },
+        "freq_hz": { "type": "integer", "minimum": 108000000, "maximum": 137000000, "description": "Airband only. The console clamps to this range and so should the station." },
+        "rssi_db": { "type": "number", "description": "In-channel signal, dBFS." },
+        "noise_floor_db": { "type": "number", "description": "Measured OUTSIDE the channel - see contract/README.md rule 3." },
+        "threshold_db": { "type": "number", "description": "Squelch threshold currently applied, whether set by hand or by AUTO." },
+        "squelch_open": { "type": "boolean", "description": "True whenever audio is flowing, including when held open by monitor." },
+        "auto_squelch": { "type": "boolean", "description": "Reported by the station, not remembered by the console - the AUTO chip reflects hardware state rather than the last click." },
+        "monitor": { "type": "boolean", "description": "Squelch defeated by an operator holding monitor." },
+        "gain": { "description": "Tuner gain: \"auto\" or dB. Prefer a fixed value; the tuner AGC desenses near strong transmitters.", "oneOf": [{ "const": "auto" }, { "type": "number" }] },
+        "gains": { "type": "array", "items": { "type": "number" }, "description": "Gains this hardware offers, so the console can list them rather than guess." },
+        "ppm": { "type": "integer", "description": "Crystal correction currently applied." },
+        "tx_capable": { "type": "boolean", "description": "False on receive-only hardware. The console disables PTT from this." }
+      },
+      "required": ["kind", "freq_hz", "rssi_db", "noise_floor_db", "threshold_db", "squelch_open", "auto_squelch", "tx_capable"]
+    },
+    "light": {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "light" },
+        "on": { "type": "boolean", "description": "What the hardware is actually doing, not what was last commanded. The console renders this and never assumes a command succeeded." }
+      },
+      "required": ["kind", "on"]
+    }
+  }
+}

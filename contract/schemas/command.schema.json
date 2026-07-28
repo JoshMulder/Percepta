@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://percepta/contract/command.schema.json",
+  "title": "Platform command to a ground station",
+  "description": "One object per message on cmd/gsu/{station_id}. A command is a request, never a guarantee: the platform confirms nothing itself and waits to see the effect in the station's own telemetry. Every command below therefore has a field in a telemetry payload that reports its result - if you add a command, add that field too. Unknown commands must be ignored, not rejected: an older station and a newer platform have to coexist.",
+  "type": "object",
+  "required": ["kind"],
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "radio.tune" },
+        "freq_hz": { "type": "integer", "minimum": 108000000, "maximum": 137000000, "description": "Already snapped to the nearest kHz by the platform. Reported back as radio.freq_hz." }
+      },
+      "required": ["kind", "freq_hz"]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "radio.squelch" },
+        "db": { "type": "number", "minimum": -110, "maximum": -10, "description": "Fixed threshold. Setting one implies leaving AUTO, exactly as moving the slider does on a real receiver." }
+      },
+      "required": ["kind", "db"]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "radio.auto_squelch" },
+        "on": { "type": "boolean", "description": "On: ride 8 dB above the measured floor. Off: FREEZE the threshold where it was - do not keep tracking, or the control appears to do nothing." }
+      },
+      "required": ["kind", "on"]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "radio.monitor" },
+        "on": { "type": "boolean", "description": "Momentary squelch defeat - the MON button. Station-wide: there is one gate, so this pushes hiss to every listener. Expected to be held, never latched." }
+      },
+      "required": ["kind", "on"]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "radio.gain" },
+        "gain": { "oneOf": [{ "const": "auto" }, { "type": "number" }], "description": "Site configuration, set once. Prefer fixed: the tuner AGC desenses near strong transmitters badly enough that a stronger signal reads lower." }
+      },
+      "required": ["kind", "gain"]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "radio.ppm" },
+        "ppm": { "type": "integer", "minimum": -1000, "maximum": 1000, "description": "Crystal correction, trimmed once at commissioning." }
+      },
+      "required": ["kind", "ppm"]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "light.set" },
+        "on": { "type": "boolean", "description": "Reported back as light.on once the hardware has actually done it." }
+      },
+      "required": ["kind", "on"]
+    }
+  ]
+}

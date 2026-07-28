@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://percepta/contract/audio.schema.json",
+  "title": "Ground station audio",
+  "description": "One object per message on gsu/{station_id}/audio. Published ONLY while the squelch is open - a station that streams continuously is the single most expensive thing on a metered link. See contract/transport.md.",
+  "type": "object",
+  "properties": {
+    "kind": { "const": "audio" },
+    "rate": { "type": "integer", "description": "Sample rate in Hz. 24000 today; the console resamples to whatever the browser grants." },
+    "pcm": { "type": "string", "contentEncoding": "base64", "description": "Mono signed 16-bit little-endian PCM. Wasteful and known to be so - expect this to become binary frames with Opus, so keep the encoding behind one function." }
+  },
+  "required": ["kind", "rate", "pcm"]
+}
