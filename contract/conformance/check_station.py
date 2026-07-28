@@ -40,6 +40,10 @@ SCHEMAS = Path(__file__).resolve().parent.parent / "schemas"
 #: before calling it absent. Weather is slow by design; the rest are 1 Hz.
 EXPECTED = {"adsb": 8, "power": 8, "radio": 8, "light": 8, "weather": 20}
 
+#: How long a command has to be reflected in telemetry. Generous: a station on a
+#: slow tick is not a broken station, and this waits only as long as it needs to.
+COMMAND_TIMEOUT = 8.0
+
 #: Streams a station may declare unavailable instead of reporting. Commands
 #: against an unavailable stream are not checked - there is no hardware to obey
 #: them, and failing a station for that would mean the only way to pass is to
@@ -98,6 +102,63 @@ def collect(pubsub, station: str, seconds: float, legacy: bool) -> list[dict]:
         else:
             out.append(frame)
     return out
+
+
+def unavailable_now(by_kind: dict[str, list[dict]]) -> set[str]:
+    """Streams the station has declared it has no source for."""
+    return {
+        k for k, payloads in by_kind.items()
+        if any(p.get("available") is False for p in payloads)
+    }
+
+
+def matches(got, expect) -> bool:
+    if got == expect:
+        return True
+    # Frequencies and thresholds are snapped and rounded station-side, so an
+    # exact float match would fail a station doing the right thing.
+    return (
+        isinstance(expect, float)
+        and isinstance(got, (int, float))
+        and not isinstance(got, bool)
+        and abs(got - expect) < 0.6
+    )
+
+
+def await_report(pubsub, station: str, kind: str, field: str, expect,
+                 seconds: float, legacy: bool):
+    """Wait until the station reports `field` as `expect`, or time out.
+
+    Returns the last value seen and whether it matched. Polling for the answer
+    rather than sampling a window and taking the final value is what makes this
+    check deterministic: the old version could miss a correct report simply
+    because the window ended a moment too early.
+    """
+    got = None
+    end = time.time() + seconds
+    while time.time() < end:
+        message = pubsub.get_message(ignore_subscribe_messages=True, timeout=0.5)
+        if not message:
+            continue
+        data = message.get("data")
+        if isinstance(data, bytes):
+            data = data.decode()
+        try:
+            frame = json.loads(data)
+        except (TypeError, ValueError):
+            continue
+        if legacy:
+            if str(frame.get("station_id")) != station:
+                continue
+            frame = frame.get("payload")
+            if not isinstance(frame, dict):
+                continue
+        if frame.get("kind") != kind or field not in frame:
+            continue
+        got = frame[field]
+        if matches(got, expect):
+            return got, True
+    return got, False
 
 
 def main() -> int:
@@ -163,35 +224,39 @@ def main() -> int:
 
     print("\n3. Audio is gated")
     audio = by_kind.get("audio", [])
-    radio = by_kind.get("radio", [{}])[-1]
-    if not radio:
-        check("audio only while squelch is open", False, "no radio telemetry")
-    elif radio.get("squelch_open"):
-        notes.append("squelch was open, so audio-while-closed was not tested")
+    radio_frames = by_kind.get("radio", [])
+    if not radio_frames:
+        if "radio" in unavailable_now(by_kind):
+            notes.append("radio unavailable, so audio gating was not tested")
+        else:
+            check("audio only while squelch is open", False, "no radio telemetry")
+    elif any(r.get("squelch_open") for r in radio_frames):
+        # This used to look at the *last* radio frame only, and failed an honest
+        # station whenever the squelch happened to open during the window and
+        # close again before it ended: the audio was legitimate, and the final
+        # frame said "closed". A harness that fails a correct station one run in
+        # three is a harness people learn to re-run rather than believe.
+        notes.append(
+            "squelch opened during the window, so audio-while-closed was not "
+            "tested - re-run to catch it closed throughout"
+        )
     else:
         check("audio only while squelch is open", not audio,
               f"{len(audio)} audio frames while squelched")
 
     print("\n4. Commands take effect")
-    unavailable_kinds = {
-        k for k, payloads in by_kind.items()
-        if any(p.get("available") is False for p in payloads)
-    }
+    unavailable_kinds = unavailable_now(by_kind)
     for kind, body, report_kind, field, expect in COMMANDS:
         if report_kind in unavailable_kinds:
             notes.append(f"{kind} not checked - {report_kind} is unavailable")
             continue
         r.publish(cmd_channel, json.dumps({"kind": kind, **body}))
-        time.sleep(0.3)
-        got = None
-        for payload in collect(sub, args.station, 4, args.legacy):
-            if payload.get("kind") == report_kind and field in payload:
-                got = payload[field]
-        ok = got == expect or (
-            isinstance(expect, float)
-            and isinstance(got, (int, float))
-            and abs(got - expect) < 0.6
-        )
+        # Wait for the reported value rather than sampling a fixed window and
+        # taking whatever was last. A station that obeys promptly now passes
+        # promptly, and one that never obeys still fails - but a slow tick or a
+        # burst of audio frames no longer decides the outcome.
+        got, ok = await_report(sub, args.station, report_kind, field, expect,
+                               COMMAND_TIMEOUT, args.legacy)
         check(f"{kind} -> {report_kind}.{field}", ok, f"reported {got!r}")
 
     sub.close()
