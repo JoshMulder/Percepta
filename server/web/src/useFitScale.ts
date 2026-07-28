@@ -27,7 +27,12 @@ import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
  *  glanceable; above the ceiling a large display wastes space rather than
  *  using it. */
 const MIN_ROOT_PX = 11;
-const MAX_ROOT_PX = 24;
+/* Raised from 24 when the squelch, meter and receiver setup moved to settings.
+   The stack got three rows shorter, the solve hit the old ceiling, and the
+   difference showed as dead space below the last panel rather than as a larger
+   console. The ceiling exists so a very large display does not render absurdly
+   oversized text, not to stop the sidebar filling its own height. */
+const MAX_ROOT_PX = 30;
 /** Stop when the fit is this close; further passes are invisible. */
 const TOLERANCE_PX = 2;
 const MAX_PASSES = 4;

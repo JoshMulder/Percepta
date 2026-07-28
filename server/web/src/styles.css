@@ -627,7 +627,10 @@ body {
 }
 .btn.ptt {
   width: 100%;
-  margin-top: 0.625rem;
+  /* Was 0.625rem to separate transmit from a dense stack of controls above it.
+     With the meter and squelch gone there is nothing to separate it from, and
+     the margin read as a gap under the volume slider. */
+  margin-top: 0.25rem;
   letter-spacing: 0.14em;
   font-weight: 600;
 }
@@ -715,11 +718,11 @@ body {
 }
 .stats dt {
   color: var(--muted);
-  font-size: 0.75rem;
+  font-size: 0.812rem;
 }
 .stats dd {
   margin: 0;
-  font: 0.75rem var(--mono);
+  font: 0.875rem var(--mono);
 }
 
 /* ----------------------------------------------------------------- alerts */
@@ -908,8 +911,11 @@ body {
   gap: 0.875rem;
 }
 .rose {
-  width: 8.4rem;
-  height: 8.4rem;
+  /* Grown to take up the room the radio panel released. Sized in rem, so it
+     still scales with everything else - this raises its share of the stack
+     rather than pinning it to a pixel size. */
+  width: 10.2rem;
+  height: 10.2rem;
   flex: none;
 }
 .rose-ring {
@@ -1000,7 +1006,7 @@ body {
    own: six readings in two rows instead of four plus a separate bar. */
 .weather-stats {
   grid-template-columns: repeat(3, 1fr);
-  gap: var(--s2) var(--s3);
+  gap: var(--s3) var(--s3);
 }
 /* Centred in each column, not left-aligned. The six labels are markedly
    different widths ("Temp" against "Visibility"), so hanging them off the left
@@ -1145,7 +1151,13 @@ body {
   padding: var(--s2) var(--s3);
 }
 .freq-input {
-  width: 100%;
+  /* Sized to its content, not to the box. At 100% the input filled the display
+     and pushed "MHz" against the far edge, so the unit read as belonging to the
+     panel rather than to the number. The whole group is centred by the flex
+     container instead, which keeps the reading and its unit together. 8ch fits
+     "128.950" with room for the caret. */
+  width: 8ch;
+  flex: none;
   min-width: 0;
   background: none;
   border: none;
@@ -1278,6 +1290,10 @@ body {
   background: #17222c;
   border: 1px solid var(--line);
   flex: none;
+  /* Centred on the row rather than sitting on the text baseline. It is a dot
+     with no baseline of its own, so baseline alignment hung it low against a
+     1.55rem readout. */
+  align-self: center;
 }
 .led.on {
   background: #3fb950;
@@ -1929,7 +1945,7 @@ body {
   color: var(--dim);
 }
 .sky-state span {
-  font-size: 0.75rem;
+  font-size: 0.812rem;
   color: var(--muted);
   max-width: 7rem;
   line-height: 1.15;
