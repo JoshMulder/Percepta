@@ -48,6 +48,7 @@ class StationConfigUpdate(BaseModel):
     map_min_zoom: int = Field(ge=MIN_ZOOM_FLOOR, le=MAX_ZOOM_CEILING)
     map_max_zoom: int = Field(ge=MIN_ZOOM_FLOOR, le=MAX_ZOOM_CEILING)
     map_radius_km: float = Field(gt=0, le=MAX_RADIUS_KM)
+    is_simulated: bool = False
 
 
 class StationConfigOut(BaseModel):
@@ -59,6 +60,7 @@ class StationConfigOut(BaseModel):
     map_min_zoom: int
     map_max_zoom: int
     map_radius_km: float
+    is_simulated: bool
     config_version: int
 
 
@@ -72,6 +74,7 @@ def _out(station: GroundStation) -> StationConfigOut:
         map_min_zoom=station.map_min_zoom,
         map_max_zoom=station.map_max_zoom,
         map_radius_km=station.map_radius_km,
+        is_simulated=station.is_simulated,
         config_version=station.config_version,
     )
 
@@ -130,6 +133,7 @@ def update_config(
         "map_min_zoom": station.map_min_zoom,
         "map_max_zoom": station.map_max_zoom,
         "map_radius_km": station.map_radius_km,
+        "is_simulated": station.is_simulated,
     }
 
     station.name = body.name.strip()
@@ -139,6 +143,7 @@ def update_config(
     station.map_min_zoom = body.map_min_zoom
     station.map_max_zoom = body.map_max_zoom
     station.map_radius_km = body.map_radius_km
+    station.is_simulated = body.is_simulated
 
     after = {
         "name": station.name,
@@ -148,6 +153,7 @@ def update_config(
         "map_min_zoom": station.map_min_zoom,
         "map_max_zoom": station.map_max_zoom,
         "map_radius_km": station.map_radius_km,
+        "is_simulated": station.is_simulated,
     }
     changed = {k: [before[k], after[k]] for k in before if before[k] != after[k]}
 

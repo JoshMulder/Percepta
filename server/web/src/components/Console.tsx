@@ -207,6 +207,16 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
   const caps: Capability[] =
     socket.capabilities.length > 0 ? socket.capabilities : (detail?.capabilities ?? []);
 
+  // Synthetic data is a property of the station being watched, not of the
+  // deployment: a real station and a simulated one can sit side by side in the
+  // same switcher. DEMO_MODE remains as a deployment-wide override for showing
+  // the whole platform off, but it is no longer how this is normally decided.
+  const simulated =
+    me.demo_mode ||
+    (detail?.is_simulated ??
+      stations.find((s) => s.id === stationId)?.is_simulated ??
+      false);
+
   const loadStations = useCallback(() => {
     api
       .stations()
@@ -369,7 +379,7 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
   const aircraft = adsb?.aircraft ?? [];
 
   const statusOf = (kind: StreamKind) =>
-    panelStatus(lastSeen[kind] ?? null, streamsSince, STALE_AFTER_MS[kind], me.demo_mode);
+    panelStatus(lastSeen[kind] ?? null, streamsSince, STALE_AFTER_MS[kind], simulated);
 
   const renderMap = (small: boolean) => {
     if (bootstrapping) return <MapSkeleton />;
@@ -399,7 +409,7 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
         streaming={false}
         canPtz={!small && has(caps, "video.ptz")}
         online={detail?.online ?? false}
-        demo={me.demo_mode}
+        demo={simulated}
         // The synthetic scene lights up when the floodlight does, so a demo can
         // show a command reaching the hardware rather than just a state flag
         // flipping in a panel.
@@ -553,8 +563,11 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
         <span className={`link-state ${socket.state}`} title="Console's link to the server">
           {LINK_LABEL[socket.state]}
         </span>
-        {me.demo_mode && (
-          <span className="demo-chip" title="Synthetic data — not a live site">
+        {simulated && (
+          <span
+            className="demo-chip"
+            title="This station's data is synthetic — not a live site"
+          >
             DEMO
           </span>
         )}

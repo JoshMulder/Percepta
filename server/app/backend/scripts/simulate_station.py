@@ -449,6 +449,14 @@ async def run() -> None:
             if str(s.id).lower() not in excluded
         ]
         skipped = [s.name for s in rows if str(s.id).lower() in excluded]
+        # The thing producing the data is the only thing that reliably knows
+        # whether it is synthetic, so the simulator maintains the flag rather
+        # than relying on anyone to remember. Set on what it drives, cleared on
+        # what it does not - so a station handed over to real hardware stops
+        # being badged the next time this runs.
+        for row in rows:
+            row.is_simulated = str(row.id).lower() not in excluded
+        db.commit()
 
     if skipped:
         log.info("Leaving alone (SIMULATOR_EXCLUDE_STATIONS): %s", ", ".join(skipped))

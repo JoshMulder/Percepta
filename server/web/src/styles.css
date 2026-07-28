@@ -2576,8 +2576,10 @@ body {
   padding-bottom: 16px;
   border-bottom: 1px solid var(--line);
 }
-.station-picker .field { margin-bottom: 0; flex: 1 1 auto; max-width: 340px; }
-.station-picker .btn { flex: 0 0 auto; }
+.station-picker .field { margin-bottom: 0; flex: 0 1 340px; }
+/* Pushed to the far right rather than sitting against the selector: creating a
+   station is a different action from choosing one, and the gap says so. */
+.station-picker .btn { flex: 0 0 auto; margin-left: auto; }
 
 /* Platform tables are text, not checkboxes, so they read left-aligned. */
 .org-table td { text-align: left; }
@@ -2590,3 +2592,18 @@ body {
   padding: 3px 6px;
 }
 .org-table .btn { padding: 2px 8px; font-size: 12px; }
+
+/* A checkbox reads left-to-right, unlike the stacked text fields around it. */
+.settings-pane .field.checkbox-field {
+  flex-direction: row;
+  align-items: center;
+  gap: 9px;
+  max-width: none;
+}
+.settings-pane .field.checkbox-field > span {
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 13px;
+  color: var(--text);
+}
+.settings-pane .field.checkbox-field input { width: auto; accent-color: var(--brand); }

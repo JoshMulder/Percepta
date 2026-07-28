@@ -34,6 +34,24 @@ class GroundStation(UUIDMixin, TimestampMixin, Base):
 
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
+    # Whether this station's data is synthetic. Per-station rather than a
+    # deployment-wide flag because a deployment is routinely both at once: a
+    # real station reporting real sensors alongside simulated ones used for
+    # development. A global switch had to be wrong about one of them.
+    #
+    # It drives two things in the console - the DEMO badge, and the suppression
+    # of sensor-fault indication, since on a simulated station a fault would only
+    # ever mean the simulator stopped. Getting it wrong in either direction is
+    # bad: badging real data as synthetic invites an operator to ignore it, and
+    # not badging synthetic data invites them to believe it.
+    #
+    # Maintained by whatever is producing the data - the simulator sets it on
+    # the stations it drives and clears it on the ones it does not - so it stays
+    # true without anyone remembering to change it.
+    is_simulated: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+
     # Set when the unit is enrolled and issued its client credential. Until then
     # the station exists as a record but nothing may publish as it.
     enrolled_at: Mapped[datetime | None] = mapped_column(

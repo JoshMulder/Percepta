@@ -37,6 +37,9 @@ class StationSummary(BaseModel):
     longitude: float | None
     last_seen_at: str | None
     online: bool
+    # Synthetic data. Drives the DEMO badge and suppresses fault indication -
+    # on a simulated station a fault would only ever mean the simulator stopped.
+    is_simulated: bool
 
 
 class PowerPoint(BaseModel):
@@ -77,6 +80,7 @@ def _summary(station: GroundStation) -> StationSummary:
         if station.last_seen_at
         else None,
         online=_online(station),
+        is_simulated=station.is_simulated,
     )
 
 

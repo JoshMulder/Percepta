@@ -21,6 +21,8 @@ export interface Me {
   roles: string[];
   /** Deployment is showing synthetic data. Badged everywhere, and suppresses
    *  sensor-fault indication - in demo the simulator is the sensor. */
+  /** Deployment-wide override: badge and suppress faults on every station. The
+   *  per-station `is_simulated` is the normal mechanism; this forces it on. */
   demo_mode: boolean;
   /** True only while the active org IS the platform org — a property of the
    *  session, not the person. A platform admin working inside a customer's org
@@ -36,6 +38,10 @@ export interface StationSummary {
   longitude: number | null;
   last_seen_at: string | null;
   online: boolean;
+  /** This station's data is synthetic. Per-station, because a deployment is
+   *  routinely both at once — a real station alongside simulated ones — and a
+   *  global flag had to be wrong about one of them. */
+  is_simulated: boolean;
 }
 
 export interface DeviceSummary {
@@ -219,6 +225,7 @@ export interface StationConfig {
   map_min_zoom: number;
   map_max_zoom: number;
   map_radius_km: number;
+  is_simulated: boolean;
   config_version: number;
 }
 

@@ -239,6 +239,7 @@ function StationConfigForm({
         map_min_zoom: config.map_min_zoom,
         map_max_zoom: config.map_max_zoom,
         map_radius_km: config.map_radius_km,
+        is_simulated: config.is_simulated,
       });
       setConfig(saved);
       setMessage("Saved.");
@@ -309,6 +310,21 @@ function StationConfigForm({
             />
           </label>
         </div>
+        <label className="field checkbox-field">
+          <input
+            type="checkbox"
+            checked={config.is_simulated}
+            onChange={(e) => set("is_simulated", e.target.checked)}
+          />
+          <span>This station's data is synthetic</span>
+        </label>
+        <small className="settings-note">
+          Badges the station DEMO and stops a silent sensor being reported as a
+          fault — on a simulated station that would only ever mean the simulator
+          stopped. The simulator sets this itself for the stations it drives, so
+          changing it by hand is usually only needed when hardware takes over.
+        </small>
+
         <small className="settings-note">
           The map centres here and range rings are measured from it. Set it now so
           the site can be worked with before hardware arrives; a station that

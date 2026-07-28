@@ -143,17 +143,31 @@ def drop_secret(station_id: uuid.UUID | str, secret: str) -> bool:
 def deprovision(station_id: uuid.UUID | str) -> bool:
     """Delete the principal outright. Used on revocation and decommissioning.
 
-    Redis closes the connections of a deleted user, so a station that is
-    currently connected is cut off rather than left running until it happens to
-    reconnect. That is the behaviour revocation is supposed to have.
+    Also kills any connection currently authenticated as it. This docstring used
+    to assert that Redis closes those connections by itself; the station team
+    tested it and it does not - an ACL change binds at authentication time, so a
+    station that never reconnects keeps publishing on a withdrawn password
+    indefinitely. Revocation that waits for the other side to reconnect is not
+    revocation, so the kill is explicit.
     """
     user = principal(station_id)
+    ok = True
     try:
-        _client().execute_command("ACL", "DELUSER", user)
-        return True
+        client = _client()
+        client.execute_command("ACL", "DELUSER", user)
     except Exception:
         log.exception("Could not remove broker principal %s.", user)
-        return False
+        ok = False
+
+    try:
+        # Separate call, and failure here is not failure of the revocation: the
+        # principal is already gone, so the worst case is one live connection
+        # lasting until it next reconnects.
+        _client().execute_command("CLIENT", "KILL", "USER", user)
+    except Exception:
+        # Redis raises when no client matches, which is the common case.
+        log.debug("No live connections to kill for %s.", user, exc_info=True)
+    return ok
 
 
 def exists(station_id: uuid.UUID | str) -> bool:
