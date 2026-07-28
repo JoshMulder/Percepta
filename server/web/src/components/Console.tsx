@@ -1,0 +1,710 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import { api } from "../api";
+import type {
+  AdsbPayload,
+  Capability,
+  LightPayload,
+  MapConfig,
+  Me,
+  PowerPayload,
+  RadioPayload,
+  ServerMessage,
+  StationDetail,
+  AudioPayload,
+  StationSummary,
+  StatusPayload,
+  WeatherPayload,
+} from "../types";
+import { useAudio } from "../useAudio";
+import { useFitScale } from "../useFitScale";
+import { useMediaQuery } from "../useMediaQuery";
+import { useSocket } from "../useSocket";
+import { AdsbMap } from "./AdsbMap";
+import { SOC_WINDOWS, type SocSample, type SocWindowKey } from "./BatteryChart";
+import {
+  Dot,
+  IconAirspace,
+  IconAlert,
+  IconCamera,
+  IconExpand,
+  IconLight,
+  IconPower,
+  IconRadio,
+  IconWind,
+} from "./Icons";
+import { Logo } from "./Logo";
+import { FloodlightPanel, has, NotPermitted, PowerPanel, VideoPanel } from "./Panels";
+import { MapSkeleton, PanelState, panelStatus } from "./PanelState";
+import { RadioPanel } from "./RadioPanel";
+import { WeatherPanel } from "./WeatherPanel";
+
+/**
+ * Below this the two-column layout stops being worth defending. Rather than
+ * shrinking past the point where the numeric readouts are still glanceable, or
+ * letting the sidebar scroll, the panels become horizontal tabs and whichever is
+ * selected gets the whole window.
+ *
+ * Height is in the query as well as width: a wide but short window - a browser
+ * with devtools docked, a letterbox display - has the same problem and the same
+ * answer.
+ */
+const COMPACT = "(max-width: 56rem), (max-height: 34rem)";
+
+/**
+ * How long without a frame counts as a failed sensor, per stream.
+ *
+ * Set from the rate each one actually reports at, with a wide margin: ADS-B,
+ * power, radio and light are 1 Hz, weather is every 5 s. A margin this generous
+ * means a brief Starlink dropout does not paint the console red - and an X that
+ * appears during normal operation is one operators learn to ignore, which is
+ * worse than not having it.
+ */
+const STALE_AFTER_MS = {
+  adsb: 15_000,
+  weather: 30_000,
+  power: 15_000,
+  radio: 15_000,
+  light: 15_000,
+} as const;
+
+type StreamKind = keyof typeof STALE_AFTER_MS;
+
+/** What the console's own connection to the server is doing. Distinct from the
+ *  dot beside it, which is the *station's* link - the two fail separately and
+ *  an operator needs to tell which one has. */
+const LINK_LABEL: Record<string, string> = {
+  connecting: "Connecting",
+  open: "Connected",
+  closed: "Reconnecting",
+  unauthenticated: "Signed out",
+};
+
+interface Alert {
+  id: number;
+  stationId: string;
+  message: string;
+  severity: "info" | "warning" | "critical";
+  at: Date;
+}
+
+export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
+  const compact = useMediaQuery(COMPACT);
+  // Off in the compact layout: there is no sidebar to fit there, and the tab
+  // panel already takes the whole window.
+  // Declared before useFitScale, which consumes it.
+  const [fitReady, setFitReady] = useState(false);
+  const fit = useFitScale({ enabled: !compact, ready: fitReady });
+  const audio = useAudio(true);
+
+  const [stations, setStations] = useState<StationSummary[]>([]);
+  const [stationId, setStationId] = useState<string | null>(null);
+  const [detail, setDetail] = useState<StationDetail | null>(null);
+  const [mapConfig, setMapConfig] = useState<MapConfig | null>(null);
+  const [mainView, setMainView] = useState<"adsb" | "video">("adsb");
+  const [tab, setTab] = useState("airspace");
+  const [alertsOpen, setAlertsOpen] = useState(false);
+  const [seenAlerts, setSeenAlerts] = useState(0);
+  const [lightPending, setLightPending] = useState(false);
+
+  const [adsb, setAdsb] = useState<AdsbPayload | null>(null);
+  const [weather, setWeather] = useState<WeatherPayload | null>(null);
+  const [power, setPower] = useState<PowerPayload | null>(null);
+  const [radio, setRadio] = useState<RadioPayload | null>(null);
+  const [light, setLight] = useState<LightPayload | null>(null);
+  const [alerts, setAlerts] = useState<Alert[]>([]);
+  const alertSeq = useRef(0);
+  // The message handler is memoised without audio in its deps, so it reads the
+  // player through a ref rather than tearing down the socket handler whenever
+  // the audio context is rebuilt.
+  const audioRef = useRef(audio);
+  audioRef.current = audio;
+
+  // When each stream last delivered, and when the station's streams became
+  // available at all. Both are needed: "never arrived" and "stopped arriving"
+  // are different failures, and only the second is unambiguously a fault.
+  const [lastSeen, setLastSeen] = useState<Partial<Record<StreamKind, number>>>({});
+  /**
+   * State of charge over the selected window, from the server's recorded
+   * history rather than a browser buffer - a buffer reset on every reload and
+   * could never reach further back than the moment the tab was opened, which
+   * makes a 12-hour or 7-day view meaningless. See services/power_history.py.
+   */
+  const [socHistory, setSocHistory] = useState<SocSample[]>([]);
+  const [socLoading, setSocLoading] = useState(false);
+  const [socWindow, setSocWindow] = useState<SocWindowKey>("12h");
+  const [streamsSince, setStreamsSince] = useState<number | null>(null);
+  // Staleness is a function of elapsed time, so nothing re-renders on its own
+  // when data simply stops. This ticks so a panel can go faulty in silence.
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = window.setInterval(() => setTick((n) => n + 1), 2000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const handleMessage = useCallback((message: ServerMessage) => {
+    if (message.type === "status") {
+      const payload = message.payload as StatusPayload;
+      if (!payload.alarm && payload.online === undefined) return;
+      alertSeq.current += 1;
+      setAlerts((prev) =>
+        [
+          {
+            id: alertSeq.current,
+            stationId: message.station_id,
+            message: payload.alarm ?? (payload.online ? "Back online" : "Went offline"),
+            severity: payload.severity ?? (payload.online ? "info" : "warning"),
+            at: new Date(),
+          },
+          ...prev,
+        ].slice(0, 40),
+      );
+      return;
+    }
+
+    if (message.type !== "event") return;
+    const payload = message.payload as { kind?: string };
+    if (payload.kind === "audio") {
+      const a = message.payload as AudioPayload;
+      audioRef.current.push(a.pcm, a.rate);
+      return;
+    }
+    if (payload.kind && payload.kind in STALE_AFTER_MS) {
+      const kind = payload.kind as StreamKind;
+      setLastSeen((prev) => ({ ...prev, [kind]: Date.now() }));
+    }
+    switch (payload.kind) {
+      case "adsb":
+        setAdsb(message.payload as AdsbPayload);
+        break;
+      case "weather":
+        setWeather(message.payload as WeatherPayload);
+        break;
+      case "power":
+        setPower(message.payload as PowerPayload);
+        break;
+      case "radio":
+        setRadio(message.payload as RadioPayload);
+        break;
+      case "light":
+        setLight(message.payload as LightPayload);
+        setLightPending(false);
+        break;
+    }
+  }, []);
+
+  const socket = useSocket(handleMessage, true);
+
+  // The server is the authority on capabilities. Until it has confirmed a
+  // station selection, fall back to what the REST detail said - they come from
+  // the same function server-side, so they agree; this only avoids a flash of
+  // missing controls between selecting and the socket replying.
+  const caps: Capability[] =
+    socket.capabilities.length > 0 ? socket.capabilities : (detail?.capabilities ?? []);
+
+  useEffect(() => {
+    api
+      .stations()
+      .then((list) => {
+        setStations(list);
+        setStationId((current) => current ?? list[0]?.id ?? null);
+      })
+      .catch(() => setStations([]));
+  }, []);
+
+  useEffect(() => {
+    if (!stationId) return;
+    let cancelled = false;
+    setDetail(null);
+    setMapConfig(null);
+    setAdsb(null);
+    setWeather(null);
+    setPower(null);
+    setRadio(null);
+    setLight(null);
+    // A station's battery history is its own; carrying it across would draw one
+    // site's curve under another's readings.
+    setSocHistory([]);
+    // And drop any audio still queued from the station being left - playing out
+    // the previous site's traffic after switching is worse than a gap.
+    audioRef.current.flush();
+    // Switching station clears every reading, so the new one starts from
+    // "loading" rather than inheriting the previous station's freshness.
+    setLastSeen({});
+    setStreamsSince(null);
+    api
+      .station(stationId)
+      .then((d) => !cancelled && setDetail(d))
+      .catch(() => !cancelled && setDetail(null));
+    api
+      .mapConfig(stationId)
+      .then((m) => !cancelled && setMapConfig(m))
+      .catch(() => !cancelled && setMapConfig(null));
+    return () => {
+      cancelled = true;
+    };
+  }, [stationId]);
+
+  // Selecting over the socket is what authorises the stream subscriptions; the
+  // REST call above is only for detail rendering.
+  useEffect(() => {
+    if (stationId && socket.state === "open") socket.selectStation(stationId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stationId, socket.state]);
+
+  // Subscribe to exactly the streams this user is cleared for. Asking for one we
+  // do not hold would simply be refused, but not asking keeps the server's error
+  // log meaningful.
+  useEffect(() => {
+    if (socket.state !== "open" || caps.length === 0) return;
+    setStreamsSince((current) => current ?? Date.now());
+    if (has(caps, "station.view")) socket.subscribe("status");
+    if (has(caps, "telemetry.view")) socket.subscribe("telemetry");
+    if (has(caps, "video.view")) socket.subscribe("video");
+    if (has(caps, "radio.listen")) socket.subscribe("audio");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [socket.state, caps.join(",")]);
+
+  // History is fetched per station and per window, and refreshed periodically -
+  // a console left open all shift should not show a chart that stops at the
+  // moment it was opened.
+  useEffect(() => {
+    if (!stationId || !has(caps, "telemetry.view")) return;
+    const hours =
+      SOC_WINDOWS.find((w) => w.key === socWindow)?.hours ?? 12;
+    let cancelled = false;
+    const load = () => {
+      setSocLoading(true);
+      api
+        .powerHistory(stationId, hours)
+        .then((points) => {
+          if (cancelled) return;
+          setSocHistory(points.map((p) => ({ t: Date.parse(p.t), soc: p.soc })));
+        })
+        .catch(() => !cancelled && setSocHistory([]))
+        .finally(() => !cancelled && setSocLoading(false));
+    };
+    load();
+    const id = window.setInterval(load, 60_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stationId, socWindow, caps.join(",")]);
+
+  // Once the station and its capabilities are known the panels stop changing
+  // shape, and the sidebar can be measured once and revealed.
+  useEffect(() => {
+    if (stationId && caps.length > 0) setFitReady(true);
+  }, [stationId, caps.length]);
+
+  // Alerts arrive for every station the user can see, including the ones they
+  // are not currently viewing - that is the whole point of the org status
+  // channel, and the badge is what makes it useful while the drawer is shut.
+  const unseen = Math.max(0, alerts.length - seenAlerts);
+
+  const online = stations.find((s) => s.id === stationId)?.online ?? false;
+
+  const signOut = async () => {
+    try {
+      await api.logout();
+    } finally {
+      onSignedOut();
+    }
+  };
+
+  const toggleLight = (on: boolean) => {
+    if (!stationId) return;
+    setLightPending(true);
+    // The spinner is the only optimism here: real state arrives on the telemetry
+    // stream from the station itself, because what matters is what the hardware
+    // did, not what we asked it to do. The timeout clears the spinner if the
+    // station never reports back.
+    api.setLight(stationId, on).catch(() => setLightPending(false));
+    setTimeout(() => setLightPending(false), 5000);
+  };
+
+  if (socket.revoked) {
+    return (
+      <div className="curtain">
+        <div className="curtain-card">
+          <h2>Session ended</h2>
+          <p>{socket.revoked}</p>
+          <button type="button" className="btn primary" onClick={onSignedOut}>
+            Sign in again
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  /**
+   * Nothing is known yet: no station picked, or the server has not said what
+   * this user may do there.
+   *
+   * This matters more than it looks. Without it every panel rendered its "no
+   * access" line during the first moment after load - a few words each - so the
+   * stack's natural height was tiny, the sidebar's fit scale pinned to its
+   * maximum, and the whole bar appeared enormous until capabilities arrived and
+   * it snapped back. Showing full-height skeletons instead keeps the natural
+   * height stable across the transition, and is also just truthful: "no access"
+   * was a claim the console had no basis for yet.
+   */
+  const bootstrapping = !stationId || caps.length === 0;
+  const stateFor = (kind: StreamKind) =>
+    bootstrapping ? ("loading" as const) : statusOf(kind);
+
+  const canVideo = has(caps, "video.view");
+  const canTelemetry = has(caps, "telemetry.view");
+  const aircraft = adsb?.aircraft ?? [];
+
+  const statusOf = (kind: StreamKind) =>
+    panelStatus(lastSeen[kind] ?? null, streamsSince, STALE_AFTER_MS[kind], me.demo_mode);
+
+  const renderMap = (small: boolean) => {
+    if (bootstrapping) return <MapSkeleton />;
+    if (!canTelemetry) return <NotPermitted what="telemetry" />;
+    if (!stationId || !mapConfig) return <MapSkeleton />;
+    // The basemap is ours and always renders; only the ADS-B overlay can fail,
+    // so a dead receiver must not black out the map an operator is using for
+    // everything else. The contact count in the header carries the fault
+    // instead - see the panel head below.
+    return (
+      <AdsbMap
+        key={`${stationId}-${small ? "s" : "m"}`}
+        stationId={stationId}
+        config={mapConfig}
+        aircraft={aircraft}
+        compact={small}
+      />
+    );
+  };
+
+  const renderVideo = (small: boolean) =>
+    bootstrapping ? (
+      <MapSkeleton />
+    ) : canVideo ? (
+      <VideoPanel
+        compact={small}
+        streaming={false}
+        canPtz={!small && has(caps, "video.ptz")}
+        online={detail?.online ?? false}
+        demo={me.demo_mode}
+        // The synthetic scene lights up when the floodlight does, so a demo can
+        // show a command reaching the hardware rather than just a state flag
+        // flipping in a panel.
+        lightOn={light?.on ?? false}
+      />
+    ) : (
+      <NotPermitted what="video" />
+    );
+
+  const alertList = (
+    <div className="alerts">
+      {alerts.length === 0 && <div className="muted">Nothing to report</div>}
+      {alerts.map((a) => (
+        <div key={a.id} className={`alert ${a.severity}`}>
+          <span className="alert-station">
+            {stations.find((s) => s.id === a.stationId)?.name ?? "Station"}
+          </span>
+          <span className="alert-msg">{a.message}</span>
+          <span className="alert-time">
+            {a.at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+
+  // One definition, both layouts. The sidebar and the tab bar render from this
+  // same list, so a panel can never appear in one and be forgotten in the other.
+  const sections = [
+    {
+      key: "airspace",
+      label: "Airspace",
+      Icon: IconAirspace,
+      body: renderMap(false),
+      fills: true,
+    },
+    {
+      key: "camera",
+      label: "Camera",
+      Icon: IconCamera,
+      body: renderVideo(false),
+      fills: true,
+    },
+    {
+      key: "radio",
+      label: "Radio",
+      Icon: IconRadio,
+      body: (
+        <PanelState
+          status={
+            bootstrapping
+              ? "loading"
+              : has(caps, "radio.listen")
+                ? statusOf("radio")
+                : "live"
+          }
+          label="Airband receiver"
+        >
+          <RadioPanel
+            stationId={stationId ?? ""}
+            radio={radio}
+            caps={caps}
+            onVolume={audio.setVolume}
+            onUnmute={audio.unmute}
+            onRetune={audio.flush}
+            audioState={audio.state}
+          />
+        </PanelState>
+      ),
+      fills: false,
+    },
+    {
+      key: "weather",
+      label: "Weather",
+      Icon: IconWind,
+      body: canTelemetry || bootstrapping ? (
+        <PanelState
+          status={stateFor("weather")}
+          label="Weather station"
+        >
+          <WeatherPanel weather={weather} />
+        </PanelState>
+      ) : (
+        <NotPermitted what="weather telemetry" />
+      ),
+      fills: false,
+    },
+    {
+      key: "light",
+      label: "Floodlight",
+      Icon: IconLight,
+      body: (
+        <PanelState
+          status={stateFor("light")}
+          label="Floodlight"
+        >
+          <FloodlightPanel
+            light={light}
+            caps={caps}
+            onToggle={toggleLight}
+            pending={lightPending}
+          />
+        </PanelState>
+      ),
+      fills: false,
+    },
+    {
+      key: "power",
+      label: "Power",
+      Icon: IconPower,
+      body: canTelemetry || bootstrapping ? (
+        <PanelState
+          status={stateFor("power")}
+          label="Solar array"
+        >
+          <PowerPanel
+            power={power}
+            history={socHistory}
+            historyLoading={socLoading}
+            windowKey={socWindow}
+            onWindowChange={setSocWindow}
+          />
+        </PanelState>
+      ) : (
+        <NotPermitted what="power telemetry" />
+      ),
+      fills: false,
+    },
+  ];
+
+  const header = (
+    <header className="topbar">
+      <Logo />
+      <div className="station-select">
+        <select
+          value={stationId ?? ""}
+          onChange={(e) => setStationId(e.target.value)}
+          aria-label="Ground station"
+        >
+          {stations.length === 0 && <option value="">No stations available</option>}
+          {stations.map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.name}
+            </option>
+          ))}
+        </select>
+        <Dot ok={online} />
+        {/* Raw socket states ("open", "closed") were being shown here, which on
+            a console with a radio panel saying SQL OPEN reads as squelch. These
+            say what the words mean to an operator instead. */}
+        <span className={`link-state ${socket.state}`} title="Console's link to the server">
+          {LINK_LABEL[socket.state]}
+        </span>
+        {me.demo_mode && (
+          <span className="demo-chip" title="Synthetic data — not a live site">
+            DEMO
+          </span>
+        )}
+      </div>
+      <div className="topbar-right">
+        <button
+          type="button"
+          className={`btn ghost alerts-toggle${alertsOpen ? " active" : ""}`}
+          onClick={() => {
+            setAlertsOpen(!alertsOpen);
+            if (!alertsOpen) setSeenAlerts(alerts.length);
+          }}
+          aria-expanded={alertsOpen}
+          title="Alerts from every station you can see"
+        >
+          <IconAlert />
+          <span>Alerts</span>
+          {unseen > 0 && <span className="badge">{unseen > 9 ? "9+" : unseen}</span>}
+        </button>
+        <span className="who">{me.display_name}</span>
+        <button type="button" className="btn ghost" onClick={signOut}>
+          Sign out
+        </button>
+      </div>
+    </header>
+  );
+
+  const alertsDrawer = (
+    <>
+      <div
+        className={`drawer-scrim${alertsOpen ? " open" : ""}`}
+        onClick={() => setAlertsOpen(false)}
+        aria-hidden
+      />
+      <aside
+        className={`drawer${alertsOpen ? " open" : ""}`}
+        aria-label="Alerts"
+        aria-hidden={!alertsOpen}
+      >
+        <div className="drawer-head">
+          <IconAlert />
+          <h3>Alerts</h3>
+          <span className="muted">all stations</span>
+          <button
+            type="button"
+            className="btn tiny"
+            onClick={() => setAlertsOpen(false)}
+            aria-label="Close alerts"
+          >
+            ✕
+          </button>
+        </div>
+        <div className="drawer-body">{alertList}</div>
+      </aside>
+    </>
+  );
+
+  /* ---------------------------------------------------------- compact --- */
+
+  if (compact) {
+    const active = sections.find((s) => s.key === tab) ?? sections[0];
+    return (
+      <div className="console">
+        {header}
+        <nav className="tabs" role="tablist" aria-label="Station panels">
+          {sections.map(({ key, label, Icon }) => (
+            <button
+              key={key}
+              type="button"
+              role="tab"
+              aria-selected={key === active.key}
+              className={`tab${key === active.key ? " active" : ""}`}
+              onClick={() => setTab(key)}
+            >
+              <Icon />
+              <span>{label}</span>
+            </button>
+          ))}
+        </nav>
+        <main className="tab-body" role="tabpanel">
+          <div className={active.fills ? "tab-fill" : "tab-scroll"}>{active.body}</div>
+        </main>
+        {alertsDrawer}
+      </div>
+    );
+  }
+
+  /* ------------------------------------------------------------ wide --- */
+
+  const main = mainView === "adsb" ? sections[0] : sections[1];
+  const preview = mainView === "adsb" ? sections[1] : sections[0];
+  const rest = sections.slice(2);
+
+  return (
+    <div className="console">
+      {header}
+      <main className="layout">
+        <section className="main-panel">
+          <div className="panel-body">
+            {main.body}
+            {/* Only the ADS-B fault surfaces here now. The contact count was
+                removed as noise - the aircraft are drawn on the map, so
+                counting them again in a corner told an operator nothing they
+                could not already see. A dead receiver is different: an empty
+                map and a failed receiver look identical, so that has to be
+                said out loud. */}
+            {mainView === "adsb" && canTelemetry && statusOf("adsb") === "fault" && (
+              <div className="view-status">
+                <span className="fault-inline">ADS-B receiver — no data</span>
+              </div>
+            )}
+          </div>
+        </section>
+
+        <aside
+          className="sidebar"
+          ref={fit.outerRef}
+          // Hidden until the fit has run, so the console is never shown at the
+          // wrong size. Width comes from the stylesheet in rem and follows the
+          // root size the fit sets - there is no transform and no inline width.
+          style={fitReady ? undefined : { visibility: "hidden" }}
+        >
+          <div className="sidebar-scale" ref={fit.innerRef}>
+          {/* The whole preview is the control: clicking it promotes it to the
+              main display. A <button> rather than a click handler on a div, so
+              it is keyboard reachable and announced as an action. */}
+          <section className="card swap-card">
+            <div className="card-head">
+              <preview.Icon />
+              <h3>{preview.label}</h3>
+              <span className="muted">click to enlarge</span>
+            </div>
+            <button
+              type="button"
+              className="swap-preview"
+              onClick={() => setMainView(mainView === "adsb" ? "video" : "adsb")}
+              aria-label={`Show ${preview.label} in the main display`}
+            >
+              <span className="swap-inner">
+                {preview.key === "airspace" ? renderMap(true) : renderVideo(true)}
+              </span>
+              <span className="swap-hint">
+                <IconExpand />
+              </span>
+            </button>
+          </section>
+
+          {rest.map(({ key, label, Icon, body }) => (
+            <section key={key} className="card">
+              <div className="card-head">
+                <Icon />
+                <h3>{label}</h3>
+              </div>
+              <div className="card-body">{body}</div>
+            </section>
+          ))}
+          </div>
+        </aside>
+      </main>
+      {alertsDrawer}
+    </div>
+  );
+}

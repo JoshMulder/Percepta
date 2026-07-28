@@ -1,0 +1,11 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+storage/
+*.log
+
+# Claude Code local, machine-specific settings
+.claude/settings.local.json

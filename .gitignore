@@ -1,11 +1,6 @@
-.env
-.venv/
-__pycache__/
-*.py[cod]
-.pytest_cache/
-.ruff_cache/
-storage/
-*.log
-
-# Claude Code local, machine-specific settings
+# Claude Code's machine-local settings. The project's own ignores live in
+# server/.gitignore, which only covers that subtree.
 .claude/settings.local.json
+
+# Scratch venvs anywhere in the tree.
+**/.venv/

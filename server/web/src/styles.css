@@ -1,0 +1,2267 @@
+/* Dark by default and only dark. These consoles are watched at night, often in
+   a vehicle or a control room, and a light theme would wreck night vision.
+
+   EVERYTHING SCALES FROM ONE NUMBER. The root font size below is fluid and every
+   dimension here is rem against it, so the whole console grows or shrinks
+   together - type, padding, the sidebar, the wind rose, the icons. Nothing is in
+   px except hairline borders, which should stay one physical pixel at any size.
+
+   That is what makes it look the same on a 1366px laptop in a vehicle and a 4K
+   wall display in a control room: identical proportions, different absolute
+   size. Sizing in px instead makes a console progressively smaller and denser on
+   larger screens, which is the opposite of what a wall display needs. */
+
+:root {
+  /* Takes the SMALLER of a width-driven and a height-driven size, so a wide but
+     short window scales down instead of overflowing. Width alone was the bug: a
+     1920x900 window got the same size as a 1920x1200 one and the sidebar had
+     nowhere to put the difference, so it grew a scrollbar.
+
+       1920x1080 -> ~14.3px    1366x768  -> ~12.5px
+       2560x1440 -> ~16.7px    3840x2160 -> 19px (capped)
+       1920x700  -> ~13.7px    (height wins here, as it should)
+
+     Capped both ends: below ~12.5px the numeric readouts stop being glanceable,
+     past 19px a large display wastes space rather than using it. */
+  font-size: clamp(12.5px, min(0.38vw + 7px, 1.95vh), 19px);
+
+  --bg: #070b0f;
+  --panel: #121a23;
+  --panel-2: #0c1219;
+  --line: #22303c;
+  --line-soft: #1a2531;
+  --text: #dde6ed;
+  --muted: #7f929f;
+  --dim: #4f626f;
+
+  --brand: #00a0dc;
+  --brand-dim: #0b7ba7;
+  --accent: #35c48a;
+  --warn: #e8b04b;
+  --danger: #ff7a45;
+
+  /* Inter for UI, JetBrains Mono for anything numeric. Both bundled into the
+     build, never fetched at runtime - these consoles run on metered links behind
+     a strict CSP, and a webfont that fails to load would leave telemetry in a
+     fallback face at a different width. Every reading here is a number an
+     operator compares against another number, and a proportional face makes
+     columns of them ragged and slower to scan. */
+  --sans: "Inter Variable", Inter, system-ui, -apple-system, sans-serif;
+  --mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, monospace;
+
+  --s1: 0.25rem;
+  --s2: 0.4rem;
+  --s3: 0.6rem;
+  --s4: 0.9rem;
+  --s5: 1.25rem;
+  --s6: 1.75rem;
+
+  --radius: 0.5rem;
+  /* The width the sidebar is *authored* at. Everything inside is designed
+     against this; the whole stack is then scaled so its natural height matches
+     the viewport, and the rendered width becomes this times that scale. So the
+     bar widens on a tall screen and narrows on a short one, and the controls
+     inside grow and shrink with it in exact proportion. */
+  --sidebar-base: 31rem;
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  /* The console owns its own scrolling. A page-level scrollbar here would mean
+     the layout has overflowed its viewport, which is always a bug. */
+  overflow: hidden;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 0.875rem/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.booting {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  color: var(--muted);
+}
+
+/* ------------------------------------------------------------------ brand */
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.562rem;
+}
+.brand-mark {
+  width: 1.5rem;
+  height: 1.5rem;
+  display: block;
+  flex: none;
+}
+.brand-word {
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  font-size: 0.812rem;
+}
+.brand.large {
+  flex-direction: column;
+  gap: 0.875rem;
+}
+.brand.large .brand-mark {
+  width: 3.5rem;
+  height: 3.5rem;
+}
+.brand.large .brand-word {
+  font-size: 1.25rem;
+  letter-spacing: 0.24em;
+}
+
+/* ------------------------------------------------------------------ login */
+
+.login {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  background: radial-gradient(
+    60% 60% at 50% 38%,
+    rgba(0, 160, 220, 0.09) 0%,
+    var(--bg) 70%
+  );
+}
+.login-card {
+  width: min(22.5rem, calc(100vw - 2rem));
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 0.625rem;
+  padding: 1.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+.login-card .brand.large {
+  margin-bottom: 1.375rem;
+}
+.login-card label {
+  font-size: 0.75rem;
+  color: var(--muted);
+  margin-top: 0.625rem;
+}
+.login-card input {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 0.375rem;
+  color: var(--text);
+  padding: 0.562rem 0.688rem;
+  font: inherit;
+}
+.login-card input:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 1px;
+}
+.login-error {
+  margin-top: 0.75rem;
+  color: var(--danger);
+  font-size: 0.812rem;
+}
+.login-card .btn {
+  margin-top: 1.125rem;
+}
+
+/* ----------------------------------------------------------------- layout */
+
+.console {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+  padding: 0 1rem;
+  height: 3rem;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-2);
+  flex: none;
+}
+.topbar-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+.who {
+  color: var(--muted);
+  font-size: 0.812rem;
+}
+
+.station-select {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+}
+.station-select select {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 0.375rem;
+  padding: 0.312rem 0.562rem;
+  font: inherit;
+  min-width: 12.5rem;
+}
+.link-state {
+  font: 0.688rem var(--mono);
+  color: var(--dim);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.link-state.open {
+  color: var(--accent);
+}
+.link-state.connecting {
+  color: var(--warn);
+}
+.link-state.closed,
+.link-state.unauthenticated {
+  color: var(--danger);
+}
+
+.weather-strip {
+  display: flex;
+  gap: 1rem;
+  font: 0.75rem var(--mono);
+  color: var(--muted);
+}
+.weather-strip b {
+  color: var(--text);
+  font-weight: 600;
+}
+.weather-strip .gust {
+  color: var(--warn);
+}
+
+/* The layout the operator asked for: one large display, one bar down the
+   right. The sidebar is a fixed column so the main panel takes every pixel
+   that is left, on any screen. */
+.layout {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+/* The stack. Its width is in rem, so it follows the root font size that
+   useFitScale sets - real layout at the chosen size, not a transformed copy of
+   a fixed one. Nothing here is scaled; everything is simply set larger or
+   smaller, which is why the text stays crisp and hairlines stay hairlines. */
+.sidebar-scale {
+  width: var(--sidebar-base);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding: var(--s2);
+}
+
+.main-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border-right: 1px solid var(--line);
+}
+.alert-pip {
+  color: var(--danger);
+}
+.panel-body {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  display: flex;
+}
+
+.scope-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* ---------------------------------------------------------------- sidebar */
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  /* Sized by its content, which is the rem-width stack above. */
+  overflow: hidden;
+  background: var(--bg);
+  flex: none;
+  width: var(--sidebar-base);
+}
+
+/* Each section is its own raised panel rather than a band separated by a rule.
+   On a wall display a flat stack of dividers reads as one long list; discrete
+   panels let an operator find the radio or the power without reading labels. */
+.card {
+  /* Natural height. Panels are as tall as their contents need and no taller -
+     the stack as a whole is then scaled to the viewport (see .sidebar-scale),
+     which is what fills the screen rather than stretching each panel
+     individually and leaving blank space inside it. */
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.625rem 0.875rem 0.375rem;
+}
+.card-head h3 {
+  margin: 0;
+  font-size: 0.688rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.card-head .btn.tiny,
+.card-head .muted {
+  margin-left: auto;
+}
+.card-body {
+  /* No flex sizing and no centring: the body is exactly as tall as its content.
+     It must not clip, because .card sets overflow:hidden - that is what was
+     cutting the PTT button off the bottom. */
+  padding: 0.2rem 0.8rem 0.6rem;
+}
+/* The preview is a button, so the default button chrome has to go before it
+   can hold a map or a video surface. */
+.swap-preview {
+  display: block;
+  position: relative;
+  width: calc(100% - 1.75rem);
+  height: 11.25rem;
+  margin: 0 0.875rem 0.875rem;
+  padding: 0;
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 0.375rem;
+  overflow: hidden;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+.swap-preview:hover {
+  border-color: var(--brand);
+}
+.swap-preview:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+.swap-inner {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  /* The preview is a target, not an instrument: swallow pointer events so a
+     click anywhere promotes it instead of panning the map underneath. */
+  pointer-events: none;
+}
+.swap-hint {
+  position: absolute;
+  right: 0.438rem;
+  bottom: 0.375rem;
+  /* Above Leaflet's panes (200-700) and its controls (800), same reason as the
+     label overlay: at a lower value the map paints over it. */
+  z-index: 1100;
+  background: rgba(11, 15, 19, 0.85);
+  border: 1px solid var(--line);
+  border-radius: 0.25rem;
+  padding: 1px 0.375rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+  pointer-events: none;
+}
+.swap-preview:hover .swap-hint {
+  color: var(--brand);
+  border-color: var(--brand);
+}
+.alerts-card {
+  flex: none;
+  min-height: 8.75rem;
+  display: flex;
+  flex-direction: column;
+}
+.alerts-card .card-body {
+  flex: 1;
+  overflow-y: auto;
+}
+
+/* ---------------------------------------------------------------- buttons */
+
+.btn {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 0.375rem;
+  padding: 0.438rem 0.75rem;
+  font: inherit;
+  cursor: pointer;
+}
+.btn:hover:not(:disabled) {
+  border-color: #2c3d4b;
+  background: #16202a;
+}
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.btn:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 1px;
+}
+.btn.primary {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #03202b;
+  font-weight: 600;
+}
+.btn.primary:hover:not(:disabled) {
+  background: var(--brand-dim);
+  border-color: var(--brand-dim);
+}
+.btn.ghost {
+  background: transparent;
+}
+.btn.tiny {
+  padding: 0.188rem 0.5rem;
+  font-size: 0.688rem;
+}
+
+.not-permitted {
+  color: var(--dim);
+  font-size: 0.75rem;
+  font-style: italic;
+  padding: 0.625rem 0;
+  margin: auto;
+  text-align: center;
+  width: 100%;
+}
+.hint {
+  color: var(--dim);
+  font-size: 0.688rem;
+  margin: 0.5rem 0 0;
+  line-height: 1.4;
+}
+.muted {
+  color: var(--dim);
+  font-size: 0.688rem;
+}
+
+/* ------------------------------------------------------------------ video */
+
+.video-panel {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-height: 0;
+}
+.video-surface {
+  flex: 1;
+  min-height: 0;
+  background:
+    repeating-linear-gradient(
+      45deg,
+      #0d141a,
+      #0d141a 0.625rem,
+      #0f1720 0.625rem,
+      #0f1720 1.25rem
+    );
+  display: grid;
+  place-items: center;
+  border-radius: 0.375rem;
+}
+.video-idle {
+  color: var(--dim);
+  font-size: 0.75rem;
+}
+.video-live {
+  display: flex;
+  align-items: center;
+  gap: 0.438rem;
+  color: var(--accent);
+  font: 0.75rem var(--mono);
+}
+.video-live-dot {
+  width: 0.438rem;
+  height: 0.438rem;
+  border-radius: 50%;
+  background: var(--danger);
+}
+
+.ptz {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 0.25rem 0.25rem;
+}
+.ptz-pad {
+  display: grid;
+  grid-template-columns: repeat(3, 1.875rem);
+  grid-template-rows: repeat(3, 1.625rem);
+  gap: 0.188rem;
+}
+.ptz-btn {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  border-radius: 0.312rem;
+  cursor: pointer;
+  font-size: 0.688rem;
+}
+.ptz-btn:hover {
+  color: var(--text);
+  border-color: #2c3d4b;
+}
+.ptz-up {
+  grid-area: 1 / 2;
+}
+.ptz-left {
+  grid-area: 2 / 1;
+}
+.ptz-home {
+  grid-area: 2 / 2;
+}
+.ptz-right {
+  grid-area: 2 / 3;
+}
+.ptz-down {
+  grid-area: 3 / 2;
+}
+.ptz-zoom {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.688rem;
+  color: var(--muted);
+}
+.ptz-zoom .ptz-btn {
+  width: 1.75rem;
+  height: 1.625rem;
+}
+
+/* ------------------------------------------------------------------ radio */
+
+.radio-freq {
+  display: flex;
+  align-items: baseline;
+  gap: 0.375rem;
+}
+.radio-mhz {
+  font: 600 1.625rem var(--mono);
+  letter-spacing: 0.02em;
+}
+.radio-unit {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.radio-meter {
+  margin: 0.75rem 0 0.625rem;
+}
+.radio-meter-track {
+  position: relative;
+  height: 0.438rem;
+  background: #0a1015;
+  border: 1px solid var(--line);
+  border-radius: 0.25rem;
+  overflow: hidden;
+}
+.radio-meter-fill {
+  height: 100%;
+  background: var(--dim);
+  transition: width 120ms linear;
+}
+.radio-meter-fill.open {
+  background: var(--accent);
+}
+.radio-meter-threshold {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  background: #5aa9ff;
+}
+.radio-meter-labels {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 0.312rem;
+  font: 0.688rem var(--mono);
+  color: var(--muted);
+}
+.sql.open {
+  color: var(--accent);
+}
+.radio-controls {
+  display: flex;
+  gap: 0.5rem;
+}
+.radio-controls .btn {
+  flex: 1;
+  font: 0.75rem var(--mono);
+}
+.btn.ptt {
+  width: 100%;
+  margin-top: 0.625rem;
+  letter-spacing: 0.14em;
+  font-weight: 600;
+}
+
+/* ------------------------------------------------------------- floodlight */
+
+.floodlight {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+.flood-state {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 4.625rem;
+}
+.flood-lamp {
+  width: 0.95rem;
+  height: 0.95rem;
+  border-radius: 50%;
+  background: #1b2630;
+  border: 1px solid var(--line);
+}
+.flood-lamp.on {
+  background: var(--warn);
+  border-color: var(--warn);
+  box-shadow: 0 0 0.875rem rgba(232, 176, 75, 0.6);
+}
+.flood-label {
+  font: 0.85rem var(--mono);
+  color: var(--muted);
+}
+.flood-btn {
+  flex: 1;
+  padding-block: var(--s2);
+  font-size: 0.95rem;
+}
+.flood-btn.on {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+/* ------------------------------------------------------------------ power */
+
+.soc {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+}
+.soc-bar {
+  flex: 1;
+  height: 0.85rem;
+  background: #0a1015;
+  border: 1px solid var(--line);
+  border-radius: 0.312rem;
+  overflow: hidden;
+}
+.soc-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 300ms ease;
+}
+.soc-fill.low {
+  background: var(--warn);
+}
+.soc-fill.critical {
+  background: var(--danger);
+}
+.soc-value {
+  font: 600 1.25rem var(--mono);
+  min-width: 3.4rem;
+  text-align: right;
+}
+.stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem 0.75rem;
+  margin: 0.75rem 0 0;
+}
+.stats div {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.stats dt {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.stats dd {
+  margin: 0;
+  font: 0.75rem var(--mono);
+}
+
+/* ----------------------------------------------------------------- alerts */
+
+.alerts {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+.alert {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 0.5rem;
+  padding: 0.438rem 0.562rem;
+  border-radius: 0.312rem;
+  background: var(--panel);
+  border-left: 2px solid var(--dim);
+  font-size: 0.75rem;
+}
+.alert.warning {
+  border-left-color: var(--warn);
+}
+.alert.critical {
+  border-left-color: var(--danger);
+}
+.alert-station {
+  color: var(--text);
+  font-weight: 600;
+}
+.alert-time {
+  font: 0.688rem var(--mono);
+  color: var(--dim);
+}
+.alert-msg {
+  grid-column: 1 / -1;
+  color: var(--muted);
+}
+
+/* ---------------------------------------------------------------- curtain */
+
+.curtain {
+  display: grid;
+  place-items: center;
+  height: 100%;
+}
+.curtain-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 0.625rem;
+  padding: 1.75rem 2rem;
+  text-align: center;
+  max-width: 21.25rem;
+}
+.curtain-card h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+}
+.curtain-card p {
+  color: var(--muted);
+  margin: 0 0 1.125rem;
+}
+
+/* Below this the two-column layout stops being usable; the sidebar moves
+   under the main panel rather than squeezing both into nothing. */
+@media (max-width: 56.25rem) {
+  .layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(20rem, 55vh) auto;
+  }
+  .main-panel {
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+  }
+  .topbar {
+    flex-wrap: wrap;
+    height: auto;
+    padding: 0.5rem 0.75rem;
+    gap: 0.75rem;
+  }
+  .weather-strip {
+    order: 3;
+    width: 100%;
+  }
+}
+
+/* -------------------------------------------------------------------- map */
+
+.map-holder {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+.map-canvas {
+  width: 100%;
+  height: 100%;
+}
+
+/* Leaflet ships a light theme. These consoles are watched at night, so the
+   chrome is darkened to match rather than punching a white hole in the UI. */
+.leaflet-container {
+  background: #0a1015;
+  font: inherit;
+  outline: none;
+}
+.leaflet-control-zoom a {
+  background: var(--panel);
+  color: var(--text);
+  border-color: var(--line);
+}
+.leaflet-control-zoom a:hover {
+  background: #16202a;
+  color: var(--brand);
+}
+.leaflet-control-attribution {
+  background: rgba(11, 15, 19, 0.78);
+  color: var(--dim);
+  font-size: 0.625rem;
+}
+.leaflet-control-attribution a {
+  color: var(--muted);
+}
+
+/* Street and terrain tiles are drawn for white paper. Inverting and rotating
+   the hue gives a dark basemap without needing a second dark tile set, which
+   would double what has to be cached.
+
+   Applied per layer, NOT to the whole tile pane: satellite imagery must never
+   be inverted - it would render vegetation magenta and water orange, and an
+   operator would not trust anything on the screen after seeing it. */
+.leaflet-tile-pane .tile-dark {
+  filter: invert(1) hue-rotate(180deg) brightness(0.88) contrast(0.95)
+    saturate(0.5);
+}
+
+.aircraft-icon {
+  background: none;
+  border: none;
+}
+.aircraft-label {
+  background: rgba(11, 15, 19, 0.82);
+  border: none;
+  border-radius: 0.188rem;
+  color: #9aa8b2;
+  font: 0.625rem var(--mono);
+  padding: 1px 0.312rem;
+  box-shadow: none;
+  white-space: nowrap;
+}
+.aircraft-label.alert {
+  color: #ffb08a;
+}
+.aircraft-label::before {
+  display: none;
+}
+
+.map-notice {
+  position: absolute;
+  left: 50%;
+  bottom: 0.875rem;
+  transform: translateX(-50%);
+  z-index: 500;
+  background: rgba(11, 15, 19, 0.9);
+  border: 1px solid var(--line);
+  border-radius: 0.312rem;
+  padding: 0.375rem 0.688rem;
+  color: var(--warn);
+  font-size: 0.688rem;
+  white-space: nowrap;
+}
+.map-uncached code {
+  font: 0.688rem var(--mono);
+  color: var(--text);
+}
+
+/* ---------------------------------------------------------------- weather */
+
+.weather {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.rose-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.875rem;
+}
+.rose {
+  width: 8.4rem;
+  height: 8.4rem;
+  flex: none;
+}
+.rose-ring {
+  fill: #0a1015;
+  stroke: var(--line);
+  stroke-width: 1;
+}
+.rose-ring.inner {
+  fill: none;
+  stroke: var(--line-soft);
+}
+.rose-point {
+  fill: var(--dim);
+  font: 0.562rem var(--mono);
+}
+.rose-point.minor {
+  fill: #35454f;
+  font-size: 0.438rem;
+}
+.rose-tick {
+  stroke: var(--line);
+  stroke-width: 1;
+}
+.rose-arrow path {
+  fill: var(--accent);
+}
+.rose-arrow line {
+  stroke: var(--accent);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+}
+.rose-arrow.warn path {
+  fill: var(--warn);
+}
+.rose-arrow.warn line {
+  stroke: var(--warn);
+}
+.rose-arrow.critical path {
+  fill: var(--danger);
+}
+.rose-arrow.critical line {
+  stroke: var(--danger);
+}
+.rose-hub {
+  fill: var(--panel);
+  stroke: var(--line);
+}
+.rose-readout {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+.wind-speed {
+  font: 600 1.75rem var(--mono);
+  line-height: 1;
+  display: flex;
+  align-items: baseline;
+  gap: 0.25rem;
+}
+.wind-speed.warn {
+  color: var(--warn);
+}
+.wind-speed.critical {
+  color: var(--danger);
+}
+.wind-speed .unit {
+  font-size: 0.75rem;
+  font-weight: 400;
+  color: var(--muted);
+}
+.wind-from {
+  color: var(--muted);
+  font: 0.75rem var(--mono);
+  margin-top: 0.312rem;
+}
+.wind-gust {
+  font: 0.688rem var(--mono);
+  margin-top: 0.188rem;
+  color: var(--warn);
+}
+.wind-gust.critical {
+  color: var(--danger);
+}
+/* Three columns now that rainfall lives here rather than in a gauge of its
+   own: six readings in two rows instead of four plus a separate bar. */
+.weather-stats {
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--s2) var(--s3);
+}
+.weather-stats div {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0;
+}
+.weather-stats dd.rain-light,
+.weather-stats dd.rain-mod {
+  color: #7fbcff;
+}
+.weather-stats dd.rain-heavy {
+  color: var(--warn);
+}
+
+/* --------------------------------------------------------- basemap switch */
+
+.basemap-switch {
+  position: absolute;
+  right: 0.625rem;
+  top: 0.625rem;
+  z-index: 600;
+  display: flex;
+  background: rgba(11, 15, 19, 0.86);
+  border: 1px solid var(--line);
+  border-radius: 0.375rem;
+  overflow: hidden;
+}
+.basemap-btn {
+  background: none;
+  border: none;
+  border-right: 1px solid var(--line);
+  color: var(--muted);
+  font: 0.688rem/1 var(--sans);
+  padding: 0.438rem 0.688rem;
+  cursor: pointer;
+}
+.basemap-btn:last-child {
+  border-right: none;
+}
+.basemap-btn:hover {
+  color: var(--text);
+  background: rgba(0, 160, 220, 0.12);
+}
+.basemap-btn.active {
+  color: var(--brand);
+  background: rgba(0, 160, 220, 0.16);
+}
+.basemap-btn:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: -2px;
+}
+
+/* ------------------------------------------------------------------ icons */
+
+.icon {
+  width: 1.15em;
+  height: 1.15em;
+  flex: none;
+  color: var(--muted);
+}
+.card-head .icon {
+  color: var(--brand);
+  opacity: 0.85;
+}
+.swap-hint .icon {
+  width: 0.9em;
+  height: 0.9em;
+  display: block;
+}
+.dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  flex: none;
+  background: var(--dim);
+  box-shadow: none;
+}
+.dot.ok {
+  background: var(--accent);
+  box-shadow: 0 0 0.5rem rgba(53, 196, 138, 0.7);
+}
+
+/* ------------------------------------------------------- radio (detailed) */
+
+.radio {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  /* Centred rather than stretched. An earlier version gave every control a flex
+     share of the panel height, which made the frequency box and the preset row
+     grow into shapes they were never designed for. A control cluster with spare
+     room should sit in the middle of it, not be pulled apart to fill it. */
+  justify-content: center;
+  min-height: 0;
+}
+.freq-row {
+  display: flex;
+  align-items: stretch;
+  gap: var(--s3);
+  flex: none;
+  height: 2.9rem;
+}
+.step-col {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.step {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  border-radius: var(--s1);
+  width: 2.1rem;
+  flex: 1;
+  cursor: pointer;
+  font-size: 0.7rem;
+  line-height: 1;
+}
+.step:hover:not(:disabled) {
+  color: var(--brand);
+  border-color: var(--brand);
+}
+.step:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.freq-display {
+  flex: 1;
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: var(--s2);
+  background: #060a0e;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: var(--s2) var(--s3);
+}
+.freq-input {
+  width: 100%;
+  min-width: 0;
+  background: none;
+  border: none;
+  color: var(--text);
+  font: 600 1.55rem var(--mono);
+  text-align: center;
+  letter-spacing: 0.01em;
+  padding: 0;
+}
+.freq-input:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+  border-radius: var(--s1);
+}
+.freq-display .unit {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.presets {
+  display: grid;
+  /* Four wider slots rather than five narrow ones - a name has to survive at
+     the size this panel is actually rendered, and at five every one of them
+     ended up an ellipsis. */
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--s2);
+  flex: none;
+}
+.preset {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.05rem;
+  min-height: 2.6rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--s1);
+  color: var(--muted);
+  font: 0.72rem var(--mono);
+  padding: var(--s2) var(--s1);
+  cursor: pointer;
+  overflow: hidden;
+}
+.preset-name {
+  font: 600 0.82rem var(--sans);
+  color: var(--text);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.preset-freq {
+  font: 0.66rem var(--mono);
+  color: var(--dim);
+}
+.preset.active .preset-name,
+.preset.active .preset-freq {
+  color: inherit;
+}
+.preset-name-input {
+  min-height: 2.4rem;
+  background: #060a0e;
+  border: 1px solid var(--brand);
+  border-radius: var(--s1);
+  color: var(--text);
+  font: 600 0.72rem var(--sans);
+  text-align: center;
+  padding: 0 var(--s1);
+  min-width: 0;
+}
+.preset-name-input:focus-visible {
+  outline: none;
+}
+.preset:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--brand);
+}
+.preset.active {
+  color: var(--brand);
+  border-color: var(--brand);
+  background: rgba(0, 160, 220, 0.14);
+}
+.preset:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.meter-label {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  margin: 0;
+  flex: none;
+  font: 0.72rem var(--mono);
+  color: var(--muted);
+  letter-spacing: 0.06em;
+}
+.meter-label .rssi {
+  margin-left: auto;
+  color: var(--text);
+}
+.meter-label .floor b {
+  color: var(--text);
+  font-weight: 600;
+}
+.chip.toggle {
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: var(--s1);
+  color: var(--dim);
+  font: 0.66rem var(--mono);
+  letter-spacing: 0.08em;
+  padding: 0.1rem var(--s2);
+  cursor: pointer;
+}
+.chip.toggle.on {
+  color: var(--brand);
+  border-color: var(--brand);
+  background: rgba(0, 160, 220, 0.14);
+}
+.chip.toggle:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.led {
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  background: #17222c;
+  border: 1px solid var(--line);
+  flex: none;
+}
+.led.on {
+  background: #3fb950;
+  border-color: #3fb950;
+  box-shadow: 0 0 0.5rem #3fb950;
+}
+
+/* The squelch slider rides directly on the meter, as in Remote-Radio: the
+   threshold is set against the signal it is gating, not on a separate control
+   an operator has to mentally align with it. */
+/* Signal meter, matching Remote-Radio: a slim bar with a green-amber-red
+   gradient, and the squelch threshold as a round thumb riding on the same dB
+   scale. The gradient is fixed to the scale rather than to the reading, so a
+   given colour always means the same signal level - a bar that recolours as it
+   fills tells you nothing you cannot already see from its length. */
+.meter {
+  position: relative;
+  flex: none;
+  height: 0.5rem;
+  margin: var(--s2) 0;
+  background: #060a0e;
+  border: 1px solid var(--line);
+  border-radius: 0.25rem;
+  /* Not hidden: the round thumb is taller than the bar and must not be
+     clipped by it. */
+  overflow: visible;
+}
+.meter-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 0.25rem;
+  /* Remote-Radio's scale, verbatim: green to amber at 75%, then red. */
+  background: linear-gradient(90deg, #3fb950, #d29922 75%, #f85149);
+  transition: width 150ms linear;
+}
+.meter-floor {
+  position: absolute;
+  top: -0.15rem;
+  bottom: -0.15rem;
+  width: 1px;
+  background: var(--dim);
+  opacity: 0.7;
+}
+/* Taller than the bar it sits on, so the round thumb has room and stays easy
+   to grab on a touchscreen. */
+.squelch-overlay {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 1.5rem;
+  transform: translateY(-50%);
+  width: 100%;
+  margin: 0;
+  appearance: none;
+  background: none;
+  cursor: ew-resize;
+}
+.squelch-overlay::-webkit-slider-thumb {
+  appearance: none;
+  width: 1rem;
+  height: 1rem;
+  border-radius: 50%;
+  background: #58a6ff;
+  border: 2px solid #0d1117;
+  box-shadow: 0 0 0.4rem rgba(88, 166, 255, 0.6);
+  cursor: ew-resize;
+}
+.squelch-overlay::-moz-range-thumb {
+  width: 1rem;
+  height: 1rem;
+  border-radius: 50%;
+  background: #58a6ff;
+  border: 2px solid #0d1117;
+  box-shadow: 0 0 0.4rem rgba(88, 166, 255, 0.6);
+  cursor: ew-resize;
+}
+.squelch-overlay:disabled {
+  cursor: not-allowed;
+}
+.squelch-overlay:disabled::-webkit-slider-thumb,
+.squelch-overlay:disabled::-moz-range-thumb {
+  background: var(--dim);
+  box-shadow: none;
+}
+
+.volume {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  flex: none;
+  font: 0.75rem var(--mono);
+  color: var(--muted);
+}
+
+
+/* ------------------------------------------------------------------- tabs */
+
+/* Compact layout: the sidebar panels become a horizontal strip and whichever is
+   selected takes the whole window. Horizontally scrollable so the strip never
+   wraps to two rows and steals height from the panel it is there to reveal. */
+.tabs {
+  display: flex;
+  flex: none;
+  gap: var(--s1);
+  padding: var(--s2) var(--s3);
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.tabs::-webkit-scrollbar {
+  display: none;
+}
+.tab {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex: none;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  color: var(--muted);
+  font: 0.8rem var(--sans);
+  padding: var(--s2) var(--s3);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tab .icon {
+  color: inherit;
+}
+.tab:hover {
+  color: var(--text);
+}
+.tab.active {
+  color: var(--brand);
+  border-color: var(--line);
+  background: rgba(0, 160, 220, 0.14);
+}
+.tab:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: -2px;
+}
+
+.tab-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+/* A map or video fills its panel; a control panel scrolls if it has to. */
+.tab-fill {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.tab-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--s4);
+}
+
+/* ----------------------------------------------------------- map labels */
+
+.range-label {
+  color: rgba(255, 255, 255, 0.5);
+  font: 0.65rem var(--mono);
+  text-align: center;
+  line-height: 0.9rem;
+  text-shadow: 0 0 0.2rem #000, 0 0 0.4rem #000;
+  pointer-events: none;
+  background: none;
+  border: none;
+}
+
+/* The attribution control is not created at all, but Leaflet adds one by
+   default in some code paths - keep it hidden regardless so nothing appears in
+   the corner of a customer's console. */
+.leaflet-control-attribution {
+  display: none !important;
+}
+
+/* ------------------------------------------------------------- alerts drawer */
+
+/* Alerts moved out of the sidebar into a drawer: they are org-wide, not a
+   property of the station being viewed, and giving them a permanent panel spent
+   sidebar height on something that is empty most of the time. The badge is what
+   keeps them useful while it is shut. */
+
+.alerts-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  position: relative;
+}
+.alerts-toggle.active {
+  color: var(--brand);
+  border-color: var(--brand);
+}
+.badge {
+  min-width: 1.15rem;
+  height: 1.15rem;
+  padding: 0 0.25rem;
+  border-radius: 0.6rem;
+  background: var(--danger);
+  color: #2a0d02;
+  font: 700 0.65rem var(--mono);
+  display: grid;
+  place-items: center;
+}
+
+.drawer-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  background: rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 160ms ease;
+}
+.drawer-scrim.open {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 901;
+  width: min(26rem, 92vw);
+  display: flex;
+  flex-direction: column;
+  background: var(--panel-2);
+  border-left: 1px solid var(--line);
+  box-shadow: -1rem 0 2rem rgba(0, 0, 0, 0.4);
+  transform: translateX(100%);
+  transition: transform 180ms ease;
+}
+.drawer.open {
+  transform: translateX(0);
+}
+/* Hidden from the tab order and from screen readers while shut - a drawer whose
+   contents are still focusable is a keyboard trap that leads nowhere visible. */
+.drawer[aria-hidden="true"] {
+  visibility: hidden;
+}
+.drawer.open {
+  visibility: visible;
+}
+.drawer-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s3) var(--s4);
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+.drawer-head h3 {
+  margin: 0;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.drawer-head .icon {
+  color: var(--brand);
+}
+.drawer-head .btn.tiny {
+  margin-left: auto;
+}
+.drawer-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--s4);
+}
+
+.hint.error {
+  color: var(--danger);
+}
+
+/* Content that is shorter than its equal share centres vertically, so a
+   floodlight toggle does not float at the top of a tall empty panel. */
+/* Content that is shorter than its share is centred by .card-body above; these
+   only need their own internal direction. */
+.floodlight {
+  display: flex;
+}
+.power,
+.weather {
+  display: flex;
+  flex-direction: column;
+}
+
+/* --------------------------------------------------- skeletons and faults */
+
+.panel-loading {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  height: 100%;
+  min-height: 0;
+}
+.skeleton {
+  display: block;
+  background: linear-gradient(
+    90deg,
+    var(--line-soft) 25%,
+    #24313d 50%,
+    var(--line-soft) 75%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-sweep 1.4s ease-in-out infinite;
+}
+@keyframes skeleton-sweep {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+/* Respect a reduced-motion preference: a sweeping shimmer on every panel at
+   once is exactly the kind of thing that setting exists for. The placeholder
+   still reads as "not here yet" without it. */
+@media (prefers-reduced-motion: reduce) {
+  .skeleton {
+    animation: none;
+    background: var(--line-soft);
+  }
+}
+
+.skeleton-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  width: 100%;
+}
+.skeleton-row {
+  display: flex;
+  gap: var(--s2);
+  width: 100%;
+}
+.skeleton-row > * {
+  flex: 1;
+}
+.skeleton-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--s3);
+}
+.skeleton-weather {
+  display: flex;
+  align-items: center;
+  gap: var(--s5);
+}
+.skeleton-weather .skeleton-stack {
+  flex: 1;
+}
+.skeleton-map {
+  width: 100%;
+  height: 100%;
+  padding: var(--s3);
+}
+
+/* A struck-through panel, not a warning badge. The distinction is the point:
+   a small icon reads as advisory, a panel with a line through it reads as
+   "this is not telling you anything", which is the actual situation. */
+.panel-fault {
+  position: relative;
+  display: grid;
+  place-items: center;
+  height: 100%;
+  min-height: 3.5rem;
+  width: 100%;
+}
+.fault-x {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  stroke: var(--danger);
+  stroke-width: 1.5;
+  opacity: 0.45;
+  vector-effect: non-scaling-stroke;
+}
+.fault-x line {
+  vector-effect: non-scaling-stroke;
+}
+.fault-text {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.1rem;
+  text-align: center;
+  background: rgba(8, 12, 16, 0.82);
+  border-radius: var(--s1);
+  padding: var(--s2) var(--s3);
+}
+.fault-text strong {
+  color: var(--danger);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+.fault-text span {
+  color: var(--muted);
+  font: 0.72rem var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.fault-inline {
+  color: var(--danger);
+}
+
+.demo-chip {
+  font: 700 0.65rem var(--mono);
+  letter-spacing: 0.12em;
+  color: var(--warn);
+  border: 1px solid var(--warn);
+  border-radius: var(--s1);
+  padding: 0.05rem var(--s2);
+}
+
+/* ---------------------------------------------------------- battery chart */
+
+.chart-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  margin: var(--s4) 0 var(--s2);
+}
+.window-switch {
+  display: flex;
+  margin-left: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--s1);
+  overflow: hidden;
+}
+.window-btn {
+  background: none;
+  border: none;
+  border-right: 1px solid var(--line);
+  color: var(--muted);
+  font: 0.68rem var(--mono);
+  padding: 0.1rem var(--s2);
+  cursor: pointer;
+}
+.window-btn:last-child {
+  border-right: none;
+}
+.window-btn:hover {
+  color: var(--text);
+}
+.window-btn.active {
+  color: var(--brand);
+  background: rgba(0, 160, 220, 0.16);
+}
+.window-btn:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: -2px;
+}
+
+.battery-chart svg {
+  display: block;
+  width: 100%;
+  height: 3.4rem;
+  background: #060a0e;
+  border: 1px solid var(--line);
+  border-radius: var(--s1);
+}
+.chart-area {
+  fill: rgba(53, 196, 138, 0.18);
+  stroke: none;
+}
+.chart-line {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.4;
+  vector-effect: non-scaling-stroke;
+}
+/* The load-shed threshold, not zero: 20% is where the station starts dropping
+   load, so it is the line that actually matters. */
+.chart-shed {
+  stroke: var(--warn);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  opacity: 0.5;
+  vector-effect: non-scaling-stroke;
+}
+.chart-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  margin-top: var(--s1);
+  font: 0.7rem var(--mono);
+}
+.trend.up {
+  color: var(--accent);
+}
+.trend.down {
+  color: var(--warn);
+}
+.chart-foot .muted {
+  margin-left: auto;
+}
+/* ------------------------------------------------- full-bleed top viewer */
+
+/* The viewer has no panel surround: it runs edge to edge across the bar and
+   breaks out of the stack's own padding. A camera image framed inside a card,
+   inside a padded column, ends up smaller than the thing it is previewing
+   deserves - and a border around a picture adds nothing the picture does not
+   already have. */
+.swap-card {
+  position: relative;
+  background: none;
+  border: none;
+  border-radius: 0;
+  overflow: visible;
+  /* Cancel the stack padding on three sides so it truly reaches the edges. */
+  margin: calc(-1 * var(--s3)) calc(-1 * var(--s3)) 0;
+}
+
+/* The label rides on the image rather than above it, so no vertical space goes
+   to a header bar. Scrimmed, because it sits over live video and has to stay
+   readable against whatever is underneath.
+
+   z-index has to clear Leaflet's, not just the canvas camera's. Leaflet paints
+   its panes from 200 up and its controls at 800, so at any lower value the map
+   renders straight over the label - which is exactly what it was doing, while
+   the camera (no z-index of its own) looked fine. */
+.swap-card .card-head {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 1100;
+  /* Extra room below the text so the scrim fades out clear of it rather than
+     ending on the baseline. */
+  padding: var(--s2) var(--s3) var(--s5);
+  background: linear-gradient(
+    rgba(6, 10, 14, 0.9) 0%,
+    rgba(6, 10, 14, 0.65) 45%,
+    rgba(6, 10, 14, 0) 100%
+  );
+  border-bottom: none;
+  pointer-events: none;
+}
+
+.swap-card .swap-preview {
+  width: 100%;
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  /* 16:9 - the aspect a camera actually produces. Fixing the ratio rather than
+     the height means the viewer scales with the bar's width like everything
+     else, instead of letterboxing as the bar grows. */
+  height: auto;
+  aspect-ratio: 16 / 9;
+}
+.swap-card .swap-preview:hover,
+.swap-card .swap-preview:focus-visible {
+  border: none;
+  outline-offset: -2px;
+}
+/* A hairline under it in place of the card border, so the viewer still reads as
+   a distinct region from the panel below. */
+.swap-card::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: var(--line);
+}
+
+/* ------------------------------------------------------------ demo camera */
+
+.video-surface {
+  position: relative;
+  overflow: hidden;
+}
+.demo-camera {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+/* The badge sits over the image, so it needs its own backing rather than
+   relying on the panel behind it. */
+.video-live.demo {
+  position: absolute;
+  top: var(--s2);
+  right: var(--s2);
+  z-index: 5;
+  color: var(--warn);
+  background: rgba(6, 10, 14, 0.72);
+  border-radius: var(--s1);
+  padding: 0.05rem var(--s2);
+  font-size: 0.68rem;
+  letter-spacing: 0.06em;
+}
+.video-live.demo .video-live-dot {
+  background: var(--warn);
+}
+
+/* -------------------------------------------------------------- sky state */
+
+.rose-wrap {
+  justify-content: space-between;
+}
+.sky-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s1);
+  flex: none;
+  margin-left: auto;
+  text-align: center;
+}
+.rose-readout {
+  flex: 1;
+}
+/* Sized to balance the wind dial across the row rather than to a generic icon
+   scale: the two are the panel's visual anchors, one at each end, and a small
+   glyph opposite an 8.4rem dial reads as an afterthought rather than the other
+   half of a pair. Slightly under the dial's size because a filled sun carries
+   more weight than an outlined dial at the same dimension. */
+.sky-icon {
+  width: 6.6rem;
+  height: 6.6rem;
+  color: var(--muted);
+  stroke-width: 1.6;
+}
+.sky-icon.clear {
+  color: var(--warn);
+}
+.sky-icon.clear.night,
+.sky-icon.partly {
+  color: #9fb8cc;
+}
+.sky-icon.rain {
+  color: #5aa9ff;
+}
+.sky-icon.fog {
+  color: var(--dim);
+}
+.sky-state span {
+  font-size: 0.75rem;
+  color: var(--muted);
+  max-width: 7rem;
+  line-height: 1.15;
+}
+
+
+
+/* ------------------------------------------------------- receiver setup */
+
+.radio-config {
+  margin-top: var(--s3);
+  border-top: 1px solid var(--line-soft);
+  padding-top: var(--s2);
+}
+.radio-config summary {
+  cursor: pointer;
+  font: 0.7rem var(--mono);
+  color: var(--muted);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  list-style: none;
+}
+.radio-config summary::-webkit-details-marker {
+  display: none;
+}
+.radio-config summary::before {
+  content: "▸ ";
+  color: var(--dim);
+}
+.radio-config[open] summary::before {
+  content: "▾ ";
+}
+.cfg-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  margin-top: var(--s3);
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.cfg-row > span:first-child {
+  min-width: 5.5rem;
+}
+.cfg-row select,
+.ppm-row input {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--s1);
+  color: var(--text);
+  font: 0.78rem var(--mono);
+  padding: 0.15rem var(--s2);
+}
+.ppm-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex: 1;
+}
+.ppm-row input {
+  width: 4rem;
+}
+.ppm-row .unit {
+  color: var(--dim);
+  font: 0.7rem var(--mono);
+}
+.btn.tiny.active {
+  color: var(--brand);
+  border-color: var(--brand);
+}
+
+/* Status riding on the main view, in place of the header bar that used to sit
+   above it. Same treatment as the basemap switcher opposite, and above
+   Leaflet's panes for the same reason. */
+.view-status {
+  position: absolute;
+  left: var(--s3);
+  top: var(--s3);
+  z-index: 1100;
+  background: rgba(11, 15, 19, 0.86);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: var(--s2) var(--s3);
+  font: 0.8rem var(--mono);
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.audio-note {
+  font: 0.65rem var(--mono);
+  color: var(--warn);
+  white-space: nowrap;
+}
+
+/* Skeletons sit in the same box as the panel they stand in for, so the stack's
+   natural height - and therefore the whole sidebar's scale - does not change
+   when data arrives. See the note in PanelState.tsx. */
+.panel-loading {
+  justify-content: flex-start;
+}
+.skeleton-weather {
+  display: flex;
+  align-items: center;
+  gap: var(--s5);
+}
+.skeleton-weather .skeleton-stack {
+  flex: 1;
+}
+.skeleton-rain {
+  margin-top: var(--s3);
+  padding-top: var(--s3);
+  border-top: 1px solid var(--line-soft);
+}
+.skeleton-light {
+  align-items: center;
+  gap: var(--s4);
+}
+.skeleton-light > :first-child {
+  flex: none;
+}
+
+/* Reserved space, not removed space. Anything inside the sidebar that appears
+   and disappears changes the stack's natural height, and the whole bar rescales
+   with it - so these keep their box and only lose their ink. */
+.hidden {
+  visibility: hidden;
+}
+
+/* Two lines' worth, always. "Clear" is one line and "Partly cloudy" is two, so
+   letting this size to its content rescaled the bar whenever the sky changed. */
+.sky-state span {
+  display: block;
+  height: 2.1em;
+}
+
+/* Held at zero by the browser's autoplay policy. Tinted rather than labelled -
+   the slider's position already says it is muted, and the tint says it is
+   worth doing something about. */
+.volume.muted-by-browser input {
+  accent-color: var(--warn);
+}
+.volume.muted-by-browser > span {
+  color: var(--warn);
+}
+
+.audio-diag {
+  font: 0.66rem var(--mono);
+  color: var(--dim);
+  line-height: 1.3;
+}
+
+/* Loading and fault overlay the real panel rather than replacing it, so the
+   panel keeps exactly its normal height in every state. */
+.panel-state {
+  position: relative;
+}
+.panel-state-content {
+  opacity: 0.35;
+}
+.panel-shimmer {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    rgba(36, 49, 61, 0) 20%,
+    rgba(36, 49, 61, 0.5) 50%,
+    rgba(36, 49, 61, 0) 80%
+  );
+  background-size: 220% 100%;
+  animation: skeleton-sweep 1.5s ease-in-out infinite;
+  pointer-events: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .panel-shimmer {
+    animation: none;
+  }
+}
+.panel-fault {
+  position: absolute;
+  inset: 0;
+  min-height: 0;
+}
+
+.flood-denied {
+  font: 0.7rem var(--mono);
+  color: var(--dim);
+  white-space: nowrap;
+}
+
+/* One reserved status line for the radio panel. Height is fixed so nothing
+   moves when the message changes or clears - see the note in RadioPanel. */
+.radio-status {
+  margin: var(--s2) 0 0;
+  min-height: 1.1rem;
+  font: 0.7rem var(--mono);
+  line-height: 1.1rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.radio-status.muted {
+  color: var(--dim);
+}
+.radio-status.error {
+  color: var(--danger);
+}
+
+.mute-btn {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 1.9rem;
+  height: 1.9rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--muted);
+  cursor: pointer;
+}
+.mute-btn:hover:not(:disabled) {
+  color: var(--text);
+  border-color: #2c3d4b;
+}
+.mute-btn:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 1px;
+}
+.mute-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+/* Muted is amber rather than red: nothing is wrong, it is just off - and if the
+   browser is the reason, the button is also the fix. */
+.mute-btn.muted {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+.mute-btn .icon {
+  width: 1.05em;
+  height: 1.05em;
+  color: inherit;
+}
+
+/* Monitor is amber, not green: the channel is open because someone is holding
+   it open, which is a different fact from a signal being present. */
+.led.monitor {
+  background: var(--warn);
+  border-color: var(--warn);
+  box-shadow: 0 0 0.5rem var(--warn);
+}
+
+/* --------------------------------------------------- shared slider style */
+
+/* The volume and squelch sliders are the same control in different places, so
+   they get the same track and the same round thumb. They looked like different
+   widgets before - one native, one custom - which invited the reading that they
+   behaved differently. */
+.volume input[type="range"] {
+  appearance: none;
+  flex: 1;
+  height: 1.5rem;
+  margin: 0;
+  background: none;
+  cursor: pointer;
+}
+/* The filled portion, which a custom track does not get for free the way
+   accent-color gives it. --vol is set inline from the value; Firefox has a
+   real progress pseudo-element and uses that instead. */
+.volume input[type="range"]::-webkit-slider-runnable-track {
+  height: 0.5rem;
+  border-radius: 0.25rem;
+  border: 1px solid var(--line);
+  background: linear-gradient(
+      90deg,
+      #58a6ff 0 var(--vol, 50%),
+      transparent var(--vol, 50%)
+    )
+    #060a0e;
+}
+.volume input[type="range"]::-moz-range-track {
+  height: 0.5rem;
+  border-radius: 0.25rem;
+  background: #060a0e;
+  border: 1px solid var(--line);
+}
+.volume input[type="range"]::-moz-range-progress {
+  height: 0.5rem;
+  border-radius: 0.25rem 0 0 0.25rem;
+  background: #58a6ff;
+}
+
+/* Muted: the fill and thumb go amber together, so the level the operator set
+   stays visible while the state is obvious. */
+.volume.muted-by-browser input[type="range"]::-webkit-slider-runnable-track {
+  background: linear-gradient(
+      90deg,
+      var(--warn) 0 var(--vol, 50%),
+      transparent var(--vol, 50%)
+    )
+    #060a0e;
+}
+.volume.muted-by-browser input[type="range"]::-moz-range-progress {
+  background: var(--warn);
+}
+.volume input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  width: 1rem;
+  height: 1rem;
+  margin-top: -0.3rem;
+  border-radius: 50%;
+  background: #58a6ff;
+  border: 2px solid #0d1117;
+  box-shadow: 0 0 0.4rem rgba(88, 166, 255, 0.6);
+}
+.volume input[type="range"]::-moz-range-thumb {
+  width: 1rem;
+  height: 1rem;
+  border-radius: 50%;
+  background: #58a6ff;
+  border: 2px solid #0d1117;
+  box-shadow: 0 0 0.4rem rgba(88, 166, 255, 0.6);
+}
+
+/* Muted: the thumb stays where the operator left it and goes amber, so the
+   level is preserved and the state is still obvious. */
+.volume.muted-by-browser input[type="range"]::-webkit-slider-thumb {
+  background: var(--warn);
+  box-shadow: 0 0 0.4rem rgba(232, 176, 75, 0.55);
+}
+.volume.muted-by-browser input[type="range"]::-moz-range-thumb {
+  background: var(--warn);
+  box-shadow: 0 0 0.4rem rgba(232, 176, 75, 0.55);
+}
+.volume input[type="range"]:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+.volume input[type="range"]:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+  border-radius: var(--radius);
+}

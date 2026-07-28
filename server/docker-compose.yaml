@@ -1,0 +1,90 @@
+# Pinned so volumes are found under a stable name even if the checkout
+# directory is renamed - same reasoning as DroneOps.
+name: percepta
+
+services:
+  postgres:
+    image: postgres:17
+    container_name: percepta-postgres
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # Deliberately not published. Reach it through the app container, or
+    # temporarily uncomment for local inspection.
+    # ports:
+    #   - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    security_opt:
+      - no-new-privileges:true
+
+  redis:
+    image: redis:7-alpine
+    container_name: percepta-redis
+    restart: unless-stopped
+    # What Redis holds here is all reconstructible: control leases (a lost lease
+    # is re-acquired), revocation pushes (the 60s revalidation poll is the
+    # backstop), single-use stream ticket ids (they expire in 60s anyway) and
+    # live fan-out. None of it survives a restart usefully, so persistence is off.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      # Loopback only, and on 6380 rather than 6379 because a development host
+      # often already runs its own Redis - connecting to the wrong one looks
+      # exactly like a station publishing nothing, which is a bad hour.
+      #
+      # This is here so tooling outside the compose network can reach the broker:
+      # contract/conformance/check_station.py, and a station implementation being
+      # developed on the host. Remove it in production, where nothing outside
+      # the network should reach Redis at all.
+      - "127.0.0.1:6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    security_opt:
+      - no-new-privileges:true
+
+  app:
+    build:
+      # Root context: the image builds the console from web/ and the API from
+      # app/ in one multi-stage build, so neither Node nor a toolchain is
+      # needed on the host.
+      context: .
+      dockerfile: app/Dockerfile
+    container_name: percepta-app
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: python -m backend.scripts.start_app
+    volumes:
+      # Only the backend source, deliberately not ./app:/app. Mounting the whole
+      # directory would shadow /app/static, which is built into the image by the
+      # console stage and does not exist on the host - the console would 404 with
+      # no obvious cause.
+      - ./app/backend:/app/backend
+      # Cached basemap tiles. A named volume, not a bind mount: this is
+      # generated data, it can be large, and it must survive a rebuild - a
+      # station's tiles are downloaded once and re-fetching them is both slow
+      # and, depending on the provider, rate-limited.
+      - tile_cache:/tiles
+    ports:
+      # In production bind to loopback and let a reverse proxy terminate TLS:
+      #   "127.0.0.1:${APP_HOST_PORT:-8000}:8000"
+      - "${APP_HOST_PORT:-8000}:8000"
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  tile_cache:
