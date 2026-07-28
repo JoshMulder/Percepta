@@ -1,4 +1,5 @@
 import logging
+import uuid
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -15,6 +16,7 @@ from backend.core.config import settings
 from backend.database.dependencies import get_db
 from backend.database.models.audit_log import AuditLog
 from backend.database.session import PrivilegedSessionLocal
+from backend.database.models.enums import UserRole
 from backend.realtime.revocation import revoke_session
 from backend.repositories.auth_session_repository import AuthSessionRepository
 from backend.repositories.organization_membership_repository import (
@@ -47,6 +49,7 @@ class MeResponse(BaseModel):
     email: str
     display_name: str
     organization_id: str
+    organization_name: str = ""
     roles: list[str]
     # Session bootstrap carries it rather than a separate endpoint: the console
     # needs it before it renders anything, and this is already the first call.
@@ -54,6 +57,19 @@ class MeResponse(BaseModel):
     # True only while the active org IS the platform org - it is a property of
     # the session, not of the person. See auth/platform.py.
     is_platform_admin: bool = False
+
+
+def _org_name(db: Session, organization_id) -> str:
+    from sqlalchemy import select
+
+    from backend.database.models.organization import Organization
+
+    return (
+        db.execute(
+            select(Organization.name).where(Organization.id == organization_id)
+        ).scalar_one_or_none()
+        or ""
+    )
 
 
 def _audit(
@@ -168,11 +184,177 @@ def login(
         email=user.email,
         display_name=user.display_name,
         organization_id=str(organization.id),
+        organization_name=organization.name,
         roles=roles,
         demo_mode=settings.demo_mode,
         # Derived from the org this session was minted for, matching exactly what
         # resolve_identity will decide on every later request.
         is_platform_admin=organization.id == PLATFORM_ORGANIZATION_ID,
+    )
+
+
+class OrganizationOption(BaseModel):
+    id: str
+    name: str
+    is_platform: bool
+    #: False when the caller reaches this org through platform access rather
+    #: than through a membership of their own. Worth showing: it is someone
+    #: else's tenant and they are working inside it.
+    is_member: bool
+
+
+def _switchable(db: Session, user_id) -> list[OrganizationOption]:
+    """Organisations this user may switch into.
+
+    Their own memberships, plus - for a platform administrator - every active
+    organisation, because administering tenants you can never look at is not
+    administration.
+    """
+    from sqlalchemy import select
+
+    from backend.database.models.organization import Organization
+    from backend.database.models.organization_membership import (
+        OrganizationMembership,
+    )
+
+    mine = {
+        row.organization_id
+        for row in db.execute(
+            select(OrganizationMembership).where(
+                OrganizationMembership.user_id == user_id
+            )
+        ).scalars()
+    }
+    has_platform = PLATFORM_ORGANIZATION_ID in mine
+
+    query = select(Organization).where(Organization.is_active.is_(True))
+    if not has_platform:
+        if not mine:
+            return []
+        query = query.where(Organization.id.in_(mine))
+    rows = db.execute(query.order_by(Organization.name)).scalars().all()
+
+    return [
+        OrganizationOption(
+            id=str(o.id),
+            name=o.name,
+            is_platform=o.id == PLATFORM_ORGANIZATION_ID,
+            is_member=o.id in mine,
+        )
+        for o in rows
+    ]
+
+
+@router.get("/organizations", response_model=list[OrganizationOption])
+def organizations(
+    identity: Identity = Depends(get_identity),
+    db: Session = Depends(get_db),
+) -> list[OrganizationOption]:
+    return _switchable(db, identity.user_id)
+
+
+class SwitchRequest(BaseModel):
+    organization_id: str
+
+
+@router.post("/organization", response_model=MeResponse)
+def switch_organization(
+    body: SwitchRequest,
+    request: Request,
+    response: Response,
+    identity: Identity = Depends(get_identity),
+    db: Session = Depends(get_db),
+) -> MeResponse:
+    """Move this login to a different organisation.
+
+    A new session is minted and **the current one is revoked**, rather than the
+    existing session being repointed. Two reasons, both load-bearing.
+
+    A session carries its organisation into every later decision, including
+    row-level security and fan-out group membership; repointing it would mean a
+    request already in flight could straddle two tenants. And revocation is
+    pushed, so any WebSocket still streaming the previous organisation's data
+    is closed immediately - a socket authorised for one tenant must not survive
+    a switch to another. The console reconnects under the new session.
+    """
+    from sqlalchemy import select
+
+    from backend.database.models.organization import Organization
+
+    try:
+        target_id = uuid.UUID(body.organization_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Invalid organisation id") from exc
+
+    allowed = {uuid.UUID(o.id) for o in _switchable(db, identity.user_id)}
+    if target_id not in allowed:
+        # Same shape as every other refusal: no distinction between "no such
+        # org" and "not yours".
+        raise HTTPException(status_code=404, detail="Organisation not available")
+
+    user = UserRepository(db).get_by_id(identity.user_id)
+    if user is None or not user.is_active:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    organization = db.execute(
+        select(Organization).where(Organization.id == target_id)
+    ).scalar_one()
+
+    if target_id == identity.organization_id:
+        # Already there. Not an error - a console that re-selects the current
+        # organisation should not lose its session over it.
+        return MeResponse(
+            user_id=str(user.id),
+            email=user.email,
+            display_name=user.display_name,
+            organization_id=str(target_id),
+            organization_name=organization.name,
+            roles=list(identity.roles),
+            demo_mode=settings.demo_mode,
+            is_platform_admin=identity.is_platform_admin,
+        )
+
+    expires_at = datetime.now(UTC) + timedelta(
+        minutes=settings.access_token_expire_minutes
+    )
+    session = AuthSessionRepository(db).create(
+        user_id=user.id, organization_id=target_id, expires_at=expires_at
+    )
+    previous_session_id = identity.session_id
+    AuthSessionRepository(db).revoke(session_id=previous_session_id)
+    db.commit()
+
+    # Closes any socket still open on the old session, which is streaming the
+    # previous organisation's data.
+    revoke_session(previous_session_id)
+
+    token = create_access_token(
+        user_id=user.id, organization_id=target_id, session_id=session.id
+    )
+    set_access_cookie(
+        response,
+        token,
+        max_age=settings.access_token_expire_minutes * 60,
+        secure=settings.cookie_secure,
+    )
+    _audit("organization_switched", request=request, actor_email=user.email,
+           actor_user_id=user.id, organization_id=target_id,
+           detail={"from": str(identity.organization_id), "to": str(target_id)})
+
+    roles = OrganizationMembershipRepository(db).roles(
+        user_id=user.id, organization_id=target_id
+    )
+    return MeResponse(
+        user_id=str(user.id),
+        email=user.email,
+        display_name=user.display_name,
+        organization_id=str(target_id),
+        organization_name=organization.name,
+        # A platform admin inside someone else's organisation holds no
+        # membership there and presents as its admin - see resolve_identity.
+        roles=roles or [UserRole.ADMIN.value],
+        demo_mode=settings.demo_mode,
+        is_platform_admin=target_id == PLATFORM_ORGANIZATION_ID,
     )
 
 
@@ -208,6 +390,7 @@ def me(
         email=user.email,
         display_name=user.display_name,
         organization_id=str(identity.organization_id),
+        organization_name=_org_name(db, identity.organization_id),
         roles=list(identity.roles),
         demo_mode=settings.demo_mode,
         is_platform_admin=identity.is_platform_admin,

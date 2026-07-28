@@ -4,6 +4,7 @@ import type {
   MapConfig,
   Me,
   OrganizationDetail,
+  OrganizationOption,
   PlatformOrg,
   PlatformOverview,
   PlatformUser,
@@ -58,6 +59,16 @@ export const api = {
   logout: () => request<void>("/api/auth/logout", { method: "POST" }),
 
   me: () => request<Me>("/api/auth/me"),
+
+  organizations: () => request<OrganizationOption[]>("/api/auth/organizations"),
+
+  /** Mints a new session and revokes the current one, so every socket open on
+   *  the old organisation is closed server-side. The caller must re-bootstrap. */
+  switchOrganization: (organizationId: string) =>
+    request<Me>("/api/auth/organization", {
+      method: "POST",
+      body: JSON.stringify({ organization_id: organizationId }),
+    }),
 
   stations: () => request<StationSummary[]>("/api/stations"),
 

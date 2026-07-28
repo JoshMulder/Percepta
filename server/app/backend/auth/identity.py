@@ -20,6 +20,7 @@ from backend.repositories.auth_session_repository import AuthSessionRepository
 from backend.repositories.organization_membership_repository import (
     OrganizationMembershipRepository,
 )
+from backend.database.models.enums import UserRole
 from backend.repositories.user_repository import UserRepository
 
 
@@ -73,10 +74,39 @@ def resolve_identity(db: Session, token: str | None) -> Identity | None:
     if user is None or not user.is_active:
         return None
 
+    # Imported here rather than at module scope: auth.platform imports
+    # auth.dependencies, which imports this module.
+    from backend.auth.platform import PLATFORM_ORGANIZATION_ID
+
     membership_repo = OrganizationMembershipRepository(db)
     membership = membership_repo.get(user_id=user_id, organization_id=organization_id)
+
+    # A platform administrator may work inside an organisation they are not a
+    # member of - that is the point of the role, and without it a platform admin
+    # can administer tenants but never look at one.
+    #
+    # They present as an ordinary admin *of that organisation*: the org context
+    # is that org, bypass is off, and row-level security binds them exactly like
+    # its own members. God mode is only ever the platform org itself, below.
+    # Anything else would make "switch into a tenant to help them" silently mean
+    # "read every tenant at once".
+    platform_access = (
+        membership_repo.get(
+            user_id=user_id, organization_id=PLATFORM_ORGANIZATION_ID
+        )
+        is not None
+    )
     if membership is None:
-        return None
+        if not platform_access or organization_id == PLATFORM_ORGANIZATION_ID:
+            return None
+        set_request_org_context(db, organization_id=organization_id, bypass=False)
+        return Identity(
+            user_id=user_id,
+            organization_id=organization_id,
+            session_id=session_id,
+            roles=(UserRole.ADMIN.value,),
+            is_platform_admin=False,
+        )
 
     # God mode is a property of the *session's active organisation*, not of the
     # person. A platform admin working inside a customer's org sees exactly what
@@ -84,10 +114,6 @@ def resolve_identity(db: Session, token: str | None) -> Identity | None:
     # active org is the platform org itself do they read across tenants.
     #
     # This is the one place bypass is ever set from a request.
-    # Imported here rather than at module scope: auth.platform imports
-    # auth.dependencies, which imports this module.
-    from backend.auth.platform import PLATFORM_ORGANIZATION_ID
-
     is_platform_admin = organization_id == PLATFORM_ORGANIZATION_ID
     set_request_org_context(
         db, organization_id=organization_id, bypass=is_platform_admin

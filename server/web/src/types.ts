@@ -18,6 +18,7 @@ export interface Me {
   email: string;
   display_name: string;
   organization_id: string;
+  organization_name: string;
   roles: string[];
   /** Deployment is showing synthetic data. Badged everywhere, and suppresses
    *  sensor-fault indication - in demo the simulator is the sensor. */
@@ -294,6 +295,15 @@ export interface OrganizationDetail {
    *  transmit hardware exists. */
   grantable_capabilities: Capability[];
   roles: string[];
+}
+
+export interface OrganizationOption {
+  id: string;
+  name: string;
+  is_platform: boolean;
+  /** False when reached through platform access rather than a membership —
+   *  it is someone else's tenant and you are working inside it. */
+  is_member: boolean;
 }
 
 /* ---- Platform administration ---- */

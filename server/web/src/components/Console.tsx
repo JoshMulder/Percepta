@@ -34,6 +34,7 @@ import {
   IconWind,
 } from "./Icons";
 import { Logo } from "./Logo";
+import { OrgSwitcher } from "./OrgSwitcher";
 import { Settings } from "./Settings";
 import { FloodlightPanel, has, NotPermitted, PowerPanel, VideoPanel } from "./Panels";
 import { MapSkeleton, PanelState, panelStatus } from "./PanelState";
@@ -594,6 +595,7 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
         )}
       </div>
       <div className="topbar-right">
+        <OrgSwitcher me={me} />
         <button
           type="button"
           className={`btn ghost alerts-toggle${alertsOpen ? " active" : ""}`}

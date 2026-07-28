@@ -2644,3 +2644,30 @@ body {
   padding: 0.1rem var(--s2);
   white-space: nowrap;
 }
+
+/* Organisation switcher. Sits left of the alerts button, and is absent
+   entirely when there is only one organisation to choose from. */
+.org-switch {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+.org-switch select {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--text);
+  font: inherit;
+  padding: 0.2rem var(--s2);
+  max-width: 14rem;
+}
+.org-switch select:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
+.org-switch select:disabled { opacity: 0.5; cursor: wait; }
+.org-guest {
+  font: 700 0.62rem var(--mono);
+  letter-spacing: 0.1em;
+  color: var(--warn);
+  border: 1px solid var(--warn);
+  border-radius: var(--s1);
+  padding: 0.05rem var(--s2);
+}

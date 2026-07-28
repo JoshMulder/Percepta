@@ -34,6 +34,43 @@ from backend.repositories.station_grant_repository import StationGrantRepository
 _NONE: frozenset[Capability] = frozenset()
 
 
+def effective_roles(
+    db: Session, *, user_id: uuid.UUID, organization_id: uuid.UUID
+) -> set[str]:
+    """This user's roles in this organisation, as authorisation should see them.
+
+    Normally just their membership. But a platform administrator may be working
+    inside an organisation they hold no membership of - that is what the org
+    switcher is for - and presents as an admin of it, exactly as
+    resolve_identity decides.
+
+    This has to live here rather than only in resolve_identity, because the
+    realtime layer and the REST guards both re-derive authorisation from the
+    database rather than trusting anything on the connection. Without it, a
+    platform admin who switched into a tenant would see an empty station list
+    and be refused every station in it - which is precisely what happened.
+
+    Deliberately never returns admin for the platform organisation itself
+    through this path: membership there is real or it is nothing.
+    """
+    membership_repo = OrganizationMembershipRepository(db)
+    roles = set(membership_repo.roles(user_id=user_id, organization_id=organization_id))
+    if roles:
+        return roles
+
+    from backend.auth.platform import PLATFORM_ORGANIZATION_ID
+
+    if organization_id == PLATFORM_ORGANIZATION_ID:
+        return set()
+    has_platform = (
+        membership_repo.get(
+            user_id=user_id, organization_id=PLATFORM_ORGANIZATION_ID
+        )
+        is not None
+    )
+    return {UserRole.ADMIN.value} if has_platform else set()
+
+
 def capabilities_for(
     db: Session,
     *,
@@ -49,12 +86,13 @@ def capabilities_for(
     tell "you have no access" from "that station does not exist", because the
     difference leaks the existence of another tenant's hardware.
     """
-    membership_repo = OrganizationMembershipRepository(db)
     grant_repo = StationGrantRepository(db)
 
-    roles = set(membership_repo.roles(user_id=user_id, organization_id=organization_id))
+    roles = effective_roles(
+        db, user_id=user_id, organization_id=organization_id
+    )
     if not roles:
-        # Not a member of this org at all.
+        # Not a member of this org, and no platform access to stand in for one.
         return _NONE
 
     # The station must exist, be active, and belong to *this* organisation.
@@ -132,11 +170,7 @@ def visible_station_ids(
 
     from backend.database.models.ground_station import GroundStation
 
-    roles = set(
-        OrganizationMembershipRepository(db).roles(
-            user_id=user_id, organization_id=organization_id
-        )
-    )
+    roles = effective_roles(db, user_id=user_id, organization_id=organization_id)
     if not roles:
         return set()
 

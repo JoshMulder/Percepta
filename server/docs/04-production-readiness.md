@@ -125,8 +125,6 @@ These are absences, not defects, but they are load-bearing for the product:
   destination. Credentials expire after 90 days and nothing yet alerts on a
   station that has stopped renewing, which §6 is explicit is how remote sites
   fail.
-- **Org switcher.** The token carries an active org and the backend supports
-  switching, but the console has no UI for it.
 - **MFA.** The `mfa_required` / `mfa_secret` columns and `pyotp` are present;
   the login flow does not enforce them.
 - **Platform admin.** Modelled in the design, not implemented — no cross-org
