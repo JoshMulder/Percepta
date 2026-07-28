@@ -31,9 +31,8 @@ from backend.auth.capabilities import Capability
 from backend.auth.dependencies import require_capability
 from backend.auth.identity import Identity
 from backend.database.dependencies import get_db
-from backend.database.models.audit_log import AuditLog
-from backend.database.session import PrivilegedSessionLocal
 from backend.realtime.bus import command_channel, publish_sync
+from backend.services.audit import record
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/stations/{station_id}", tags=["commands"])
@@ -84,28 +83,19 @@ def _audit(
 ) -> None:
     """Append-only record of who told which hardware to do what.
 
-    Uses the privileged session because audit_logs sits outside RLS - see
-    migration 0002. This is the record that matters if an incident is ever
-    reviewed, so a failure to write it is logged loudly but never blocks the
-    command it describes.
+    This is the record that matters if an incident is ever reviewed. See
+    services/audit.py for why writing it can never block the command.
     """
-    try:
-        with PrivilegedSessionLocal() as db:
-            db.add(
-                AuditLog(
-                    organization_id=identity.organization_id,
-                    actor_user_id=identity.user_id,
-                    action=action,
-                    target_type="ground_station",
-                    target_id=str(station_id),
-                    ground_station_id=station_id,
-                    ip_address=request.client.host if request.client else None,
-                    detail=detail,
-                )
-            )
-            db.commit()
-    except Exception:
-        log.exception("Failed to audit %s on station %s.", action, station_id)
+    record(
+        action=action,
+        organization_id=identity.organization_id,
+        actor_user_id=identity.user_id,
+        target_type="ground_station",
+        target_id=str(station_id),
+        ground_station_id=station_id,
+        ip_address=request.client.host if request.client else None,
+        detail=detail,
+    )
 
 
 def _dispatch(station_id: uuid.UUID, command: dict) -> None:

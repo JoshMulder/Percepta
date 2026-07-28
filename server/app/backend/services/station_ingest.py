@@ -14,12 +14,15 @@ own sensor readings, which is unavoidable because it owns the sensors, and can
 do nothing else. There is deliberately no `organization_id` field in the
 contract, and if one ever appears it must still be ignored here.
 
-NOT YET AUTHENTICATED. Enrolment does not exist (`contract/enrolment.md`), so
-any process that can reach the broker can publish as any station. The org
-resolution below is correct and will not need to change, but until stations
-authenticate and broker ACLs pin each one to its own channels, the *identity*
-this trusts is unverified. That is the gap, and it is the enrolment work rather
-than anything here.
+A station must be enrolled and hold a valid credential for anything it sends to
+reach a subscriber (`contract/enrolment.md`). That check lives here as a second
+line: the broker is supposed to have refused the connection already. It has real
+value anyway - revoking a credential stops the data within one registry TTL even
+if the broker never noticed - but note what it does *not* do. It confirms the
+named station is entitled to publish; it cannot confirm the publisher is that
+station. Only broker authentication does that, and on the development stack
+nothing authenticates to Redis at all, so anything with access can still forge
+any enrolled station. See `services/broker_acl.py` for what closes it.
 
 **Exactly one ingest runs at a time**, elected by a Redis lease. Everything else
 in the realtime layer is safe to run in every worker, because each worker only
@@ -46,6 +49,7 @@ from backend.core.config import settings
 from backend.database.models.ground_station import GroundStation
 from backend.database.session import PrivilegedSessionLocal
 from backend.realtime.hub import hub
+from backend.services.enrolment import has_valid_credential
 
 log = logging.getLogger(__name__)
 
@@ -203,19 +207,31 @@ class StationIngest:
     # --- registry -------------------------------------------------------
 
     def _lookup(self, station_id: uuid.UUID) -> uuid.UUID | None:
-        """Organisation for a station, or None if it is unknown or inactive.
+        """Organisation for a station, or None if it may not publish.
 
         Read on the privileged connection deliberately: this runs before any org
         context exists, which is the whole point - it is the step that
         *establishes* which org the data belongs to.
+
+        A station must be active *and* hold a valid credential. The credential
+        check is what gives revocation teeth here: the broker should already
+        have closed the connection, but if it has not - and on the development
+        stack it cannot, because nothing authenticates to Redis - a revoked
+        station's data stops reaching subscribers within one registry TTL
+        anyway. It is a second line, not the first.
         """
         with PrivilegedSessionLocal() as db:
-            return db.execute(
+            org_id = db.execute(
                 select(GroundStation.organization_id).where(
                     GroundStation.id == station_id,
                     GroundStation.is_active.is_(True),
                 )
             ).scalar_one_or_none()
+            if org_id is None:
+                return None
+            if not has_valid_credential(db, station_id=station_id):
+                return None
+            return org_id
 
     async def _organization(self, station_id: uuid.UUID) -> uuid.UUID | None:
         now = datetime.now(UTC)
@@ -232,8 +248,8 @@ class StationIngest:
             if station_id not in self._unknown_stations:
                 self._unknown_stations.add(station_id)
                 log.warning(
-                    "Dropping telemetry from unknown or inactive station %s.",
-                    station_id,
+                    "Dropping telemetry from %s: unknown, deactivated, or "
+                    "holding no valid credential.", station_id,
                 )
         else:
             self._unknown_stations.discard(station_id)

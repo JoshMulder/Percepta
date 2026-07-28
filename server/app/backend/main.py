@@ -9,6 +9,8 @@ from starlette.types import Scope
 
 from backend.api.auth import router as auth_router
 from backend.api.commands import router as commands_router
+from backend.api.enrolment import router as enrolment_router
+from backend.api.station_enrolment import router as station_enrolment_router
 from backend.api.stations import router as stations_router
 from backend.api.tiles import router as tiles_router
 from backend.core.config import settings
@@ -71,6 +73,8 @@ app = FastAPI(title="Percepta", lifespan=lifespan)
 
 app.include_router(auth_router)
 app.include_router(commands_router)
+app.include_router(enrolment_router)
+app.include_router(station_enrolment_router)
 app.include_router(stations_router)
 app.include_router(tiles_router)
 

@@ -3,8 +3,13 @@
 How a physical box becomes a ground station the platform will accept data from,
 and everything it needs to know to operate afterwards.
 
-Neither side has built this yet. It is written first because enrolment is where
-the platform's tenancy guarantee is actually established — every other isolation
+**The platform side is built** (`server/app/backend/services/enrolment.py`,
+`api/enrolment.py`, `api/station_enrolment.py`). The station side is not. What
+follows is still the specification; §11 records where the implementation differs
+from it and why, and every difference there is deliberate.
+
+It was written before either side existed because enrolment is where the
+platform's tenancy guarantee is actually established — every other isolation
 control assumes the station's identity is trustworthy, and this is the step that
 makes it so.
 
@@ -139,10 +144,21 @@ token rather than by the rate limit alone.
 // 200
 {
   "station_id": "uuid",
-  "credential": { "type": "bearer", "secret": "…", "expires_at": "…" },
+  "credential": {
+    "type": "bearer",
+    "secret": "…",
+    "expires_at": "…",
+    "renew_after": "…"               // when to start renewing; the platform
+                                     // owns this policy and states it, rather
+                                     // than each station hardcoding half a life
+  },
   "broker": {
     "url": "mqtts://broker.example:8883",
     "ca_pem": "…",                   // pinned; the station verifies the platform
+                                     // NOT YET SENT - the development broker has
+                                     // no TLS. Expect it to appear; do not
+                                     // require it yet.
+    "username": "gsu:{station_id}",  // the broker principal to authenticate as
     "telemetry_topic": "gsu/{station_id}/telemetry",
     "audio_topic": "gsu/{station_id}/audio",
     "command_topic": "cmd/gsu/{station_id}"
@@ -177,8 +193,33 @@ with a used token and no way to finish.
 
 ### `POST /api/enrol/renew`
 
-Authenticated with the current credential. Returns a fresh one. Old credential
-remains valid for an overlap period (§6).
+Authenticated with the current credential as `Authorization: Bearer <secret>`.
+Returns the same shape as a claim. The old credential remains valid for an
+overlap period (§6).
+
+The station does **not** send its own id. It is derived from the credential, so
+a box holding a valid secret still cannot assert which station it is.
+
+### `GET /api/enrol/status`
+
+Authenticated the same way. Thin by design — it is for a box confirming it is
+still trusted, not an API surface.
+
+```jsonc
+{
+  "station_id": "uuid",
+  "name": "Kaikoura Ridge",
+  "config_version": 3,
+  "credential_expires_at": "…",
+  "renew_now": false,
+  "server_time": "…"       // a reference clock, never an authority
+}
+```
+
+`server_time` exists for a specific failure: a box with no battery-backed clock
+cannot evaluate its own expiry, and one that wrongly believes it has expired
+behaves as badly as one that wrongly believes it has not. §6 still holds — the
+platform must never be a station's only clock.
 
 ---
 
@@ -289,15 +330,26 @@ These need a human, and the station agent should not invent answers.
 
 ## 10. What each side builds
 
-**Platform**
-- Station records exist already (`ground_stations`); add credential and
-  enrolment-token columns, hashed
-- `POST /api/enrol` and `/api/enrol/renew`
-- Admin UI/API to issue and revoke tokens, behind `config.write`
-- Broker ACLs derived from station identity — the ingest already resolves org
-  from the registry (`transport.md`), so this is the piece that makes the
-  identity it trusts real
-- Audit every issue, claim, renew and revoke
+**Platform — built**
+- `station_enrolment_tokens` and `station_credentials`, both hashed, both under
+  RLS. A credential decides which tenant a box may publish as, so a query
+  against it that escaped its org scope would be the worst leak in the schema
+- `POST /api/enrol`, `/api/enrol/renew`, `GET /api/enrol/status`
+- Admin API to issue and revoke, behind `config.write`, at
+  `/api/stations/{id}/enrolment`
+- Broker principals derived from station identity, one per station, pinned to
+  its own channels (`services/broker_acl.py`)
+- Every issue, claim, renew, revoke and rejection audited
+- `scripts/verify_enrolment.py` exercises the lifecycle against a running stack
+
+**Platform — still owed**
+- **Locking down the broker's default user.** Per-station principals exist and
+  are enforced *for anyone who uses them*; Redis' `default` user is still open
+  and unauthenticated, so the pinning is not yet a boundary. This is the last
+  gap between the model described here and reality
+- Console UI for issuing codes — the API is there, nothing renders it
+- Configuration delivery (§7). `config_version` is issued; `config.set` is not
+- mTLS, and the CA to go with it (§3)
 
 **Station**
 - Keypair or credential generation, and secure local storage
@@ -306,3 +358,34 @@ These need a human, and the station agent should not invent answers.
 - Time sync, and refusing to enrol with an implausible clock
 - Config apply, persist, and report version
 - Device discovery, and reporting what is actually attached
+
+---
+
+## 11. Where the implementation differs from this document
+
+Each of these is deliberate. Raise them rather than silently matching the code
+if you disagree — that is what the contract process is for.
+
+**A retry re-issues rather than returning the same credential.** §4 says a retry
+from the same station returns the same credential. The platform cannot: secrets
+are stored hashed and are unrecoverable, and making them recoverable would mean
+the operator could impersonate a customer's station. A retry inside the token's
+lifetime therefore issues a *fresh* credential and revokes the previous one.
+This still satisfies what the clause is for — a technician who loses signal
+mid-enrolment can finish without an admin issuing anything new. The cost is that
+an accidental re-claim cuts off a box that had already succeeded, which requires
+someone to physically re-enter the code.
+
+**Tokens are not strictly single-use.** Same reason. A token stays claimable
+until it expires or is revoked; `claim_count` records how often it was used, and
+issuing a new code revokes any outstanding one.
+
+**`ca_pem` is not yet sent**, because the development broker has no TLS.
+
+**Two fields were added**: `credential.renew_after` and `broker.username`. Both
+are additive and safe to ignore.
+
+**Rate limiting fails open.** If Redis is unavailable, enrolment proceeds. An
+outage in an unrelated component should not strand a technician on site, and the
+actual defence against guessing is the token's ~58 bits of entropy, not the
+limit.

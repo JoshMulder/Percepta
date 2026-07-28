@@ -23,6 +23,7 @@ import random
 import sys
 import uuid
 
+import httpx
 import redis
 from sqlalchemy import select
 
@@ -120,6 +121,10 @@ class StationSim:
         self.name = name
         self.lat = lat if lat is not None else -43.5
         self.lon = lon if lon is not None else 172.6
+        # Held in memory only. A real station persists this and renews it -
+        # re-claiming a token on every boot is a simulator shortcut, not the
+        # design (contract/enrolment.md section 6).
+        self.credential: str | None = None
         self.contacts = [Contact() for _ in range(random.randint(2, 5))]
         self.soc = random.uniform(55, 95)
         self.light_on = False
@@ -322,6 +327,78 @@ class StationSim:
         return events
 
 
+async def ensure_enrolled(sim) -> bool:
+    """Take the station through the real enrolment flow.
+
+    This function plays three parts that are three different people in reality,
+    and it is worth being explicit about which is which, because only the last
+    is the station team's to build.
+
+      admin      issues an enrolment token for the station record
+      technician carries that token to the box
+      station    claims it, and keeps the credential
+
+    Only the third step is what real hardware does, and it is done here the way
+    hardware must: an HTTP POST to /api/enrol carrying the token, with the
+    credential kept in memory afterwards. The first two are shortcut through the
+    service layer because there is no admin sitting in a development stack.
+
+    Re-enrols every run. A real station stores its credential and renews it
+    rather than claiming a fresh token each boot - see contract/enrolment.md.
+    """
+    from backend.services import enrolment as enrolment_service
+
+    with PrivilegedSessionLocal() as db:
+        station = db.get(GroundStation, sim.station_id)
+        if station is None:
+            return False
+        # --- admin: issue a code ---
+        _, token = enrolment_service.issue_token(
+            db, station=station, issued_by_user_id=None
+        )
+        # A record already in service would reject a claim from a second box, so
+        # clear the enrolment the previous run left behind.
+        station.enrolled_at = None
+        enrolment_service.revoke_credentials(
+            db, station_id=station.id, reason="simulator-restart"
+        )
+        db.commit()
+
+    # --- station: claim it ---
+    url = f"{settings.simulator_enrol_url}/api/enrol"
+    body = {
+        "token": token,
+        "hardware": {
+            "model": "percepta-simulator",
+            "serial": str(sim.station_id)[:8],
+            "os": "container",
+            "agent_version": "0.1",
+        },
+    }
+    for attempt in range(10):
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(url, json=body)
+            if response.status_code == 200:
+                data = response.json()
+                sim.credential = data["credential"]["secret"]
+                log.info(
+                    "%s enrolled; credential expires %s.",
+                    sim.name, data["credential"]["expires_at"],
+                )
+                return True
+            log.warning(
+                "Enrolment for %s returned %s: %s",
+                sim.name, response.status_code, response.text[:200],
+            )
+            return False
+        except Exception as exc:
+            # The API may still be starting; this runs seconds after boot.
+            log.info("Waiting for the enrolment endpoint (%s).", exc)
+            await asyncio.sleep(2)
+    return False
+
+
 async def publish_station(hub: Hub, station_id, stream: str, payload: dict) -> None:
     """Publish as a station does - see contract/transport.md."""
     if hub.bus is not None and hub.bus._redis is not None:
@@ -368,6 +445,14 @@ async def run() -> None:
     if not sims:
         log.error("No active ground stations. Run seed_dev first.")
         return
+
+    for sim in sims:
+        if not await ensure_enrolled(sim):
+            log.error(
+                "Station %s could not enrol; the ingest will drop everything "
+                "it publishes.", sim.name,
+            )
+            return
 
     by_id = {str(s.station_id): s for s in sims}
     commands = redis.Redis.from_url(settings.redis_url).pubsub()

@@ -41,10 +41,16 @@ The simulator publishes across this same boundary, so it exercises the ingest
 rather than bypassing it, and `conformance/check_station.py` passes against it
 without `--legacy`.
 
-**Still missing: authentication.** Any process that can reach the broker can
-publish as any station. Org resolution is already correct and will not change,
-but the identity it trusts is unverified until enrolment and broker ACLs exist
-(`enrolment.md`). That is the platform's next piece of work on this boundary.
+**Authentication.** A station must be enrolled and hold a valid credential
+before anything it publishes reaches a subscriber; revoking one stops its data
+within about thirty seconds, whether or not the broker noticed. Enrolment is
+built — see `enrolment.md` — and issues each station a broker principal
+(`gsu/{station_id}`) pinned to exactly the three channels above.
+
+One thing that pinning does **not** yet do: Redis' `default` user is still open
+on the development stack, so an unauthenticated client can publish anywhere. The
+per-station principals are real and enforced for anyone using them; closing
+`default` is a deployment change and is the last gap on this boundary.
 
 ## Broker
 

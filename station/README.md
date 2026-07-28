@@ -84,8 +84,9 @@ than assumed:
 
 - the broker's address, reachable from your machine
 - credentials for it
-- a **station UUID that exists in the platform's registry** — the platform
-  resolves the organisation from that id, so an invented one is silently ignored
+- a **station UUID that exists in the platform's registry**, and an **enrolment
+  code** for it — the platform resolves the organisation from that id, and drops
+  everything from a station that is not enrolled or whose credential was revoked
 
 Production is MQTT over TLS with a per-station client certificate. Development
 is Redis, and the difference is deliberately confined to one place in your code:
@@ -107,15 +108,21 @@ keep the transport behind a small interface and none of the rest cares.
 
 ## Known gaps you will hit
 
-- **Stations are not authenticated yet.** The ingest exists and will receive
-  you (see `../contract/transport.md`), but nothing verifies that a publisher is
-  the station it claims to be — the broker has no per-station credentials or
-  ACLs. Build as though it does: publish only on your own channels, and expect
-  a credential to become required without the channel names changing.
-- **Enrolment does not exist** on either side yet. `../contract/enrolment.md`
-  specifies it and lists what each side builds; until it is done, use a seeded
-  station's uuid for development. Five decisions in its section 9 need a human -
-  do not invent answers to those.
+- **Enrolment is built on the platform, not on the box.** `POST /api/enrol` with
+  a code an admin issues you, and you get back a credential, your broker
+  username, and the exact topics you may use. That is yours to implement:
+  `../contract/enrolment.md` §10 lists it, and §11 records where the platform
+  deviated from the spec and why. Read §6 before designing the boot sequence —
+  clock, expiry and renewal are what strand a remote site.
+- **The broker's `default` user is still open.** Your per-station principal
+  exists and is genuinely pinned to your own channels, but nothing yet forces
+  anyone to use it, so unauthenticated clients still work. Build as though they
+  do not: authenticate as `gsu:{station_id}` from the start, because when
+  `default` is closed, code that never authenticated stops working everywhere at
+  once.
+- **Five decisions in `../contract/enrolment.md` §9 need a human** — compute
+  platform, who installs, token lifetime, broker hosting, update path. Do not
+  invent answers to those.
 - **Transmit is not implemented anywhere**, and must not be until the
   fail-released design in `05-radio-integration.md` exists.
 

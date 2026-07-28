@@ -14,6 +14,10 @@ from backend.database.models.ground_station import GroundStation
 from backend.database.models.organization import Organization
 from backend.database.models.organization_membership import OrganizationMembership
 from backend.database.models.power_sample import PowerSample
+from backend.database.models.station_credential import StationCredential
+from backend.database.models.station_enrolment_token import (
+    StationEnrolmentToken,
+)
 from backend.database.models.station_grant import StationGrant
 from backend.database.models.user import User
 
@@ -26,6 +30,8 @@ __all__ = [
     "Organization",
     "OrganizationMembership",
     "PowerSample",
+    "StationCredential",
+    "StationEnrolmentToken",
     "StationGrant",
     "User",
     "UserRole",

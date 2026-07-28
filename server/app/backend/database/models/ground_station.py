@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.database.base import Base
@@ -44,6 +45,19 @@ class GroundStation(UUIDMixin, TimestampMixin, Base):
     last_seen_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+    # What the box said about itself at its last enrolment: model, serial, OS,
+    # agent version. Inventory only - nothing here is ever used to decide what
+    # the station is allowed to do, which is why it is safe to accept unverified
+    # from the station itself.
+    hardware: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+    # The configuration generation the platform intends this station to run.
+    # The station reports the version it has actually applied on its telemetry;
+    # a mismatch is what triggers the platform to send config.set. Delivering
+    # configuration is not built yet - see contract/enrolment.md section 7 - but
+    # the version is issued at enrolment because the response carries it.
+    config_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
     # Basemap cache extent. The station does not move, so its map is a finite
     # set of tiles fetched once and served locally from then on - the console

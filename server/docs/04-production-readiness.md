@@ -97,14 +97,24 @@ These are absences, not defects, but they are load-bearing for the product:
   hand, but the container still runs a single uvicorn worker, so a real
   multi-worker failover has never happened. Exercise it before scaling out, and
   expect a gap of up to one lease period (15s) when a leader dies.
-- **Ground station authentication.** The ingest exists
-  (`backend/services/station_ingest.py`) and resolves each station's org from
-  the registry rather than from anything the station says, so the tenancy rule
-  holds. What is missing is the step before it: no device credentials are
-  issued, and the broker has no per-station ACLs, so **anything that can reach
-  the broker can publish as any station**. Nothing about org resolution changes
-  when this lands - it is enrolment (`../../contract/enrolment.md`) plus broker
-  ACLs, and it is the last thing standing between this and a real station.
+- **Close the broker's `default` user.** This is the one that matters.
+  Enrolment is built, every station gets its own Redis principal pinned to its
+  own channels, and that pinning is verified
+  (`scripts/verify_enrolment.py` proves a station cannot publish as another).
+  But `default` is still `on nopass ~* &* +@all`, and the platform's own
+  components use it, so **an unauthenticated client can still publish as any
+  station**. Closing it means setting `requirepass` or disabling `default`,
+  giving the app, the ingest and the recorder their own credentials, and only
+  then is the isolation real rather than described. Nothing in the application
+  changes; this is configuration and rollout.
+- **Enrolment gaps.** No console UI for issuing codes (the API exists at
+  `/api/stations/{id}/enrolment`, nothing renders it). No configuration
+  delivery - `config_version` is issued at enrolment but `config.set` is not
+  implemented. No mTLS or CA; credentials are bearer secrets, which
+  `../../contract/enrolment.md` §3 recommends as the starting point but not the
+  destination. Credentials expire after 90 days and nothing yet alerts on a
+  station that has stopped renewing, which §6 is explicit is how remote sites
+  fail.
 - **Org switcher.** The token carries an active org and the backend supports
   switching, but the console has no UI for it.
 - **MFA.** The `mfa_required` / `mfa_secret` columns and `pyotp` are present;

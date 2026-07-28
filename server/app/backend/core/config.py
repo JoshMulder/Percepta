@@ -62,6 +62,16 @@ class Settings(BaseSettings):
     # How often an open WebSocket revalidates its session and station grants,
     # independently of the Redis revocation push. Bounds worst-case staleness if
     # a push is ever missed - see docs/03-realtime-isolation.md section 6.
+    # What an enrolling station is told to connect to. Distinct from redis_url
+    # deliberately: the platform reaches the broker on an internal address, and
+    # a station reaches it from the public internet over Starlink. Falls back to
+    # redis_url so a development stack needs no extra configuration.
+    station_broker_url: str | None = None
+
+    # Where the simulator posts its own enrolment. Development only - it is the
+    # API talking to itself from inside the container.
+    simulator_enrol_url: str = "http://localhost:8000"
+
     stream_revalidate_seconds: int = 60
 
     # Lifetime of a media stream ticket. Deliberately short: the ticket only has
