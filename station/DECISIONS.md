@@ -3,7 +3,7 @@
 Three lists. The first is what `contract/enrolment.md` §9 says needs a human —
 no answers invented, only what the station does in the absence of one. The
 second is every choice I made that someone should confirm. The third is the
-deployment session: **items 21–34 are new, all of them need review, and none of
+deployment session: **items 21–36 are new, all of them need review, and none of
 them has been run on a Raspberry Pi.**
 
 ---
@@ -172,59 +172,39 @@ was not, it says that instead. HARDWARE.md §7 is the same register in one table
 
 ## Transport security
 
-### 21. Deployed as a systemd service, not Docker — and here is the argument
+### 21. Both a systemd unit and a container image — superseded by item 35
 
-The owner asked for an "image". I have taken that to mean *a repeatable way to
-get from a blank SD card to a running station*, and delivered it as a systemd
-unit plus an installer rather than a container.
+This item originally argued for systemd *instead of* a container. The owner
+asked about Docker twice, which is a preference and not a question, and the
+argument did not earn the right to override it. **Both paths are now built** and
+the honest comparison — including where my original reasoning was overstated —
+is item 35. This entry is kept because it is what I said at the time.
 
-**Why not Docker on this box:**
-
-- **Memory.** 1 GB total. `dockerd` plus `containerd` idle at 80–150 MB before
-  anything runs, against an agent whose whole job is ~30 MB. That is 10–15% of
-  the machine spent on a supervisor that systemd already is.
-- **Device access.** The agent needs two USB-UARTs whose names change between
-  boots, a USB SDR, and later the CSI camera. Doing that in a container means
-  `--privileged` or a growing list of `--device` flags plus udev inside the
-  container — which is strictly *less* isolation than the systemd sandbox below,
-  achieved with more moving parts.
-- **The SD card.** Overlayfs multiplies small writes, and the card is already
-  the most likely hardware failure at a remote site.
-- **ARMv7 images.** Increasingly an afterthought upstream; base images get
-  dropped, and a station that cannot pull an image is a station that cannot be
-  fixed.
-- **It would prejudge §9.5.** Containers imply a registry and a pull-based
-  update path, and the update decision is explicitly unanswered. Choosing the
-  mechanism by accident, through packaging, is the wrong way to answer it.
-
-**What the systemd unit buys instead:** `NoNewPrivileges`, `PrivateTmp`,
-`ProtectSystem=strict`, `ProtectHome`, `ProtectClock`, an empty
+What the systemd unit buys, which still stands: `NoNewPrivileges`,
+`PrivateTmp`, `ProtectSystem=strict`, `ProtectHome`, `ProtectClock`, an empty
 `CapabilityBoundingSet`, a `@system-service` syscall filter, a dedicated
-unprivileged user, and code owned by root that the agent cannot rewrite. That is
-a tighter sandbox than a default container, and it is described in one file a
-person can read.
+unprivileged user, and code owned by root that the agent cannot rewrite.
 
-**What would change my mind:** a fleet of dozens where image-based rollout and
-rollback is the update story, or a decision to run other services on the same
-box. Neither is true of one Pi 2B.
+**Confidence: untested in practice** — the unit parses cleanly under
+`systemd-analyze verify` and has never been started on a Pi.
 
-**Confidence: high on the reasoning, untested in practice** — the unit parses
-cleanly under `systemd-analyze verify`, and has never been started on a Pi.
+### 22. TLS is mandatory, pinned, with no way to turn it off
 
-### 22. TLS is mandatory, pinned to the platform's CA, with no way to turn it off
+> **Partly superseded by item 36.** The parts about one CA covering both links,
+> the file name `platform-ca.pem` and the `GSU_TLS_TRUST` switch are all out of
+> date — the broker and the API now have separate trust roots. Everything below
+> about *refusing* is unchanged and still holds.
 
 `contract/enrolment.md` §4 says `ca_pem` is *pinned*. Implemented literally, in
 `gsu/tls.py`:
 
-- The CA is persisted at `$GSU_HOME/platform-ca.pem`, **0600**, beside the
-  credential — they are one identity.
-- Both the broker (`rediss://`) and the API (`https://`) verify against it.
-  `ssl_cert_reqs=required`, `ssl_check_hostname=True` and TLS 1.2 minimum are
+- The CA is persisted **0600**, beside the credential — they are one identity.
+  (Now `$GSU_HOME/broker-ca.pem`, and broker-only. Item 36.)
+- `ssl_cert_reqs=required`, `ssl_check_hostname=True` and TLS 1.2 minimum are
   passed **explicitly** to redis-py rather than left to its defaults, which have
   differed between versions.
-- **There is no mode that disables verification.** `GSU_TLS_TRUST` takes
-  `pinned` (default) or `system`, and `system` still verifies — it accepts any
-  CA the OS trusts, which is weaker and is reported as a health condition.
+- **There is no mode that disables verification.** (The `GSU_TLS_TRUST` switch
+  described here has since been removed entirely — item 36.)
 - **There is no plaintext fallback.** A pinned station pointed at `redis://` or
   `http://` refuses, raises `uplink.refused` (critical), records an event, logs
   `NOT PUBLISHING`, and shows `REFUSED` on the setup page — while continuing to
@@ -243,6 +223,9 @@ restart, re-pin from the persisted CA alone, and refuse a plaintext override.
 for a platform that later sits behind a public certificate. It is an escape
 hatch, and escape hatches get used.
 
+> **Resolved by item 36.** It should not, and it is gone. Splitting the two
+> trust roots removed the only legitimate use it had.
+
 ### 23. Broker URLs must carry no credentials, and the station enforces it
 
 redis-py's `ConnectionPool.from_url` ends with `kwargs.update(url_options)`, so
@@ -258,23 +241,30 @@ still connected as the station and was still refused another station's channel.
 
 *(Found by the platform side and passed on; the fix and its test are mine.)*
 
-### 24. The first enrolment call needs a CA installed out of band
+### 24. The first enrolment call needs a trustworthy connection
 
-A bootstrap problem with no clever answer: the first `POST /api/enrol` happens
-before anything has been pinned, and that call carries the enrolment token and
-receives the credential. Verifying it against the system trust store would make
-the pinning decorative.
+> **Reframed by item 36.** The bootstrap is now solved by the *public* trust
+> store in the expected deployment, and only needs a carried CA while the
+> platform serves its own certificate.
 
-So `GSU_CA_FILE` is a file the installer puts on the box, and without it the
-station **refuses** to enrol over `https://` and says what to install. The
-installer prints the CA's fingerprint and tells the operator to check it against
-the platform. That eyeball check is the root of the whole chain.
+The first `POST /api/enrol` carries the enrolment token and receives the
+credential, over a connection that must already be trustworthy. Two ways to get
+one, and the second is much better:
 
-**Needs review:** this is the one manual verification step in the procedure. If
-the CA is emailed to the technician alongside the code, it is not really out of
-band, and the pinning is worth less than it looks.
+1. **A CA carried to the box** (`GSU_API_CA_FILE`), fingerprint checked by eye
+   against a channel that did not deliver the file. Necessary today. The one
+   manual verification step in the whole procedure — and if the CA is emailed to
+   the technician alongside the code, it is not really out of band and is worth
+   less than it looks.
+2. **A public certificate on a real domain**, verified against the system trust
+   store. The bootstrap was then done years in advance by the OS vendor, and
+   there is nothing to carry, check or get wrong. This is where the platform is
+   going, and it is a good reason to go there.
 
-### 25. Precedence: installed CA, then persisted CA, then nothing
+The broker's CA has no bootstrap problem either way: it arrives inside the
+enrolment response, which was itself verified.
+
+### 25. Broker CA precedence: installed, then persisted, then nothing
 
 An installed `GSU_CA_FILE` wins over the one from enrolment, because it was put
 there deliberately by a person. A CA arriving in a response that *differs* from
@@ -282,6 +272,10 @@ the stored one is accepted — the response carrying it was itself verified — 
 logged as a warning and recorded as an event, because a rotation and somebody
 else's certificate look identical from here. A pinned CA that has gone missing
 is a refusal, never a fallback.
+
+Note what this does *not* do: the CA from an enrolment response never becomes
+the API's trust root. One CA arriving over a channel must not silently become
+the root for that same channel.
 
 ## Deployment
 
@@ -412,3 +406,118 @@ The RTC breaks that circle without needing the network or a sky view, and it is
 still worth having after GPS because the kernel reads it in the first second of
 boot while a cold GPS fix takes minutes, and the agent is trying to renew a
 credential in between.
+
+---
+
+# Second pass — the container path, and splitting the trust roots
+
+## 35. Docker: it works, it is built, and here are the real costs
+
+**Supersedes item 21.** I argued against a container and I was asked twice for
+one, which means the argument was not carrying its weight. Both paths now exist:
+`deploy/Dockerfile` and `deploy/docker-compose.yml` alongside the systemd unit.
+Neither is a fallback for the other, and DEPLOYMENT.md §16 compares them where
+somebody deploying will actually read it.
+
+**Docker does work on a Pi 2B.** Here is what I claimed before, and what is
+actually true:
+
+| I said | Actually |
+|---|---|
+| "ARMv7 images are increasingly an afterthought" | **Wrong enough to matter.** `python:3.11-slim-bookworm` publishes `linux/arm/v7` today. Verified at the registry: manifest `sha256:d2091b0d…`, 39.9 MB compressed across 4 layers. The image is pinned by its multi-arch index digest so `--platform` still resolves |
+| "`dockerd` + `containerd` idle at 80–150 MB" | **Directionally right, imprecisely stated.** 50–100 MB is the better range. I could not measure it here — the Docker daemon is not reachable from this machine — so it stays an estimate and is labelled as one |
+| "containers mean `--privileged` or a growing list of `--device` flags" | **Half right, and the wrong half was doing the work.** No `privileged: true` is needed and none is used. The device list *is* the cost, but the specific problem is not privilege — see below |
+| "overlayfs multiplies small writes" | True but minor next to the real SD-card risk, which is **unrotated container logs**. Docker's `json-file` driver has no rotation by default; an unrotated log will eventually fill the card and take the site down. `max-size: 10m, max-file: 3` is configured |
+| "it would prejudge §9.5" | **Still true, and still worth saying** — but it is an argument for not *deciding* the update path, not for refusing to build the packaging. Containers make updates and rollback genuinely easier, which is an argument *for* them that I under-weighted |
+
+**Where the container path is actually weaker, which is device handling:**
+
+- **A mapped device that does not exist prevents the container from starting.**
+  On the systemd path a missing UART is a health condition the station reports
+  and recovers from on its own when somebody plugs it in. In a container it is a
+  box that will not come up. For a station with two USB-UARTs that are sometimes
+  unplugged, that is a real regression in unattended behaviour.
+- **A device replugged while running is invisible** until the container is
+  recreated, because the device cgroup is fixed at start. The agent's 30-second
+  rediscovery loop cannot help it.
+- **`/dev/serial/by-id` needs both the symlink directory and the target nodes**
+  mapped — the symlinks are relative and resolve inside the container. It works;
+  it is two coupled bits of configuration instead of none.
+- **The SDR cannot be mapped by node.** libusb needs
+  `/dev/bus/usb/<bus>/<device>` and the device number changes on every
+  re-enumeration, so today's node stops working after a replug. The workable
+  answer is to map the whole USB bus with a cgroup rule for major 189, which is
+  broader than one dongle. Written into the compose file, commented, because
+  there is no SDR driver in this build. **This is a genuine finding rather than
+  a failure to configure it properly.**
+
+**Recommendation: systemd for this one station, narrowly.** The deciding row is
+unattended device behaviour, not memory or ideology. **If the fleet grows or the
+update path lands on image pulls, switch** — the container is built, the sandbox
+is comparable (`read_only`, `cap_drop: ALL`, `no-new-privileges`), and rollback
+is better.
+
+**What I could not test: all of it.** `docker info` returns a permission error
+on this machine, so the image has never been built and the container has never
+been started, on any architecture. The compose file validates against the schema
+(`docker compose config`); the ARMv7 base image is verified at the registry.
+Everything about the runtime behaviour of the device mappings is reasoned from
+documentation. Expect an hour on those specifically.
+
+## 36. Two trust roots: the broker is pinned, the API is not by default
+
+**This corrects a real design error of mine.** I used `broker.ca_pem` to verify
+both the broker and the platform API. The field is named for the broker because
+that is what it is, and the platform is moving its API behind a TLS-terminating
+reverse proxy with a public certificate — at which point pinning the API to the
+broker's private CA would have failed every station at once, with a certificate
+error and no obvious cause.
+
+| | Verified against | Configured by |
+|---|---|---|
+| **Broker** `rediss://` | a pinned private CA, **always** | nothing: `broker.ca_pem` from enrolment, persisted 0600 at `$GSU_HOME/broker-ca.pem` |
+| **Platform API** `https://` | the **system CA bundle** by default | `GSU_API_CA_FILE` to pin instead |
+
+Three consequences worth stating:
+
+- **The API is not weakened by this.** A public certificate for a real domain
+  verified against a well-audited root store is what that store is for. What
+  would weaken it is pinning to a CA that is not the one answering, which is an
+  outage wearing a security costume.
+- **Pinning the API stays possible and is currently correct**, because the
+  platform still serves its own certificate on `https://192.168.2.49:8000`. The
+  migration is one commented line in the environment file, in both directions.
+- **`GSU_TLS_TRUST` is gone.** It was a global pinned/system switch, and I
+  flagged it for review last night as an escape hatch that would get used.
+  Splitting the roots removed the only legitimate reason for it — a
+  publicly-signed platform — so the switch went with it. The broker now has no
+  system-trust option at all, which is the right shape: it is a private service
+  with a private CA, and "any CA the OS trusts" is not a description of it.
+
+**Also deliberate: a pinning request that cannot be honoured is a refusal, not a
+downgrade.** `GSU_API_CA_FILE` pointing at an unreadable file raises a critical
+health condition and refuses the connection. It does *not* quietly fall back to
+the system bundle — the operator asked for something specific, and silently
+doing something weaker than they asked for is the exact failure this module
+exists to prevent.
+
+**Verified** against a live self-signed platform and a TLS-only broker: the two
+roots resolve independently; the broker still pins from the enrolment response
+and survives a restart; the API is refused when unpinned against a self-signed
+certificate and accepted when pinned; the refusal messages name the right
+environment variable for each link. 14 end-to-end checks plus 26 unit tests.
+**On x86-64 — not on ARM.**
+
+## 37. The DEMO badge: no change needed here, and worth recording why
+
+The platform showed a bench station as connected with no DEMO badge while every
+device it reported was `simulated-*`. The station side was correct — `health`
+carries `devices[].simulated` per slot and always has — and the console was
+reading the platform's own record instead. Fixed on the platform side.
+
+Recorded because it is the same failure this station keeps guarding against,
+seen from the other end: **the honest signal existed and the consumer did not
+read it.** That is an argument for `CONTRACT-QUESTIONS.md` item 5 — the `health`
+kind is still not in the platform's `KNOWN_KINDS`, so the structured device
+inventory the station publishes every 30 seconds is dropped on arrival. This is
+the second time that data would have answered a question somebody had.

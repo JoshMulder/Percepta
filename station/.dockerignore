@@ -1,0 +1,15 @@
+# Build context is station/. Keep out of the image everything that is either a
+# secret, a different box's identity, or dead weight on an ARMv7 build.
+
+# The credential, the pinned CA, the device inventory, the event database and
+# the recordings. Shipping one station's identity inside an image that is then
+# run on another box is exactly the failure enrolment exists to prevent.
+var/
+
+.venv/
+__pycache__/
+*.pyc
+tests/
+deploy/wheels/
+docker-compose.yaml
+.gitignore

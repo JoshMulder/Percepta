@@ -36,20 +36,29 @@ and the installer refuses rather than half-working.
 
 **From the platform admin, before you go anywhere**
 
-1. **The platform CA**, as a PEM file. This is the one thing you must carry with
-   you: the first enrolment call happens before the station has pinned anything,
-   so it can only be verified against a CA installed out of band.
-2. **Its SHA-256 fingerprint**, told to you separately from the file itself —
-   read out, or from a message you already trust. Checking the file against
-   itself proves nothing.
-3. **The platform URL and the broker URL**, with ports. For example
+1. **The platform URL and the broker URL**, with ports. For example
    `https://platform.example.net:8000` and `rediss://platform.example.net:6380/0`.
+   They may be different hosts — the API is moving behind a reverse proxy and
+   the broker is not.
+2. **Whether the API has a public certificate yet.** If it is still serving its
+   own, you need its CA as a PEM file and its SHA-256 fingerprint. See §4.
+3. **Its SHA-256 fingerprint**, told to you separately from the file itself —
+   read out, or from a message you already trust. Checking a file against itself
+   proves nothing.
 4. **A station record** created in the right organisation, and **an enrolment
    code** for it. The code is short-lived — 24 hours by default — so get it when
    you are ready to use it, not a fortnight before (`DECISIONS.md`, open
    decision 3).
 
+You do **not** need to carry the broker's CA. It arrives in the enrolment
+response and is pinned from then on.
+
 You never type the station's UUID. It comes back in the enrolment response.
+
+**Two deployment paths, both supported.** §1–§15 describe the systemd service.
+**§16 describes the container**, and compares the two. Read §16 first if you
+have a preference; the rest of the runbook is the same either way from §4
+onwards.
 
 ---
 
@@ -107,7 +116,11 @@ another is precisely what enrolment exists to prevent.
 ## 3. Install
 
 ```bash
-sudo /tmp/station/deploy/install.sh --ca /tmp/platform-ca.pem
+# While the platform serves its own certificate (the arrangement today):
+sudo /tmp/station/deploy/install.sh --api-ca /tmp/platform-api-ca.pem
+
+# Once it is behind a proxy with a public certificate:
+sudo /tmp/station/deploy/install.sh
 ```
 
 It is idempotent — re-run it to upgrade — and it never overwrites
@@ -120,15 +133,15 @@ What it does:
 | `/opt/percepta/station` | the code, owned by root and **not writable by the agent** |
 | `/opt/percepta/station/.venv` | Python environment with one dependency, `redis` |
 | `/etc/percepta/gsu.env` | configuration, `0640 root:gsu` |
-| `/etc/percepta/platform-ca.pem` | the CA you carried in |
-| `/var/lib/percepta-gsu` | state: credential, pinned CA, inventory, events, recordings. `0700 gsu` |
+| `/etc/percepta/platform-api-ca.pem` | the API's CA, if you pinned it |
+| `/var/lib/percepta-gsu` | state: credential, pinned broker CA, inventory, events, recordings. `0700 gsu` |
 | user `gsu` | system account, no login, in `dialout`, `video`, `plugdev` |
 | `/etc/systemd/system/gsu.service` | the unit, enabled but not started |
 | `/etc/udev/rules.d/99-percepta-sdr.rules` | so the SDR is readable without root |
 
-**Check the CA fingerprint it prints against the one you were told.** This is
+**Check any CA fingerprint it prints against the one you were told.** This is
 the only step in the whole procedure that a person has to verify by eye, and
-everything else rests on it.
+what follows rests on it.
 
 No network at the site? `pip download -r requirements.txt -d deploy/wheels` on a
 machine that has one, copy `deploy/wheels` across, and use `--offline`.
@@ -146,11 +159,36 @@ The shipped file points at `example.net`. Set at least:
 ```sh
 GSU_PLATFORM_URL=https://platform.example.net:8000
 GSU_BROKER_URL=rediss://platform.example.net:6380/0
-GSU_CA_FILE=/etc/percepta/platform-ca.pem
 GSU_REQUIRE_TLS=1
+
+# Only while the platform serves its own certificate:
+GSU_API_CA_FILE=/etc/percepta/platform-api-ca.pem
 ```
 
-Host and port are both yours to set on both URLs.
+Host and port are both yours to set on both URLs, and they may be different
+hosts.
+
+### The two trust roots, because they are not the same root
+
+This trips people up once and then never again, so it is worth the paragraph.
+
+| | Verified against | You configure |
+|---|---|---|
+| **Broker** `rediss://` | a **pinned private CA**, always | nothing — it arrives in the enrolment response and is persisted at `$GSU_HOME/broker-ca.pem`, 0600 |
+| **Platform API** `https://` | the **system CA bundle** by default | `GSU_API_CA_FILE` to pin it instead |
+
+`broker.ca_pem` in the enrolment response is the **broker's** trust root. The
+field is named for what it is. Using it for the API as well works only for as
+long as the two share a certificate authority, and breaks the day the API moves
+behind a proxy with a public certificate — with a certificate error and no
+obvious cause.
+
+**Today the platform serves its own certificate**, so pin the API with
+`GSU_API_CA_FILE`. **When the proxy lands**, comment that line out and the
+system bundle takes over. That is the whole migration.
+
+Neither setting can disable verification, and neither will fall back to
+plaintext. There is no third option and there is deliberately no flag for one.
 
 **`GSU_BROKER_URL` must be an address and nothing else.** Not a username, not a
 password. redis-py lets a URL override the credentials passed alongside it, so a
@@ -183,8 +221,8 @@ Clock
   PASS  disciplined by ntp
   WARN  no hardware RTC
 Trust
-  PASS  CA pinned from installed
-        SHA-256 50:03:05:1A:...
+  WARN  broker: no CA pinned yet   (arrives in the enrolment response)
+  PASS  platform API: CA pinned    SHA-256 50:03:05:1A:...
   PASS  platform API: https://…    verified …, certificate CN=…
   WARN  broker: no address yet     not enrolled
 Identity
@@ -195,6 +233,9 @@ Devices
   FAIL  adsb: uAvionix ping RX Pro …: no serial port set for this device
   FAIL  radio: RTL-SDR airband …: not supported by this software build
 ```
+
+Once the proxy is in front of the API, the second line reads `platform API:
+system CA bundle` instead, and that is also a PASS.
 
 The last two are dealt with in §8 and §10. Anything under **Trust** that fails
 must be fixed here, not later.
@@ -227,7 +268,9 @@ and press the button. Watch for:
 
 - **Enrolled** → yes
 - **Link to the platform** → up
-- **Uplink security** → `TLS, CA pinned 50:03:05:1A:…`
+- **Broker security** → `TLS, CA pinned 50:03:05:1A:…`
+- **Platform API security** → `TLS, public certificate`, or `TLS, CA pinned …`
+  if you pinned it
 
 Headless alternative, over SSH:
 
@@ -297,7 +340,8 @@ journalctl -u gsu -n 50
 Look for, in order:
 
 ```
-TLS trust: pinned CA from installed, SHA-256 …
+Broker TLS trust: pinned CA from enrolment, SHA-256 …
+Platform API TLS trust: system CA bundle (public certificate, not pinned)
 Station <name> (<uuid>) attached: publishing to gsu/<uuid>/telemetry …
 Subscribed to cmd/gsu/<uuid> as gsu:<uuid>.
 ```
@@ -305,9 +349,9 @@ Subscribed to cmd/gsu/<uuid> as gsu:<uuid>.
 Then `systemctl status gsu` should show `active (running)` with a low restart
 count.
 
-**On the setup page** — the six rows that matter: Enrolled *yes*, Link *up*,
-Uplink security *TLS, CA pinned*, Clock kept by *NTP*, Telemetry sent
-*increasing*, Dropped *not increasing*.
+**On the setup page** — the rows that matter: Enrolled *yes*, Link *up*, Broker
+security *TLS, CA pinned*, Platform API security *TLS*, Clock kept by *NTP*,
+Telemetry sent *increasing*, Dropped *not increasing*.
 
 **From the platform side** the station goes online on its own: the ingest writes
 `last_seen_at` from the telemetry itself, and there is no separate heartbeat.
@@ -399,6 +443,8 @@ and cleared when it goes away.
 |---|---|
 | `uplink.refused` | The station will not connect on these terms and is publishing nothing. A plaintext URL on a pinned box, or no CA. Not a network fault |
 | `uplink.tls_failed` | The broker's certificate did not verify against the pinned CA |
+| `tls.api_trust_unusable` | `GSU_API_CA_FILE` is set to something unreadable. It does **not** fall back to the system bundle — you asked for pinning |
+| `tls.broker_trust_unusable` | `GSU_CA_FILE` is set to something unreadable |
 | `uplink.down` | No route to the broker. Weather, an obstruction, a dead link |
 | `credential.renewal_failing` | Renewal is failing. Warning, escalating to critical inside six hours of expiry |
 | `credential.revoked` | The platform no longer accepts this station. Needs a new code |
@@ -406,7 +452,6 @@ and cleared when it goes away.
 | `clock.unsynchronised` | Nothing is disciplining the clock |
 | `devices.absent` | Something configured is not answering |
 | `telemetry.unsourced` | Streams with no source at all. Expected on this build for `radio` |
-| `tls.not_pinned` | Verifying against the OS CA bundle rather than the platform's |
 
 The same list is on the setup page under **Needs attention**, which works with
 no link at all.
@@ -430,23 +475,32 @@ with `pgrep -af "gsu run"`, then start again. Two agents on one station publish
 two independent worlds onto one channel and the console alternates between them.
 
 **Nothing is being published, and the link looks fine.**
-Check **Uplink security** on the setup page. `uplink.refused` means the station
+Check **Broker security** on the setup page. `uplink.refused` means the station
 decided not to connect — which is a configuration fault, not a network one. The
 message names the fix.
 
-**The certificate does not verify.**
-Compare fingerprints; the station prints the one it has pinned:
+**The certificate does not verify — first work out which link.** They have
+different roots and different fixes, and the message says which one it is.
+
+*The broker.* Compare fingerprints; the station prints the one it has pinned:
 
 ```bash
-sudo -u gsu ... python -m gsu preflight        # prints the pinned fingerprint
+sudo -u gsu ... python -m gsu preflight        # prints both pinned fingerprints
 openssl s_client -connect <host>:6380 -showcerts </dev/null 2>/dev/null \
   | openssl x509 -noout -issuer -fingerprint -sha256
 ```
 
-If the platform's CA has been rotated, re-enrol: the new CA arrives in the
-enrolment response and is pinned from then on. **Do not** work around it with
-`GSU_TLS_TRUST=system` — that accepts any CA the OS trusts and hides exactly the
-fault you are looking at.
+If the broker's CA has been rotated, re-enrol: the new CA arrives in the
+enrolment response and is pinned from then on.
+
+*The platform API.* Almost always one of two things. Either the platform still
+serves its own certificate and `GSU_API_CA_FILE` is not set — set it. Or a proxy
+with a public certificate has landed and `GSU_API_CA_FILE` is *still* set to the
+old private CA — comment it out and let the system bundle verify.
+
+**There is no setting that skips verification, and adding one would be the wrong
+fix.** A station that accepts any certificate hides exactly the fault you are
+looking at, and hides it everywhere, for ever.
 
 A CA that `redis-cli --cacert` accepts may still be rejected by Python, which
 requires `basicConstraints` and `keyUsage` on a CA certificate. If `redis-cli`
@@ -468,7 +522,7 @@ recording throughout; it is cut off, not disabled.
 
 ```bash
 sudo systemctl stop gsu
-sudo rm /var/lib/percepta-gsu/credential.json /var/lib/percepta-gsu/platform-ca.pem
+sudo rm /var/lib/percepta-gsu/credential.json /var/lib/percepta-gsu/broker-ca.pem
 sudo systemctl start gsu
 ```
 
@@ -512,6 +566,130 @@ the only control it has (`DECISIONS.md`, open decision 2).
 
 ---
 
+## 16. The container path
+
+Both paths are supported and neither is a fallback for the other. Use this
+section to choose; everything from §4 onwards applies either way.
+
+**Recommendation: systemd for this station.** Not by much, and the reasons are
+specific rather than ideological — they are in the table below and in
+`DECISIONS.md` item 35. If you are heading towards a fleet with image-based
+rollout, or you want the update story containers give you, the container path is
+built and is a reasonable choice today.
+
+### The tradeoff, honestly
+
+| | systemd | container |
+|---|---|---|
+| Memory before the agent starts | ~0 | **50–100 MB** for `dockerd` + `containerd`, of 1 GB |
+| Install size | ~15 MB | **~40 MB compressed** to pull, more on disk |
+| A device that is absent at start | health condition; recovers on its own when plugged in | **the container will not start** |
+| A device replugged while running | picked up within 30 s | **not visible until the container is recreated** |
+| SD card writes | journald, rotated by default | image layers, container logs (**rotation must be configured, and is here**), plus the writable layer |
+| Sandbox | `ProtectSystem=strict`, empty capability set, syscall filter | `read_only`, `cap_drop: ALL`, `no-new-privileges`. Comparable; the syscall filter is coarser |
+| Rollback | reinstall the previous copy | **retag and restart — genuinely better** |
+| Update path | `rsync` + re-run the installer | pull a digest. **Better, and §9.5 is still open, so this is an argument rather than a decision** |
+| ARMv7 support | native | `python:3.11-slim-bookworm` publishes `linux/arm/v7`; **verified against the registry** |
+
+**Docker does work on a Pi 2B.** The costs above are real but none of them is
+disqualifying, and the update story is a genuine argument in its favour. The
+device handling is where it is weakest, and that is the row that decided the
+recommendation: this station has two USB-UARTs that are sometimes unplugged, an
+SDR that re-enumerates, and nobody on site.
+
+### Running it
+
+```bash
+sudo apt install -y docker.io docker-compose-v2
+sudo systemctl enable --now docker
+
+# Same as the systemd path — the installer still lays down /etc/percepta and
+# /var/lib/percepta-gsu, which the container binds:
+sudo /tmp/station/deploy/install.sh --api-ca /tmp/platform-api-ca.pem
+sudo systemctl disable --now gsu      # only one of the two may run at a time
+
+cd /opt/percepta/station
+sudo nano deploy/docker-compose.yml   # SEE BELOW — this needs editing
+sudo docker compose -f deploy/docker-compose.yml build
+sudo docker compose -f deploy/docker-compose.yml up -d
+```
+
+Subcommands work as they do everywhere else:
+
+```bash
+sudo docker compose -f deploy/docker-compose.yml run --rm gsu preflight --probe
+sudo docker compose -f deploy/docker-compose.yml run --rm gsu enrol --token XXXX-XXXX-XXXX
+sudo docker compose -f deploy/docker-compose.yml logs -f
+```
+
+Building on the Pi itself is fine — one pure-Python dependency, nothing
+compiles. To build elsewhere: `docker buildx build --platform linux/arm/v7`.
+
+### What you must edit before it will start
+
+**`devices:` in `docker-compose.yml` has to match the box.** Docker refuses to
+start a container whose mapped device does not exist, so a station with only one
+UART plugged in will not come up until the other line is commented out. This is
+the sharpest difference from the systemd path, where a missing device is a
+health condition the station reports and recovers from on its own.
+
+**`group_add` must carry the host's numeric gids**, not names — group names
+resolve inside the container, where they differ. Check with `getent group
+dialout plugdev video`.
+
+**The SDR is commented out.** libusb needs `/dev/bus/usb/<bus>/<device>` and the
+device number changes on every re-enumeration, so mapping today's node stops
+working after a replug. Mapping the whole USB bus with a cgroup rule is the
+workable answer and is written in the file, commented, ready for when there is a
+driver. It is broader access than one dongle; that is the honest cost.
+
+**The camera is commented out** for the same reason plus one more: on Bookworm
+it is libcamera and needs several nodes (`/dev/video0`, `/dev/media0`,
+`/dev/dma_heap/*`), and there is no driver in this build to open any of them.
+
+### What I could not test
+
+**None of this has been run.** The Docker daemon is not reachable from the
+machine this was written on — `docker info` returns a permission error — so:
+
+- the image has **never been built**, on any architecture;
+- the container has **never been started**, so the device mappings, the
+  `group_add` gids, the `read_only` filesystem and the tmpfs are all reasoned
+  from documentation rather than observed;
+- the ARMv7 claim is **verified at the registry** (`python:3.11-slim-bookworm`
+  publishes `linux/arm/v7`, manifest `sha256:d2091b0d…`, 39.9 MB compressed) and
+  nowhere else;
+- the memory figure for the daemon is **an estimate from published figures**,
+  not a measurement.
+
+What *was* checked: the compose file validates against the schema
+(`docker compose config`), and the Dockerfile is a straightforward read. The
+first person with the hardware should expect to spend an hour on the device
+mappings specifically.
+
+---
+
+## 17. Backups
+
+**Scheduled on the platform, not here.** Nothing in this runbook backs anything
+up and nothing should be read as implying otherwise.
+
+What lives only on the station, and what it costs to lose:
+
+| | If the SD card dies |
+|---|---|
+| Credential and pinned broker CA | re-enrol with a new code. Minutes |
+| Device inventory | re-enter the serial ports on the setup page. Minutes |
+| Event database | **lost.** Proximity alerts and outage records for the retention window |
+| Audio recordings | **lost.** Up to 24 h / 200 MB |
+
+Neither of the last two has a channel to the platform yet — that is
+`CONTRACT-QUESTIONS.md` item 4, still open — so a card failure loses them. That
+is an argument for the event channel, not for backing up an SD card in the
+field.
+
+---
+
 ## Appendix: everything in one place
 
 ```bash
@@ -519,10 +697,10 @@ the only control it has (`DECISIONS.md`, open decision 2).
 /opt/percepta/station                    code (root-owned, not agent-writable)
 /opt/percepta/station/.venv/bin/python   the interpreter the service runs
 /etc/percepta/gsu.env                    configuration        0640 root:gsu
-/etc/percepta/platform-ca.pem            the CA you carried in
+/etc/percepta/platform-api-ca.pem        the API's CA, if pinned
 /var/lib/percepta-gsu/                   state                0700 gsu
   credential.json                        the station's identity   0600
-  platform-ca.pem                        the pinned CA            0600
+  broker-ca.pem                          the pinned broker CA     0600
   devices.json                           what is fitted
   station.db                             events
   recordings/                            audio

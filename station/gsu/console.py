@@ -277,10 +277,12 @@ class Console:
              "ok" if state["enrolled"] else "warn"),
             ("Link to the platform", "up" if state["link"] else "down",
              "ok" if state["link"] else "bad"),
-            # Whether the uplink is encrypted and verified, in the same list as
-            # everything else a technician checks before leaving site. It is
-            # not a question that should need a packet capture to answer.
+            # Whether each link is encrypted and verified, in the same list as
+            # everything else a technician checks before leaving site. Neither
+            # is a question that should need a packet capture to answer, and
+            # they are separate rows because they have separate trust roots.
             self._security_row(security, trust),
+            self._api_security_row(state, security),
             ("Telemetry sent", f"{state['published']} frames", "ok"),
             ("Dropped while offline", f"{state['dropped']} frames",
              "ok" if not state["dropped"] else "warn"),
@@ -316,18 +318,37 @@ class Console:
         two need completely different people called.
         """
         if security.get("tls_failed"):
-            return ("Uplink security",
+            return ("Broker security",
                     "REFUSED — the broker's certificate did not verify", "bad")
         if not security.get("publishing") and security.get("broker_url"):
-            return ("Uplink security", "REFUSED — see the conditions below", "bad")
+            return ("Broker security", "REFUSED — see the conditions below", "bad")
         if security.get("broker_tls") is None:
-            return ("Uplink security", "no broker yet", "warn")
+            return ("Broker security", "no broker yet", "warn")
         if not security.get("broker_tls"):
-            return ("Uplink security", "PLAINTEXT — development only", "bad")
+            return ("Broker security", "PLAINTEXT — development only", "bad")
         if trust.get("mode") == "system":
-            return ("Uplink security", "TLS, system CA bundle (not pinned)", "warn")
+            return ("Broker security", "TLS, system CA bundle (not pinned)", "warn")
         fingerprint = (trust.get("fingerprint") or "")[:23]
-        return ("Uplink security", f"TLS, CA pinned {fingerprint}…", "ok")
+        return ("Broker security", f"TLS, CA pinned {fingerprint}…", "ok")
+
+    @staticmethod
+    def _api_security_row(state: dict, security: dict) -> tuple[str, str, str]:
+        """The other half, which has a different trust root and different fixes.
+
+        Shown even though the API is only used at enrolment and renewal: a
+        station whose renewal is quietly failing on a certificate has weeks
+        before anyone finds out the hard way, and this is where somebody would
+        look first.
+        """
+        api = security.get("api_trust") or {}
+        if not security.get("platform_tls"):
+            return ("Platform API security", "PLAINTEXT — development only", "bad")
+        if api.get("mode") == "system":
+            return ("Platform API security", "TLS, public certificate", "ok")
+        if not api.get("fingerprint"):
+            return ("Platform API security", "pinning asked for, CA unusable", "bad")
+        return ("Platform API security",
+                f"TLS, CA pinned {(api.get('fingerprint') or '')[:23]}…", "ok")
 
     @staticmethod
     def _clock_wording(state: dict) -> str:

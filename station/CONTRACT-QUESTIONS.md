@@ -318,34 +318,50 @@ rotated by somebody who has not hit it before.
 *(Found and fixed on the platform side already; writing it down is what stops it
 recurring at the next rotation.)*
 
-### 10b. `ca_pem` is scoped under `broker` and is used for the API too
+### 10b. `ca_pem` is the broker's root, and the contract should say so out loud
 
-§4 puts `ca_pem` inside the `broker` object, and its comment says "the station
-verifies the platform" — the broker's CA, described as verifying the platform.
-In practice one CA signs both, and the station uses it for both. That works, but
-it is inferred rather than stated, and a deployment that later fronts the API
-with a different certificate would break stations silently.
+§4 puts `ca_pem` inside the `broker` object, and its comment says "pinned; the
+station verifies the platform" — the broker's CA, described as verifying the
+platform. I read that as "one CA signs both" and used it for the API as well.
+**That was wrong**, and it would have failed every station at once the day the
+API moved behind a reverse proxy with a public certificate.
 
-**Proposed, additive:** either a sentence in §4 saying explicitly that the same
-CA signs the API and the broker, or a `platform.ca_pem` alongside it for the day
-they differ. The station reads `broker.ca_pem` today and would read either.
+The station now keeps two roots: the broker is always pinned to `broker.ca_pem`,
+and the API is verified against the system trust store unless a CA is configured
+for it locally (`DECISIONS.md` item 36).
 
-### 10c. Nothing says how the CA gets onto the box for the *first* call
+**Proposed:** correct the comment on `ca_pem` to say what the field is — *the
+broker's trust root* — and add a sentence stating that the API's certificate is
+a deployment concern, not something enrolment describes. The current wording
+actively invites the mistake I made, and the next person to implement a station
+from this document will make it too.
 
-The first `POST /api/enrol` happens before anything has been pinned, and that
-call carries the enrolment token and receives the credential. If it is verified
-against the system trust store, the pinning that follows is decorative — the
-identity was handed over on a connection nobody checked.
+If the platform ever *does* want to pin the API from enrolment, that wants its
+own field (`platform.ca_pem`) rather than reuse of this one, so that the two can
+diverge without an ambiguity.
 
-The station's answer is `GSU_CA_FILE`: a CA installed with the image or carried
-by the technician, and a refusal to enrol over `https://` without one. §5 says
-what the technician does and does not mention carrying a CA; §3 discusses
-credential types and not trust roots.
+### 10c. Nothing says how a trust root gets onto the box before it is needed
 
-**Proposed:** a paragraph in §5 stating that the platform CA is provisioned out
-of band, before enrolment, and that its fingerprint is verified by a person
-against a channel that is not the same one that delivered the file. That last
-part is the whole root of the chain and it is currently nobody's documented job.
+Two bootstraps, and neither is documented.
+
+**The API.** The first `POST /api/enrol` carries the enrolment token and
+receives the credential, over a connection that must already be trustworthy. A
+public certificate on a real domain solves this completely — the system trust
+store is the out-of-band provisioning, done years in advance by the OS vendor.
+That is now the expected arrangement and is a good reason to prefer it. But
+**while the platform serves its own certificate**, the CA must be carried to the
+box and verified by eye, and nothing in §5 says so.
+
+**The broker.** Bootstraps cleanly — `broker.ca_pem` arrives inside the
+already-verified enrolment response. Worth stating explicitly, because it is the
+part that reassures somebody reading §4 that there is no circularity.
+
+**Proposed:** a paragraph in §5 covering both: that the broker's CA arrives with
+enrolment and needs no provisioning, and that a platform not fronted by a
+publicly-trusted certificate requires its CA to be installed out of band with
+its fingerprint verified by a person against a channel that did not deliver the
+file. That last part is the root of the whole chain and is currently nobody's
+documented job.
 
 ### 10d. `broker.url` must be credential-free, and it is worth saying why
 
@@ -371,7 +387,9 @@ document as it stands would treat the CA as optional — which is precisely the
 "do not require verification" behaviour the pinning exists to prevent.
 
 **Proposed:** delete both notes and replace them with the requirement: a station
-**must** pin `ca_pem`, **must** verify the broker and the API against it, and
-**must not** fall back to plaintext or to the system trust store if verification
+**must** pin `broker.ca_pem`, **must** verify the broker against it, and **must
+not** fall back to plaintext or to the system trust store if that verification
 fails. `transport.md`'s "Broker" section, which still says "Redis pub/sub
-today", could say Redis-over-TLS in the same commit.
+today", could say Redis-over-TLS in the same commit — and its "Identity" section
+still says enrolment "is not built yet on either side", which is two revisions
+out of date.

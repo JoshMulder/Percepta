@@ -176,8 +176,10 @@ GSU_BROKER_URL=redis://127.0.0.1:6380/0 .venv/bin/python -m gsu run
 ```
 
 **To put one on a Raspberry Pi, read `DEPLOYMENT.md`.** It goes from a blank SD
-card to an enrolled station: `deploy/install.sh`, a systemd unit, and what to
-check before driving away.
+card to an enrolled station, and covers **both supported paths** — a systemd
+service (`deploy/install.sh`) and a container (`deploy/Dockerfile`,
+`deploy/docker-compose.yml`) — with the tradeoff between them in §16 and in
+DECISIONS.md item 35.
 
 `GSU_BROKER_URL` overrides only the broker *address* — an address and nothing
 else, never credentials — and the username and topics still come from enrolment.
@@ -188,11 +190,13 @@ Other environment: `GSU_HOME` (state directory), `GSU_PLATFORM_URL`,
 `GSU_SETUP_HOST`/`GSU_SETUP_PORT`/`GSU_SETUP=0`, `GSU_AIRBAND_TRAFFIC`
 (`off`/`low`/`busy`), `GSU_ENROL_TOKEN`.
 
-Trust: `GSU_CA_FILE` (a CA installed out of band, needed for the first
-enrolment call), `GSU_TLS_TRUST` (`pinned` by default, or `system`),
-`GSU_REQUIRE_TLS=1` (refuse plaintext outright). **Neither of the last two can
-turn verification off**, and nothing here falls back to plaintext when TLS
-fails — see `gsu/tls.py` and DECISIONS.md item 22.
+Trust is **two roots, not one**: the broker is always pinned to the private CA
+from `broker.ca_pem` (persisted 0600, pre-provision with `GSU_CA_FILE`), and the
+platform API is verified against the system CA bundle unless `GSU_API_CA_FILE`
+pins it — because the API is expected behind a reverse proxy with a public
+certificate. `GSU_REQUIRE_TLS=1` refuses plaintext outright. **Nothing here can
+turn verification off**, and nothing falls back to plaintext when TLS fails —
+see `gsu/tls.py` and DECISIONS.md items 22 and 36.
 
 ## Read next
 

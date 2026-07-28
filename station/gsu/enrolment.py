@@ -11,14 +11,20 @@ Written against stdlib HTTP on purpose. This runs on an unattended box that must
 boot with whatever is in the image; the fewer things that have to be installable
 in the field, the better.
 
-**All three go over TLS verified against the pinned CA** (`gsu/tls.py`), the
-same one the broker is checked with — §4 sends one `ca_pem` and one CA signs
-both. There is a bootstrap in here worth being explicit about: the *first*
-`POST /api/enrol` happens before any CA has been pinned, so it can only be
-verified against a CA installed with the image (`GSU_CA_FILE`). Without one this
-client refuses the call and says what to install, rather than reaching for the
-system trust store — that would make the pinning decorative, since the first
-call is the one that hands over a token and receives an identity.
+**All three go over TLS**, verified against the *API's* trust root — which is
+not the broker's (`gsu/tls.py`). The platform API is expected behind a
+TLS-terminating reverse proxy with a public certificate for a real domain, so
+the default here is the system CA bundle, and `GSU_API_CA_FILE` pins it instead
+for a platform serving its own certificate.
+
+`broker.ca_pem` is deliberately *not* used for this. It is the broker's root,
+the field is named accordingly, and pinning the API to it would work only for as
+long as the two happened to share an authority — then fail the day a proxy
+appeared, with a certificate error and no obvious cause.
+
+What does not change: plaintext is still refused when TLS is required,
+verification is never disabled, and a certificate that does not verify is
+reported as exactly that rather than as an unreachable platform.
 
 **Renewal is the part that strands sites.** §6 is unambiguous: renew early,
 back off, and treat failure as a health alarm long before it is an outage. The

@@ -83,8 +83,12 @@ class Agent:
         self.store = LocalStore(config.store_path, config.recordings_dir)
         self.credentials = CredentialStore(config.credential_path)
         self.ca = tls.CaStore(config.ca_path)
-        self.trust = self._resolve_trust()
-        self.client = EnrolmentClient(config.platform_url, trust=self.trust)
+        # Two roots, deliberately. The broker is pinned to a private CA; the
+        # API is verified against the system bundle unless told otherwise,
+        # because it is expected behind a proxy with a public certificate.
+        self.trust = self._resolve_broker_trust()
+        self.api_trust = self._resolve_api_trust()
+        self.client = EnrolmentClient(config.platform_url, trust=self.api_trust)
         self.inventory = Inventory(config.devices_path)
 
         self.enrolment: Enrolment | None = None
@@ -120,8 +124,8 @@ class Agent:
 
     # --- trust ----------------------------------------------------------
 
-    def _resolve_trust(self) -> tls.Trust:
-        """What this box will verify the platform and broker against.
+    def _resolve_broker_trust(self) -> tls.Trust:
+        """What the broker is verified against. Always a pinned private CA.
 
         A trust root that cannot be read is a fault to *report*, never a reason
         to proceed without one: the fallback is "no CA", which refuses every
@@ -130,35 +134,56 @@ class Agent:
         talk to anything it cannot identify.
         """
         try:
-            trust = tls.resolve(
+            trust = tls.resolve_broker(
                 self.ca,
                 installed=self.config.ca_file,
-                mode=self.config.tls_trust,
                 require_tls=self.config.require_tls,
             )
         except tls.Refusal as exc:
-            self.health.raise_condition("tls.trust_unusable", "critical", str(exc))
+            self.health.raise_condition("tls.broker_trust_unusable", "critical", str(exc))
             log.error("%s", exc)
-            return tls.Trust(require_tls=self.config.require_tls)
-        if trust.mode == tls.TRUST_SYSTEM:
-            self.health.raise_condition(
-                "tls.not_pinned", "warning",
-                "Verifying against the operating system's CA bundle rather than "
-                "the platform's own CA. Verification is on, but any CA the OS "
-                "trusts is accepted. Unset GSU_TLS_TRUST to pin.",
+            return tls.Trust(require_tls=self.config.require_tls, purpose="broker")
+        log.info("Broker TLS trust: %s.", trust.describe())
+        return trust
+
+    def _resolve_api_trust(self) -> tls.Trust:
+        """What the platform API is verified against.
+
+        The system CA bundle by default — the API is expected behind a
+        TLS-terminating proxy with a public certificate, and the public trust
+        store is the right tool for one. Pinned only when `GSU_API_CA_FILE`
+        says so, which is the correct setting while the platform serves its own
+        certificate.
+        """
+        try:
+            trust = tls.resolve_api(
+                installed=self.config.api_ca_file,
+                require_tls=self.config.require_tls,
             )
-        log.info("TLS trust: %s.", trust.describe())
+        except tls.Refusal as exc:
+            # Deliberately not a silent fall back to the system store: the
+            # operator asked for pinning and got a broken file, and quietly
+            # doing something weaker than they asked for is the whole failure
+            # mode this module exists to prevent.
+            self.health.raise_condition("tls.api_trust_unusable", "critical", str(exc))
+            log.error("%s", exc)
+            return tls.Trust(mode=tls.TRUST_PINNED, require_tls=self.config.require_tls,
+                             purpose="api")
+        log.info("Platform API TLS trust: %s.", trust.describe())
         return trust
 
     def _persist_ca(self, enrolment: Enrolment) -> None:
-        """Keep the CA from the enrolment response, and pin to it from now on.
+        """Keep the **broker's** CA from the enrolment response, and pin to it.
 
-        `contract/enrolment.md` §4 calls `ca_pem` pinned, which only means
-        anything if it is stored: a CA re-fetched over an unverified channel
-        every boot is pinned to nothing. A CA that *changes* is either a planned
-        rotation or somebody else's certificate, and from here those look
-        identical — so it is accepted (the response that carried it was itself
-        verified) and said out loud.
+        `contract/enrolment.md` §4 calls `broker.ca_pem` pinned, which only
+        means anything if it is stored: a CA re-fetched over an unverified
+        channel every boot is pinned to nothing. A CA that *changes* is either a
+        planned rotation or somebody else's certificate, and from here those
+        look identical — so it is accepted (the response that carried it was
+        itself verified) and said out loud.
+
+        This never touches the API's trust root. That one is configured locally
+        and is not something the platform gets to change by sending a field.
         """
         pem = enrolment.broker.ca_pem
         if not pem:
@@ -186,9 +211,10 @@ class Agent:
                 "tls.ca_rotated", "warning",
                 f"Pinned CA replaced; SHA-256 {tls.fingerprint(pem)}.",
             )
-        # Re-resolve so the API client and the next transport use it.
-        self.trust = self._resolve_trust()
-        self.client.trust = self.trust
+        # Re-resolve so the next transport uses it. The API client keeps its own
+        # trust: one CA arriving in a response must not silently become the root
+        # for the channel that delivered it.
+        self.trust = self._resolve_broker_trust()
 
     # --- devices --------------------------------------------------------
 
@@ -746,7 +772,11 @@ class Agent:
             "broker_url": redact_url(url),
             "broker_tls": tls.is_tls(url) if url else None,
             "platform_tls": tls.is_tls(self.config.platform_url),
+            # Two roots, reported separately. "Which CA is this box trusting"
+            # has two answers and merging them into one is what produced the
+            # arrangement this replaced.
             "trust": self.trust.to_dict(),
+            "api_trust": self.api_trust.to_dict(),
             "publishing": self.transport is not None,
             "tls_failed": bool(getattr(self.transport, "tls_failed", False)),
         }

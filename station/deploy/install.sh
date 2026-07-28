@@ -2,7 +2,15 @@
 #
 # Install the Percepta ground station agent on Raspberry Pi OS.
 #
-#   sudo ./deploy/install.sh [--ca /path/to/platform-ca.pem] [--offline]
+#   sudo ./deploy/install.sh [--broker-ca FILE] [--api-ca FILE] [--offline]
+#
+# Two CAs, because the station verifies two things against two roots:
+#   --broker-ca  the broker's private CA. Optional: it normally arrives in the
+#                enrolment response. Pre-provision it to check the broker
+#                address before enrolling.
+#   --api-ca     pins the platform API. Needed while the platform serves its
+#                own certificate; NOT needed once it is behind a proxy with a
+#                public certificate, which is the direction of travel.
 #
 # Idempotent: safe to re-run to upgrade an existing install. It never
 # overwrites /etc/percepta/gsu.env, the state directory, or an existing device
@@ -24,7 +32,8 @@ ETC=/etc/percepta
 STATE=/var/lib/percepta-gsu
 SERVICE_USER=gsu
 UNIT=gsu.service
-CA_SOURCE=""
+BROKER_CA=""
+API_CA=""
 OFFLINE=0
 # Python 3.11 or newer: the code uses datetime.UTC, which arrived in 3.11.
 # Raspberry Pi OS Bookworm ships 3.11.2. Bullseye ships 3.9 and will not run
@@ -40,10 +49,17 @@ die()  { printf '\n\033[31mERROR: %s\033[0m\n\n' "$*" >&2; exit 1; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --ca)      CA_SOURCE="${2:-}"; shift 2 ;;
-    --offline) OFFLINE=1; shift ;;
-    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
-    *)         die "unknown option: $1" ;;
+    --broker-ca) BROKER_CA="${2:-}"; shift 2 ;;
+    --api-ca)    API_CA="${2:-}"; shift 2 ;;
+    # The old spelling, from when one CA was used for both. Kept so a written
+    # note or a shell history entry does not silently install the wrong thing.
+    --ca)        die "--ca is ambiguous now that the broker and the API have
+   separate trust roots. Use --broker-ca (the broker's private CA, usually
+   delivered by enrolment) or --api-ca (pins the platform API). See
+   DEPLOYMENT.md §4." ;;
+    --offline)   OFFLINE=1; shift ;;
+    -h|--help)   sed -n '2,40p' "$0"; exit 0 ;;
+    *)           die "unknown option: $1" ;;
   esac
 done
 
@@ -143,23 +159,38 @@ else
   info "wrote $ETC/gsu.env — EDIT IT before starting: it points at example.net."
 fi
 
-if [ -n "$CA_SOURCE" ]; then
-  [ -f "$CA_SOURCE" ] || die "no such CA file: $CA_SOURCE"
-  grep -q "BEGIN CERTIFICATE" "$CA_SOURCE" || die "$CA_SOURCE is not a PEM certificate."
-  install -m 0640 -o root -g "$SERVICE_USER" "$CA_SOURCE" "$ETC/platform-ca.pem"
-  info "installed the platform CA:"
-  openssl x509 -in "$ETC/platform-ca.pem" -noout -fingerprint -sha256 2>/dev/null \
+install_ca() {   # source, destination, description
+  [ -f "$1" ] || die "no such CA file: $1"
+  grep -q "BEGIN CERTIFICATE" "$1" || die "$1 is not a PEM certificate."
+  install -m 0640 -o root -g "$SERVICE_USER" "$1" "$2"
+  info "installed the $3:"
+  openssl x509 -in "$2" -noout -fingerprint -sha256 2>/dev/null \
     | sed 's/^/      /' || true
-  info "  Check that fingerprint against the platform before enrolling. It is"
-  info "  the one thing here that a person has to verify by eye."
-elif [ -f "$ETC/platform-ca.pem" ]; then
-  info "$ETC/platform-ca.pem exists — left alone."
+}
+
+if [ -n "$BROKER_CA" ]; then
+  install_ca "$BROKER_CA" "$ETC/broker-ca.pem" "broker CA"
+  info "  Check that fingerprint against the platform. This is one of the two"
+  info "  things here a person has to verify by eye."
 else
-  info "NO PLATFORM CA INSTALLED."
-  info "  The first enrolment call happens before any CA has been pinned, so it"
-  info "  can only be verified against one installed out of band. Without it the"
-  info "  agent will refuse to enrol over https rather than trusting whatever"
-  info "  answers. Re-run with: sudo $0 --ca /path/to/ca.crt"
+  info "no broker CA pre-provisioned — normal."
+  info "  It arrives in the enrolment response and is pinned from then on."
+  info "  Pre-provision it with --broker-ca only if you want to check the broker"
+  info "  address with 'gsu preflight --probe' before enrolling."
+fi
+
+if [ -n "$API_CA" ]; then
+  install_ca "$API_CA" "$ETC/platform-api-ca.pem" "platform API CA"
+  info "  Check this fingerprint by eye too."
+elif [ -f "$ETC/platform-api-ca.pem" ]; then
+  info "$ETC/platform-api-ca.pem exists — left alone."
+else
+  info "NO PLATFORM API CA INSTALLED."
+  info "  The API is then verified against the system CA bundle, which is right"
+  info "  once it is behind a reverse proxy with a public certificate — and"
+  info "  WRONG while the platform serves its own. If enrolment fails with a"
+  info "  certificate error, that is this: re-run with --api-ca /path/to/ca.crt"
+  info "  and comment GSU_API_CA_FILE back in."
 fi
 
 # --- 5. state --------------------------------------------------------------
@@ -223,7 +254,8 @@ cat <<EOF
 
 $(printf '\033[1m==> Installed. Three things left, in order:\033[0m')
 
-  1. Edit the addresses and check the CA fingerprint:
+  1. Edit the addresses, and the trust settings if the platform is not yet
+     behind a proxy with a public certificate:
        sudo nano $ETC/gsu.env
 
   2. Check everything that must be true before it can work:

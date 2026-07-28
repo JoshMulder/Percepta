@@ -184,21 +184,32 @@ def _preflight(agent, config: AgentConfig, probe: bool) -> int:
              "See HARDWARE.md §4 — an RTC module is a few pounds.")
 
     # --- trust, before anything is sent anywhere ---
+    # Two roots, reported separately: the broker is pinned to a private CA, the
+    # API is verified against the system bundle unless pinned deliberately.
     print("\nTrust")
-    trust = agent.trust
-    if trust.mode == tls.TRUST_SYSTEM:
-        line("WARN", "system CA bundle", "Not pinned to the platform's CA.")
-    elif trust.path is None:
-        line("WARN", "no CA pinned yet",
-             "Normal before the first enrolment if the platform is plaintext. "
-             "For an https:// platform, install the CA and set GSU_CA_FILE.")
+    if agent.trust.path is None:
+        line("WARN", "broker: no CA pinned yet",
+             "The broker's CA arrives in the enrolment response. Normal before "
+             "the first enrolment; pre-provision it with GSU_CA_FILE if you "
+             "want to check the address before enrolling.")
     else:
-        line("PASS", f"CA pinned from {trust.source}",
-             f"{trust.path}\nSHA-256 {trust.fingerprint}\n"
+        line("PASS", f"broker: CA pinned from {agent.trust.source}",
+             f"{agent.trust.path}\nSHA-256 {agent.trust.fingerprint}\n"
              "Compare with: openssl x509 -in ca.crt -noout -fingerprint -sha256")
 
-    for label, url in (("platform API", config.platform_url),
-                       ("broker", broker_url)):
+    if agent.api_trust.mode == tls.TRUST_SYSTEM:
+        line("PASS", "platform API: system CA bundle",
+             "The expected setting for an API behind a reverse proxy with a "
+             "public certificate. Set GSU_API_CA_FILE to pin it instead.")
+    elif agent.api_trust.path is None:
+        line("FAIL", "platform API: pinning was asked for and is not usable",
+             "GSU_API_CA_FILE is set to something that could not be read.")
+    else:
+        line("PASS", "platform API: CA pinned",
+             f"{agent.api_trust.path}\nSHA-256 {agent.api_trust.fingerprint}")
+
+    for label, url, trust in (("platform API", config.platform_url, agent.api_trust),
+                              ("broker", broker_url, agent.trust)):
         if not url:
             line("WARN", f"{label}: no address yet",
                  "not enrolled, and no GSU_BROKER_URL set")

@@ -134,8 +134,51 @@ class PolicyTests(unittest.TestCase):
 
     def test_an_unreadable_installed_ca_is_a_refusal_not_a_fallback(self):
         store = tls.CaStore(self.home / "stored.pem")
+        missing = str(self.home / "missing.pem")
         with self.assertRaises(tls.Refusal):
-            tls.resolve(store, installed=str(self.home / "missing.pem"))
+            tls.resolve_broker(store, installed=missing)
+        # Especially for the API, where the fallback would be *silent*: the
+        # operator asked for pinning and would have got the system bundle.
+        with self.assertRaises(tls.Refusal):
+            tls.resolve_api(installed=missing)
+
+    def test_the_broker_and_the_api_have_separate_trust_roots(self):
+        # The whole point of the split. broker.ca_pem is the broker's root; the
+        # API is expected behind a proxy with a public certificate.
+        store = tls.CaStore(self.home / "stored.pem")
+        broker = tls.resolve_broker(store)
+        api = tls.resolve_api()
+        self.assertEqual(broker.mode, tls.TRUST_PINNED)
+        self.assertEqual(broker.purpose, "broker")
+        self.assertEqual(api.mode, tls.TRUST_SYSTEM)
+        self.assertEqual(api.purpose, "api")
+
+    def test_the_broker_has_no_system_trust_option(self):
+        # A private service with a private CA. "Any CA the OS trusts" is not a
+        # description of it, and there is no argument to ask for one.
+        store = tls.CaStore(self.home / "stored.pem")
+        self.assertEqual(tls.resolve_broker(store).mode, tls.TRUST_PINNED)
+        with self.assertRaises(tls.Refusal):
+            tls.resolve_broker(store).check("rediss://broker:6380/0", "the broker")
+
+    @unittest.skipUnless(HAS_OPENSSL, "needs openssl to make a certificate")
+    def test_the_api_can_be_pinned_when_the_platform_serves_its_own_cert(self):
+        api = tls.resolve_api(installed=str(make_ca(self.home, "api")))
+        self.assertEqual(api.mode, tls.TRUST_PINNED)
+        self.assertIsNotNone(api.fingerprint)
+        api.check("https://platform:8000", "the platform API")
+
+    def test_the_two_refusals_name_different_fixes(self):
+        store = tls.CaStore(self.home / "stored.pem")
+        with self.assertRaises(tls.Refusal) as broker:
+            tls.resolve_broker(store).check("rediss://b:6380/0", "the broker")
+        self.assertIn("enrolment response", str(broker.exception))
+        self.assertIn("GSU_CA_FILE", str(broker.exception))
+
+        stranded = tls.Trust(mode=tls.TRUST_PINNED, purpose="api")
+        with self.assertRaises(tls.Refusal) as api:
+            stranded.check("https://p:8000", "the platform API")
+        self.assertIn("GSU_API_CA_FILE", str(api.exception))
 
     def test_the_mandatory_redis_tls_settings_are_all_present(self):
         kwargs = tls.Trust(mode="pinned", path=self.home / "ca.pem").redis_kwargs(
@@ -272,11 +315,21 @@ class PinnedApiTests(unittest.TestCase):
         # one, and a retry loop would hide the fault behind "link down".
         self.assertFalse(caught.exception.retryable)
 
-    def test_https_with_no_ca_never_falls_back_to_the_system_store(self):
-        client = EnrolmentClient(self.url, trust=tls.Trust())
+    def test_a_self_signed_platform_is_rejected_by_the_system_bundle(self):
+        # The API's default. A public certificate for a real domain verifies;
+        # this test server's private one must not, or the default would be
+        # accepting anything.
+        client = EnrolmentClient(self.url, trust=tls.resolve_api())
         with self.assertRaises(Exception) as caught:
             client.status("secret")
-        self.assertIn("no CA to check it against", str(caught.exception))
+        self.assertIn("will not accept", str(caught.exception))
+
+    def test_pinning_asked_for_and_unusable_never_becomes_the_system_store(self):
+        stranded = tls.Trust(mode=tls.TRUST_PINNED, purpose="api")
+        client = EnrolmentClient(self.url, trust=stranded)
+        with self.assertRaises(Exception) as caught:
+            client.status("secret")
+        self.assertIn("GSU_API_CA_FILE", str(caught.exception))
 
 
 @unittest.skipUnless(HAS_OPENSSL, "needs openssl to make a certificate")
@@ -331,7 +384,8 @@ class AgentRefusalTests(unittest.TestCase):
                                   single_instance=False))
         self.enrol(agent)
         agent.shutdown()
-        stored = self.home / "platform-ca.pem"
+        # Named for the broker, because that is whose root it is.
+        stored = self.home / "broker-ca.pem"
         self.assertTrue(stored.exists())
         self.assertEqual(stored.stat().st_mode & 0o777, 0o600)
 

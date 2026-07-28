@@ -225,6 +225,91 @@ class UnitFileTests(unittest.TestCase):
         # The setup console has no authentication; it must not be shipped bound
         # to anything routable.
         self.assertIn("GSU_SETUP_HOST=127.0.0.1", env)
+        # The switch that used to be able to un-pin everything is gone.
+        self.assertNotIn("GSU_TLS_TRUST", env)
+
+
+class ContainerTests(unittest.TestCase):
+    """The container path. Never built and never run — see DECISIONS.md 35.
+
+    So these check the things a careful read can check: that the base image is
+    pinned, that the hardening matches the systemd path, that the log rotation
+    which protects the SD card is present, and that no `privileged: true` has
+    crept in to make a device mapping work.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dockerfile = (DEPLOY / "Dockerfile").read_text()
+        cls.compose = (DEPLOY / "docker-compose.yml").read_text()
+        # Asserted against the text rather than a parsed tree so that these run
+        # everywhere without adding PyYAML as a dependency. The file's *schema*
+        # was validated separately with `docker compose config`, which is the
+        # real parser; what these guard against is a line going missing.
+        cls.directives = "\n".join(
+            line for line in cls.compose.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        )
+
+    def test_the_base_image_is_pinned_by_digest(self):
+        # An unpinned base is a different station every time it is rebuilt.
+        self.assertRegex(self.dockerfile, r"FROM .*python:3\.11-slim-bookworm@sha256:[0-9a-f]{64}")
+
+    def test_it_runs_as_a_non_root_user(self):
+        self.assertIn("USER gsu", self.dockerfile)
+        self.assertIn("useradd", self.dockerfile)
+
+    def test_the_code_is_not_writable_by_the_agent(self):
+        # Matches the systemd path: a compromised agent must not be able to
+        # rewrite the thing that restarts it.
+        self.assertIn("chown -R root:root /opt/percepta/station", self.dockerfile)
+
+    def test_no_bytecode_is_written_to_the_sd_card(self):
+        self.assertIn("PYTHONDONTWRITEBYTECODE=1", self.dockerfile)
+
+    def test_nothing_reaches_for_privileged(self):
+        # The device mappings are the honest cost of the container path;
+        # privileged: true would be the dishonest way out of them.
+        self.assertNotIn("privileged", self.directives.replace("no-new-privileges", ""))
+
+    def test_the_container_hardening_matches_the_unit(self):
+        for directive in ("cap_drop:", "- ALL", "no-new-privileges:true",
+                          "read_only: true"):
+            self.assertIn(directive, self.directives)
+
+    def test_logs_are_rotated_or_the_sd_card_fills(self):
+        # Docker's json-file driver has no rotation by default. journald does,
+        # which is why only this path needs saying.
+        self.assertIn("driver: json-file", self.directives)
+        self.assertRegex(self.directives, r'max-size:\s*"\d+m"')
+        self.assertRegex(self.directives, r'max-file:\s*"\d+"')
+
+    def test_the_radio_still_gets_its_shutdown_window(self):
+        # Docker's default grace is 10s, which is not enough to shut the
+        # receiver down through its own path.
+        self.assertIn("stop_grace_period: 45s", self.directives)
+        self.assertIn("restart: unless-stopped", self.directives)
+
+    def test_the_console_is_published_to_loopback_only(self):
+        # It has no authentication. On 0.0.0.0 this would be an unauthenticated
+        # setup page on the public internet.
+        self.assertIn('- "127.0.0.1:8088:8088"', self.directives)
+        self.assertNotIn('- "8088:8088"', self.directives)
+
+    def test_the_state_directory_is_the_same_path_as_the_systemd_path(self):
+        # `ls /var/lib/percepta-gsu` should work whichever way it was deployed.
+        self.assertIn("/var/lib/percepta-gsu:/var/lib/percepta-gsu", self.directives)
+
+    def test_the_sdr_and_camera_are_not_mapped_while_they_have_no_driver(self):
+        # Mapping a device nothing opens is access granted for no reason. Both
+        # are present as commented, ready-to-use lines instead.
+        self.assertNotIn("/dev/bus/usb:/dev/bus/usb", self.directives)
+        self.assertNotIn("/dev/video0", self.directives)
+        self.assertIn("/dev/bus/usb", self.compose)     # documented in comments
+
+    def test_the_dockerignore_keeps_one_stations_identity_out_of_the_image(self):
+        ignored = (DEPLOY.parent / ".dockerignore").read_text()
+        self.assertIn("var/", ignored)
 
 
 if __name__ == "__main__":

@@ -64,20 +64,22 @@ class AgentConfig:
     #: default reflects that; "busy" is for exercising the audio path.
     airband_traffic: str = "low"
 
-    # --- trust (gsu/tls.py) ---------------------------------------------
-    #: A CA installed with the image, used for the *first* enrolment call —
-    #: before that call returns there is no pinned CA, so the bootstrap has to
-    #: arrive out of band or it is not a bootstrap.
+    # --- trust (gsu/tls.py), which is two roots and not one ---------------
+    #: The **broker's** CA. Normally delivered by the enrolment response as
+    #: `broker.ca_pem` and persisted at `ca_path`; this pre-provisions or
+    #: overrides it. The broker is always pinned — there is no system-trust
+    #: option for it.
     ca_file: str | None = None
 
-    #: "pinned" (the platform's own CA, per contract/enrolment.md §4) or
-    #: "system" (the OS bundle, for a publicly-signed platform). There is no
-    #: mode that disables verification.
-    tls_trust: str = "pinned"
+    #: The **platform API's** CA, opt-in. Unset, the API is verified against the
+    #: system CA bundle, which is right for an API behind a reverse proxy with a
+    #: public certificate. Set, the API is pinned to this file — which is right
+    #: for a platform serving its own certificate, as it does today.
+    api_ca_file: str | None = None
 
-    #: Refuse plaintext even before a CA has ever been seen. Off by default so
-    #: the development stack — a local Redis container with no TLS — still
-    #: works; **on** in the deployed environment file.
+    #: Refuse plaintext on either link even before a CA has ever been seen. Off
+    #: by default so the development stack — a local Redis container with no TLS
+    #: — still works; **on** in the deployed environment file.
     require_tls: bool = False
 
     #: Refuse to start a second agent for the same station. Two instances
@@ -100,7 +102,7 @@ class AgentConfig:
             airband_traffic=_env("GSU_AIRBAND_TRAFFIC", "low"),
             single_instance=_env("GSU_SINGLE_INSTANCE", "1") not in ("0", "false"),
             ca_file=_env("GSU_CA_FILE"),
-            tls_trust=_env("GSU_TLS_TRUST", "pinned"),
+            api_ca_file=_env("GSU_API_CA_FILE"),
             require_tls=_env("GSU_REQUIRE_TLS", "0") not in ("0", "false", "no"),
         )
 
@@ -121,9 +123,11 @@ class AgentConfig:
 
     @property
     def ca_path(self) -> Path:
-        # Beside the credential, and 0600 like it. They are one identity: the
-        # secret says who this box is, the CA says who it may say that to.
-        return self.home / "platform-ca.pem"
+        # The **broker's** CA, beside the credential and 0600 like it. They are
+        # one identity: the secret says who this box is, the CA says which
+        # broker it may say that to. The API's trust root is separate and is
+        # never delivered over the wire — see AgentConfig.api_ca_file.
+        return self.home / "broker-ca.pem"
 
     @property
     def site_config_path(self) -> Path:

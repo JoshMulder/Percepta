@@ -1,32 +1,49 @@
-"""The station's trust root, and the rules about when it may talk at all.
+"""The station's trust roots, and the rules about when it may talk at all.
+
+**There are two of them, and conflating them was a mistake worth naming.**
 
 `contract/enrolment.md` §4 gives the station a `broker.ca_pem` at enrolment:
-*"pinned; the station verifies the platform"*. That is a stronger statement than
-ordinary TLS. A public trust store says "somebody a browser vendor trusts signed
-this"; a pinned private CA says "the CA that issued this station's identity
-signed this, and nothing else will do". On a box that lives on someone else's
-network behind CGNAT, reachable only over the public internet, that difference
-is the whole security boundary.
+*"pinned; the station verifies the platform"*. The field is named for the broker
+because that is what it is — **the broker's trust root, not the API's**. An
+earlier version of this file used it for both, which works only for as long as
+the two happen to share a certificate authority, and stops working the moment
+the API moves behind a reverse proxy with a public certificate.
 
-Three rules follow, and all three are enforced here rather than left to the
-caller's good manners:
+So:
+
+| | Trust | Why |
+|---|---|---|
+| **Broker** (`rediss://`) | **always pinned** to `broker.ca_pem` | A private CA the station explicitly trusts. Nothing else will do |
+| **Platform API** (`https://`) | **system trust store** by default, pinned only when told | It is expected to sit behind a TLS-terminating proxy with a public certificate on a real domain |
+
+The pinning on the broker is the stronger statement and it is the one that
+matters most: a public trust store says "somebody a browser vendor trusts signed
+this", while a pinned private CA says "the CA that issued this station's
+identity signed this". On a box on someone else's network behind CGNAT, that
+difference is the security boundary.
+
+The API is not weakened by using the system store — a public certificate for a
+real domain is verified against a well-audited set of roots, which is what that
+set is for. It is weakened by pinning it to a CA that will not be the one
+answering, which is what the previous arrangement would have produced.
+
+Three rules survive both, and all three are enforced here rather than left to
+the caller's good manners:
 
 **1. Verification is never disabled.** There is no `verify=False` in this
 package and no environment variable that produces one. The only knob is *which*
-CA to trust, and the default is the pinned one.
+roots to trust.
 
 **2. There is no plaintext fallback.** A station that quietly downgrades to
 `redis://` when TLS fails is worse than one that refuses to start, because the
 refusal is visible and the downgrade is not — nobody finds out until the traffic
-is already on the wire. When TLS is required and cannot be established, this
-module refuses, the agent raises a health condition, and the local console says
-so in words.
+is already on the wire. When TLS cannot be established, this module refuses, the
+agent raises a health condition, and the local console says so in words.
 
 **3. The refusal is loud and local.** `Refusal` carries a message written for
 whoever is standing in front of the box, not for whoever wrote the code.
 
-The same CA signs the broker and the API — one file, one fingerprint, both
-paths. It is persisted next to the credential, 0600, because a CA that is
+The broker's CA is persisted next to the credential, 0600, because a CA that is
 re-fetched over an unverified channel every boot is not pinned to anything.
 """
 
@@ -41,14 +58,14 @@ from pathlib import Path
 
 log = logging.getLogger("gsu.tls")
 
-#: Trust the CA the platform pinned at enrolment. The default, and what
-#: `contract/enrolment.md` §4 describes.
+#: Trust exactly one CA and nothing else. Always the broker's mode
+#: (`contract/enrolment.md` §4), and the API's when a CA is configured for it.
 TRUST_PINNED = "pinned"
 
-#: Trust the operating system's CA bundle instead. A deliberate, logged
-#: reduction for the case where the platform is fronted by a publicly-signed
-#: certificate. Still full verification — it is not a way to turn checking off,
-#: and there is no third option that is.
+#: Trust the operating system's CA bundle. The API's default, because it is
+#: expected behind a proxy with a publicly-signed certificate for a real
+#: domain. Still full verification — it is not a way to turn checking off, and
+#: there is no third option that is.
 TRUST_SYSTEM = "system"
 
 TRUST_MODES = (TRUST_PINNED, TRUST_SYSTEM)
@@ -174,6 +191,11 @@ class Trust:
     #: deployments; off in development, where the broker is a local container
     #: with no TLS at all.
     require_tls: bool = False
+    #: "broker" or "api". Only ever affects the words in a refusal — but those
+    #: words are the product: the two links are fixed in completely different
+    #: ways, and a message naming the wrong one sends a technician after the
+    #: wrong file.
+    purpose: str = "broker"
 
     @property
     def pinned(self) -> bool:
@@ -181,7 +203,7 @@ class Trust:
 
     def describe(self) -> str:
         if self.mode == TRUST_SYSTEM:
-            return "system CA bundle (not pinned)"
+            return "system CA bundle (public certificate, not pinned)"
         if self.path is None:
             return "no CA pinned yet"
         return f"pinned CA from {self.source}, SHA-256 {self.fingerprint or 'unreadable'}"
@@ -193,6 +215,23 @@ class Trust:
             "fingerprint": self.fingerprint,
             "require_tls": self.require_tls,
         }
+
+    def _no_ca_message(self, url: str, what: str) -> str:
+        """The one refusal whose fix differs completely between the two links."""
+        if self.purpose == "broker":
+            return (
+                f"{what} at {url} needs TLS, and this box has no broker CA to "
+                "check it against. The broker's CA arrives in the enrolment "
+                "response (contract/enrolment.md §4), so enrol first — or "
+                "pre-provision it with GSU_CA_FILE. It will not connect without "
+                "one and it will not fall back to an unverified connection."
+            )
+        return (
+            f"{what} at {url} needs TLS, and GSU_API_CA_FILE was set but its CA "
+            "could not be used. Fix or unset it: with it unset the API is "
+            "verified against the system CA bundle, which is the right answer "
+            "for a platform behind a proxy with a public certificate."
+        )
 
     # --- the two questions everything else asks --------------------------
 
@@ -208,12 +247,7 @@ class Trust:
             if self.mode == TRUST_SYSTEM:
                 return
             if self.path is None:
-                raise Refusal(
-                    f"{what} at {url} needs TLS, but this box has no CA to check "
-                    "it against. Enrol it (the platform sends its CA), or install "
-                    "the CA file and set GSU_CA_FILE. It will not connect without "
-                    "one, and it will not fall back to an unverified connection."
-                )
+                raise Refusal(self._no_ca_message(url, what))
             return
         if is_plaintext(url):
             if self.pinned:
@@ -299,50 +333,73 @@ def _tls_equivalent(scheme: str) -> str:
     }.get(scheme, "a TLS")
 
 
-def resolve(
+def _installed(path_text: str, variable: str) -> tuple[Path, str]:
+    """Read a CA file a person put there, or refuse. Never fall back."""
+    path = Path(path_text)
+    try:
+        pem = path.read_text()
+    except OSError as exc:
+        raise Refusal(
+            f"{variable} is set to {path_text} but it cannot be read: {exc}. "
+            "Refusing to start with an unusable trust root rather than silently "
+            "falling back to something weaker."
+        ) from exc
+    if "BEGIN CERTIFICATE" not in pem:
+        raise Refusal(f"{variable} at {path_text} is not a PEM certificate.")
+    return path, pem
+
+
+def resolve_broker(
     store: CaStore,
     installed: str | None = None,
-    mode: str = TRUST_PINNED,
     require_tls: bool = False,
 ) -> Trust:
-    """Work out what this box trusts, in a fixed order of precedence.
+    """What the broker is verified against. Always pinned, never the OS bundle.
 
-    1. **An installed CA file** (`GSU_CA_FILE`). Provisioned with the image or
-       copied on by whoever set the box up. This is the only thing that can be
-       trusted for the *first* enrolment call, because until that call returns
-       there is no pinned CA — the bootstrap has to come from the installer, out
-       of band, or it is not a bootstrap at all.
-    2. **The CA persisted from a previous enrolment response.**
+    Precedence:
+
+    1. **An installed CA file** (`GSU_CA_FILE`), if someone pre-provisioned one.
+       Wins because it was put there deliberately, out of band.
+    2. **The CA persisted from the enrolment response** — the normal path. The
+       broker's CA is delivered by `broker.ca_pem` and pinned from then on.
     3. Nothing, which is fine on a development box talking plaintext to a local
-       broker and fatal to any `https://` or `rediss://` URL.
+       broker and refuses any `rediss://` URL.
+
+    There is no system-trust option here on purpose. The broker is a private
+    service with a private CA, and "any CA the OS trusts" is not a description
+    of it.
     """
-    if mode not in TRUST_MODES:
-        log.warning("Unknown trust mode %r; using %r.", mode, TRUST_PINNED)
-        mode = TRUST_PINNED
-    if mode == TRUST_SYSTEM:
-        log.warning(
-            "TLS trust is the system CA bundle, not the platform's pinned CA. "
-            "Verification is still on, but any CA the OS trusts will be accepted."
-        )
-        return Trust(mode=mode, source="system", require_tls=require_tls)
-
     if installed:
-        path = Path(installed)
-        try:
-            pem = path.read_text()
-        except OSError as exc:
-            raise Refusal(
-                f"GSU_CA_FILE is set to {installed} but it cannot be read: {exc}. "
-                "Refusing to start with an unusable trust root rather than "
-                "silently falling back to something weaker."
-            ) from exc
-        if "BEGIN CERTIFICATE" not in pem:
-            raise Refusal(f"GSU_CA_FILE at {installed} is not a PEM certificate.")
-        return Trust(mode=mode, path=path, source="installed",
-                     fingerprint=fingerprint(pem), require_tls=require_tls)
-
+        path, pem = _installed(installed, "GSU_CA_FILE")
+        return Trust(mode=TRUST_PINNED, path=path, source="installed",
+                     fingerprint=fingerprint(pem), require_tls=require_tls,
+                     purpose="broker")
     pem = store.load()
     if pem:
-        return Trust(mode=mode, path=store.path, source="enrolment",
-                     fingerprint=fingerprint(pem), require_tls=require_tls)
-    return Trust(mode=mode, require_tls=require_tls)
+        return Trust(mode=TRUST_PINNED, path=store.path, source="enrolment",
+                     fingerprint=fingerprint(pem), require_tls=require_tls,
+                     purpose="broker")
+    return Trust(mode=TRUST_PINNED, require_tls=require_tls, purpose="broker")
+
+
+def resolve_api(installed: str | None = None, require_tls: bool = False) -> Trust:
+    """What the platform API is verified against.
+
+    The system CA bundle by default: the API is expected to sit behind a
+    TLS-terminating reverse proxy with a public certificate for a real domain,
+    and the public trust store is exactly the right tool for checking one.
+
+    `GSU_API_CA_FILE` pins it instead. That is the correct setting for a
+    platform serving its own certificate — the interim arrangement today — and
+    for any deployment with no proxy in front of it. It is opt-in because
+    pinning the API to a CA that will not be the one answering is not security,
+    it is an outage with a certificate error attached.
+    """
+    if installed:
+        path, pem = _installed(installed, "GSU_API_CA_FILE")
+        log.info("Platform API pinned to the CA at %s.", path)
+        return Trust(mode=TRUST_PINNED, path=path, source="installed",
+                     fingerprint=fingerprint(pem), require_tls=require_tls,
+                     purpose="api")
+    return Trust(mode=TRUST_SYSTEM, source="system", require_tls=require_tls,
+                 purpose="api")
