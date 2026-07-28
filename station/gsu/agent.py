@@ -820,15 +820,25 @@ class Agent:
     # --- health ---------------------------------------------------------
 
     def health_payload(self) -> dict:
-        """A proposed additive telemetry kind — see CONTRACT-QUESTIONS.md.
+        """The `health` telemetry kind — in the contract, and consumed.
 
-        The platform drops unknown kinds and logs them once, which the contract
-        promises precisely so a station can report something before the platform
-        renders it. This carries the things there is otherwise no way to say:
-        the config version the station is running (`contract/enrolment.md` §7
-        requires it be reported in telemetry), the devices it actually found
-        against the ones it was told to expect, **which telemetry streams have
-        no source at all**, and whether the credential is renewing.
+        Proposed from this side and since adopted: it is in
+        `contract/schemas/telemetry.schema.json` `$defs/health` and in the
+        platform ingest's `KNOWN_KINDS`, and `devices[].simulated` is what
+        drives the console's DEMO badge. **Validate changes here against the
+        schema** — `tests/test_station.py` does, in both the enrolled and
+        unenrolled states, because this payload is the one whose shape varies
+        most with what is wrong at the time.
+
+        It carries the things there is otherwise no way to say: the config
+        version the station is running (`contract/enrolment.md` §7 requires it
+        be reported in telemetry), the devices it actually found against the
+        ones it was told to expect, **which telemetry streams have no source at
+        all**, and whether the credential is renewing.
+
+        `security`, `clock` and `resources` are not in the schema yet. The
+        schema allows additional properties, so they are valid rather than
+        merely tolerated — they are proposed properly in CONTRACT-QUESTIONS.
         """
         # Re-evaluated here rather than only at build time: a device that was
         # absent at boot and has since started talking must stop being reported
@@ -837,11 +847,15 @@ class Agent:
         self._check_clock()
         credential = self.enrolment.credential if self.enrolment else None
         transport = self.transport
-        return {
+        payload = {
             "kind": "health",
             "agent_version": AGENT_VERSION,
             "config_version": self.site.version,
-            "status": self.health.worst(),
+            # The contract's summary vocabulary (ok | degraded | failing), which
+            # is deliberately not the per-condition severity vocabulary
+            # (info | warning | critical) carried in `conditions` below. They
+            # answer different questions; see health.Health.SUMMARY.
+            "status": self.health.summary(),
             "conditions": self.health.to_list(),
             "uplink": {
                 "connected": bool(transport and transport.connected),
@@ -849,10 +863,6 @@ class Agent:
                 "offline_seconds": round(
                     time.monotonic() - self._offline_since, 1
                 ) if self._offline_since else 0.0,
-            },
-            "credential": {
-                "expires_at": credential.expires_at.isoformat() if credential else None,
-                "renewal_failures": self.renewer.failures if self.renewer else 0,
             },
             # Two things a remote box cannot be asked in person: whether its
             # link is verified, and whether its clock is disciplined by
@@ -868,6 +878,17 @@ class Agent:
             "storage": self.store.stats(),
             "uptime_s": round(time.monotonic() - self._started, 1),
         }
+        # Renewal health, and only when there is a credential to have any. The
+        # schema types `expires_at` as a string; a null would be this station
+        # breaking its own rule that an unsourced value is omitted rather than
+        # defaulted (DECISIONS.md item 16). A station with no credential has no
+        # renewal health — that fact is `enrolment.missing` in `conditions`.
+        if credential is not None:
+            payload["credential"] = {
+                "expires_at": credential.expires_at.isoformat(),
+                "renewal_failures": self.renewer.failures if self.renewer else 0,
+            }
+        return payload
 
     def _check_clock(self) -> None:
         """Whether anything is keeping this clock honest.

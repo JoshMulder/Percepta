@@ -136,11 +136,12 @@ build without a site visit.
 
 ### Behaviour that goes slightly beyond the contract
 
-15. **A `health` telemetry kind is published** every 30 seconds. It is not in
-    the schema; the schema promises unknown kinds are dropped and logged, and
-    this is the only way to report `config_version`, which `enrolment.md` §7
-    requires be in telemetry. Proposed properly in CONTRACT-QUESTIONS item 5.
-    It shows up in conformance output as an ignored unknown kind.
+15. **A `health` telemetry kind is published** every 30 seconds. Proposed from
+    this side and **since adopted**: it is in the contract schema, in the
+    platform's `KNOWN_KINDS`, and `devices[].simulated` drives the console's
+    DEMO badge. It carries `config_version`, which `enrolment.md` §7 requires be
+    in telemetry and which no other field holds. CONTRACT-QUESTIONS item 5 has
+    the two schema violations that adoption then exposed, and how they escaped.
 16. **Unsourced fields are omitted, not defaulted** — including
     `weather.humidity_pct` on an instrument with no RH module, which the schema
     no longer requires. A stream with **no source at all** is a different
@@ -172,13 +173,15 @@ was not, it says that instead. HARDWARE.md §7 is the same register in one table
 
 ## Transport security
 
-### 21. Both a systemd unit and a container image — superseded by item 35
+### 21. systemd rather than a container — right conclusion, partly wrong reasons
 
-This item originally argued for systemd *instead of* a container. The owner
-asked about Docker twice, which is a preference and not a question, and the
-argument did not earn the right to override it. **Both paths are now built** and
-the honest comparison — including where my original reasoning was overstated —
-is item 35. This entry is kept because it is what I said at the time.
+This item argued for systemd instead of a container. **The conclusion is now the
+decision** (item 35, ruled by the owner) — but not on the strength of what is
+written here: several of my arguments did not survive checking, and item 35
+keeps the table of which ones. Both paths were built before the decision was
+made, which is why there was something concrete to decide about.
+
+Kept because it is what I said at the time.
 
 What the systemd unit buys, which still stands: `NoNewPrivileges`,
 `PrivateTmp`, `ProtectSystem=strict`, `ProtectHome`, `ProtectClock`, an empty
@@ -411,16 +414,53 @@ credential in between.
 
 # Second pass — the container path, and splitting the trust roots
 
-## 35. Docker: it works, it is built, and here are the real costs
+## 35. Docker: built, evaluated, and rejected by the owner — **DECIDED**
 
-**Supersedes item 21.** I argued against a container and I was asked twice for
-one, which means the argument was not carrying its weight. Both paths now exist:
-`deploy/Dockerfile` and `deploy/docker-compose.yml` alongside the systemd unit.
-Neither is a fallback for the other, and DEPLOYMENT.md §16 compares them where
-somebody deploying will actually read it.
+**The decision: systemd is the deployment path. Docker is not suitable for an
+unattended remote station.** The owner's words:
 
-**Docker does work on a Pi 2B.** Here is what I claimed before, and what is
-actually true:
+> so what you're saying is that using docker on the station is going to
+> complicate the setup, and possibly stop the station working - requiring manual
+> intervention - if/when it restarts? that's not acceptable
+
+That is the correct reading of my own compose file, which says in capitals that
+Docker refuses to start a container whose mapped device does not exist. For a
+box hours from anyone, a reboot after a USB adapter fails to enumerate takes
+down **the entire station** rather than one sensor, and recovery needs a person
+on site. It is the exact failure class this project exists to avoid, and it
+outweighs everything in the table below.
+
+`deploy/Dockerfile` and `deploy/docker-compose.yml` are **kept** — they may suit
+a co-located station with someone on site — and both now carry that warning at
+the top. DEPLOYMENT.md Appendix B is the same warning where a deployer will meet
+it.
+
+### The mitigation that exists, and why it was not taken
+
+Recorded so nobody later finds it and assumes it was missed. The won't-start
+failure **is** avoidable: bind-mount `/dev/serial` and `/dev/bus/usb` as
+*directories* instead of mapping individual nodes. Nothing is then missing at
+start, and hot-replug works — a UART plugged in later becomes visible, and the
+SDR survives re-enumeration.
+
+The cost is that the container gets **every USB device on the box**, present and
+future, rather than the three it needs. That surrenders most of the isolation
+which was the reason to containerise; what is left is a filesystem boundary the
+systemd unit already provides with `ProtectSystem=strict`, plus a supervisor
+that systemd already is.
+
+So the honest choice was between a container that can strand the site and a
+container that isolates almost nothing. Neither beats the unit file. The option
+was understood and rejected, not overlooked.
+
+### What I got wrong along the way, which is why this was decided on the right grounds
+
+**This table stays.** My original argument against Docker (item 21) was built
+partly on claims that did not survive checking, and the decision above was made
+on the one that did — unattended restart behaviour — rather than on my errors.
+
+**Docker does work on a Pi 2B.** Here is what I claimed, and what is actually
+true:
 
 | I said | Actually |
 |---|---|
@@ -451,11 +491,11 @@ actually true:
   there is no SDR driver in this build. **This is a genuine finding rather than
   a failure to configure it properly.**
 
-**Recommendation: systemd for this one station, narrowly.** The deciding row is
-unattended device behaviour, not memory or ideology. **If the fleet grows or the
-update path lands on image pulls, switch** — the container is built, the sandbox
-is comparable (`read_only`, `cap_drop: ALL`, `no-new-privileges`), and rollback
-is better.
+The first of those four is the one the decision turned on. I originally called
+it a "recommendation, narrowly" and weighed it against memory, image size and
+update ergonomics as though those were comparable quantities. They are not: the
+others cost effort, and that one costs a site visit. The owner read the same
+list and said so plainly, which was the right call on the right grounds.
 
 **What I could not test: all of it.** `docker info` returns a permission error
 on this machine, so the image has never been built and the container has never
@@ -517,7 +557,38 @@ reading the platform's own record instead. Fixed on the platform side.
 
 Recorded because it is the same failure this station keeps guarding against,
 seen from the other end: **the honest signal existed and the consumer did not
-read it.** That is an argument for `CONTRACT-QUESTIONS.md` item 5 — the `health`
-kind is still not in the platform's `KNOWN_KINDS`, so the structured device
-inventory the station publishes every 30 seconds is dropped on arrival. This is
-the second time that data would have answered a question somebody had.
+read it.**
+
+## 38. I asserted a platform behaviour twice without checking the platform
+
+I wrote, in two consecutive reports, that `health` was not in the platform's
+`KNOWN_KINDS` and that the device inventory was being dropped on arrival. **Both
+were false.** `health` has been in `KNOWN_KINDS`, in the contract schema, and
+rendered by the console since before either report.
+
+How I got there: I saw no health frames on the fan-out, at a moment when the
+only station publishing any was a bench station I had myself just stopped while
+tearing down a test lab. I inferred a consumer-side gap from an absence of data
+I had caused. `server/app/backend/services/station_ingest.py` is in this
+repository, I am permitted to read it, and I did not.
+
+It is precisely the reasoning this station is built to refuse — an empty ADS-B
+frame and a dead receiver are indistinguishable unless somebody says which it
+is — applied in the wrong direction by the thing that keeps arguing for it.
+
+**Three things changed as a result**, beyond correcting the text:
+
+- **`health` is now schema-validated in the station's own tests.** It had been
+  left out of `test_telemetry_matches_the_schema` from when it was an unknown
+  kind. Adding it found two real violations of mine within seconds — a `status`
+  in the wrong vocabulary and a null `expires_at`. Both are fixed;
+  CONTRACT-QUESTIONS item 5 has the detail and the reason conformance never
+  caught them.
+- **Do not tear down the bench station.** It is the only real station the
+  console has and the owner looks at it. Stopping it at the end of a session
+  removes the platform's only live data and, as here, invites conclusions drawn
+  from the silence.
+- **Conformance is 20 checks in a normal window, not 21.** The health schema
+  check appears only when a frame lands inside the sample, which at 30-second
+  cadence is intermittent. "All checks passed" is the thing to read, not a
+  count I quoted as though it were fixed.

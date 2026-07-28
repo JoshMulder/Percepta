@@ -62,7 +62,15 @@ class PayloadTests(unittest.TestCase):
             self.assertTrue(self.by_kind(kind), f"nothing published for {kind}")
 
     def test_telemetry_matches_the_schema(self):
-        for kind in ("adsb", "power", "radio", "light", "weather"):
+        # `health` belongs in this list. It was left out when it was still a
+        # kind the platform did not know, and stayed out after it was adopted —
+        # which is how two schema violations in it went unnoticed: a `status`
+        # using the condition-severity vocabulary instead of the summary one,
+        # and a null `expires_at` before enrolment. Conformance did not catch
+        # them either, because a health frame only lands inside its sample
+        # window sometimes, and when it did the station happened to be healthy
+        # and enrolled — the two states where the payload is valid.
+        for kind in ("adsb", "power", "radio", "light", "weather", "health"):
             for payload in self.by_kind(kind)[:5]:
                 errors = sorted(TELEMETRY.iter_errors(payload), key=str)
                 self.assertFalse(errors, f"{kind}: {[e.message for e in errors]}")
@@ -86,6 +94,91 @@ class PayloadTests(unittest.TestCase):
         self.assertIn("config_version", health[0])
         self.assertIn("devices", health[0])
         self.assertIn("unsourced_streams", health[0])
+
+    def test_health_devices_carry_the_flag_the_demo_badge_is_built_on(self):
+        # The platform badges a station DEMO from `devices[].simulated`. Every
+        # slot must carry it, on a station that is entirely simulated as this
+        # one is — a missing flag reads as real hardware.
+        health = self.by_kind("health")[0]
+        self.assertTrue(health["devices"])
+        for device in health["devices"]:
+            self.assertIn("simulated", device, device.get("slot"))
+        configured = [d for d in health["devices"] if d["configured"]]
+        self.assertTrue(all(d["simulated"] for d in configured),
+                        "this fixture is all simulated devices")
+
+
+class HealthPayloadTests(unittest.TestCase):
+    """`health` against the schema in the states where its shape changes.
+
+    Its shape varies with what is wrong at the time, which is exactly when
+    nobody is watching. Both bugs this class was written for appeared only when
+    the station was unhealthy or unenrolled.
+    """
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.agent = agent_in(self._dir.name)
+
+    def tearDown(self):
+        self.agent.shutdown()
+        self._dir.cleanup()
+
+    def assert_valid(self, payload: dict, note: str) -> None:
+        errors = sorted(TELEMETRY.iter_errors(payload), key=str)
+        self.assertFalse(errors, f"{note}: {[e.message for e in errors]}")
+
+    def test_valid_when_not_enrolled(self):
+        # No credential at all: `expires_at` must be omitted, never null.
+        payload = self.agent.health_payload()
+        self.assertIsNone(self.agent.enrolment)
+        self.assertNotIn("credential", payload)
+        self.assert_valid(payload, "unenrolled")
+
+    def test_valid_with_every_condition_severity(self):
+        # `status` is a summary (ok | degraded | failing), deliberately not the
+        # per-condition vocabulary (info | warning | critical). Publishing the
+        # latter is what the schema caught.
+        #
+        # A fresh Health per case: the agent raises its own conditions for the
+        # absent devices in this fixture, and the summary is of the *worst* of
+        # them, so an info case would otherwise be measuring those instead.
+        from gsu.health import Health
+
+        for severity, expected in (("info", "ok"), ("warning", "degraded"),
+                                   ("critical", "failing")):
+            with self.subTest(severity=severity):
+                self.agent.health = Health()
+                self.agent.health.raise_condition("test.condition", severity, "x")
+                payload = self.agent.health_payload()
+                # health_payload re-evaluates device conditions, which can only
+                # add severity — so assert the floor, and the exact value where
+                # nothing else could have raised it higher.
+                self.assertIn(payload["status"], ("ok", "degraded", "failing"))
+                if severity == "critical":
+                    self.assertEqual(payload["status"], "failing")
+                self.assert_valid(payload, severity)
+
+    def test_the_summary_mapping_itself(self):
+        from gsu.health import Health
+
+        health = Health()
+        self.assertEqual(health.summary(), "ok")
+        health.raise_condition("a", "info", "")
+        self.assertEqual(health.summary(), "ok", "info is not a fault")
+        health.raise_condition("b", "warning", "")
+        self.assertEqual(health.summary(), "degraded")
+        health.raise_condition("c", "critical", "")
+        self.assertEqual(health.summary(), "failing")
+
+    def test_the_two_vocabularies_do_not_overlap_by_accident(self):
+        from gsu.health import SEVERITIES, Health
+
+        summary = set(Health.SUMMARY.values())
+        self.assertEqual(summary, {"ok", "degraded", "failing"})
+        # If these ever collide, a future edit could pass one where the other
+        # is meant and the schema would still accept it.
+        self.assertFalse(summary & set(SEVERITIES) - {"ok"})
 
 
 class CommandTests(unittest.TestCase):

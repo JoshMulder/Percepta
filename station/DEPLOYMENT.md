@@ -55,10 +55,9 @@ response and is pinned from then on.
 
 You never type the station's UUID. It comes back in the enrolment response.
 
-**Two deployment paths, both supported.** §1–§15 describe the systemd service.
-**§16 describes the container**, and compares the two. Read §16 first if you
-have a preference; the rest of the runbook is the same either way from §4
-onwards.
+**The station runs as a systemd service.** That is the deployment path; this
+runbook is it. A container image exists in `deploy/` and **is not to be used for
+an unattended site** — Appendix B says why in one line and in more detail.
 
 ---
 
@@ -566,110 +565,7 @@ the only control it has (`DECISIONS.md`, open decision 2).
 
 ---
 
-## 16. The container path
-
-Both paths are supported and neither is a fallback for the other. Use this
-section to choose; everything from §4 onwards applies either way.
-
-**Recommendation: systemd for this station.** Not by much, and the reasons are
-specific rather than ideological — they are in the table below and in
-`DECISIONS.md` item 35. If you are heading towards a fleet with image-based
-rollout, or you want the update story containers give you, the container path is
-built and is a reasonable choice today.
-
-### The tradeoff, honestly
-
-| | systemd | container |
-|---|---|---|
-| Memory before the agent starts | ~0 | **50–100 MB** for `dockerd` + `containerd`, of 1 GB |
-| Install size | ~15 MB | **~40 MB compressed** to pull, more on disk |
-| A device that is absent at start | health condition; recovers on its own when plugged in | **the container will not start** |
-| A device replugged while running | picked up within 30 s | **not visible until the container is recreated** |
-| SD card writes | journald, rotated by default | image layers, container logs (**rotation must be configured, and is here**), plus the writable layer |
-| Sandbox | `ProtectSystem=strict`, empty capability set, syscall filter | `read_only`, `cap_drop: ALL`, `no-new-privileges`. Comparable; the syscall filter is coarser |
-| Rollback | reinstall the previous copy | **retag and restart — genuinely better** |
-| Update path | `rsync` + re-run the installer | pull a digest. **Better, and §9.5 is still open, so this is an argument rather than a decision** |
-| ARMv7 support | native | `python:3.11-slim-bookworm` publishes `linux/arm/v7`; **verified against the registry** |
-
-**Docker does work on a Pi 2B.** The costs above are real but none of them is
-disqualifying, and the update story is a genuine argument in its favour. The
-device handling is where it is weakest, and that is the row that decided the
-recommendation: this station has two USB-UARTs that are sometimes unplugged, an
-SDR that re-enumerates, and nobody on site.
-
-### Running it
-
-```bash
-sudo apt install -y docker.io docker-compose-v2
-sudo systemctl enable --now docker
-
-# Same as the systemd path — the installer still lays down /etc/percepta and
-# /var/lib/percepta-gsu, which the container binds:
-sudo /tmp/station/deploy/install.sh --api-ca /tmp/platform-api-ca.pem
-sudo systemctl disable --now gsu      # only one of the two may run at a time
-
-cd /opt/percepta/station
-sudo nano deploy/docker-compose.yml   # SEE BELOW — this needs editing
-sudo docker compose -f deploy/docker-compose.yml build
-sudo docker compose -f deploy/docker-compose.yml up -d
-```
-
-Subcommands work as they do everywhere else:
-
-```bash
-sudo docker compose -f deploy/docker-compose.yml run --rm gsu preflight --probe
-sudo docker compose -f deploy/docker-compose.yml run --rm gsu enrol --token XXXX-XXXX-XXXX
-sudo docker compose -f deploy/docker-compose.yml logs -f
-```
-
-Building on the Pi itself is fine — one pure-Python dependency, nothing
-compiles. To build elsewhere: `docker buildx build --platform linux/arm/v7`.
-
-### What you must edit before it will start
-
-**`devices:` in `docker-compose.yml` has to match the box.** Docker refuses to
-start a container whose mapped device does not exist, so a station with only one
-UART plugged in will not come up until the other line is commented out. This is
-the sharpest difference from the systemd path, where a missing device is a
-health condition the station reports and recovers from on its own.
-
-**`group_add` must carry the host's numeric gids**, not names — group names
-resolve inside the container, where they differ. Check with `getent group
-dialout plugdev video`.
-
-**The SDR is commented out.** libusb needs `/dev/bus/usb/<bus>/<device>` and the
-device number changes on every re-enumeration, so mapping today's node stops
-working after a replug. Mapping the whole USB bus with a cgroup rule is the
-workable answer and is written in the file, commented, ready for when there is a
-driver. It is broader access than one dongle; that is the honest cost.
-
-**The camera is commented out** for the same reason plus one more: on Bookworm
-it is libcamera and needs several nodes (`/dev/video0`, `/dev/media0`,
-`/dev/dma_heap/*`), and there is no driver in this build to open any of them.
-
-### What I could not test
-
-**None of this has been run.** The Docker daemon is not reachable from the
-machine this was written on — `docker info` returns a permission error — so:
-
-- the image has **never been built**, on any architecture;
-- the container has **never been started**, so the device mappings, the
-  `group_add` gids, the `read_only` filesystem and the tmpfs are all reasoned
-  from documentation rather than observed;
-- the ARMv7 claim is **verified at the registry** (`python:3.11-slim-bookworm`
-  publishes `linux/arm/v7`, manifest `sha256:d2091b0d…`, 39.9 MB compressed) and
-  nowhere else;
-- the memory figure for the daemon is **an estimate from published figures**,
-  not a measurement.
-
-What *was* checked: the compose file validates against the schema
-(`docker compose config`), and the Dockerfile is a straightforward read. The
-first person with the hardware should expect to spend an hour on the device
-mappings specifically.
-
----
-
-## 17. Backups
+## 16. Backups
 
 **Scheduled on the platform, not here.** Nothing in this runbook backs anything
 up and nothing should be read as implying otherwise.
@@ -690,7 +586,7 @@ field.
 
 ---
 
-## Appendix: everything in one place
+## Appendix A: everything in one place
 
 ```bash
 # on the box, as root
@@ -713,3 +609,93 @@ python -m gsu whoami                     what this box thinks it is, offline
 python -m gsu status                     what the platform thinks of it
 python -m gsu bench                      what a tick costs on this hardware
 ```
+
+---
+
+## Appendix B: the container image, and why it is not the deployment path
+
+**Do not deploy an unattended station with Docker.** A container will not start
+if a device it maps is missing, so a reboot after a USB adapter fails to
+enumerate takes down **the entire station** — not just the affected sensor — and
+recovery needs somebody on site. The owner's ruling, and it is the right one.
+
+The systemd service does not have that failure: a missing device is a health
+condition the station reports and recovers from on its own when the device
+reappears, while every other sensor keeps working throughout.
+
+`deploy/Dockerfile` and `deploy/docker-compose.yml` are kept because they are
+sound work and may suit a **co-located** station — one in a rack, in a building,
+with someone who can reach it. Both files carry this warning at the top. Nothing
+in the runbook above depends on them.
+
+### The mitigation that exists, and why it is not taken
+
+This is not an oversight and it should not be discovered as one later.
+
+The won't-start failure **can** be avoided: bind-mount `/dev/serial` and
+`/dev/bus/usb` as *directories* rather than mapping individual device nodes.
+Then nothing is missing at start, and hot-replug works — a UART plugged in after
+the container is running becomes visible, and the SDR survives re-enumeration
+without recreating anything.
+
+The cost is that the container then has access to **every USB device on the
+box**, present and future, rather than the three it needs. That gives away most
+of the isolation which was the reason to containerise in the first place: what
+remains is a filesystem boundary the systemd unit already provides via
+`ProtectSystem=strict`, plus a supervisor systemd already is.
+
+So the choice is between a container that can strand the site and a container
+that is barely isolating anything. Neither is better than the unit file, which
+is why the decision went the way it did rather than being mitigated. It is
+written down here so a future reader knows the option was understood and
+rejected, not missed.
+
+### If you run it anyway, on a site with people
+
+```bash
+sudo apt install -y docker.io docker-compose-v2
+sudo systemctl enable --now docker
+
+# The installer still lays down /etc/percepta and /var/lib/percepta-gsu,
+# which the container binds:
+sudo /tmp/station/deploy/install.sh --api-ca /tmp/platform-api-ca.pem
+sudo systemctl disable --now gsu      # only one of the two may run at a time
+
+cd /opt/percepta/station
+sudo nano deploy/docker-compose.yml   # devices: MUST match the box, or it will
+                                      # not start. group_add MUST carry the
+                                      # host's numeric gids, not names.
+sudo docker compose -f deploy/docker-compose.yml build
+sudo docker compose -f deploy/docker-compose.yml up -d
+```
+
+Subcommands work as they do everywhere else:
+
+```bash
+sudo docker compose -f deploy/docker-compose.yml run --rm gsu preflight --probe
+sudo docker compose -f deploy/docker-compose.yml run --rm gsu enrol --token XXXX-XXXX-XXXX
+sudo docker compose -f deploy/docker-compose.yml logs -f
+```
+
+Building on the Pi itself is fine — one pure-Python dependency, nothing
+compiles. To build elsewhere: `docker buildx build --platform linux/arm/v7`.
+
+The SDR and camera are commented out in the compose file: there is no driver for
+either in this build, and mapping a device nothing opens is access granted for
+no reason.
+
+### What was never tested
+
+**None of it.** The Docker daemon is not reachable from the machine this was
+written on — `docker info` returns a permission error — so the image has never
+been built and the container has never been started, on any architecture. The
+device mappings, the `group_add` gids, the `read_only` filesystem and the tmpfs
+are reasoned from documentation, not observed.
+
+Two things *were* checked: the compose file validates against the schema
+(`docker compose config`), and the ARMv7 base image is verified at the registry
+— `python:3.11-slim-bookworm` publishes `linux/arm/v7`, manifest
+`sha256:d2091b0d…`, 39.9 MB compressed across 4 layers.
+
+`DECISIONS.md` item 35 has the full cost comparison, including which of my own
+original arguments against Docker did not survive checking.

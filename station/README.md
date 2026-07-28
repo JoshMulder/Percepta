@@ -176,10 +176,15 @@ GSU_BROKER_URL=redis://127.0.0.1:6380/0 .venv/bin/python -m gsu run
 ```
 
 **To put one on a Raspberry Pi, read `DEPLOYMENT.md`.** It goes from a blank SD
-card to an enrolled station, and covers **both supported paths** — a systemd
-service (`deploy/install.sh`) and a container (`deploy/Dockerfile`,
-`deploy/docker-compose.yml`) — with the tradeoff between them in §16 and in
-DECISIONS.md item 35.
+card to an enrolled station, running as a **systemd service**
+(`deploy/install.sh`, `deploy/gsu.service`).
+
+A container image also exists in `deploy/` and **must not be used for an
+unattended site**: Docker will not start a container whose mapped device is
+missing, so one USB adapter failing to enumerate at boot takes the whole station
+down and needs somebody there. DEPLOYMENT.md Appendix B and DECISIONS.md item 35
+have the reasoning, including the mitigation that exists and why it costs more
+than it saves.
 
 `GSU_BROKER_URL` overrides only the broker *address* — an address and nothing
 else, never credentials — and the username and topics still come from enrolment.

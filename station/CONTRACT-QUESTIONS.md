@@ -173,34 +173,65 @@ exists and nothing calls it, deliberately.
 
 ---
 
-## 5. Proposed additive telemetry kind: `health` — with the owner
+## 5. Additive telemetry kind: `health` — **RESOLVED, adopted**
 
-The station already publishes this, on the strength of the schema's own promise
-that unknown kinds are dropped and logged rather than erroring "so a new sensor
-can be added station-side before the platform renders it". It is the only way to
-say several things the contract otherwise has no room for, including
-`config_version`, which `enrolment.md` §7 *requires* be reported in telemetry
-and which no schema field carries.
+**Shipped, on both sides.** `health` is in
+`contract/schemas/telemetry.schema.json` `$defs/health`, in the platform
+ingest's `KNOWN_KINDS`, and rendered by the console. `devices[].simulated` is
+what drives the DEMO badge — the schema says so in the field's own description.
 
-**Today it is write-only.** `health` is not in the ingest's `KNOWN_KINDS`, so
-the platform drops it and nothing here reaches a console — which is the platform
-doing exactly what the contract promises, not a fault. The station keeps
-publishing it regardless: it costs ~90 B/s, it is what the *local* console
-renders when there is no link at all, and when the kind is accepted nothing on
-the station side has to change.
+**I claimed twice, in two reports, that the platform was still dropping this
+kind. That was wrong**, and it had been wrong for a while. I inferred it from an
+absence of health frames on the fan-out at a moment when the only station
+publishing them was one I had just stopped, and I did not check
+`server/app/backend/services/station_ingest.py` — which is in this repository
+and which I am permitted to read. Recorded here because the mistake is the exact
+one this document exists to argue against, made in the other direction: absence
+of data treated as evidence about a consumer.
 
-The part worth having soonest is `devices[].status` — `not_fitted`,
-`configured_absent`, `stalled`. That is the structured form of a distinction the
-platform currently receives only as English prose in `unavailable_reason`, and
-"never fitted" versus "fitted and failed" is a difference an operator acts on
-differently.
+Two consequences worth keeping:
+
+- The station's own `test_telemetry_matches_the_schema` did not include
+  `health`, left over from when it was an unknown kind. Adding it immediately
+  found **two schema violations of mine** — see below. A payload nobody
+  validates is a payload that drifts.
+- `devices[].status` (`not_fitted`, `configured_absent`, `stalled`) is in the
+  schema and delivered. That is the structured form of a distinction the
+  platform would otherwise receive only as English prose in
+  `unavailable_reason`, and "never fitted" versus "fitted and failed" is a
+  difference an operator acts on differently.
+
+### The two violations, and why neither was caught
+
+Both were found by validating the payload rather than by anything failing.
+
+**`status` used the wrong vocabulary.** The schema's `health.status` is a
+summary — `ok | degraded | failing` — deliberately *not* the per-condition
+severity vocabulary `info | warning | critical` that `conditions[].severity`
+uses. The station published the latter. Fixed by `health.Health.summary()`,
+which maps `info → ok` (an informational condition is not a fault), `warning →
+degraded` and `critical → failing`.
+
+**`credential.expires_at` was `null` before enrolment**, where the schema types
+it as a string. The station was breaking its own rule that an unsourced value is
+omitted rather than defaulted. The whole `credential` block is now omitted when
+there is no credential — a station with none has no renewal health, and that
+fact is already `enrolment.missing` in `conditions`.
+
+**Why neither showed up:** conformance validates `health` only when a frame
+lands inside its sample window, which at a 30-second cadence is intermittent —
+and when one did, the station happened to be enrolled and healthy, which are
+precisely the two states in which the payload was valid. Both faults appeared
+only when something was already wrong. `tests/test_station.py` now validates
+`health` in the unenrolled state and at every condition severity.
 
 ```jsonc
 {
   "kind": "health",
   "agent_version": "0.1.0",
   "config_version": 3,               // enrolment.md §7 asks for this in telemetry
-  "status": "ok",                    // ok | info | warning | critical
+  "status": "ok",                    // ok | degraded | failing — a SUMMARY, and
+                                     // not the severity vocabulary below
   "conditions": [                    // each with an id, severity, detail, since
     {"id": "credential.renewal_failing", "severity": "warning",
      "detail": "3 failed renewals; expires in 41.2 h", "since": "…"}
@@ -215,8 +246,16 @@ differently.
 }
 ```
 
-It costs about 90 bytes/s at 30-second cadence. Currently it appears in
-conformance output as `unknown kind 'health' ignored, as the contract allows`.
+It costs about 90 bytes/s at 30-second cadence.
+
+**Three fields the station sends are not in the schema**: `security` (which link
+is verified and against which CA), `clock` (what is disciplining the clock, and
+whether an RTC is fitted), and `resources` (SDR tuners by serial). The schema
+allows additional properties, so they are valid rather than merely tolerated,
+and the platform is free to ignore them. Proposing them properly: the first two
+answer questions about an unattended box that are otherwise unanswerable from a
+desk — *is that station's traffic actually encrypted, and is its clock being
+kept* — and `clock` is the early warning for the §6 failure that strands a site.
 
 ---
 

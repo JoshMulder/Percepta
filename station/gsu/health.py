@@ -77,10 +77,31 @@ class Health:
             )
 
     def worst(self) -> str:
+        """The most severe *condition* severity: info | warning | critical.
+
+        The same vocabulary the `conditions[]` array uses, which is what the
+        local console renders per condition.
+        """
         conditions = self.active()
         if not conditions:
             return "ok"
         return conditions[0].severity
+
+    #: Condition severity → the station's summary of itself. The contract uses
+    #: a deliberately different vocabulary for the summary
+    #: (`telemetry.schema.json` $defs/health/status: ok | degraded | failing)
+    #: because it answers a different question: not "how bad is the worst
+    #: problem" but "is this station still doing its job".
+    #:
+    #: `info` maps to `ok` on purpose — an informational condition is something
+    #: worth saying, not something wrong — and `warning` to `degraded`, which
+    #: the schema describes as the state that most needs to reach an operator
+    #: before it becomes `failing`.
+    SUMMARY = {"ok": "ok", "info": "ok", "warning": "degraded", "critical": "failing"}
+
+    def summary(self) -> str:
+        """The station's own summary of itself, in the contract's vocabulary."""
+        return self.SUMMARY.get(self.worst(), "degraded")
 
     def to_list(self) -> list[dict]:
         return [c.to_dict() for c in self.active()]

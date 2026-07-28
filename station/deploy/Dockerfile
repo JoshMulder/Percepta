@@ -1,12 +1,25 @@
+# ===========================================================================
+#  DO NOT USE THIS FOR AN UNATTENDED STATION.
+#
+#  A container will not start if a device it maps is missing, so a reboot
+#  after a USB adapter fails to enumerate takes down THE WHOLE STATION — not
+#  just the affected sensor — and recovery needs somebody on site. The systemd
+#  unit beside this file does not have that failure: a missing device is a
+#  health condition the station reports and recovers from on its own.
+#
+#  The owner ruled on this. deploy/gsu.service is the deployment path.
+#
+#  Kept because it may suit a CO-LOCATED station — in a rack, in a building,
+#  with someone who can reach it. DEPLOYMENT.md Appendix B has the reasoning,
+#  including the mitigation that exists and why it is not taken; DECISIONS.md
+#  item 35 has the full cost comparison.
+# ===========================================================================
+#
 # The ground station agent as a container image.
 #
 #   docker buildx build --platform linux/arm/v7 -f deploy/Dockerfile -t percepta/gsu:0.1.0 .
 #
 # Build context is station/, not deploy/ — the package is what goes in.
-#
-# This is one of two supported deployment paths; the other is the systemd unit
-# beside this file. DEPLOYMENT.md §16 compares them and DECISIONS.md item 35
-# records the costs of each. Both are real; neither is a fallback for the other.
 #
 # ---------------------------------------------------------------------------
 # Base image: pinned by digest, and the digest is the multi-arch *index* so that

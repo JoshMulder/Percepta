@@ -230,13 +230,24 @@ class UnitFileTests(unittest.TestCase):
 
 
 class ContainerTests(unittest.TestCase):
-    """The container path. Never built and never run — see DECISIONS.md 35.
+    """The container files, which are kept but are **not** the deployment path.
 
-    So these check the things a careful read can check: that the base image is
-    pinned, that the hardening matches the systemd path, that the log rotation
-    which protects the SD card is present, and that no `privileged: true` has
-    crept in to make a device mapping work.
+    The owner rejected Docker for an unattended station: a container will not
+    start if a mapped device is missing, so one USB adapter failing to
+    enumerate at boot takes the whole station down and needs somebody on site
+    (DECISIONS.md item 35). The files remain because they may suit a co-located
+    station — so the first thing tested is that the warning saying so is still
+    on both of them.
+
+    The rest check what a careful read can check, since neither file has ever
+    been built or run: the base image is pinned, the hardening matches the
+    systemd path, the log rotation that protects the SD card is present, and no
+    `privileged: true` has crept in to make a device mapping work.
     """
+
+    #: Both files must carry this, or one of them can be picked up by somebody
+    #: who never sees the reason it is not the deployment path.
+    WARNING = "DO NOT USE THIS FOR AN UNATTENDED STATION"
 
     @classmethod
     def setUpClass(cls):
@@ -250,6 +261,26 @@ class ContainerTests(unittest.TestCase):
             line for line in cls.compose.splitlines()
             if line.strip() and not line.lstrip().startswith("#")
         )
+
+    def test_both_files_carry_the_warning(self):
+        for name, text in (("Dockerfile", self.dockerfile),
+                           ("docker-compose.yml", self.compose)):
+            self.assertIn(self.WARNING, text, name)
+            # ...and the reason, not just the prohibition. A bare "do not" gets
+            # argued with; the failure mode does not.
+            self.assertIn("will not start", text.lower().replace("refuses to start", "will not start"), name)
+            self.assertIn("gsu.service", text, name)
+
+    def test_the_docs_agree_that_systemd_is_the_path(self):
+        # Prose is line-wrapped, so match on collapsed whitespace rather than
+        # on where the paragraph happened to break.
+        runbook = " ".join((DEPLOY.parent / "DEPLOYMENT.md").read_text().split())
+        self.assertIn("Appendix B", runbook)
+        self.assertIn("is not to be used for an unattended site", runbook)
+        # The mitigation is recorded as understood-and-rejected rather than
+        # left to be rediscovered later as an oversight.
+        self.assertIn("/dev/bus/usb", runbook)
+        self.assertIn("understood and rejected, not missed", runbook)
 
     def test_the_base_image_is_pinned_by_digest(self):
         # An unpinned base is a different station every time it is rebuilt.

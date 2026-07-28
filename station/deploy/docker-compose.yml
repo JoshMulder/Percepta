@@ -1,20 +1,34 @@
+# ===========================================================================
+#  DO NOT USE THIS FOR AN UNATTENDED STATION.
+#
+#  `devices:` below names specific device nodes, and Docker REFUSES TO START a
+#  container whose mapped device does not exist. So a reboot after a USB
+#  adapter fails to enumerate takes down THE WHOLE STATION — not just the
+#  affected sensor — and recovery needs somebody on site. The systemd unit
+#  beside this file does not have that failure: a missing device is a health
+#  condition the station reports and recovers from on its own, while every
+#  other sensor keeps working.
+#
+#  The owner ruled on this. deploy/gsu.service is the deployment path.
+#
+#  Kept because it may suit a CO-LOCATED station — in a rack, in a building,
+#  with someone who can reach it. DEPLOYMENT.md Appendix B has the reasoning,
+#  including the mitigation that exists (bind-mount /dev/serial and
+#  /dev/bus/usb as directories) and why it is not taken: it hands the
+#  container every USB device on the box, which gives away most of the
+#  isolation that was the reason to containerise at all.
+# ===========================================================================
+#
 # The ground station agent, as a container.
 #
 #   cd /opt/percepta/station
 #   docker compose -f deploy/docker-compose.yml up -d
 #
-# This is the container half of DEPLOYMENT.md §16. The systemd unit beside it is
-# the other, and the tradeoff is written down in DECISIONS.md item 35 rather
-# than implied by which one exists.
-#
 # ---------------------------------------------------------------------------
 # THE PART THAT NEEDS EDITING BEFORE THIS WILL START
 #
-# `devices:` below names specific device nodes. **Docker refuses to start a
-# container whose mapped device does not exist**, so this file has to match the
-# box: comment out what is not fitted, and add what is. That is the single
-# biggest ergonomic difference from the systemd path, where a missing device is
-# a health condition the station reports and recovers from on its own.
+# `devices:` below has to match the box: comment out what is not fitted, and
+# add what is.
 #
 # Find the numeric group ids for `group_add` on the host with:
 #   getent group dialout plugdev video
