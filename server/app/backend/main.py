@@ -7,9 +7,12 @@ from fastapi.staticfiles import StaticFiles
 from starlette.responses import Response
 from starlette.types import Scope
 
+from backend.api.account import router as account_router
 from backend.api.auth import router as auth_router
 from backend.api.commands import router as commands_router
 from backend.api.enrolment import router as enrolment_router
+from backend.api.organization import router as organization_router
+from backend.api.station_config import router as station_config_router
 from backend.api.station_enrolment import router as station_enrolment_router
 from backend.api.stations import router as stations_router
 from backend.api.tiles import router as tiles_router
@@ -71,9 +74,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Percepta", lifespan=lifespan)
 
+app.include_router(account_router)
 app.include_router(auth_router)
 app.include_router(commands_router)
 app.include_router(enrolment_router)
+app.include_router(organization_router)
+app.include_router(station_config_router)
 app.include_router(station_enrolment_router)
 app.include_router(stations_router)
 app.include_router(tiles_router)

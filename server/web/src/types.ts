@@ -203,3 +203,69 @@ export interface MapConfig {
   basemaps: BasemapOption[];
   live_fetch: boolean;
 }
+
+/* ---- Settings ---- */
+
+export interface StationConfig {
+  id: string;
+  name: string;
+  timezone: string;
+  latitude: number | null;
+  longitude: number | null;
+  map_min_zoom: number;
+  map_max_zoom: number;
+  map_radius_km: number;
+  config_version: number;
+}
+
+export interface EnrolmentStatus {
+  station_id: string;
+  enrolled: boolean;
+  enrolled_at: string | null;
+  /** What the box reported about itself at its last claim. Inventory only —
+   *  nothing here decides what the station is allowed to do. */
+  hardware: Record<string, string> | null;
+  config_version: number;
+  credential_expires_at: string | null;
+  credential_valid: boolean;
+  /** False means the credential works but the broker was never told about it —
+   *  enrolment is fail-soft, so this is how an operator finds the ones to retry. */
+  broker_provisioned: boolean;
+  token_outstanding: boolean;
+  /** Distinguishes "waiting for a technician" from "already used, retry window
+   *  still open". */
+  token_claimed: boolean;
+  token_expires_at: string | null;
+}
+
+export interface IssuedToken {
+  /** Shown once. The server keeps only a hash and cannot show it again. */
+  token: string;
+  expires_at: string;
+}
+
+export interface MemberGrant {
+  ground_station_id: string;
+  capabilities: Capability[];
+  expires_at: string | null;
+}
+
+export interface Member {
+  user_id: string;
+  email: string;
+  display_name: string;
+  is_active: boolean;
+  roles: string[];
+  grants: MemberGrant[];
+}
+
+export interface OrganizationDetail {
+  id: string;
+  name: string;
+  members: Member[];
+  stations: { id: string; name: string; is_active: boolean }[];
+  /** radio.transmit is deliberately absent and stays absent until certified
+   *  transmit hardware exists. */
+  grantable_capabilities: Capability[];
+  roles: string[];
+}

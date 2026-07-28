@@ -16,6 +16,10 @@ from backend.auth.capabilities import Capability
 from backend.auth.cookies import ACCESS_COOKIE_NAME
 from backend.auth.identity import Identity, resolve_identity
 from backend.database.dependencies import get_db
+from backend.database.models.enums import UserRole
+from backend.repositories.organization_membership_repository import (
+    OrganizationMembershipRepository,
+)
 
 
 def _extract_token(request: Request) -> str | None:
@@ -36,6 +40,34 @@ def get_identity(
     identity = resolve_identity(db, _extract_token(request))
     if identity is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
+    return identity
+
+
+def require_admin(
+    identity: Identity = Depends(get_identity), db: Session = Depends(get_db)
+) -> Identity:
+    """Route guard for org-wide administration.
+
+    Distinct from `require_capability` on purpose. Capabilities answer "may you
+    do this at that station"; this answers "may you change who can do anything
+    here at all", which is a different and larger question - an admin can grant
+    themselves every capability on every station, so this is the boundary that
+    actually matters for the tenancy model.
+
+    403 rather than 404, unlike the station guard. There is nothing to conceal:
+    the caller is a member of this org and already knows it exists, so the
+    enumeration risk that justifies the 404 elsewhere does not apply, and a
+    truthful error is more useful.
+    """
+    roles = set(
+        OrganizationMembershipRepository(db).roles(
+            user_id=identity.user_id, organization_id=identity.organization_id
+        )
+    )
+    if UserRole.ADMIN not in roles:
+        raise HTTPException(
+            status_code=403, detail="This requires an organisation administrator"
+        )
     return identity
 
 

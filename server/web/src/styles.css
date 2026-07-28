@@ -2265,3 +2265,290 @@ body {
   outline-offset: 2px;
   border-radius: var(--radius);
 }
+
+/* ------------------------------------------------------------ settings ---
+
+   Sized in px, not rem, and this is the only part of the app that is. The
+   console is a dense glanceable display that useFitScale sizes to fit the
+   viewport exactly, which on a small screen can put the root at 11px. That is
+   right for telemetry you read at a glance and wrong for a form you type into,
+   so the settings dialog opts out and keeps a fixed, comfortable size.
+
+   It is also rendered outside the fit-scaled stack. Anything inside that stack
+   changes the scale of the whole console by existing. */
+
+.settings-scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(3, 6, 9, 0.72);
+  backdrop-filter: blur(2px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 60;
+  padding: 24px;
+  font-size: 14px;
+}
+
+.settings {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  width: min(1040px, 100%);
+  max-height: min(820px, 100%);
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+  font-family: var(--sans);
+  color: var(--text);
+}
+
+.settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+.settings-head h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.settings-close {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 26px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 6px;
+  border-radius: 6px;
+}
+.settings-close:hover { color: var(--text); }
+.settings-close:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+
+.settings-body {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.settings-tabs {
+  flex: 0 0 190px;
+  border-right: 1px solid var(--line);
+  padding: 12px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.settings-tab {
+  background: none;
+  border: none;
+  border-left: 2px solid transparent;
+  color: var(--muted);
+  text-align: left;
+  padding: 9px 18px;
+  font: inherit;
+  cursor: pointer;
+}
+.settings-tab:hover { color: var(--text); background: var(--panel-2); }
+.settings-tab.active {
+  color: var(--text);
+  border-left-color: var(--brand);
+  background: var(--panel-2);
+}
+.settings-tab:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
+
+.settings-pane {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 20px 24px 26px;
+  min-width: 0;
+}
+
+.settings-sections { display: flex; flex-direction: column; gap: 26px; }
+.settings-section { display: flex; flex-direction: column; gap: 12px; }
+.settings-section h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.settings-section h4 { margin: 0 0 2px; font-size: 14px; font-weight: 600; }
+.settings-section.danger h3 { color: var(--danger); border-bottom-color: rgba(255, 122, 69, 0.3); }
+
+.settings-pane .field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 12px;
+  max-width: 460px;
+}
+.settings-pane .field > span {
+  font-size: 12px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.settings-pane .field input[type="text"],
+.settings-pane .field input[type="password"],
+.settings-pane .field input[type="number"],
+.settings-pane .field input:not([type]) {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 8px 10px;
+  font: inherit;
+  width: 100%;
+}
+.settings-pane .field input:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: -1px;
+}
+.settings-pane .field input:disabled { color: var(--dim); cursor: not-allowed; }
+.settings-pane .field small,
+.settings-pane > small,
+.settings-sections small {
+  font-size: 12px;
+  color: var(--dim);
+  line-height: 1.45;
+}
+
+.field-row { display: flex; gap: 14px; flex-wrap: wrap; }
+.field-row .field { flex: 1 1 150px; margin-bottom: 0; }
+
+.settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+.settings-note { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; max-width: 64ch; }
+.settings-ok { color: var(--accent); font-size: 13px; }
+.settings-error { color: var(--danger); font-size: 13px; margin: 0; }
+.settings-warn { color: var(--warn); }
+
+.settings-facts {
+  display: grid;
+  grid-template-columns: 170px 1fr;
+  gap: 10px 18px;
+  margin: 0;
+  font-size: 13px;
+}
+.settings-facts dt { color: var(--muted); }
+.settings-facts dd { margin: 0; display: flex; flex-direction: column; gap: 4px; }
+
+.settings-kv { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+.settings-kv li { display: flex; gap: 10px; }
+.settings-kv span { color: var(--muted); min-width: 100px; }
+.settings-kv code { font-family: var(--mono); font-size: 12px; }
+
+/* The enrolment code is shown once and cannot be recovered, so it gets
+   deliberate visual weight rather than sitting in a paragraph. */
+.token-reveal { display: flex; flex-direction: column; gap: 12px; align-items: flex-start; }
+.token-value {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  background: var(--panel-2);
+  border: 1px solid var(--brand-dim);
+  border-radius: 8px;
+  padding: 14px 18px;
+}
+.token-value code {
+  font-family: var(--mono);
+  font-size: 24px;
+  letter-spacing: 0.14em;
+  color: var(--text);
+}
+
+.member-layout { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
+.member-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  flex: 0 0 210px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.member-item {
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 8px 10px;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.member-item:hover { background: var(--panel-2); }
+.member-item.active { background: var(--panel-2); border-color: var(--line); }
+.member-item:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
+.member-name em { color: var(--dim); font-style: normal; }
+.member-roles { font-size: 12px; color: var(--muted); text-transform: capitalize; }
+
+.member-detail { flex: 1 1 380px; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+.role-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+.role-buttons .btn { text-transform: capitalize; }
+.role-buttons .btn.active { border-color: var(--brand); color: var(--text); }
+
+.grant-grid-wrap { overflow-x: auto; }
+.grant-grid { border-collapse: collapse; font-size: 12px; width: 100%; }
+.grant-grid th,
+.grant-grid td {
+  border: 1px solid var(--line-soft);
+  padding: 6px 8px;
+  text-align: center;
+}
+.grant-grid thead th {
+  color: var(--muted);
+  font-weight: 500;
+  vertical-align: bottom;
+  white-space: nowrap;
+}
+.grant-grid tbody th {
+  text-align: left;
+  font-weight: 500;
+  white-space: nowrap;
+  color: var(--text);
+}
+.grant-grid input[type="checkbox"] { accent-color: var(--brand); cursor: pointer; }
+/* Stored but currently inert because of the holder's role. Shown rather than
+   hidden: the value is real and comes back if the role changes. */
+.grant-grid input.ineffective { accent-color: var(--dim); opacity: 0.55; }
+.actuator-mark { color: var(--warn); margin-left: 2px; }
+
+.btn.danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #1a0b05;
+}
+.btn.danger-text { color: var(--danger); }
+
+@media (max-width: 780px) {
+  .settings-scrim { padding: 0; }
+  .settings { max-height: 100%; border-radius: 0; border: none; }
+  .settings-body { flex-direction: column; }
+  .settings-tabs {
+    flex: 0 0 auto;
+    flex-direction: row;
+    overflow-x: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+    padding: 0 8px;
+  }
+  .settings-tab { border-left: none; border-bottom: 2px solid transparent; white-space: nowrap; }
+  .settings-tab.active { border-left-color: transparent; border-bottom-color: var(--brand); }
+}

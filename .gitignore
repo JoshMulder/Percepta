@@ -4,3 +4,7 @@
 
 # Scratch venvs anywhere in the tree.
 **/.venv/
+
+# Python bytecode, wherever it lands.
+__pycache__/
+*.py[cod]

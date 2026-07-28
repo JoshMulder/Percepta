@@ -1,4 +1,13 @@
-import type { MapConfig, Me, StationDetail, StationSummary } from "./types";
+import type {
+  EnrolmentStatus,
+  IssuedToken,
+  MapConfig,
+  Me,
+  OrganizationDetail,
+  StationConfig,
+  StationDetail,
+  StationSummary,
+} from "./types";
 
 /** Thrown for any non-2xx. `status` is carried so callers can tell an expired
  *  session (401) from a station that is not available (404) without parsing
@@ -103,4 +112,69 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ on }),
     }),
+
+  /* Settings. Everything below needs config.write at the station, or org admin
+     for the organisation routes. A 404 here means "not yours", the same as
+     everywhere else — the API never distinguishes that from "does not exist". */
+
+  updateProfile: (displayName: string) =>
+    request<{ user_id: string; email: string; display_name: string }>(
+      "/api/account/profile",
+      { method: "PATCH", body: JSON.stringify({ display_name: displayName }) },
+    ),
+
+  changePassword: (currentPassword: string, newPassword: string) =>
+    request<{ other_sessions_ended: number }>("/api/account/password", {
+      method: "POST",
+      body: JSON.stringify({
+        current_password: currentPassword,
+        new_password: newPassword,
+      }),
+    }),
+
+  stationConfig: (id: string) =>
+    request<StationConfig>(`/api/stations/${id}/config`),
+
+  saveStationConfig: (id: string, body: Omit<StationConfig, "id" | "config_version">) =>
+    request<StationConfig>(`/api/stations/${id}/config`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+
+  enrolmentStatus: (id: string) =>
+    request<EnrolmentStatus>(`/api/stations/${id}/enrolment`),
+
+  issueEnrolmentToken: (id: string) =>
+    request<IssuedToken>(`/api/stations/${id}/enrolment/token`, { method: "POST" }),
+
+  revokeEnrolmentToken: (id: string) =>
+    request<{ revoked: number }>(`/api/stations/${id}/enrolment/token`, {
+      method: "DELETE",
+    }),
+
+  revokeStationCredentials: (id: string) =>
+    request<{ revoked: number; broker_principal_removed: boolean }>(
+      `/api/stations/${id}/enrolment/revoke`,
+      { method: "POST" },
+    ),
+
+  organization: () => request<OrganizationDetail>("/api/organization"),
+
+  setMemberGrant: (userId: string, stationId: string, capabilities: string[]) =>
+    request<{ ground_station_id: string; capabilities: string[] }>(
+      `/api/organization/members/${userId}/grants`,
+      {
+        method: "PUT",
+        body: JSON.stringify({
+          ground_station_id: stationId,
+          capabilities,
+        }),
+      },
+    ),
+
+  setMemberRoles: (userId: string, roles: string[]) =>
+    request<{ user_id: string; roles: string[] }>(
+      `/api/organization/members/${userId}/roles`,
+      { method: "PUT", body: JSON.stringify({ roles }) },
+    ),
 };

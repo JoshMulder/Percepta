@@ -30,9 +30,11 @@ import {
   IconLight,
   IconPower,
   IconRadio,
+  IconSettings,
   IconWind,
 } from "./Icons";
 import { Logo } from "./Logo";
+import { Settings } from "./Settings";
 import { FloodlightPanel, has, NotPermitted, PowerPanel, VideoPanel } from "./Panels";
 import { MapSkeleton, PanelState, panelStatus } from "./PanelState";
 import { RadioPanel } from "./RadioPanel";
@@ -103,6 +105,10 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
   const [mainView, setMainView] = useState<"adsb" | "video">("adsb");
   const [tab, setTab] = useState("airspace");
   const [alertsOpen, setAlertsOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  // A rename in settings has to reach the header without a reload. `me` is a
+  // prop, so the new name is held here and overlays it.
+  const [displayName, setDisplayName] = useState(me.display_name);
   const [seenAlerts, setSeenAlerts] = useState(0);
   const [lightPending, setLightPending] = useState(false);
 
@@ -201,7 +207,7 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
   const caps: Capability[] =
     socket.capabilities.length > 0 ? socket.capabilities : (detail?.capabilities ?? []);
 
-  useEffect(() => {
+  const loadStations = useCallback(() => {
     api
       .stations()
       .then((list) => {
@@ -210,6 +216,10 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
       })
       .catch(() => setStations([]));
   }, []);
+
+  useEffect(() => {
+    loadStations();
+  }, [loadStations]);
 
   useEffect(() => {
     if (!stationId) return;
@@ -564,7 +574,17 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
           <span>Alerts</span>
           {unseen > 0 && <span className="badge">{unseen > 9 ? "9+" : unseen}</span>}
         </button>
-        <span className="who">{me.display_name}</span>
+        <button
+          type="button"
+          className={`btn ghost settings-toggle${settingsOpen ? " active" : ""}`}
+          onClick={() => setSettingsOpen(true)}
+          aria-haspopup="dialog"
+          title="Settings"
+        >
+          <IconSettings />
+          <span>Settings</span>
+        </button>
+        <span className="who">{displayName}</span>
         <button type="button" className="btn ghost" onClick={signOut}>
           Sign out
         </button>
@@ -628,6 +648,18 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
           <div className={active.fills ? "tab-fill" : "tab-scroll"}>{active.body}</div>
         </main>
         {alertsDrawer}
+      {settingsOpen && (
+        <Settings
+          me={me}
+          stationId={stationId}
+          stationName={stations.find((s) => s.id === stationId)?.name ?? null}
+          capabilities={caps}
+          onClose={() => setSettingsOpen(false)}
+          onProfileChanged={setDisplayName}
+          onStationsChanged={loadStations}
+        />
+      )}
+
       </div>
     );
   }
@@ -705,6 +737,20 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
         </aside>
       </main>
       {alertsDrawer}
+      {/* Outside the fit-scaled stack on purpose: useFitScale sizes the console
+          from the sidebar's natural height, so anything inside it changes the
+          scale of everything else simply by existing. */}
+      {settingsOpen && (
+        <Settings
+          me={me}
+          stationId={stationId}
+          stationName={stations.find((s) => s.id === stationId)?.name ?? null}
+          capabilities={caps}
+          onClose={() => setSettingsOpen(false)}
+          onProfileChanged={setDisplayName}
+          onStationsChanged={loadStations}
+        />
+      )}
     </div>
   );
 }
