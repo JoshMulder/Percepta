@@ -89,6 +89,7 @@ export interface AudioPayload {
 
 export type EventPayload =
   | AudioPayload
+  | HealthPayload
   | AdsbPayload
   | WeatherPayload
   | PowerPayload
@@ -192,6 +193,51 @@ export interface RadioPayload extends Availability {
   ppm?: number;
   /** False until certified transmit hardware exists. Always false today. */
   tx_capable: boolean;
+}
+
+export type DeviceStatus =
+  | "present"
+  /** Nothing was ever meant to be here. Not a fault. */
+  | "not_fitted"
+  /** Specified and cannot be found. */
+  | "configured_absent"
+  /** Was found and has stopped answering. */
+  | "stalled"
+  | "unsupported";
+
+export interface HealthDevice {
+  slot: string;
+  label?: string;
+  status: DeviceStatus;
+  detail?: string;
+  simulated?: boolean;
+  telemetry_kind?: string | null;
+  absent?: string[];
+}
+
+export interface HealthCondition {
+  id: string;
+  severity?: "info" | "warning" | "critical";
+  detail?: string;
+}
+
+/** The station describing itself rather than its surroundings. Carries the
+ *  structured form of things the other streams can only say in prose — notably
+ *  `devices[].status`, which separates "never fitted" from "stopped answering".
+ *  Those need different reactions and must not be rendered the same way. */
+export interface HealthPayload extends Availability {
+  kind: "health";
+  status?: "ok" | "degraded" | "failing";
+  agent_version?: string;
+  config_version?: number;
+  uptime_s?: number;
+  conditions?: HealthCondition[];
+  uplink?: { connected?: boolean; dropped_frames?: number; offline_seconds?: number };
+  credential?: { expires_at?: string; renewal_failures?: number };
+  devices?: HealthDevice[];
+  unsourced_streams?: string[];
+  unsourced_fields?: Record<string, string[]>;
+  storage?: Record<string, number>;
 }
 
 export interface LightPayload extends Availability {

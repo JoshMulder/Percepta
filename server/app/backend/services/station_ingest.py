@@ -60,7 +60,12 @@ AUDIO_PATTERN = "gsu/*/audio"
 #: rejected: a station may legitimately be newer than the platform, and the
 #: contract promises unknown kinds are ignored. Logged once per kind so a typo
 #: is still visible.
-KNOWN_KINDS = {"adsb", "weather", "power", "radio", "light", "audio"}
+#:
+#: `health` is the station describing itself rather than its surroundings - what
+#: is actually attached, whether its credential is renewing, what it is holding
+#: locally. It rides the telemetry stream and needs telemetry.view like the
+#: rest.
+KNOWN_KINDS = {"adsb", "weather", "power", "radio", "light", "audio", "health"}
 
 #: How often a station's last_seen_at is written. Telemetry arrives several
 #: times a second; the console's online threshold is two minutes, so writing

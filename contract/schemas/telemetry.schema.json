@@ -22,6 +22,9 @@
     },
     {
       "$ref": "#/$defs/light"
+    },
+    {
+      "$ref": "#/$defs/health"
     }
   ],
   "$defs": {
@@ -471,6 +474,195 @@
             ]
           }
         }
+      ]
+    },
+    "health": {
+      "type": "object",
+      "description": "How the station itself is doing, as distinct from what it is measuring. Sent on a slow cadence.\n\nThis is where the *structured* form of things the other streams can only say in prose lives. `available: false` on a stream carries a human-readable reason; `devices[].status` says the same thing in a form a console can branch on - a receiver that was never fitted and one that has stopped answering both make a stream unavailable, and an operator does very different things about each.\n\nDeliberately permissive. The station owns the truth about what is attached to it, so unknown fields here are expected rather than tolerated: a station that learns to report something new must not have to wait for the platform.",
+      "properties": {
+        "kind": {
+          "const": "health"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "ok",
+            "degraded",
+            "failing"
+          ],
+          "description": "The station's own summary of itself. `degraded` means it is still doing its job with something wrong - a sensor down, a renewal failing - and is the state that most needs to reach an operator before it becomes `failing`."
+        },
+        "conditions": {
+          "type": "array",
+          "description": "Named problems currently true, e.g. `uplink.down`, `credential.renewal_failing`. Raised and cleared by the station; the platform surfaces them and never infers them.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "severity": {
+                "type": "string",
+                "enum": [
+                  "info",
+                  "warning",
+                  "critical"
+                ]
+              },
+              "detail": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id"
+            ]
+          }
+        },
+        "agent_version": {
+          "type": "string"
+        },
+        "config_version": {
+          "type": "integer",
+          "description": "The configuration generation the station has actually applied. The platform compares it with the version it issued and sends config.set when its own is newer."
+        },
+        "uptime_s": {
+          "type": "number",
+          "minimum": 0
+        },
+        "uplink": {
+          "type": "object",
+          "description": "The station's view of its own link. `dropped_frames` counts telemetry deliberately discarded rather than queued - the contract asks for that, so it is a measure of an outage's length, not of a fault.",
+          "properties": {
+            "connected": {
+              "type": "boolean"
+            },
+            "dropped_frames": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "offline_seconds": {
+              "type": "number",
+              "minimum": 0
+            }
+          }
+        },
+        "credential": {
+          "type": "object",
+          "description": "Renewal health. A station that has stopped renewing is the failure that costs a site visit (enrolment.md section 6), and it is visible here long before the credential actually expires.",
+          "properties": {
+            "expires_at": {
+              "type": "string"
+            },
+            "renewal_failures": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "devices": {
+          "type": "array",
+          "description": "What is actually attached, as the station found it. The platform reconciles its own inventory against this rather than assuming: a camera that has failed and a camera that was never fitted look identical in a database and completely different at the site.",
+          "items": {
+            "$ref": "#/$defs/device"
+          }
+        },
+        "unsourced_streams": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Telemetry kinds the station has no source for. The same fact as `available: false` on those streams, gathered in one place."
+        },
+        "unsourced_fields": {
+          "type": "object",
+          "description": "Per-kind, the fields the fitted instrument cannot measure - humidity on an Airmar without the RH module. Distinct from an unsourced stream: the sensor is present and simply does not report that value."
+        },
+        "storage": {
+          "type": "object",
+          "description": "Local retention. `events_pending` is what the station is holding for a channel that does not exist yet - see transport.md."
+        },
+        "available": {
+          "type": "boolean",
+          "default": true
+        },
+        "unavailable_reason": {
+          "type": "string",
+          "maxLength": 200
+        }
+      },
+      "required": [
+        "kind"
+      ]
+    },
+    "device": {
+      "type": "object",
+      "description": "One device slot, fitted or not.",
+      "properties": {
+        "slot": {
+          "type": "string",
+          "description": "What the device is for - adsb, radio, weather, power, light, camera. One slot per job; which product fills it is type_id."
+        },
+        "type_id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string",
+          "description": "For an operator, not a parser."
+        },
+        "connection": {
+          "type": "string"
+        },
+        "configured": {
+          "type": "boolean",
+          "description": "Someone said this device should be here."
+        },
+        "detected": {
+          "type": "boolean",
+          "description": "The station actually found it. Kept separate from `configured` on purpose: intent and reality are different facts, and conflating them is how a failed sensor reads as an absent one."
+        },
+        "driver_available": {
+          "type": "boolean"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "present",
+            "not_fitted",
+            "configured_absent",
+            "stalled",
+            "unsupported"
+          ],
+          "description": "The one field a console should branch on. `not_fitted` - nothing was ever meant to be here. `configured_absent` - it was specified and cannot be found. `stalled` - it was found and has stopped answering. The last two are faults; the first is not, and showing them the same way teaches operators to ignore all three."
+        },
+        "detail": {
+          "type": "string"
+        },
+        "simulated": {
+          "type": "boolean",
+          "description": "Synthetic rather than real hardware. The platform badges a station DEMO from its own record; this says which *device* is pretending, which a mixed station needs."
+        },
+        "provides": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "absent": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "telemetry_kind": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "slot",
+        "status"
       ]
     }
   }

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type {
   AdsbPayload,
+  HealthPayload,
   Capability,
   LightPayload,
   MapConfig,
@@ -118,6 +119,11 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
   const [power, setPower] = useState<PowerPayload | null>(null);
   const [radio, setRadio] = useState<RadioPayload | null>(null);
   const [light, setLight] = useState<LightPayload | null>(null);
+  const [health, setHealth] = useState<HealthPayload | null>(null);
+  // Conditions already raised, so one that stays true for hours does not refill
+  // the drawer once a second. A ref rather than state: it is bookkeeping, and
+  // nothing renders from it.
+  const raisedConditions = useRef<Set<string>>(new Set());
   // Streams the station says it has no source for, with its reason. Distinct
   // from a fault: nothing has failed, the hardware was never fitted.
   const [unavailable, setUnavailable] = useState<
@@ -212,6 +218,41 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
       case "radio":
         setRadio(message.payload as RadioPayload);
         break;
+      case "health": {
+        const h = message.payload as HealthPayload;
+        setHealth(h);
+        // A station's own conditions have to reach an operator. The one that
+        // matters most is credential renewal failing: it is invisible until the
+        // credential actually expires, and by then the fix is a site visit
+        // (contract/enrolment.md section 6). Raised and cleared by the station;
+        // the console surfaces them and never infers them.
+        const station = message.station_id;
+        const active = h.conditions ?? [];
+        const seen = raisedConditions.current;
+        const fresh = active.filter((c) => !seen.has(`${station}:${c.id}`));
+        if (fresh.length > 0) {
+          setAlerts((prev) =>
+            [
+              ...fresh.map((c) => ({
+                id: ++alertSeq.current,
+                stationId: station,
+                message: c.detail ? `${c.id} — ${c.detail}` : c.id,
+                severity: c.severity ?? ("warning" as const),
+                at: new Date(),
+              })),
+              ...prev,
+            ].slice(0, 40),
+          );
+          for (const c of fresh) seen.add(`${station}:${c.id}`);
+        }
+        // Forget the ones no longer true, so the same condition recurring later
+        // is reported again rather than swallowed as a duplicate.
+        const stillTrue = new Set(active.map((c) => `${station}:${c.id}`));
+        for (const key of [...seen]) {
+          if (key.startsWith(`${station}:`) && !stillTrue.has(key)) seen.delete(key);
+        }
+        break;
+      }
       case "light":
         setLight(message.payload as LightPayload);
         setLightPending(false);
@@ -258,6 +299,8 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
     setDetail(null);
     setMapConfig(null);
     setAdsb(null);
+    setHealth(null);
+    raisedConditions.current = new Set();
     setUnavailable({});
     setWeather(null);
     setPower(null);
@@ -399,6 +442,7 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
   const canVideo = has(caps, "video.view");
   const canTelemetry = has(caps, "telemetry.view");
   const aircraft = adsb?.aircraft ?? [];
+  const adsbDeviceStatus = health?.devices?.find((d) => d.slot === "adsb")?.status;
 
   const statusOf = (kind: StreamKind) =>
     panelStatus(lastSeen[kind] ?? null, streamsSince, STALE_AFTER_MS[kind], simulated);
@@ -723,8 +767,15 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
                 at all; a fault means it had one and it stopped. */}
             {mainView === "adsb" && canTelemetry && unavailable.adsb && (
               <div className="view-status">
+                {/* "Never fitted" and "fitted and stopped answering" both make
+                    the stream unavailable and need different reactions, so the
+                    badge is taken from health's structured status rather than
+                    from the prose reason. */}
                 <span className="no-source-badge" title={unavailable.adsb}>
-                  NO ADS-B
+                  {adsbDeviceStatus === "stalled" ||
+                  adsbDeviceStatus === "configured_absent"
+                    ? "ADS-B FAULT"
+                    : "NO ADS-B"}
                 </span>
               </div>
             )}
