@@ -1002,9 +1002,15 @@ body {
   grid-template-columns: repeat(3, 1fr);
   gap: var(--s2) var(--s3);
 }
+/* Centred in each column, not left-aligned. The six labels are markedly
+   different widths ("Temp" against "Visibility"), so hanging them off the left
+   edge of three equal columns left the block looking ragged underneath a wind
+   rose that is itself centred. Centring each cell lines the readings up with
+   the dial above them. */
 .weather-stats div {
   flex-direction: column;
-  align-items: flex-start;
+  align-items: center;
+  text-align: center;
   gap: 0;
 }
 .weather-stats dd.rain-light,
@@ -2285,7 +2291,12 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 60;
+  /* Above everything, and that means well above 1100. This app's z-index
+     vocabulary runs high because Leaflet paints its own panes from 200 and its
+     controls at 800, so the map's overlays sit at 1100 to clear them (see the
+     .swap-card .card-head note). At a modest value this dialog rendered
+     perfectly and invisibly, underneath the map. */
+  z-index: 2000;
   padding: 24px;
   font-size: 14px;
 }
