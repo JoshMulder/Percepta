@@ -121,7 +121,44 @@ refused by Python.** My first CA had neither; `redis-cli --cacert` was perfectly
 happy and Python's `ssl` refused it. Testing TLS with `redis-cli` alone is not
 evidence a Python client will connect. The CA was regenerated with both.
 
-## 10. What is genuinely not verified
+## 10. Decisions the station side took, which I checked rather than accepted
+
+- **Enrolment refuses to run without a CA.** The CA arrives *at* enrolment, so
+  there is a chicken-and-egg. Rather than trust-on-first-use, the CA is carried
+  to the box out of band and its fingerprint verified by eye at install
+  (`DEPLOYMENT.md` step 3). That is the stronger choice and the one step in the
+  runbook a person must check. **REVIEW** — it does mean you carry `ca.crt` to
+  the Pi on a stick or over scp before enrolling.
+- **Serial port no longer defaults to `/dev/ttyUSB0`.** Two USB-UART adapters
+  swap between boots, so each driver would read the other's traffic and both
+  instruments would present as failed. It defaults to empty and the console
+  offers detected `by-id` names. **This is why you must plug both adapters in
+  before configuring, not after.**
+- **Baud is per-device now**, with 57600 for the ping RX Pro. Everything
+  previously got 4800, which for the ping RX would have read as a dead receiver.
+- **Raspberry Pi OS Bookworm, not Bullseye.** The code needs Python 3.11 for
+  `datetime.UTC`. The installer checks and refuses with that explanation.
+  **REVIEW** — confirm your SD image before you travel to the site.
+- **GPS deliberately not implemented in Python.** It belongs in chrony via
+  gpsd/PPS, so the receiver you intend to fit becomes a config file rather than
+  a code change, and the station starts reporting `disciplined by gps` on its
+  own. chrony is installed for that reason rather than timesyncd.
+
+What I verified myself, on this machine, rather than taking on report: the
+station enrols over HTTPS against the real CA, publishes over `rediss://`, and
+**passes full contract conformance with the CA pinned and no `--insecure`**.
+Pointed at a plaintext broker it refuses before opening a socket, raises a
+critical `uplink.refused`, records an event, and keeps sensing locally. Its 109
+tests pass.
+
+## 11. I pushed to GitHub — **REVIEW**
+
+Both commits are on `origin/main`. You have had me push every previous batch, and
+a night's work existing only on this machine is the risk I flagged to you
+yesterday about the station code. If you would rather review before publishing in
+future, say so and I will hold.
+
+## 12. What is genuinely not verified
 
 I have no Raspberry Pi, no serial ports, no SDR and no camera on this machine.
 Anything about ARMv7, real UARTs, the RTL2838 or the Pi camera is **untested by
