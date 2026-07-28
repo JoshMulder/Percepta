@@ -2,10 +2,14 @@
 
     docker compose exec -d app python -m backend.scripts.simulate_station
 
-Stands in for the onboard computer until real adapters exist. It publishes onto
-exactly the same bus channels a ground station would, so nothing in the API or
-the console knows the difference - which is the point: when the real adapters
-land they replace this script and nothing downstream changes.
+Stands in for the onboard computer until real hardware exists. It publishes
+across the real station boundary - `gsu/{station_id}/telemetry` and
+`gsu/{station_id}/audio`, per `contract/transport.md` - and subscribes to
+`cmd/gsu/{station_id}`. Nothing downstream can tell it from a station, because
+as far as the platform is concerned it is one.
+
+That makes it the reference implementation the contract points at: whatever the
+station team builds has to behave like this on the same channels.
 
 Development only. It writes no database rows except last_seen_at.
 """
@@ -18,17 +22,16 @@ import math
 import random
 import sys
 import uuid
-from datetime import UTC, datetime
 
 import redis
-from sqlalchemy import select, update
+from sqlalchemy import select
 
 from backend.core.config import settings
 from backend.database.models.ground_station import GroundStation
 from backend.database.session import PrivilegedSessionLocal
 from backend.services.airband_demo import AUDIO_RATE, AirbandDemo, channel_floor_db
 from backend.realtime.bus import command_channel
-from backend.realtime.groups import station_group, status_group
+from backend.realtime.groups import status_group
 from backend.realtime.hub import Hub
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -319,6 +322,14 @@ class StationSim:
         return events
 
 
+async def publish_station(hub: Hub, station_id, stream: str, payload: dict) -> None:
+    """Publish as a station does - see contract/transport.md."""
+    if hub.bus is not None and hub.bus._redis is not None:
+        await hub.bus._redis.publish(
+            f"gsu/{station_id}/{stream}", json.dumps(payload)
+        )
+
+
 async def run() -> None:
     # Refuse to start twice. Every instance publishes its own independent fleet
     # to the same channels at the same rate, so a second copy does not double
@@ -364,7 +375,6 @@ async def run() -> None:
         commands.subscribe(command_channel(sim.station_id))
 
     log.info("Simulating %d station(s). Ctrl-C to stop.", len(sims))
-    heartbeat = 0.0
 
     try:
         while True:
@@ -378,21 +388,27 @@ async def run() -> None:
                     channel = message["channel"]
                     if isinstance(channel, bytes):
                         channel = channel.decode()
-                    station = by_id.get(channel.rsplit(":", 1)[-1])
+                    # cmd/gsu/{station_id} - the station id is the last segment.
+                    station = by_id.get(channel.rsplit("/", 1)[-1])
                     data = message["data"]
                     if isinstance(data, bytes):
                         data = data.decode()
                     if station:
                         station.apply(json.loads(data))
+                    else:
+                        # Silence here once cost a full conformance run: the
+                        # channel format changed and every command was dropped
+                        # without a trace.
+                        log.warning("Command on unrecognised channel %r.", channel)
                 except Exception:
                     log.warning("Ignoring malformed command.", exc_info=True)
 
             for sim in sims:
                 for stream, payload in sim.tick(TICK_SECONDS):
-                    await hub.publish(
-                        station_group(sim.org_id, sim.station_id, stream),
-                        hub.station_message(sim.station_id, stream, payload),
-                    )
+                    # Out through the station boundary, exactly as hardware
+                    # would: the payload alone, on a channel named for this
+                    # station, saying nothing about which org it belongs to.
+                    await publish_station(hub, sim.station_id, stream, payload)
                     if payload.get("kind") == "power" and payload["soc_pct"] < 20:
                         await hub.publish(
                             status_group(sim.org_id),
@@ -410,18 +426,9 @@ async def run() -> None:
             except Exception:
                 pass
 
-            heartbeat += TICK_SECONDS
-            if heartbeat >= 15:
-                heartbeat = 0.0
-                now = datetime.now(UTC)
-                with PrivilegedSessionLocal() as db:
-                    db.execute(
-                        update(GroundStation)
-                        .where(GroundStation.id.in_([s.station_id for s in sims]))
-                        .values(last_seen_at=now)
-                    )
-                    db.commit()
-
+            # last_seen_at is written by the ingest, not here: a station has
+            # no business reaching into the platform's database, and the ingest
+            # is what actually observes whether traffic is arriving.
             await asyncio.sleep(TICK_SECONDS)
     finally:
         await hub.stop()

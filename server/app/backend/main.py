@@ -17,6 +17,7 @@ from backend.database.session import check_database_connection
 from backend.realtime.endpoint import websocket_endpoint
 from backend.realtime.hub import hub
 from backend.services.power_history import power_history
+from backend.services.station_ingest import station_ingest
 
 logger = logging.getLogger(__name__)
 
@@ -54,11 +55,15 @@ async def lifespan(app: FastAPI):
             "Set APP_DB_PASSWORD before this touches real data."
         )
     await hub.start()
+    # Ingest before history: history reads what the ingest republishes, so
+    # starting it first only means it sits idle for a moment.
+    await station_ingest.start()
     await power_history.start()
     try:
         yield
     finally:
         await power_history.stop()
+        await station_ingest.stop()
         await hub.stop()
 
 

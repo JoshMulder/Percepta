@@ -5,10 +5,12 @@ reload and could never reach further back than the moment the tab was opened,
 which makes a 12-hour or 7-day view meaningless. This keeps one row per station
 per minute instead.
 
-It subscribes to the fan-out bus rather than sitting in the ingest path, because
-the ingest path does not exist yet - stations publish straight onto the bus. When
-a real enrolment and ingest path lands, this should move behind it, and the
-subscription here becomes the thing to delete.
+It subscribes to the fan-out bus rather than sitting in the ingest path. It
+could now move behind the ingest - `station_ingest.py` sees every frame with the
+organisation already resolved, which would save this a second registry lookup -
+but that would tie recording to whichever worker holds the ingest lease, and
+recording history has different availability requirements to relaying it. Left
+here deliberately; the duplicate lookup is cheap and cached.
 
 Deliberately its own Redis connection, and a pattern subscription: the hub only
 subscribes to groups that have a live viewer, and history has to be recorded

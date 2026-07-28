@@ -86,7 +86,6 @@ than assumed:
 - credentials for it
 - a **station UUID that exists in the platform's registry** — the platform
   resolves the organisation from that id, so an invented one is silently ignored
-- the platform's **ingest** to exist at all (see *Known gaps*)
 
 Production is MQTT over TLS with a per-station client certificate. Development
 is Redis, and the difference is deliberately confined to one place in your code:
@@ -108,12 +107,11 @@ keep the transport behind a small interface and none of the rest cares.
 
 ## Known gaps you will hit
 
-- **The platform's ingest does not exist yet.** The simulator currently
-  publishes onto the platform's *internal* channels, bypassing the station-facing
-  ones this contract defines. So a real station's messages currently reach
-  nothing, and integration is blocked on the platform side, not yours.
-  Developing against your own broker is unaffected — `--legacy` is only for
-  watching the simulator itself.
+- **Stations are not authenticated yet.** The ingest exists and will receive
+  you (see `../contract/transport.md`), but nothing verifies that a publisher is
+  the station it claims to be — the broker has no per-station credentials or
+  ACLs. Build as though it does: publish only on your own channels, and expect
+  a credential to become required without the channel names changing.
 - **Enrolment does not exist** on either side yet. `../contract/enrolment.md`
   specifies it and lists what each side builds; until it is done, use a seeded
   station's uuid for development. Five decisions in its section 9 need a human -

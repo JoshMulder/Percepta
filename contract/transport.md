@@ -19,20 +19,32 @@ station cannot publish into another tenant's namespace or read anything back.
 **The platform resolves the organisation from the station id**, via its device
 registry. Nothing in the payload says which tenant this is, and nothing should.
 
-## Not yet built on the platform side
+## The platform side of this boundary
 
-Today the simulator publishes *directly* onto the platform's internal fan-out
-channels (`rt:g:org:{org}:gsu:{station}:{stream}`), skipping this boundary
-entirely. That is a development shortcut, not the design.
+**Built.** `server/app/backend/services/station_ingest.py` subscribes to
+`gsu/*/telemetry` and `gsu/*/audio`, resolves station → organisation from the
+device registry, and republishes onto the platform's internal fan-out
+(`rt:g:org:{org}:gsu:{station}:{stream}`). It starts with the application. A
+station publishing to this contract is now heard.
 
-The platform therefore owes an **ingest**: subscribe to `gsu/+/telemetry`,
-resolve station → organisation from the registry, and republish onto the internal
-fan-out. Until that exists, a station built to this contract has nothing
-listening to it.
+What it does with what you send:
 
-**Platform agent: this is your task, and it blocks the station agent's first
-end-to-end test.** Track it as such rather than letting the station side
-discover it.
+| | |
+|---|---|
+| Station id | Taken from the **channel name**, never from the payload |
+| Organisation | Resolved from the registry. A station id that is unknown or deactivated is dropped, logged once, and nothing reaches any subscriber |
+| Unknown `kind` | Dropped and logged once — as this contract promises, so a station may be newer than the platform |
+| Malformed JSON | Dropped and logged |
+| `last_seen_at` | Written by the ingest, at most every 15s per station. This is what drives online/offline in the console, so **a station that stops publishing goes offline on its own** — there is no separate heartbeat to send |
+
+The simulator publishes across this same boundary, so it exercises the ingest
+rather than bypassing it, and `conformance/check_station.py` passes against it
+without `--legacy`.
+
+**Still missing: authentication.** Any process that can reach the broker can
+publish as any station. Org resolution is already correct and will not change,
+but the identity it trusts is unverified until enrolment and broker ACLs exist
+(`enrolment.md`). That is the platform's next piece of work on this boundary.
 
 ## Broker
 

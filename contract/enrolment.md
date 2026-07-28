@@ -294,9 +294,9 @@ These need a human, and the station agent should not invent answers.
   enrolment-token columns, hashed
 - `POST /api/enrol` and `/api/enrol/renew`
 - Admin UI/API to issue and revoke tokens, behind `config.write`
-- The **ingest** that receives `gsu/{id}/telemetry` and republishes internally,
-  resolving org from the registry — already owed, see `transport.md`
-- Broker ACLs derived from station identity
+- Broker ACLs derived from station identity — the ingest already resolves org
+  from the registry (`transport.md`), so this is the piece that makes the
+  identity it trusts real
 - Audit every issue, claim, renew and revoke
 
 **Station**

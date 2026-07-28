@@ -13,8 +13,9 @@ Neutral about implementation: it talks to the broker, not to anyone's code. The
 simulator passes it, and so must real hardware.
 
 `--legacy` listens on the platform's internal fan-out channels instead of the
-station-facing ones, which is where the simulator currently publishes. Drop it
-once the platform's ingest exists (see contract/transport.md).
+station-facing ones. You should not need it: the ingest exists and the simulator
+publishes across the real boundary. It remains only for looking at what reaches
+subscribers *after* the ingest, which is a platform-side question.
 """
 
 import argparse
@@ -102,7 +103,7 @@ def main() -> int:
     # connecting to it looks identical to a station that is publishing nothing.
     ap.add_argument("--redis", default="redis://localhost:6380/0")
     ap.add_argument("--legacy", action="store_true",
-                    help="listen on internal fan-out channels (the simulator)")
+                    help="listen on internal fan-out channels (platform-side debugging)")
     args = ap.parse_args()
 
     r = redis.Redis.from_url(args.redis)

@@ -90,13 +90,21 @@ These are absences, not defects, but they are load-bearing for the product:
   real problem rather than a UX one.
 - **Media pipeline.** No video ingest, relay or stream tickets. The design is in
   `03-realtime-isolation.md` §7.
-- **Ground station enrolment and ingest.** No device credential issuing, so
-  nothing can authenticate as a station yet, and there is no ingest listening on
-  the station-facing channels - `simulate_station.py` publishes straight onto the
-  internal bus, bypassing the boundary. Both are specified in
-  `../../contract/enrolment.md` and `../../contract/transport.md`, and both are
-  the platform's work. The ingest blocks the station team's first end-to-end
-  test.
+- **The ingest is single-instance by lease, and untested above one worker.**
+  `station_ingest.py` republishes, so two running at once would double every
+  frame on the fan-out; a Redis lease elects one leader and the others idle.
+  That is correct by construction and the stand-down path has been exercised by
+  hand, but the container still runs a single uvicorn worker, so a real
+  multi-worker failover has never happened. Exercise it before scaling out, and
+  expect a gap of up to one lease period (15s) when a leader dies.
+- **Ground station authentication.** The ingest exists
+  (`backend/services/station_ingest.py`) and resolves each station's org from
+  the registry rather than from anything the station says, so the tenancy rule
+  holds. What is missing is the step before it: no device credentials are
+  issued, and the broker has no per-station ACLs, so **anything that can reach
+  the broker can publish as any station**. Nothing about org resolution changes
+  when this lands - it is enrolment (`../../contract/enrolment.md`) plus broker
+  ACLs, and it is the last thing standing between this and a real station.
 - **Org switcher.** The token carries an active org and the backend supports
   switching, but the console has no UI for it.
 - **MFA.** The `mfa_required` / `mfa_secret` columns and `pyotp` are present;
