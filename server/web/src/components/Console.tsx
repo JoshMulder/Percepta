@@ -117,6 +117,11 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
   const [power, setPower] = useState<PowerPayload | null>(null);
   const [radio, setRadio] = useState<RadioPayload | null>(null);
   const [light, setLight] = useState<LightPayload | null>(null);
+  // Streams the station says it has no source for, with its reason. Distinct
+  // from a fault: nothing has failed, the hardware was never fitted.
+  const [unavailable, setUnavailable] = useState<
+    Partial<Record<StreamKind, string>>
+  >({});
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const alertSeq = useRef(0);
   // The message handler is memoised without audio in its deps, so it reads the
@@ -177,6 +182,21 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
     if (payload.kind && payload.kind in STALE_AFTER_MS) {
       const kind = payload.kind as StreamKind;
       setLastSeen((prev) => ({ ...prev, [kind]: Date.now() }));
+      // A stream declaring itself unavailable is still arriving, so it counts
+      // as live for staleness - the station is talking to us, it just has
+      // nothing to measure with.
+      const declared = message.payload as { available?: boolean; unavailable_reason?: string };
+      setUnavailable((prev) => {
+        const reason =
+          declared.available === false
+            ? (declared.unavailable_reason ?? "No source for this data")
+            : undefined;
+        if (prev[kind] === reason) return prev;
+        const next = { ...prev };
+        if (reason === undefined) delete next[kind];
+        else next[kind] = reason;
+        return next;
+      });
     }
     switch (payload.kind) {
       case "adsb":
@@ -237,6 +257,7 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
     setDetail(null);
     setMapConfig(null);
     setAdsb(null);
+    setUnavailable({});
     setWeather(null);
     setPower(null);
     setRadio(null);
@@ -695,11 +716,24 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
                 could not already see. A dead receiver is different: an empty
                 map and a failed receiver look identical, so that has to be
                 said out loud. */}
-            {mainView === "adsb" && canTelemetry && statusOf("adsb") === "fault" && (
+            {/* Two different things, and an operator has to be able to tell
+                them apart. Unavailable means the station has no ADS-B receiver
+                at all; a fault means it had one and it stopped. */}
+            {mainView === "adsb" && canTelemetry && unavailable.adsb && (
               <div className="view-status">
-                <span className="fault-inline">ADS-B receiver — no data</span>
+                <span className="no-source-badge" title={unavailable.adsb}>
+                  NO ADS-B
+                </span>
               </div>
             )}
+            {mainView === "adsb" &&
+              canTelemetry &&
+              !unavailable.adsb &&
+              statusOf("adsb") === "fault" && (
+                <div className="view-status">
+                  <span className="fault-inline">ADS-B receiver — no data</span>
+                </div>
+              )}
           </div>
         </section>
 

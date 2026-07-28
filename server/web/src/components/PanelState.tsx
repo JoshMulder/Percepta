@@ -125,3 +125,26 @@ export function PanelState({
 export function MapSkeleton() {
   return <div className="skeleton-map" />;
 }
+
+
+/**
+ * A single reading the station has no source for, struck through in red.
+ *
+ * Distinct from the dashes a panel shows while it is waiting. A dash means "not
+ * yet"; this means "there is no sensor for this, and there will not be a
+ * number". Confusing the two is how an operator ends up waiting for a reading
+ * that is never coming - or worse, reading a placeholder as a measurement.
+ *
+ * Sized to the text it replaces so a panel keeps its height, which the sidebar
+ * scaling depends on.
+ */
+export function NoSource({ what }: { what: string }) {
+  return (
+    <span className="no-source" role="img" aria-label={`${what}: no sensor`} title={`No sensor for ${what}`}>
+      <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden focusable="false">
+        <line x1="8" y1="8" x2="92" y2="92" />
+        <line x1="92" y1="8" x2="8" y2="92" />
+      </svg>
+    </span>
+  );
+}

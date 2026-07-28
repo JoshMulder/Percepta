@@ -38,6 +38,28 @@ simulator, keep the console working, pass conformance.** When in doubt about
 what a field should contain, that file is the answer, and this contract is what
 stops it being the *only* answer.
 
+## Declaring a stream unavailable
+
+A station with no receiver for a stream sends `available: false` and a short
+`unavailable_reason` instead of the stream's usual fields. Absent means `true`,
+so nothing written before this changes meaning.
+
+This exists because an empty payload and a dead sensor are otherwise
+indistinguishable, and **only the station knows which it is**. An empty
+`aircraft` array means *clear airspace*; a station with no ADS-B receiver must
+not be able to say that. The console renders a `NO ADS-B` badge rather than an
+empty map, and strikes through individual readings that have no sensor behind
+them - which is deliberately different from the dashes it shows while waiting.
+
+Conformance accepts a declared-unavailable stream in place of a payload, and
+skips commands against it. A station is not failed for lacking hardware; it is
+failed for pretending.
+
+**Not every absent value is unavailability.** A field the instrument simply does
+not measure - humidity on an Airmar without the RH module - is omitted, and is
+optional in the schema for that reason. Reserve `available: false` for a stream
+with no source at all.
+
 ## Three rules that are not visible in the schemas
 
 Each of these has already cost somebody something.

@@ -116,12 +116,24 @@ export interface Aircraft {
   alert?: boolean;
 }
 
-export interface AdsbPayload {
-  kind: "adsb";
-  aircraft: Aircraft[];
+/** Carried by every telemetry payload. `available: false` says the station has
+ *  no source for this stream — no receiver fitted, or one that has failed — and
+ *  is the only honest way to distinguish that from a working sensor with
+ *  nothing to report. An empty `aircraft` array means clear airspace. */
+export interface Availability {
+  available?: boolean;
+  unavailable_reason?: string;
 }
 
-export interface WeatherPayload {
+export interface AdsbPayload extends Availability {
+  kind: "adsb";
+  /** Absent when the stream is unavailable. Never contains a contact without a
+   *  position — ADS-B exists to transmit position, so a positionless return is
+   *  counted station-side and dropped rather than sent with nulls. */
+  aircraft?: Aircraft[];
+}
+
+export interface WeatherPayload extends Availability {
   kind: "weather";
   wind_kt: number;
   gust_kt: number;
@@ -130,7 +142,10 @@ export interface WeatherPayload {
    *  is the classic wind-rose bug. */
   wind_dir_deg: number;
   temperature_c: number;
-  humidity_pct: number;
+  /** Optional: the fitted instrument may have no humidity module. Absent means
+   *  no sensor, which the console strikes through — it is not the same as a
+   *  reading that has not arrived yet. */
+  humidity_pct?: number | null;
   pressure_hpa: number | null;
   visibility_km: number | null;
   /** Present-weather state, reported by the station rather than inferred here -
@@ -143,7 +158,7 @@ export interface WeatherPayload {
   rain_mm_today?: number;
 }
 
-export interface PowerPayload {
+export interface PowerPayload extends Availability {
   kind: "power";
   /** Battery state of charge, 0-100. */
   soc_pct: number;
@@ -156,7 +171,7 @@ export interface PowerPayload {
   runtime_h: number | null;
 }
 
-export interface RadioPayload {
+export interface RadioPayload extends Availability {
   kind: "radio";
   freq_hz: number;
   rssi_db: number;
@@ -178,7 +193,7 @@ export interface RadioPayload {
   tx_capable: boolean;
 }
 
-export interface LightPayload {
+export interface LightPayload extends Availability {
   kind: "light";
   on: boolean;
 }

@@ -1,5 +1,6 @@
 import { memo } from "react";
 import { SKY_LABEL, SkyIcon } from "./Icons";
+import { NoSource } from "./PanelState";
 import type { WeatherPayload } from "../types";
 
 const POINTS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
@@ -128,22 +129,41 @@ function WeatherPanelInner({ weather }: { weather: WeatherPayload | null }) {
         </div>
         <div>
           <dt>Humidity</dt>
-          <dd>{has ? `${weather.humidity_pct.toFixed(0)} %` : "--"}</dd>
+          {/* Optional in the contract: the fitted instrument may have no RH
+              module. Absent means no sensor, which is a different thing from a
+              reading that has not arrived. */}
+          <dd>
+            {!has ? (
+              "--"
+            ) : weather.humidity_pct === undefined || weather.humidity_pct === null ? (
+              <NoSource what="humidity" />
+            ) : (
+              `${weather.humidity_pct.toFixed(0)} %`
+            )}
+          </dd>
         </div>
         <div>
           <dt>Pressure</dt>
           <dd>
-            {!has || weather.pressure_hpa === null
-              ? "--"
-              : `${weather.pressure_hpa.toFixed(0)} hPa`}
+            {!has ? (
+              "--"
+            ) : weather.pressure_hpa === undefined || weather.pressure_hpa === null ? (
+              <NoSource what="pressure" />
+            ) : (
+              `${weather.pressure_hpa.toFixed(0)} hPa`
+            )}
           </dd>
         </div>
         <div>
           <dt>Visibility</dt>
           <dd>
-            {!has || weather.visibility_km === null
-              ? "--"
-              : `${weather.visibility_km.toFixed(0)} km`}
+            {!has ? (
+              "--"
+            ) : weather.visibility_km === undefined || weather.visibility_km === null ? (
+              <NoSource what="visibility" />
+            ) : (
+              `${weather.visibility_km.toFixed(0)} km`
+            )}
           </dd>
         </div>
         {/* Rainfall reads as two more numbers alongside the rest rather than a
@@ -151,12 +171,26 @@ function WeatherPanelInner({ weather }: { weather: WeatherPayload | null }) {
             what says whether a track is passable. */}
         <div>
           <dt>Rain today</dt>
-          <dd>{has ? `${(weather.rain_mm_today ?? 0).toFixed(1)} mm` : "--"}</dd>
+          <dd>
+            {!has ? (
+              "--"
+            ) : weather.rain_mm_today === undefined || weather.rain_mm_today === null ? (
+              <NoSource what="rainfall" />
+            ) : (
+              `${weather.rain_mm_today.toFixed(1)} mm`
+            )}
+          </dd>
         </div>
         <div>
           <dt>Rain rate</dt>
           <dd className={rainBand}>
-            {has ? `${(weather.rain_rate_mmh ?? 0).toFixed(1)} mm/h` : "--"}
+            {!has ? (
+              "--"
+            ) : weather.rain_rate_mmh === undefined || weather.rain_rate_mmh === null ? (
+              <NoSource what="rain rate" />
+            ) : (
+              `${weather.rain_rate_mmh.toFixed(1)} mm/h`
+            )}
           </dd>
         </div>
       </dl>

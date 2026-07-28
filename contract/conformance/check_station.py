@@ -40,9 +40,14 @@ SCHEMAS = Path(__file__).resolve().parent.parent / "schemas"
 #: before calling it absent. Weather is slow by design; the rest are 1 Hz.
 EXPECTED = {"adsb": 8, "power": 8, "radio": 8, "light": 8, "weather": 20}
 
-#: Each command, and the telemetry field that must reflect it. This pairing is
-#: the contract's core promise: nothing is confirmed by the platform, so every
-#: command has to be observable in what the station reports.
+#: Streams a station may declare unavailable instead of reporting. Commands
+#: against an unavailable stream are not checked - there is no hardware to obey
+#: them, and failing a station for that would mean the only way to pass is to
+#: pretend.
+#:
+#: Each command below, and the telemetry field that must reflect it. This
+#: pairing is the contract's core promise: nothing is confirmed by the platform,
+#: so every command has to be observable in what the station reports.
 COMMANDS = [
     ("radio.tune", {"freq_hz": 119_500_000}, "radio", "freq_hz", 119_500_000),
     ("radio.auto_squelch", {"on": False}, "radio", "auto_squelch", False),
@@ -130,8 +135,19 @@ def main() -> int:
         by_kind.setdefault(str(payload.get("kind")), []).append(payload)
 
     for kind in EXPECTED:
-        check(f"publishes {kind}", kind in by_kind,
-              "nothing received in the window")
+        payloads = by_kind.get(kind, [])
+        unavailable = [p for p in payloads if p.get("available") is False]
+        if unavailable:
+            # A station saying "I have no receiver for this" is conformant. The
+            # alternative - demanding a payload it cannot honestly fill - is
+            # what makes a station invent numbers, which is the one outcome
+            # this harness exists to prevent.
+            reason = unavailable[-1].get("unavailable_reason") or "no reason given"
+            check(f"publishes {kind}", True)
+            notes.append(f"{kind} declared unavailable: {reason}")
+        else:
+            check(f"publishes {kind}", bool(payloads),
+                  "nothing received in the window")
 
     print("\n2. Schema")
     for kind, payloads in sorted(by_kind.items()):
@@ -157,7 +173,14 @@ def main() -> int:
               f"{len(audio)} audio frames while squelched")
 
     print("\n4. Commands take effect")
+    unavailable_kinds = {
+        k for k, payloads in by_kind.items()
+        if any(p.get("available") is False for p in payloads)
+    }
     for kind, body, report_kind, field, expect in COMMANDS:
+        if report_kind in unavailable_kinds:
+            notes.append(f"{kind} not checked - {report_kind} is unavailable")
+            continue
         r.publish(cmd_channel, json.dumps({"kind": kind, **body}))
         time.sleep(0.3)
         got = None

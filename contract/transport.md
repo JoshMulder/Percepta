@@ -52,6 +52,13 @@ on the development stack, so an unauthenticated client can publish anywhere. The
 per-station principals are real and enforced for anyone using them; closing
 `default` is a deployment change and is the last gap on this boundary.
 
+## Streams with no source
+
+Send `available: false` with a short `unavailable_reason` rather than an empty
+payload or silence. See `README.md`. Keep sending it on the normal cadence - a
+station that goes quiet is a station that has failed, and "I have no receiver"
+is something you have to keep saying.
+
 ## Broker
 
 Redis pub/sub today; MQTT over TLS is the intended production transport
