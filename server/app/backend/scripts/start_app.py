@@ -104,25 +104,31 @@ def main() -> None:
         workers,
     ]
 
-    # TLS is served directly rather than through a reverse proxy: one process,
-    # one port, and no way to reach the API in clear. That last part matters
-    # more than it looks - a station misconfigured to http:// would send its
-    # enrolment token and receive its credential in plaintext, and would appear
-    # to work perfectly while doing it.
-    cert = os.environ.get("APP_TLS_CERT", "/certs/api.crt")
-    key = os.environ.get("APP_TLS_KEY", "/certs/api.key")
-    if os.path.exists(cert) and os.path.exists(key):
+    # Behind a reverse proxy by default: the proxy terminates TLS and this
+    # serves plain HTTP on the internal network only.
+    #
+    # --proxy-headers is not cosmetic. Without it every request appears to come
+    # from the proxy, so the audit log records the proxy's address for every
+    # login and every command issued to hardware - which is exactly the field
+    # you need when something has gone wrong. forwarded-allow-ips must name the
+    # proxy rather than "*", because a client can set X-Forwarded-For itself and
+    # trusting it from anywhere lets anyone write whatever address they like
+    # into the audit trail.
+    argv += ["--proxy-headers", "--forwarded-allow-ips",
+             os.environ.get("FORWARDED_ALLOW_IPS", "127.0.0.1")]
+
+    # Direct TLS remains available for a deployment with no proxy in front.
+    cert = os.environ.get("APP_TLS_CERT", "")
+    key = os.environ.get("APP_TLS_KEY", "")
+    if cert and key and os.path.exists(cert) and os.path.exists(key):
         argv += ["--ssl-certfile", cert, "--ssl-keyfile", key]
         logger.info("Starting uvicorn on :%s over TLS (%s worker(s)).", port, workers)
     else:
-        # Refusing to start would be worse: a developer with no certs generated
-        # yet should get a working stack and a loud warning, not a container
-        # that will not boot. But say plainly what is exposed.
-        logger.warning(
-            "No TLS certificate at %s - serving PLAINTEXT HTTP on :%s. "
-            "Enrolment tokens and station credentials cross this in clear. "
-            "Run scripts/make_certs.sh before any station is enrolled over a "
-            "network you do not control.", cert, port,
+        logger.info(
+            "Starting uvicorn on :%s in plain HTTP for a TLS-terminating proxy "
+            "(%s worker(s)). Nothing but the proxy should be able to reach this "
+            "port: enrolment tokens and station credentials cross it in clear.",
+            port, workers,
         )
     os.execvp("uvicorn", argv)
 

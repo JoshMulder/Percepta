@@ -125,7 +125,7 @@ services:
     ports:
       # In production bind to loopback and let a reverse proxy terminate TLS:
       #   "127.0.0.1:${APP_HOST_PORT:-8000}:8000"
-      - "${APP_HOST_PORT:-8000}:8000"
+      - "${APP_BIND:-127.0.0.1}:${APP_HOST_PORT:-8000}:8000"
     security_opt:
       - no-new-privileges:true
     depends_on:
@@ -133,6 +133,35 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+
+  # Scheduled database backups. Same image as the database so pg_dump always
+  # matches the server version - a newer server with an older pg_dump refuses
+  # outright, and that is not a thing to discover during a restore.
+  #
+  # Kept on this host for now, which covers a bad migration and a dropped table
+  # and does not cover the disk or the building. Moving them off-box is the
+  # remaining half and needs a destination rather than more code.
+  backup:
+    image: postgres:17
+    container_name: percepta-backup
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: "${POSTGRES_PASSWORD}"
+      POSTGRES_HOST: "${POSTGRES_HOST:-postgres}"
+      POSTGRES_USER: "${POSTGRES_USER:-percepta}"
+      POSTGRES_DB: "${POSTGRES_DB:-percepta}"
+      BACKUP_INTERVAL_HOURS: "${BACKUP_INTERVAL_HOURS:-6}"
+      BACKUP_KEEP: "${BACKUP_KEEP:-28}"
+      BACKUP_DIR: /backups
+    volumes:
+      - ./scripts/backup_loop.sh:/usr/local/bin/backup_loop.sh:ro
+      - "${BACKUP_DIR:-./backups}:/backups"
+    entrypoint: ["/bin/sh", "/usr/local/bin/backup_loop.sh"]
+    security_opt:
+      - no-new-privileges:true
 
 volumes:
   postgres_data:

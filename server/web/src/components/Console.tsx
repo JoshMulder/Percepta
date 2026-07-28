@@ -269,12 +269,22 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
   const caps: Capability[] =
     socket.capabilities.length > 0 ? socket.capabilities : (detail?.capabilities ?? []);
 
+  // Devices the station itself says are synthetic. This matters more than the
+  // platform's own record: a real station agent, properly enrolled and
+  // publishing, can still be running simulated drivers because no hardware is
+  // attached - which is exactly the bench case, and it showed as a live station
+  // with no badge at all. The station knows and says so; believing the record
+  // over the station was the mistake.
+  const simulatedDevices =
+    health?.devices?.filter((d) => d.simulated).map((d) => d.slot) ?? [];
+
   // Synthetic data is a property of the station being watched, not of the
   // deployment: a real station and a simulated one can sit side by side in the
   // same switcher. DEMO_MODE remains as a deployment-wide override for showing
   // the whole platform off, but it is no longer how this is normally decided.
   const simulated =
     me.demo_mode ||
+    simulatedDevices.length > 0 ||
     (detail?.is_simulated ??
       stations.find((s) => s.id === stationId)?.is_simulated ??
       false);
@@ -632,7 +642,11 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
         {simulated && (
           <span
             className="demo-chip"
-            title="This station's data is synthetic — not a live site"
+            title={
+              simulatedDevices.length > 0
+                ? `Synthetic data. The station reports these as simulated: ${simulatedDevices.join(", ")}`
+                : "This station's data is synthetic — not a live site"
+            }
           >
             DEMO
           </span>

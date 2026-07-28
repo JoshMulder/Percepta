@@ -61,9 +61,22 @@ is something you have to keep saying.
 
 ## Transport security
 
-Both channels are TLS, verified against the CA handed over at enrolment - not
-against the system trust store. A station trusts exactly one issuer, which is
-stronger here than public PKI rather than weaker.
+Both channels are TLS. **All traffic between a station and the platform is
+encrypted; there is no unencrypted path and no downgrade.**
+
+The two channels are verified differently, and the distinction matters:
+
+- **Broker** - verified against `broker.ca_pem`, the private CA handed over at
+  enrolment. A station trusts exactly one issuer for its data path, which is
+  stronger here than public PKI rather than weaker.
+- **API** - normally behind a TLS-terminating reverse proxy with a public
+  certificate, so verified against the system trust store. A station may pin the
+  API to a private CA instead where there is no proxy, but that is configuration
+  rather than the default.
+
+The field is `broker.ca_pem` and not `ca_pem` for exactly this reason: it is the
+broker's trust root. Using it for the API works today and stops working the
+moment a real certificate is in front.
 
 The plaintext listeners are **disabled**, not deprioritised. A station pointed at
 `redis://` or `http://` fails to connect rather than quietly sending its

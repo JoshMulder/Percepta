@@ -154,10 +154,12 @@ token rather than by the rate limit alone.
   },
   "broker": {
     "url": "mqtts://broker.example:8883",
-    "ca_pem": "…",                   // pinned; the station verifies the platform
+    "ca_pem": "…",                   // pinned; the station verifies THE BROKER
                                      // against this CA and no other. SENT.
-                                     // Persist it beside the credential and use
-                                     // it for the broker and this API both.
+                                     // Persist it beside the credential. It is
+                                     // the broker's trust root, not the API's -
+                                     // the API is normally behind a proxy with
+                                     // a public certificate.
     "username": "gsu:{station_id}",  // the broker principal to authenticate as
     "telemetry_topic": "gsu/{station_id}/telemetry",
     "audio_topic": "gsu/{station_id}/audio",
