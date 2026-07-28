@@ -1,0 +1,9 @@
+# One runtime dependency. Everything else the station needs is in the standard
+# library on purpose: an unattended box in the field should boot with what is in
+# its image and never need to install anything.
+#
+#   python -m venv .venv && .venv/bin/pip install -r requirements.txt
+redis>=5.0
+
+# Development only: the offline schema tests read contract/schemas/ directly.
+jsonschema>=4.0    # tests

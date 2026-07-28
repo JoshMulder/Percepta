@@ -132,3 +132,59 @@ keep the transport behind a small interface and none of the rest cares.
   there changes someone else's build, so propose it.
 - Additive contract changes are cheap; renames and removals are breaking.
 - Commit inside `station/` only.
+
+---
+
+# The implementation
+
+Everything above is the brief. What follows is what was built against it.
+
+```
+gsu/
+  agent.py       the loop: sense, alert, record, then publish
+  transport/     the only code that knows the broker is Redis (mqtt.py is a
+                 documented stub, not a plausible-looking untested client)
+  devices/       the supported-device registry, the inventory (intent vs fact),
+                 and the drivers: MAVLink/ping RX for ADS-B, NMEA/Airmar for
+                 weather, serial I/O under both
+  radio/         the receiver, and the squelch and noise-floor logic that
+                 contract/README.md rule 3 makes station-side correctness
+  sensors/       interfaces, and simulated implementations behind them
+  console.py     the local setup and device-selection app (enrolment.md §5, §7)
+  enrolment.py   claim, renew with backoff, and alarm early
+```
+
+## Running it
+
+```bash
+python -m venv .venv && .venv/bin/pip install -r requirements.txt
+
+# First boot: claim a code. Or leave it and use the console.
+.venv/bin/python -m gsu enrol --token XXXX-XXXX-XXXX
+
+# Run. Console on http://127.0.0.1:8088
+GSU_BROKER_URL=redis://127.0.0.1:6380/0 .venv/bin/python -m gsu run
+
+.venv/bin/python -m gsu devices    # what is fitted, and what was found
+.venv/bin/python -m gsu bench      # what a tick costs — run this on the Pi
+.venv/bin/python -m unittest discover -s tests -t . -q
+```
+
+`GSU_BROKER_URL` overrides only the broker *address*; the username and topics
+still come from enrolment. It exists because the platform currently hands out a
+container-internal hostname.
+
+Other environment: `GSU_HOME` (state directory), `GSU_PLATFORM_URL`,
+`GSU_SETUP_HOST`/`GSU_SETUP_PORT`/`GSU_SETUP=0`, `GSU_AIRBAND_TRAFFIC`
+(`off`/`low`/`busy`), `GSU_ENROL_TOKEN`.
+
+## Read next
+
+- **DECISIONS.md** — every assumption that needs a human, and the five open
+  decisions from `contract/enrolment.md` §9, still open.
+- **CONTRACT-QUESTIONS.md** — nine things the contract could not express when
+  this was built. Four are settled (`available: false`, optional
+  `humidity_pct`, positionless contacts stay dropped, and the conformance
+  harness); the rest are open. Nothing in `contract/` was edited from this side.
+- **HARDWARE.md** — what the Pi 2B, the single RTL2838 and the Airmar 110WX can
+  and cannot carry, measured where measurable and marked where not.

@@ -1,0 +1,6 @@
+# Station state: credential, device inventory, recordings, event database.
+# The credential in particular must never be committed.
+var/
+.venv/
+__pycache__/
+*.pyc
