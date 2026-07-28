@@ -57,11 +57,19 @@ def capabilities_for(
         # Not a member of this org at all.
         return _NONE
 
-    # The station must exist, be active, and be visible in this org context.
-    # RLS enforces the org part; a deactivated station grants nothing to anyone,
-    # including admins - taking a station out of service should stop control of
-    # it, not just hide it from the list.
-    if grant_repo.active_station(ground_station_id=ground_station_id) is None:
+    # The station must exist, be active, and belong to *this* organisation.
+    #
+    # The org check is made explicitly rather than left to RLS. RLS is the right
+    # backstop for an ordinary session, but a platform-admin session runs with
+    # bypass on, and under bypass "every active station" means every active
+    # station on the platform. Relying on the database to scope this would hand
+    # a platform admin operational control of every tenant's hardware as a side
+    # effect of a read permission - see visible_station_ids for the same fix.
+    #
+    # A deactivated station grants nothing to anyone, including admins: taking a
+    # station out of service should stop control of it, not just hide it.
+    station = grant_repo.active_station(ground_station_id=ground_station_id)
+    if station is None or station.organization_id != organization_id:
         return _NONE
 
     if UserRole.ADMIN.value in roles:
@@ -133,8 +141,18 @@ def visible_station_ids(
         return set()
 
     if UserRole.ADMIN.value in roles:
+        # Explicitly org-scoped, not left to RLS. A platform-admin session
+        # bypasses RLS, and without this filter that turns "every active station
+        # in my org" into "every active station on the platform" - which is how
+        # a platform admin ended up with five stations from two other tenants in
+        # their switcher, subscribing to fan-out groups that nothing publishes
+        # to. Cross-tenant *administration* is the Platform tab's job; operating
+        # another org's hardware means switching into that org.
         rows = db.execute(
-            select(GroundStation.id).where(GroundStation.is_active.is_(True))
+            select(GroundStation.id).where(
+                GroundStation.is_active.is_(True),
+                GroundStation.organization_id == organization_id,
+            )
         ).scalars()
         return set(rows)
 
@@ -147,10 +165,13 @@ def visible_station_ids(
     if not candidates:
         return set()
 
-    # A grant naming a deactivated station shows nothing.
+    # A grant naming a deactivated station shows nothing, and the org filter is
+    # explicit here for the same reason as above.
     rows = db.execute(
         select(GroundStation.id).where(
-            GroundStation.id.in_(candidates), GroundStation.is_active.is_(True)
+            GroundStation.id.in_(candidates),
+            GroundStation.is_active.is_(True),
+            GroundStation.organization_id == organization_id,
         )
     ).scalars()
     return set(rows)
