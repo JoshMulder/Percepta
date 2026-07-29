@@ -98,6 +98,9 @@ class StationIngest:
         self._token = uuid.uuid4().hex
         self._registry: dict[uuid.UUID, tuple[uuid.UUID | None, datetime]] = {}
         self._seen: dict[uuid.UUID, datetime] = {}
+        #: Last known synthetic/real state per station, so the row is written
+        #: when it changes rather than on every health frame.
+        self._simulated: dict[uuid.UUID, bool] = {}
         self._unknown_kinds: set[str] = set()
         self._unknown_stations: set[uuid.UUID] = set()
 
@@ -306,11 +309,53 @@ class StationIngest:
         if organization_id is None:
             return
 
+        if kind == "health":
+            await self._reconcile_simulated(station_id, payload)
+
         # Onto the internal fan-out, where authorisation and per-subscriber
         # delivery already apply. Nothing downstream needs to know the frame
         # came from outside.
         await hub.publish_station(organization_id, station_id, stream, payload)
         await self._touch(station_id)
+
+    async def _reconcile_simulated(self, station_id: uuid.UUID, payload: dict) -> None:
+        """Believe the station about whether its own data is synthetic.
+
+        `ground_stations.is_simulated` was previously set only by the platform's
+        own simulator, so a real station agent running simulated drivers - no
+        hardware attached yet - showed as a live station with nothing to say it
+        was not. The station reports the truth per device; this writes it down
+        so the station *list* can be honest too, not just the panel of whichever
+        station happens to be selected.
+
+        Only written when it changes. A station reports health every half minute
+        and this is a fact that changes when hardware is fitted, not per frame.
+        """
+        devices = payload.get("devices")
+        if not isinstance(devices, list) or not devices:
+            return
+        simulated = any(
+            isinstance(d, dict) and d.get("simulated") is True for d in devices
+        )
+        if self._simulated.get(station_id) == simulated:
+            return
+        self._simulated[station_id] = simulated
+        await asyncio.to_thread(self._write_simulated, station_id, simulated)
+
+    def _write_simulated(self, station_id: uuid.UUID, simulated: bool) -> None:
+        try:
+            with PrivilegedSessionLocal() as db:
+                db.execute(
+                    update(GroundStation)
+                    .where(
+                        GroundStation.id == station_id,
+                        GroundStation.is_simulated.is_(not simulated),
+                    )
+                    .values(is_simulated=simulated)
+                )
+                db.commit()
+        except Exception:
+            log.exception("Could not update is_simulated for %s.", station_id)
 
     async def _touch(self, station_id: uuid.UUID) -> None:
         """Record that the station is alive, at most every SEEN_INTERVAL."""

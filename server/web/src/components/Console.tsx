@@ -652,7 +652,12 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
           {stations.length === 0 && <option value="">No stations available</option>}
           {stations.map((s) => (
             <option key={s.id} value={s.id}>
+              {/* A native select cannot hold a chip, so the label carries it.
+                  Which stations are synthetic matters most at the moment of
+                  choosing one - finding out afterwards, from a badge on a panel
+                  you are already reading, is finding out too late. */}
               {s.name}
+              {s.is_simulated ? " · DEMO" : ""}
             </option>
           ))}
         </select>

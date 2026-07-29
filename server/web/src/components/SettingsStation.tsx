@@ -63,6 +63,7 @@ export function SettingsStation({
             {stations.map((s) => (
               <option key={s.id} value={s.id}>
                 {s.name}
+                {s.is_simulated ? " · DEMO" : ""}
               </option>
             ))}
           </select>

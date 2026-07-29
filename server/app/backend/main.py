@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -11,6 +12,7 @@ from backend.api.account import router as account_router
 from backend.api.auth import router as auth_router
 from backend.api.commands import router as commands_router
 from backend.api.enrolment import router as enrolment_router
+from backend.api.media import renew_leases, router as media_router
 from backend.api.organization import router as organization_router
 from backend.api.platform import router as platform_router
 from backend.api.station_config import router as station_config_router
@@ -65,9 +67,13 @@ async def lifespan(app: FastAPI):
     # starting it first only means it sits idle for a moment.
     await station_ingest.start()
     await power_history.start()
+    # Keeps watched stations streaming. Silence is the stop signal, so this
+    # task existing is what makes on-demand video actually stop.
+    leases = asyncio.create_task(renew_leases())
     try:
         yield
     finally:
+        leases.cancel()
         await power_history.stop()
         await station_ingest.stop()
         await hub.stop()
@@ -79,6 +85,7 @@ app.include_router(account_router)
 app.include_router(auth_router)
 app.include_router(commands_router)
 app.include_router(enrolment_router)
+app.include_router(media_router)
 app.include_router(organization_router)
 app.include_router(platform_router)
 app.include_router(station_config_router)

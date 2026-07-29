@@ -70,6 +70,42 @@ command, and that is an open contract question rather than something to invent.
 image assumes it is current unless told otherwise, and a frozen frame from four
 minutes ago is exactly what gets acted on wrongly.
 
+## The live video stream
+
+Separate from the snapshot channel and from the broker entirely. Video is bulk
+data; the broker carries control and telemetry that must not be delayed by it.
+
+```
+station ──(outbound wss, station credential)──► platform ──(per viewer)──► browser
+```
+
+- **`wss://<platform>/media/ingest`**, authenticated with the station credential
+  as a bearer token. The station id is derived from the credential, never sent.
+- **Fragmented MP4**, not Annex B. The relay is then a byte pipe - it forwards
+  fragments without parsing or re-muxing, so a second viewer costs a socket
+  rather than a codec, and a browser plays it through Media Source Extensions
+  with no player library.
+- **The first binary frame of a session is the initialisation segment**
+  (`ftyp` + `moov`). The platform keeps it and gives it to every later viewer,
+  because a viewer handed only the next fragment sees nothing at all - and that
+  looks exactly like a dead camera. Send a text frame `init` to declare a new
+  encoder session; the platform discards the old one, since parameters that no
+  longer match decode as corruption rather than as an error.
+- **Nothing reaches a viewer directly** (topology rule 8). The platform
+  terminates the stream and re-originates it, so a viewer never learns a
+  station's address and a station never learns a viewer's.
+
+### On demand
+
+The platform sends `video.start` when the first viewer attaches and `video.stop`
+when the last one leaves, and **renews `video.start` while anyone is watching**.
+The lease is what makes silence the stop signal: if the platform crashes or the
+link drops, the station stops on its own rather than transmitting to nobody,
+which is the whole point of on-demand on a metered link.
+
+`video.start` carries `lease_seconds`. Treat a repeat as a renewal, not as a
+second start.
+
 ## Streams with no source
 
 Send `available: false` with a short `unavailable_reason` rather than an empty
