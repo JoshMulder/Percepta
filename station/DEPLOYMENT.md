@@ -24,7 +24,7 @@ normal.
 | Airmar 110WX | on a USB-UART |
 | uAvionix ping RX Pro | on a USB-UART. Not yet connected as of HARDWARE.md |
 | RTL2838 | airband. **No driver in this build** — see §10 |
-| Pi camera | CSI ribbon. **No driver in this build** — see §10 |
+| Pi camera | CSI ribbon. Driven: snapshots on the video channel, and live H.264 on demand. **Never yet run against a real camera** — see §10 |
 | Network | Ethernet or a Starlink terminal. The Pi 2B has no onboard Wi-Fi |
 
 **Software**
@@ -220,6 +220,32 @@ URL carrying `user:pass@` would replace this station's identity with whatever it
 names — failing confusingly at best and, at worst, publishing as somebody else.
 The agent strips and warns rather than obeying, but do not rely on that.
 
+### Video needs nothing set, and here is what you can set anyway
+
+**The normal case is three variables you have already set.** Snapshots go to
+`gsu/{station_id}/video` on the broker you configured, and the live stream goes
+to `wss://<the platform's host>/media/ingest`, derived from `GSU_PLATFORM_URL`
+and authenticated with the credential the station already holds. There is no
+fourth URL to obtain and no second secret.
+
+| | When you need it |
+|---|---|
+| `GSU_MEDIA_URL` | Only when the media endpoint is **not** on the API's host — the same situation `GSU_BROKER_URL` exists for. `wss://…/media/ingest` |
+| `GSU_ENCODER` | `auto` (default), `hardware` or `software`. `auto` probes for a hardware encode block and prefers it; naming one that is not there is **refused with the reason**, not silently swapped, because a quiet fallback hides the fact you set the option to establish. A Pi 5 is believed to need `software` — HARDWARE.md §9 |
+| `GSU_STREAM_SINK` | Diagnostics only: writes the live stream to a file instead of to the platform. `python -m gsu stream` sets it for you |
+
+None of these are in the shipped `gsu.env`, deliberately: a variable in an
+environment file is a variable somebody will set.
+
+**Bandwidth is the thing to decide here, not connectivity.** Snapshots run
+continuously; the live stream runs only while somebody is watching. At the
+defaults — 640×480 at 2 fps — snapshots cost around 245 kbit/s of test card, or
+**640–1280 kbit/s from a real camera** (HARDWARE.md §8). If the site's link is
+metered and small, turn the rate down from the platform with `config.set`
+(`video_fps`, or `video_enabled: false`) rather than editing anything on the box.
+The station reports what it is actually costing in every health frame, so this
+is a number you can check rather than estimate.
+
 ---
 
 ## 5. Preflight
@@ -255,13 +281,24 @@ Serial ports present
 Devices
   FAIL  adsb: uAvionix ping RX Pro …: no serial port set for this device
   FAIL  radio: RTL-SDR airband …: not supported by this software build
+  PASS  camera: Raspberry Pi camera (CSI ribbon)
+          Pi CSI camera via picamera2, 640x480, quality 75
 ```
 
 Once the proxy is in front of the API, the second line reads `platform API:
 system CA bundle` instead, and that is also a PASS.
 
-The last two are dealt with in §8 and §10. Anything under **Trust** that fails
+The two FAILs are dealt with in §8 and §10. Anything under **Trust** that fails
 must be fixed here, not later.
+
+**Read the camera line carefully — preflight does not take a picture.** It
+reports that the driver could be built: that libcamera tooling is installed and
+this board can be asked for a frame. A ribbon that is not seated, or a camera
+that is not there, still shows `PASS` here and only settles at the first
+capture, after which the slot reports `configured_absent` with libcamera's own
+message. **`gsu camera` is what proves a picture** (§9), and it takes about a
+second. On a box with neither `picamera2` nor `rpicam-jpeg` installed the line
+is a `FAIL` naming both.
 
 ---
 
@@ -343,6 +380,13 @@ at once, which sends you looking for a power fault.
 Which is which: unplug one, re-run `ls`, and see which name disappeared. The
 Airmar is 4800 baud, the ping RX Pro 57600.
 
+**The camera is not in this step.** It is a ribbon cable on the CSI connector,
+with no port to choose and no credentials to type — that distinction is why the
+device registry keeps `csi` and `network` connections apart, and why the setup
+page never asks for the password of a camera that is a ribbon. Its settings are
+resolution, JPEG quality and rotation, and the defaults are the ones to leave
+alone unless §4's bandwidth arithmetic says otherwise.
+
 Then:
 
 ```bash
@@ -396,23 +440,144 @@ python contract/conformance/check_station.py --station <uuid>
 Streams with no driver are reported as declared-unavailable and skipped, not
 failed. A station is not failed for lacking hardware, only for pretending.
 
+### Confirming video, which conformance does not cover
+
+Conformance checks telemetry, audio and commands. Video is a separate channel
+and a separate uplink, and it has its own three checks. Do them in this order —
+each one needs less of the world than the one after it.
+
+**1. Does the camera produce a picture at all?** No platform, no network, no
+enrolment:
+
+```bash
+cd /opt/percepta/station
+sudo docker compose -f deploy/docker-compose.yml run --rm gsu camera --frames 3 --out /tmp/frame.jpg
+```
+
+```
+armv7l / Pi CSI camera via picamera2, 640x480, quality 75
+
+  1:   38.4 kB JPEG,   51.4 kB published,   184.2 ms, captured 2026-07-29T…Z
+  2:   38.1 kB JPEG,   51.0 kB published,   171.5 ms, captured …
+  3:   38.6 kB JPEG,   51.7 kB published,   169.8 ms, captured …
+
+  51.4 kB per published frame; at 2 fps that is 842 kbit/s sustained on the uplink.
+```
+
+That last line is the one to read before you leave: it is measured from this
+camera at this setting, not estimated. Copy `/tmp/frame.jpg` off and look at it —
+a picture of the site means the ribbon, the sensor and the encoder are all
+right. **No frame** prints libcamera's own message, which is the diagnosis:
+*"no cameras available"* is a ribbon or a camera, *"picamera2 is not installed
+and no rpicam-jpeg was found"* is a package.
+
+**2. Does the live encoder keep up?** Still no platform needed:
+
+```bash
+sudo docker compose -f deploy/docker-compose.yml run --rm gsu stream --seconds 30
+```
+
+It prints which encoders this board has, then measured frames per second,
+measured bitrate and dropped frames, and writes fragmented MP4 to
+`/dev/shm/gsu-stream.mp4`. Play that back — it is the same container the platform
+receives, so it checks the container as well as the camera. It says plainly when
+the encoder did not keep up, and **that is a hardware answer to report, not a
+setting to nudge quietly**.
+
+**3. Is it reaching the platform?** With the station running and enrolled:
+
+```bash
+curl -s http://127.0.0.1:8088/status.json | python3 -m json.tool | sed -n '/"video"/,/^        }/p'
+```
+
+or the same block in any `health` frame the platform receives. What each field
+means when things are right:
+
+| Field | Right |
+|---|---|
+| `video.enabled` | `true` |
+| `video.frames_published` | increasing |
+| `video.frames_dropped` | not increasing |
+| `video.bytes_per_frame`, `bitrate_bps` | measured, and roughly what §4 predicted |
+| `video.refused` | `false`. `true` means the broker will not accept the video channel — an ACL on the platform, not a fault here |
+| `video.reason` | empty. When it is not, it is a sentence, and it is the diagnosis |
+| `video.stream.state` | `idle` until somebody watches. That is correct: the stream is on demand |
+| `video.stream.uplink` | `websocket:wss://…/media/ingest`. If it says `none (no media URL configured)` the station is encoding into a counter and nobody can see anything |
+
+**On the setup page**, the same numbers in the video row: frames published
+increasing, dropped not, and the bitrate. **On the platform's console**, the
+station's video panel shows the picture — with the simulated camera fitted it
+shows a test card that says SYNTHETIC with the capture time drawn on it, which
+is the point of it: if that clock is stale, the age an operator is being shown is
+wrong, and it is visible by eye with nothing to set up.
+
+**Then ask for the live stream**, which only the platform can do — a viewer
+attaching is what starts it. Within a second or two the log says:
+
+```
+Media uplink open to wss://…/media/ingest
+Streaming 1920x1080 at 30 fps, 3000 kbit/s target, to websocket:wss://…
+Media session started: avc1.640028, 651 byte initialisation segment.
+```
+
+and `video.stream.state` becomes `streaming` with `fps_measured`, `bitrate_bps`,
+`dropped` and `resyncs` beside it. When the viewer leaves, the platform stops
+renewing the lease and the station stops on its own within about thirty seconds —
+**silence is the stop signal**, so a console that crashes or a link that drops
+does not leave the encoder running on a metered link.
+
 ---
 
 ## 10. What this build does not do
 
-Two of the four fitted devices have **no driver in this build**, and say so:
+One of the four fitted devices has **no driver in this build**, and says so:
 
 | Device | What the station does |
 |---|---|
 | RTL-SDR airband | publishes `radio` as `available: false`, reason *"not supported by this software build"*, on the normal cadence |
-| Pi camera | reports as configured and undriveable. There is no media channel in the contract either (`CONTRACT-QUESTIONS.md` item 7), so there is nowhere for a frame to go |
 
-They are selected in the inventory anyway, so that the platform and the console
-can see the hardware is fitted and that what is missing is software. Nothing is
+It is selected in the inventory anyway, so that the platform and the console can
+see the hardware is fitted and that what is missing is software. Nothing is
 stubbed to look like it works.
 
 `power` and `light` have no hardware specified for this site, so those slots are
 empty and their streams are declared unavailable for that reason instead.
+
+### The camera is driven now, and none of it has met a camera
+
+This row used to say the camera "reports as configured and undriveable" and that
+there was no media channel to carry anything it produced. **Both are now false.**
+What exists:
+
+| | |
+|---|---|
+| Snapshots | `gsu/{station_id}/video`, one complete JPEG per message, 640×480 at 2 fps by default. `contract/schemas/video.schema.json` |
+| Live video | H.264, fragmented MP4 over a WebSocket to the platform, started only while somebody is watching |
+| Driver | `gsu/camera/picsi.py` for stills — `picamera2` if it imports, `rpicam-jpeg` if it does not. `gsu/camera/h264.py` for the stream — a hardware encode block, or libav/x264, probed at start-up |
+| No camera fitted | `available: false` with a reason, on a cadence. Never silence, never a black frame |
+
+**What has never happened**, and the owner is about to be the first to find out:
+
+- **No part of this has run against a real camera.** Not `picamera2`, not
+  `rpicam-jpeg`, not `rpicam-vid`, not the hardware encoder. There is no Pi and
+  no camera on the machine this was written on.
+- **Nothing has executed on ARMv7 at all**, so the timings in HARDWARE.md §8 are
+  x86 numbers and are labelled as such.
+- The **synthetic** camera and the synthetic H.264 source have been run
+  continuously and verified — the JPEG against libjpeg, the H.264 and the
+  fragmented MP4 against ffmpeg, and the whole uplink end to end against the
+  running platform at 1080p30 for fifteen seconds with nothing dropped. That
+  proves the *pipe*. It says nothing about the sensor.
+
+So the first two commands in §9 are the ones that matter on the day: `gsu camera`
+proves the picture, `gsu stream` proves the encoder. Both work with no platform
+and no network, and both print numbers rather than opinions.
+
+One thing that follows from a single camera: **the live stream takes the sensor
+while it runs**, so snapshots pause and publish `available: false` with
+*"the camera is in use by the live stream"* until it stops. That is deliberate —
+a `rpicam-jpeg` competing with `rpicam-vid` for the same device fails with a
+device-busy that reads like broken hardware — and it is what a console will show.
 
 ---
 
@@ -493,6 +658,7 @@ and cleared when it goes away.
 | `clock.unsynchronised` | Nothing is disciplining the clock |
 | `devices.absent` | Something configured is not answering |
 | `telemetry.unsourced` | Streams with no source at all. Expected on this build for `radio` |
+| `video.topic_refused` | The broker will not accept `gsu/{station_id}/video`. An ACL on the platform, not a fault here — the station retries every five minutes and nothing else is affected |
 
 The same list is on the setup page under **Needs attention**, which works with
 no link at all.
@@ -569,6 +735,33 @@ platform side.
 The reason is in `gsu devices`, on the setup page, and in the `unavailable_reason`
 the platform receives. For serial devices it names the ports that *are* present.
 Check the user is in `dialout` (`id gsu`) and that you used a `by-id` path.
+
+**There is no picture, and everything else is fine.**
+Read `video.reason` in `status.json` (§9) — it is a sentence, and it is the
+answer. The four you will actually see:
+
+| Reason | What it is |
+|---|---|
+| *"no camera fitted"* | the camera slot is empty in the inventory. Set it on the setup page |
+| libcamera's own words — *"no cameras available"* | the ribbon or the camera. `gsu camera` reproduces it in a second, and the message comes from libcamera rather than from this software |
+| *"picamera2 is not installed and no rpicam-jpeg was found"* | packages: `sudo apt install python3-picamera2 rpicam-apps` |
+| *"the camera is in use by the live stream"* | not a fault. One sensor, one user; snapshots resume when the viewer leaves |
+
+If `video.refused` is `true`, the broker is rejecting the video channel. That is
+an ACL on the platform, not a fault on the box — the station retries every five
+minutes and needs nobody on site once it is fixed.
+
+If the picture is there but the *stream* never starts, the station is waiting to
+be asked: `video.stream.state` stays `idle` until a viewer attaches, and that is
+correct. Check `video.stream.uplink` — `none (no media URL configured)` means it
+would encode into a counter, and `GSU_PLATFORM_URL` is what it derives from.
+
+**The stream starts and the picture stutters or goes blocky.**
+`video.stream.dropped` and `resyncs` in the health frame. Rising `resyncs` is a
+link that cannot carry the bitrate: the station drops whole fragments and waits
+for the next keyframe rather than queueing, so what an operator sees is a gap
+rather than a smear. Lower `stream_bitrate_kbps` or `stream_fps` with
+`config.set` from the platform — not on the box, and not by restarting anything.
 
 **It enrolled and now the credential is refused.**
 `credential.revoked` means an admin revoked it, or another box claimed this
@@ -731,9 +924,16 @@ box is better than relying on luck.
 | 8088 | `127.0.0.1` | the setup console. **No authentication** — reach it over an SSH tunnel |
 | 22 | everything | SSH. Key-only, please: this box is on the public internet |
 
-The station makes **outbound** connections only, to the broker (6380/TLS) and
-the platform API (8000/TLS). Nothing reaches inward: Starlink is CGNAT and the
-platform can never initiate a connection to a station.
+The station makes **outbound** connections only: to the broker (6380/TLS), to
+the platform API (8000/TLS), and — **only while somebody is watching** — a
+WebSocket to the platform's media endpoint for the live video. Nothing reaches
+inward: Starlink is CGNAT and the platform can never initiate a connection to a
+station. That is also why a viewer asks for video through the *command* channel
+rather than by connecting to the box.
+
+The media socket carries the same credential as the broker, verified against the
+same pinned trust, and is closed when the stream stops. There is no third secret
+and no port to open.
 
 If the setup console is ever moved off loopback, it belongs on a private setup
 network and nowhere else — it has no authentication, and physical presence is
@@ -754,6 +954,7 @@ What lives only on the station, and what it costs to lose:
 | Device inventory | re-enter the serial ports on the setup page. Minutes |
 | Event database | **lost.** Proximity alerts and outage records for the retention window |
 | Audio recordings | **lost.** Up to 24 h / 200 MB |
+| Video | **nothing to lose.** No frame is stored on the box: snapshots are published and dropped, and the live stream is never written to disk except by `gsu stream`, which is a diagnostic and is capped |
 
 Neither of the last two has a channel to the platform yet — that is
 `CONTRACT-QUESTIONS.md` item 4, still open — so a card failure loses them. That
@@ -792,6 +993,8 @@ sudo $C run --rm gsu devices             intent against fact
 sudo $C run --rm gsu whoami              what this box thinks it is, offline
 sudo $C run --rm gsu status              what the platform thinks of it
 sudo $C run --rm gsu bench               what a tick costs on this hardware
+sudo $C run --rm gsu camera --frames 3   one picture, and what it costs to send
+sudo $C run --rm gsu stream --seconds 30 the live encoder, measured and playable
 
 # updates
 U=/opt/percepta/station/deploy/gsu-update.sh
@@ -892,6 +1095,17 @@ changed twice and none of it has touched the target hardware.
   21 scenarios.
 - The ARMv7 base image, verified at the registry.
 - Update bandwidth: the code layer and the cost of a no-op check, both measured.
+- **Video, end to end against the running platform**: snapshots on
+  `gsu/{station_id}/video`, and the live stream as fragmented MP4 over a
+  WebSocket — 1080p30 for fifteen seconds, 459 fragments, none dropped, and it
+  played in a browser. The synthetic JPEG was checked against libjpeg and the
+  synthetic H.264 and fMP4 against ffmpeg, including a late joiner given only
+  the initialisation segment and a later keyframe.
+- The on-demand lease: a repeated `video.start` renews rather than restarting,
+  and a lease left to expire stops the encoder on its own.
+- Congestion: against a server that accepts the connection and then stops
+  reading, fragments are dropped whole and the picture resynchronises on the
+  next keyframe. Nothing is ever queued and no partial frame is ever written.
 
 **Never run, anywhere:**
 
@@ -903,7 +1117,13 @@ changed twice and none of it has touched the target hardware.
 - `gsu-update.sh` has **never driven a real container** — only the stub.
 - `install.sh` has never been run end to end.
 - Nothing has executed on ARMv7, a real UART, the camera or the SDR.
+- **No camera code has met a camera.** `picamera2`, `rpicam-jpeg`, `rpicam-vid`
+  and the hardware H.264 encoder are all reasoned from documentation. Everything
+  verified above ran against the synthetic camera and the synthetic encoder,
+  which exercise the publisher, the muxer, the uplink and the on-demand logic —
+  and none of the sensor.
 
 The first person with the hardware should expect the device cgroup majors and
-the `group_add` gids to need adjusting, and should run `gsu-update.sh` by hand
-once before letting the timer near it.
+the `group_add` gids to need adjusting, should run `gsu-update.sh` by hand once
+before letting the timer near it, and should run `gsu camera` and `gsu stream`
+(§9) before trusting anything this document says about video.

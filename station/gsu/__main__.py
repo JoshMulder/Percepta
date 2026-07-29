@@ -129,9 +129,14 @@ def _camera(agent, frames: int, size: str | None, out: str | None) -> int:
         payload = len(frame.to_payload()["jpeg"]) + 160
         sizes.append(payload)
         last = frame
+        from .camera import iso
+
+        # The same spelling of the timestamp that goes on the wire, so what a
+        # technician reads here and what the platform receives are comparable
+        # without anybody converting anything.
         print(f"  {index + 1}: {len(frame.jpeg) / 1024:6.1f} kB JPEG, "
               f"{payload / 1024:6.1f} kB published, {elapsed:6.1f} ms, "
-              f"captured {frame.captured_at.isoformat()}")
+              f"captured {iso(frame.captured_at)}")
     if not sizes:
         print("\nNothing was captured. The reason above is the whole diagnosis.\n")
         agent.shutdown()

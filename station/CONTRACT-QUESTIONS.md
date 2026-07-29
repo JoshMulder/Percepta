@@ -4,14 +4,19 @@ Raised, not changed. Nothing in `contract/` has been edited by this side — eac
 item below is something the station ran into while being built, with the shape
 of a proposed change and what the station does about it.
 
-**Items 1, 2, 3 and 8 are settled and implemented** (contract commits `ee44e25`
-and `ed02b31`, station side done and conformant). They are kept here with what
-shipped, because the reasoning is why the schema and the harness look the way
-they do. **Items 4, 6, 7, 9 and 11 are open** — the event
-channel and the camera media path are the two that matter most. **Item 10 is
-new**: TLS has landed, and `enrolment.md` §4 and §11 now describe a state of the
-world that has passed. **Item 11 is new**: the station can update itself, but
-nothing can tell it to look.
+**Items 1, 2, 3, 7, 8, 12, 13 and 14 are settled and implemented**, station side
+done and conformant. They are kept here with what shipped, because the reasoning
+is why the schema and the harness look the way they do.
+
+**Open: 4, 6, 9, 10 and 11.** The event channel (4) is the one that matters most
+now that video is closed — it is the only thing the station buffers during an
+outage with nowhere to send it afterwards. 10 is the stale TLS wording in
+`enrolment.md`; 11 is that nothing can tell a station to look for an update.
+
+**The whole camera path closed in one pass**: 7 (the camera had nowhere to send
+anything), 12 (the broker refused the video channel), 13 (on-demand needed a
+command) and 14 (H.264 needed a transport). Video now runs end to end, snapshots
+and live, and the reasoning behind each shape is in those four items.
 
 ---
 
@@ -276,7 +281,33 @@ command: the platform never assumes the change took.
 
 ---
 
-## 7. The camera has nowhere to send anything
+## 7. The camera has nowhere to send anything — **RESOLVED**
+
+**Shipped, on both sides, and the camera is no longer unmonitored.** Three
+things closed it, and each answers a different half of the original complaint:
+
+- **A channel for the picture.** `contract/schemas/video.schema.json` and
+  `gsu/{station_id}/video` — one complete JPEG per message, 640×480 at 2 fps by
+  default, granted by the broker ACL (item 12).
+- **A way to say the camera is fitted and healthy.** The same `available: false`
+  rule as telemetry, so *"no camera fitted"*, *"no cameras available"* and *"the
+  camera is in use by the live stream"* are now three different, published
+  statements rather than one silence. `health.devices[]` carries the camera slot
+  and `health.unsourced_streams` carries `video`, so the console can tell a
+  failed camera from one that was never fitted — which is exactly what this item
+  said it could not.
+- **Media on demand, as `00-topology.md` rules 5/8 describe it.** H.264 as
+  fragmented MP4 over a WebSocket to the platform, started by `video.start` and
+  stopped when the platform stops renewing the lease (items 13 and 14). GSU →
+  server → viewer, pulled rather than pushed, and nothing reaches a viewer from
+  a station.
+
+**Still true, and worth keeping in view:** the ONVIF network camera in the
+registry has no driver. It is a different job from grabbing a still off a ribbon
+cable — an RTSP pull and a re-encode — and it is the one case that would need a
+decoder on the station.
+
+The original argument follows.
 
 `00-topology.md` puts a camera in every station and rules 5/8 describe media as
 GSU → server → viewer, pulled on demand. The contract has no media channel, no
