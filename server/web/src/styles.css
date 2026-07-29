@@ -185,8 +185,14 @@ body {
   height: 100%;
 }
 
+/* Three columns rather than a flex row with an auto margin. The station
+   switcher is genuinely centred on the screen, instead of landing wherever the
+   logo's width leaves it - which is what made it drift, and what made it move
+   again whenever anything on either side changed size. The outer columns are
+   equal, so the middle stays put regardless of what is in them. */
 .topbar {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
   gap: 1.25rem;
   padding: 0 1rem;
@@ -196,7 +202,7 @@ body {
   flex: none;
 }
 .topbar-right {
-  margin-left: auto;
+  justify-self: end;
   display: flex;
   align-items: center;
   gap: 0.75rem;
@@ -207,6 +213,7 @@ body {
 }
 
 .station-select {
+  justify-self: center;
   display: flex;
   align-items: center;
   gap: 0.625rem;
@@ -2745,9 +2752,11 @@ body {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  /* Matches what the native select occupied, so swapping the control did not
-     move the header. */
-  line-height: 1.4;
+  /* An explicit height rather than padding plus line-height. The button and the
+     dot and the link label all sit on the same row, and letting three different
+     intrinsic heights negotiate is what left them a pixel or two out. */
+  height: 1.875rem;
+  line-height: 1;
   background: var(--panel);
   color: var(--text);
   border: 1px solid var(--line);
@@ -2776,7 +2785,10 @@ body {
 .station-list {
   position: absolute;
   top: calc(100% + 0.25rem);
-  left: 0;
+  /* Centred under a centred trigger. Left-aligned looked deliberate only while
+     the control was on the left. */
+  left: 50%;
+  transform: translateX(-50%);
   z-index: 2000;   /* Above the map: Leaflet paints its panes from 200 and its
                       controls at 800, and the console's overlays sit at 1100. */
   margin: 0;
