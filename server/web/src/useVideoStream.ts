@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api } from "./api";
+import { ApiError, api } from "./api";
 
 /**
  * Play a station's live stream into a `<video>` element.
@@ -24,6 +24,17 @@ import { api } from "./api";
  * begin when the first viewer connects and to stop when the last leaves, so
  * closing this hook is what stops paying for satellite bandwidth. That makes
  * the cleanup path load-bearing rather than tidy-up.
+ *
+ * **A dropped stream reconnects; a closed one does not.** The two look the same
+ * on the wire - a socket closing - and mean opposite things. The viewer leaving
+ * must stop the station; the platform redeploying, or a link blip, must not
+ * strand an operator on a dead panel that says idle. So an unexpected close
+ * tears the media pipeline down and tries again with a fresh ticket, backing
+ * off to thirty seconds, forever - a security console left open overnight
+ * should be showing the camera in the morning. Only two things stop the
+ * retries: the hook's own cleanup, and the platform refusing the ticket
+ * (403/404) - permission does not come back by asking more often, and every
+ * attach starts the camera at the far end, which is satellite bandwidth.
  */
 
 export type StreamState = "idle" | "connecting" | "playing" | "unavailable";
@@ -50,8 +61,10 @@ export function useVideoStream(
     let socket: WebSocket | null = null;
     let source: MediaSource | null = null;
     let buffer: SourceBuffer | null = null;
-    const pending: ArrayBuffer[] = [];
+    let pending: ArrayBuffer[] = [];
     let objectUrl: string | null = null;
+    let attempt = 0;
+    let retryTimer: number | null = null;
 
     /** Drop media the playhead has left behind.
      *
@@ -111,13 +124,55 @@ export function useVideoStream(
       if (end - el.currentTime > 4) el.currentTime = end - 0.5;
     };
 
-    (async () => {
+    /** Unwind one connection's media pipeline so the next starts clean. A new
+     *  connection is a new encoder session with its own parameter sets, and
+     *  fragments appended to the old buffer decode as corruption. */
+    const teardownMedia = () => {
+      pending = [];
+      buffer = null;
+      try {
+        if (source && source.readyState === "open") source.endOfStream();
+      } catch {
+        /* already torn down */
+      }
+      source = null;
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+        objectUrl = null;
+      }
+      if (video.current) video.current.removeAttribute("src");
+    };
+
+    const scheduleRetry = () => {
+      if (cancelled || retryTimer !== null) return;
+      attempt += 1;
+      // 1s, 2s, 4s ... capped at 30s, with jitter so a fleet of consoles
+      // severed by one redeploy does not reattach as a thundering herd.
+      const delay =
+        Math.min(30_000, 1000 * 2 ** Math.min(attempt - 1, 5)) *
+        (0.75 + Math.random() * 0.5);
+      setState("connecting");
+      retryTimer = window.setTimeout(() => {
+        retryTimer = null;
+        void connect();
+      }, delay);
+    };
+
+    const connect = async () => {
+      if (cancelled) return;
       setState("connecting");
       let ticket: string;
       try {
         ticket = (await api.streamTicket(stationId)).ticket;
-      } catch {
-        if (!cancelled) setState("unavailable");
+      } catch (err) {
+        if (cancelled) return;
+        if (err instanceof ApiError && (err.status === 403 || err.status === 404)) {
+          // Not allowed, or no such station. Retrying cannot change either,
+          // and every attach starts a camera somewhere.
+          setState("unavailable");
+          return;
+        }
+        scheduleRetry();
         return;
       }
       if (cancelled) return;
@@ -165,27 +220,37 @@ export function useVideoStream(
         // worth less than the time it takes to play them.
         if (pending.length > 24) pending.splice(0, pending.length - 24);
         drain();
-        if (!cancelled) setState("playing");
+        if (!cancelled) {
+          // Media arriving is the one signal that the whole path works, so it
+          // is what resets the backoff - not the socket opening, which succeeds
+          // and immediately dies while the platform is mid-restart.
+          attempt = 0;
+          setState("playing");
+        }
       };
 
-      socket.onerror = () => !cancelled && setState("unavailable");
-      socket.onclose = () => !cancelled && setState("idle");
-    })();
+      // onclose fires after onerror in every failure, so the close handler is
+      // the one place reconnection is decided.
+      socket.onerror = () => undefined;
+      socket.onclose = () => {
+        if (cancelled) return;
+        teardownMedia();
+        scheduleRetry();
+      };
+    };
+
+    void connect();
 
     return () => {
       cancelled = true;
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
       // Closing is what tells the platform the last viewer has gone, which is
-      // what stops the station encoding. Not housekeeping.
+      // what stops the station encoding. Not housekeeping - and `cancelled`
+      // above is what keeps this close from reading as a dropout and
+      // reconnecting a stream the viewer just left.
       socket?.close();
       socketRef.current = null;
-      pending.length = 0;
-      try {
-        if (source && source.readyState === "open") source.endOfStream();
-      } catch {
-        /* already torn down */
-      }
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-      if (video.current) video.current.removeAttribute("src");
+      teardownMedia();
       setState("idle");
     };
   }, [stationId, enabled, video]);

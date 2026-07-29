@@ -498,9 +498,16 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
         compact={small}
         frame={frame}
         stationId={stationId}
-        // Live only on the large view. Attaching is what starts the station
-        // encoding, so this decides whether the camera runs at all.
-        live={!small && mainView === "video"}
+        // Live wherever the panel is mounted - main stage, sidebar preview,
+        // or a phone's camera tab. Attaching is what starts the station
+        // encoding, so this means the camera runs whenever it is on somebody's
+        // screen; decided deliberately, because an operator with the console
+        // open is exactly the demand the on-demand design exists to detect,
+        // and a preview showing seconds-old snapshots beside a live main view
+        // reads as a broken camera. Mounting already tracks visibility - the
+        // compact layout unmounts hidden tabs - and the lease still stops the
+        // encoder when the console closes.
+        live
         streaming={frame?.jpeg != null}
         canPtz={!small && has(caps, "video.ptz")}
         online={detail?.online ?? false}

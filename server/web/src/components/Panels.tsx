@@ -58,7 +58,10 @@ function VideoPanelInner({
   const streamState = useVideoStream(
     videoRef,
     stationId ?? null,
-    Boolean(live && !compact && online),
+    // `live` is the whole decision now - the console only mounts this panel
+    // where it is actually on screen, so a compact guard here just made the
+    // preview and the phone tab lie about a camera that works.
+    Boolean(live && online),
   );
   const showingLive = streamState === "playing";
 

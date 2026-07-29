@@ -507,6 +507,8 @@ async def run() -> None:
     log.info("Simulating %d station(s). Ctrl-C to stop.", len(sims))
 
     try:
+        next_tick = asyncio.get_running_loop().time()
+
         while True:
             # Drain any commands that arrived since the last tick. Non-blocking,
             # so a quiet channel costs nothing.
@@ -559,7 +561,22 @@ async def run() -> None:
             # last_seen_at is written by the ingest, not here: a station has
             # no business reaching into the platform's database, and the ingest
             # is what actually observes whether traffic is arriving.
-            await asyncio.sleep(TICK_SECONDS)
+            #
+            # Paced against an absolute deadline, not `sleep(TICK_SECONDS)`.
+            # Sleeping a fixed second AFTER the tick's work made the true
+            # period one second plus the work - measured at 1.027s - while
+            # every frame carries exactly one second of audio. A player fed
+            # 1.000s of sound every 1.027s starves by 27ms per second and
+            # drops out on a regular cycle, which is exactly how it presented:
+            # rhythmic in-out-in on the demo radio, and nothing wrong with
+            # either the player or the receiver model.
+            next_tick += TICK_SECONDS
+            now = asyncio.get_running_loop().time()
+            if next_tick < now - 5 * TICK_SECONDS:
+                # Hopelessly behind (a paused laptop, a debugger): jump rather
+                # than fast-forwarding through a backlog of silent ticks.
+                next_tick = now
+            await asyncio.sleep(max(0.0, next_tick - now))
     finally:
         await hub.stop()
         try:
