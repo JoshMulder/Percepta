@@ -1157,11 +1157,11 @@ body {
   flex: none;
   height: 2.9rem;
 }
-/* Centred on the readout beside it. The row is the readout's height, so
-   centring in the row is centring on the bar. */
+/* At the far right of the row, centred on the readout. The row is the
+   readout's height, so centring in the row is centring on the bar. */
 .freq-row > .led {
   align-self: center;
-  margin-left: var(--s2);
+  flex: none;
 }
 .step-col {
   display: flex;
@@ -1187,11 +1187,11 @@ body {
   opacity: 0.35;
   cursor: not-allowed;
 }
-/* Sized to its contents and pinned left, rather than stretching across the
-   panel. A readout that fills the width invites the eye to look for something
-   at the far end of it; the number and its unit are the whole content. */
+/* Takes the width the row has left. The tuning steps flank it at their natural
+   size and the channel light sits at the far right end, so the readout - the
+   thing being read - is what grows. */
 .freq-display {
-  flex: none;
+  flex: 1;
   display: flex;
   align-items: baseline;
   justify-content: center;

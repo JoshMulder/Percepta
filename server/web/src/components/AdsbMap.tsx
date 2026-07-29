@@ -82,10 +82,17 @@ function AdsbMapInner({
       dragging: false,
       keyboard: false,
       doubleClickZoom: false,
-      // Scroll zoom stays on for the main map - it zooms about the centre when
-      // dragging is disabled, so it cannot shift the frame.
-      scrollWheelZoom: !compact,
-      touchZoom: !compact,
+      // "center", not true. Leaflet's default scroll zoom is *anchored on the
+      // pointer*, which moves the centre - disabling dragging does not change
+      // that, and the comment that used to sit here claimed otherwise. The
+      // effect was a map that zoomed toward the cursor, drifted the station off
+      // centre, and then appeared to snap back on the next zoom step as the
+      // anchor moved again.
+      //
+      // This map is locked to its station by design, so every zoom must be
+      // about the centre. Same for pinch zoom, for the same reason.
+      scrollWheelZoom: compact ? false : "center",
+      touchZoom: compact ? false : "center",
     });
 
     L.tileLayer(`/api/stations/${stationId}/tiles/${basemap.key}/{z}/{x}/{y}.png`, {
