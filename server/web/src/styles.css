@@ -2369,7 +2369,10 @@ body {
   border: 1px solid var(--line);
   border-radius: 10px;
   width: min(1040px, 100%);
-  max-height: min(820px, 100%);
+  /* A fixed height, not a maximum. With max-height the dialog shrank to fit
+     whichever pane was showing, so switching tabs resized the window and moved
+     the tab you were about to click. The pane scrolls inside instead. */
+  height: min(820px, 100%);
   display: flex;
   flex-direction: column;
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
@@ -2435,6 +2438,17 @@ body {
   background: var(--panel-2);
 }
 .settings-tab:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
+
+/* Pushed to the bottom of the nav by the auto margin, so it never moves as
+   tabs appear and disappear with a user's roles. */
+.settings-tab.sign-out {
+  margin-top: auto;
+  color: var(--danger);
+}
+.settings-tab.sign-out:hover {
+  color: var(--danger);
+  background: rgba(255, 122, 69, 0.12);
+}
 
 .settings-pane {
   flex: 1 1 auto;
@@ -2636,8 +2650,20 @@ body {
   display: flex;
   align-items: flex-end;
   gap: 12px;
-  padding-bottom: 16px;
   border-bottom: 1px solid var(--line);
+  /* Held at the top while the pane scrolls: which station you are editing is
+     the one thing that must never be off screen while you edit it. The negative
+     margins pull the background out over the pane's own padding, so content
+     scrolls under it rather than appearing in the gap at the edges. */
+  position: sticky;
+  /* -20px, not 0, because `top` aligns the *margin* box and the margin above is
+     -20px. At top:0 the row locked 20px down the pane and content scrolled
+     through the strip above it - measured at y=210 against a pane top of 190. */
+  top: -20px;
+  z-index: 2;
+  background: var(--panel);
+  margin: -20px -24px 0;
+  padding: 20px 24px 16px;
 }
 .station-picker .field { margin-bottom: 0; flex: 0 1 340px; }
 /* Pushed to the far right rather than sitting against the selector: creating a
@@ -2826,7 +2852,9 @@ body {
 /* Slightly tighter than the panel chips: it sits inside a control rather than
    beside one, and the full-size badge made the trigger taller than the row. */
 .station-trigger .demo-chip,
-.station-option .demo-chip {
+.station-option .demo-chip,
+.station-trigger .station-offline,
+.station-option .station-offline {
   font-size: 0.6rem;
   padding: 0 0.312rem;
   line-height: 1.5;
@@ -2876,11 +2904,19 @@ body {
 .station-option.selected { background: var(--panel-2); box-shadow: inset 2px 0 0 var(--brand); }
 .station-option:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
 .station-option-name { flex: 1; }
+/* A chip rather than dim text. This is now the only place unreachability is
+   shown - the topbar dot that used to carry it is gone - so it has to survive
+   being glanced past, which grey lowercase did not. Shaped like .demo-chip
+   because they appear together and mean the same kind of thing: something
+   about this station that is not normal. */
 .station-offline {
-  font: 0.65rem var(--mono);
-  color: var(--dim);
+  font: 700 0.65rem var(--mono);
+  letter-spacing: 0.12em;
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  color: var(--danger);
+  border: 1px solid var(--danger);
+  border-radius: var(--s1);
+  padding: 0.05rem var(--s2);
 }
 
 /* ------------------------------------------------------------ map (GL) ---

@@ -33,6 +33,7 @@ export function Settings({
   onClose,
   onProfileChanged,
   onStationsChanged,
+  onSignOut,
 }: {
   me: Me;
   stationId: string | null;
@@ -44,6 +45,7 @@ export function Settings({
   onClose: () => void;
   onProfileChanged: (displayName: string) => void;
   onStationsChanged: () => void;
+  onSignOut: () => void;
 }) {
   // Tabs are hidden rather than disabled when they are not available. A
   // disabled tab advertises a capability the user does not have and invites
@@ -114,6 +116,17 @@ export function Settings({
                 {t.label}
               </button>
             ))}
+            {/* Not a tab - it selects nothing and leaves instead. It sits with
+                them because this is where a user now looks for anything about
+                their own session, and it is pushed to the bottom and coloured
+                so it is never the thing clicked on the way to something else. */}
+            <button
+              type="button"
+              className="settings-tab sign-out"
+              onClick={onSignOut}
+            >
+              Sign out
+            </button>
           </nav>
 
           <div className="settings-pane">

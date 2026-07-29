@@ -167,3 +167,60 @@ the same distinction explicit in its own report.
 
 The morning's first real test is the one thing neither of us could do overnight:
 put it on the hardware.
+
+## 13. Deploy the Pi on the systemd path, not Docker — **REVIEW**
+
+You settled on Docker as the primary path, and I am recommending you go against
+that for this first deployment. The reason is specific and not a change of mind
+about the container.
+
+`station/deploy/Dockerfile` is `python:3.11-slim-bookworm` plus `redis`. It
+contains no `picamera2`, no `rpicam-jpeg`, no `rpicam-vid` and no libcamera.
+`gsu/camera/picsi.py` needs one of the first two and `gsu/camera/h264.py` needs
+`rpicam-vid` or `libcamera-vid`, so **the camera cannot work inside the image as
+shipped**. It will report itself unavailable, correctly, and you will get no
+picture. Your Pi's host OS already has that stack, so the systemd path works
+today and the container path does not.
+
+Two further things follow from that:
+
+- `install.sh` creates the venv without `--system-site-packages`, so `picamera2`
+  cannot import even on the host. The driver falls back to `rpicam-jpeg` - a
+  subprocess per frame - and does so **silently**, which means a slow camera
+  would look like a hardware problem rather than a packaging one.
+- Putting libcamera in the container is not free. `rpicam-apps` comes from the
+  Raspberry Pi apt repository, is architecture-specific, and is version-coupled
+  to the host kernel and firmware; a mismatch between the container's libcamera
+  and the host's is a real failure mode. It may still be the right answer - it is
+  just not a one-line Dockerfile change, and I would rather you saw that before
+  it was discovered on hardware you have said is hard to physically reach.
+
+The station agent has both items and has been told that "the container cannot
+carry the camera reliably, use systemd for camera-equipped stations" is a
+legitimate conclusion if that is what it finds. **This is your call to confirm**:
+the recommendation is systemd tonight, container fixed or ruled out on its own
+schedule - not a decision to abandon Docker.
+
+Trixie itself is fine. Your Pi is on Raspberry Pi OS 13, Python 3.13.5; the
+version gate in `install.sh` is `>= 3.11` so it passes, the station's tests run
+here on 3.14.4, and nothing in the codebase uses a module 3.13 removed. Only the
+prose around it may still assume Bookworm.
+
+### 13a. Resolved by the station agent
+
+It confirmed the container cannot carry the camera and **ruled that path out for
+camera stations** rather than adding packages, on three grounds: libcamera
+enumerates through udev and finds nothing without `/run/udev`; `/dev/media*` and
+`/dev/dma_heap/*` have dynamically allocated majors, so a device-cgroup rule set
+is correct until the next kernel update and then silently is not; and the camera
+stack is 300-400 MB against a measured 91 KB update layer. The work is in
+`deploy/Dockerfile.camera` and `deploy/docker-compose.camera.yml`, both labelled
+never built and never run. The main `Dockerfile` is untouched.
+
+The venv now uses `--system-site-packages`, and the fallback to `rpicam-jpeg` is
+no longer silent - `backend_reason` names the path and the cause.
+
+Still unverified, and only the hardware can answer it: whether your Pi 2B
+presents `/dev/video11`. The board has the VideoCore IV encoder so it should,
+but if `gsu stream --seconds 30` reports the software encoder instead, 1080p30
+x264 on a 2B is the one case in this system with no measurement behind it.

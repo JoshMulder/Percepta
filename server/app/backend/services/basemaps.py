@@ -1,10 +1,15 @@
-"""Basemap styles, matching DroneOps.
+"""Basemap styles.
 
-The same three DroneOps offers, so an operator moving between the two products
-sees the same map: Esri satellite imagery, OSM street, OpenTopoMap terrain.
-Max zooms are DroneOps' values and its reasoning holds here too - capping at what
+Esri satellite imagery only. DroneOps also offers OSM street and OpenTopoMap
+terrain; those were dropped here because a security site is judged on what is
+actually on the ground - buildings, vehicles, vegetation - and a drawn map shows
+none of it. Max zoom is DroneOps' value and its reasoning holds: capping at what
 the provider actually has makes the client upscale the deepest available tile
 rather than requesting a level that 404s and renders blank.
+
+Adding one back is a dict entry. The console switches basemaps when it is
+offered more than one and hides the control when it is not, so nothing else
+needs to change.
 
 Note Esri's path is {z}/{y}/{x}, not {z}/{x}/{y}. Getting that round the wrong
 way produces a map that looks plausible and is silently wrong.
@@ -44,22 +49,6 @@ BASEMAPS: dict[str, Basemap] = {
         max_zoom=19,
         attribution="Tiles © Esri",
         invert_for_dark=False,
-    ),
-    "street": Basemap(
-        key="street",
-        label="Street",
-        url="https://tile.openstreetmap.org/{z}/{x}/{y}.png",
-        max_zoom=19,
-        attribution="© OpenStreetMap contributors",
-        invert_for_dark=True,
-    ),
-    "terrain": Basemap(
-        key="terrain",
-        label="Terrain",
-        url="https://tile.opentopomap.org/{z}/{x}/{y}.png",
-        max_zoom=17,
-        attribution="© OpenTopoMap, © OpenStreetMap contributors",
-        invert_for_dark=True,
     ),
 }
 

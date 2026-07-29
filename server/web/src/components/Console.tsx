@@ -24,7 +24,6 @@ import { useSocket } from "../useSocket";
 import { AdsbMap } from "./AdsbMap";
 import { SOC_WINDOWS, type SocSample, type SocWindowKey } from "./BatteryChart";
 import {
-  Dot,
   IconAirspace,
   IconAlert,
   IconCamera,
@@ -408,8 +407,6 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
   // channel, and the badge is what makes it useful while the drawer is shut.
   const unseen = Math.max(0, alerts.length - seenAlerts);
 
-  const online = stations.find((s) => s.id === stationId)?.online ?? false;
-
   const signOut = async () => {
     try {
       await api.logout();
@@ -654,19 +651,22 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
           stationId={stationId}
           onSelect={setStationId}
         />
-        {/* Sits beside the picker without being part of what gets centred.
-            While these were in the same flex row, the grid centred the whole
-            group - picker plus dot plus label - which put the control itself
-            visibly left of centre. */}
-        <span className="station-status">
-          <Dot ok={online} />
-          {/* Raw socket states ("open", "closed") were being shown here, which
-              on a console with a radio panel saying SQL OPEN reads as squelch.
-              These say what the words mean to an operator instead. */}
-          <span className={`link-state ${socket.state}`} title="Console's link to the server">
-            {LINK_LABEL[socket.state]}
+        {/* Whether the *station* is reachable is a property of each station and
+            is marked in the picker, on the trigger and in the list.
+
+            What survives here is the console's own link to the server, and only
+            while it is unhealthy. A permanent "Connected" is noise an operator
+            stops seeing within an hour, but losing the server silently is not
+            something to find out from stale numbers. The two failures are
+            different and were previously side by side, which is what made the
+            pair read as one status. */}
+        {socket.state !== "open" && (
+          <span className="station-status">
+            <span className={`link-state ${socket.state}`} title="Console's link to the server">
+              {LINK_LABEL[socket.state]}
+            </span>
           </span>
-        </span>
+        )}
       </div>
       <div className="topbar-right">
         <OrgSwitcher me={me} />
@@ -695,9 +695,6 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
           <span>Settings</span>
         </button>
         <span className="who">{displayName}</span>
-        <button type="button" className="btn ghost" onClick={signOut}>
-          Sign out
-        </button>
       </div>
     </header>
   );
@@ -768,6 +765,7 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
           onClose={() => setSettingsOpen(false)}
           onProfileChanged={setDisplayName}
           onStationsChanged={loadStations}
+          onSignOut={signOut}
         />
       )}
 
@@ -881,6 +879,7 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
           onClose={() => setSettingsOpen(false)}
           onProfileChanged={setDisplayName}
           onStationsChanged={loadStations}
+          onSignOut={signOut}
         />
       )}
     </div>

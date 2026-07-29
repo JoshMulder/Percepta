@@ -8,6 +8,14 @@ import type { EnrolmentStatus, IssuedToken } from "../types";
  * The code appears exactly once. The server stores only a hash and genuinely
  * cannot show it again, so this pane has to make that obvious rather than
  * letting someone close it expecting to come back for the code later.
+ *
+ * Issuing a code follows the moment it is needed rather than sitting on the
+ * station's page forever. It appears when a station is created, because handing
+ * the installer a code is the next thing that happens; it stays on the station's
+ * page only while that station has never enrolled. Once a box is connected, the
+ * way to replace its credential is to revoke it — and an "issue a code" button
+ * next to a working station is an invitation to enrol a second box against it,
+ * which is the failure this is shaped to avoid.
  */
 
 function when(value: string | null): string {
@@ -36,9 +44,7 @@ export function SettingsEnrolment({
   const [status, setStatus] = useState<EnrolmentStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [issued, setIssued] = useState<IssuedToken | null>(null);
   const [confirmingRevoke, setConfirmingRevoke] = useState(false);
-  const [copied, setCopied] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -50,7 +56,6 @@ export function SettingsEnrolment({
   }, [stationId]);
 
   useEffect(() => {
-    setIssued(null);
     setConfirmingRevoke(false);
     void load();
   }, [load]);
@@ -126,99 +131,15 @@ export function SettingsEnrolment({
             ) : (
               "Nothing reported"
             )}
-            <small>
-              What the box said about itself when it enrolled. Inventory only —
-              nothing here decides what it is allowed to do.
-            </small>
           </dd>
         </dl>
       </section>
 
-      <section className="settings-section">
-        <h3>Enrolment code</h3>
-
-        {issued ? (
-          <div className="token-reveal">
-            <p className="settings-note">
-              Give this to whoever is installing the box. <strong>It is shown
-              once.</strong> We keep only a hash of it and cannot show it again —
-              if it is lost, issue another.
-            </p>
-            <div className="token-value">
-              <code>{issued.token}</code>
-              <button
-                type="button"
-                className="btn ghost"
-                onClick={() => {
-                  void navigator.clipboard?.writeText(issued.token);
-                  setCopied(true);
-                }}
-              >
-                {copied ? "Copied" : "Copy"}
-              </button>
-            </div>
-            <p className="settings-note">
-              Expires {when(issued.expires_at)}
-              {relative(issued.expires_at)}.
-            </p>
-            <button
-              type="button"
-              className="btn ghost"
-              onClick={() => {
-                setIssued(null);
-                setCopied(false);
-              }}
-            >
-              Done
-            </button>
-          </div>
-        ) : (
-          <>
-            {status.token_outstanding ? (
-              <p className="settings-note">
-                {status.token_claimed
-                  ? "A code was issued and has already been used. It stays usable until it expires so an installer who lost signal can retry."
-                  : "A code is outstanding and has not been used yet."}{" "}
-                Expires {when(status.token_expires_at)}
-                {relative(status.token_expires_at)}.
-              </p>
-            ) : (
-              <p className="settings-note">No code outstanding.</p>
-            )}
-            <div className="settings-actions">
-              <button
-                type="button"
-                className="btn primary"
-                disabled={busy}
-                onClick={() =>
-                  void run(async () => {
-                    setIssued(await api.issueEnrolmentToken(stationId));
-                    setCopied(false);
-                  })
-                }
-              >
-                Issue a code
-              </button>
-              {status.token_outstanding && (
-                <button
-                  type="button"
-                  className="btn ghost"
-                  disabled={busy}
-                  onClick={() =>
-                    void run(() => api.revokeEnrolmentToken(stationId))
-                  }
-                >
-                  Cancel outstanding code
-                </button>
-              )}
-            </div>
-            <small>
-              Issuing a new code cancels any previous one. Two live codes for one
-              station is a way to enrol the wrong box and not find out.
-            </small>
-          </>
-        )}
-      </section>
+      {/* Only until the box has enrolled once. After that a code is something
+          you reach for deliberately, by revoking below. */}
+      {!status.enrolled && (
+        <EnrolmentCode stationId={stationId} status={status} onChanged={load} />
+      )}
 
       {status.enrolled && (
         <section className="settings-section danger">
@@ -270,4 +191,161 @@ export function SettingsEnrolment({
       {error && <p className="settings-error">{error}</p>}
     </div>
   );
+}
+
+/**
+ * The "issue a code" step on its own.
+ *
+ * Used in two places — the new-station page and an unenrolled station's page —
+ * so it takes the status it should render rather than fetching its own. Where
+ * there is already a status on screen, two fetches could disagree, and the
+ * disagreement would be about whether a code is outstanding.
+ */
+export function EnrolmentCode({
+  stationId,
+  status,
+  onChanged,
+}: {
+  stationId: string;
+  status: EnrolmentStatus;
+  onChanged: () => Promise<void> | void;
+}) {
+  const [issued, setIssued] = useState<IssuedToken | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setIssued(null);
+    setCopied(false);
+  }, [stationId]);
+
+  async function run(action: () => Promise<unknown>) {
+    setBusy(true);
+    setError(null);
+    try {
+      await action();
+      await onChanged();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "That did not work.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="settings-section">
+      <h3>Enrolment code</h3>
+
+      {issued ? (
+        <div className="token-reveal">
+          <p className="settings-note">
+            Give this to whoever is installing the box. <strong>It is shown
+            once.</strong> We keep only a hash of it and cannot show it again —
+            if it is lost, issue another.
+          </p>
+          <div className="token-value">
+            <code>{issued.token}</code>
+            <button
+              type="button"
+              className="btn ghost"
+              onClick={() => {
+                void navigator.clipboard?.writeText(issued.token);
+                setCopied(true);
+              }}
+            >
+              {copied ? "Copied" : "Copy"}
+            </button>
+          </div>
+          <p className="settings-note">
+            Expires {when(issued.expires_at)}
+            {relative(issued.expires_at)}.
+          </p>
+          <button
+            type="button"
+            className="btn ghost"
+            onClick={() => {
+              setIssued(null);
+              setCopied(false);
+            }}
+          >
+            Done
+          </button>
+        </div>
+      ) : (
+        <>
+          {status.token_outstanding ? (
+            <p className="settings-note">
+              {status.token_claimed
+                ? "A code was issued and has already been used. It stays usable until it expires so an installer who lost signal can retry."
+                : "A code is outstanding and has not been used yet."}{" "}
+              Expires {when(status.token_expires_at)}
+              {relative(status.token_expires_at)}.
+            </p>
+          ) : (
+            <p className="settings-note">No code outstanding.</p>
+          )}
+          {/* One or the other. To replace a code you cancel it first, which
+              also means there is never a moment with two live codes for one
+              station. */}
+          <div className="settings-actions">
+            {status.token_outstanding ? (
+              <button
+                type="button"
+                className="btn ghost"
+                disabled={busy}
+                onClick={() => void run(() => api.revokeEnrolmentToken(stationId))}
+              >
+                Cancel outstanding code
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="btn primary"
+                disabled={busy}
+                onClick={() =>
+                  void run(async () => {
+                    setIssued(await api.issueEnrolmentToken(stationId));
+                    setCopied(false);
+                  })
+                }
+              >
+                Issue a code
+              </button>
+            )}
+          </div>
+        </>
+      )}
+
+      {error && <p className="settings-error">{error}</p>}
+    </section>
+  );
+}
+
+/**
+ * The code step for a station that has just been created.
+ *
+ * Loads its own status, because on the new-station page there is nothing else
+ * on screen that has one.
+ */
+export function NewStationEnrolment({ stationId }: { stationId: string }) {
+  const [status, setStatus] = useState<EnrolmentStatus | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setStatus(await api.enrolmentStatus(stationId));
+      setError(null);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not load enrolment.");
+    }
+  }, [stationId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  if (error && !status) return <p className="settings-error">{error}</p>;
+  if (!status) return <p className="settings-note">Loading…</p>;
+  return <EnrolmentCode stationId={stationId} status={status} onChanged={load} />;
 }

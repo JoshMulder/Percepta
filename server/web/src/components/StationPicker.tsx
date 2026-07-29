@@ -87,6 +87,18 @@ export function StationPicker({
             DEMO
           </span>
         )}
+        {/* On the closed control as well as in the list, for the same reason
+            the DEMO badge is: in the list it answers "which of these can I
+            reach" while choosing, and here it answers "is what I am looking at
+            right now still live" - which is the question for the rest of the
+            session, and the one the panels cannot answer, because a station
+            that stopped reporting looks like a station where nothing is
+            happening. */}
+        {current && !current.online && (
+          <span className="station-offline" title="This station cannot be reached">
+            Offline
+          </span>
+        )}
         <span className="station-caret" aria-hidden>
           ▾
         </span>
@@ -115,7 +127,11 @@ export function StationPicker({
                     DEMO
                   </span>
                 )}
-                {!s.online && <span className="station-offline">offline</span>}
+                {!s.online && (
+                  <span className="station-offline" title="This station cannot be reached">
+                    Offline
+                  </span>
+                )}
               </button>
             </li>
           ))}

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, api } from "../api";
 import type { StationConfig, StationSummary } from "../types";
-import { SettingsEnrolment } from "./SettingsEnrolment";
+import { NewStationEnrolment, SettingsEnrolment } from "./SettingsEnrolment";
 
 /**
  * Everything about one station: pick it, configure it, enrol it.
@@ -82,11 +82,15 @@ export function SettingsStation({
       {adding ? (
         <NewStation
           onCancel={() => setAdding(false)}
+          // Refreshed at creation rather than when the page is left, so the new
+          // station is in the list and selected from that moment. Leaving it
+          // until "Done" meant backing out of the code step lost sight of a
+          // station that had already been created.
           onCreated={async (created) => {
-            setAdding(false);
             await loadStations(created.id);
             onSaved();
           }}
+          onDone={() => setAdding(false)}
         />
       ) : station ? (
         <>
@@ -111,10 +115,15 @@ export function SettingsStation({
 function NewStation({
   onCreated,
   onCancel,
+  onDone,
 }: {
+  /** Called as soon as the record exists, so the list behind this page is
+   *  correct even if the code step is abandoned. */
   onCreated: (station: StationSummary) => void | Promise<void>;
   onCancel: () => void;
+  onDone: () => void;
 }) {
+  const [created, setCreated] = useState<StationSummary | null>(null);
   const [name, setName] = useState("");
   const [timezone, setTimezone] = useState(
     // The browser knows where the person creating it is, which is right far more
@@ -130,18 +139,47 @@ function NewStation({
     setSaving(true);
     setError(null);
     try {
-      const created = await api.createStation({
+      // The record exists from here on. We stay on this page rather than
+      // returning to the list, because handing the installer a code is the next
+      // thing that happens and making them go and find the station to do it is
+      // a step that exists for no reason.
+      const station = await api.createStation({
         name: name.trim(),
         timezone,
         latitude: null,
         longitude: null,
       });
-      await onCreated(created);
+      setCreated(station);
+      await onCreated(station);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not create the station.");
     } finally {
       setSaving(false);
     }
+  }
+
+  if (created) {
+    return (
+      <div className="settings-sections">
+        <section className="settings-section">
+          <h3>{created.name} created</h3>
+          <p className="settings-note">
+            Issue a code below if there is a box ready to enrol. There is no
+            hurry — the station's own page keeps offering one until it has
+            connected, and a code only lasts 24 hours, so issuing it before
+            somebody is standing in front of the hardware wastes it.
+          </p>
+        </section>
+
+        <NewStationEnrolment stationId={created.id} />
+
+        <div className="settings-actions">
+          <button type="button" className="btn primary" onClick={onDone}>
+            Done
+          </button>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -278,10 +316,6 @@ function StationConfigForm({
             placeholder="Pacific/Auckland"
             required
           />
-          <small>
-            An IANA zone. The station is remote and an operator may be elsewhere,
-            so local time is a property of the site.
-          </small>
         </label>
         <div className="field-row">
           <label className="field">
@@ -319,19 +353,6 @@ function StationConfigForm({
           />
           <span>This station's data is synthetic</span>
         </label>
-        <small className="settings-note">
-          Badges the station DEMO and stops a silent sensor being reported as a
-          fault — on a simulated station that would only ever mean the simulator
-          stopped. The simulator sets this itself for the stations it drives, so
-          changing it by hand is usually only needed when hardware takes over.
-        </small>
-
-        <small className="settings-note">
-          The map centres here and range rings are measured from it. Set it now so
-          the site can be worked with before hardware arrives; a station that
-          reports its own GPS is expected to take over this field, and does not
-          yet.
-        </small>
       </section>
 
       <section className="settings-section">
@@ -377,12 +398,6 @@ function StationConfigForm({
             Minimum zoom cannot be greater than maximum zoom.
           </p>
         )}
-        <p className="settings-note">
-          The station does not move, so its basemap is a finite set of tiles. Tile
-          count grows fourfold per zoom level and with the square of the radius,
-          so maximum zoom is by far the expensive control — going from 17 to 19 is
-          roughly sixteen times the tiles.
-        </p>
       </section>
 
       <div className="settings-actions">
