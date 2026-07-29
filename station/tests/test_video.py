@@ -23,7 +23,9 @@ does not do.
 
 import json
 import os
+import socket
 import tempfile
+import threading
 import time
 import unittest
 from datetime import UTC, datetime, timedelta
@@ -117,12 +119,22 @@ class AgentFixture(unittest.TestCase):
 
     def setUp(self):
         self._dir = tempfile.TemporaryDirectory()
+        # A file sink, so nothing in this suite opens a socket to a platform
+        # that is not there. The WebSocket uplink has its own tests, against a
+        # server this file starts.
+        self.sink = str(Path(self._dir.name) / "stream.mp4")
         self.agent = Agent(AgentConfig(
             home=Path(self._dir.name), setup_enabled=False, single_instance=False,
+            stream_sink=self.sink,
         ))
         # Attached by hand rather than through `_attach`, which would start the
         # video thread, the renewer and a transport. Every test here drives
         # `cycle()` itself so that timing is the test's business.
+        # Small and slow: these tests exercise the logic, not the encoder, and
+        # a 1080p30 synthetic source would spend the suite's time drawing.
+        self.agent.site.stream_width = 320
+        self.agent.site.stream_height = 240
+        self.agent.site.stream_fps = 10
         self.agent.enrolment = _enrolment()
         self.transport = FakeTransport()
         self.agent.transport = self.transport
@@ -824,9 +836,19 @@ class OnDemandTests(AgentFixture):
         for asked, expected in ((0, 30.0), (1, MIN_LEASE_S), (99999, MAX_LEASE_S),
                                 ("nonsense", 30.0)):
             self.agent.stream.stop()
-            self.agent.stream.start({"lease_s": asked})
+            self.agent.stream.start({"lease_seconds": asked})
             remaining = self.agent.stream.expires_at - time.monotonic()
             self.assertAlmostEqual(remaining, expected, delta=1.0, msg=asked)
+
+    def test_the_lease_is_read_from_the_name_the_platform_uses(self):
+        # `lease_seconds` is the platform's spelling. The two older names are
+        # still accepted: a station that only understands the newest spelling of
+        # a field breaks on the day somebody deploys an older console.
+        for key in ("lease_seconds", "lease_s", "ttl_s"):
+            self.agent.stream.stop()
+            self.agent.stream.start({key: 45})
+            self.assertAlmostEqual(self.agent.stream.expires_at - time.monotonic(),
+                                   45.0, delta=1.0, msg=key)
 
     def test_there_is_a_ceiling_even_if_the_lease_keeps_being_renewed(self):
         self.agent.site.stream_max_minutes = 1 / 60
@@ -874,27 +896,39 @@ class OnDemandTests(AgentFixture):
         self.assertEqual((greedy.width, greedy.height, greedy.fps,
                           greedy.bitrate_kbps), (1280, 720, 15, 2000))
 
-    def test_frames_are_dropped_rather_than_queued_when_the_sink_will_not_take_them(self):
-        class Refusing:
+    def test_frames_are_dropped_rather_than_queued_when_the_uplink_will_not_take_them(self):
+        from gsu.transport.stream import StreamUplink
+
+        class Refusing(StreamUplink):
             name = "refusing"
 
             def open(self):
                 return True
 
-            def send(self, unit):
-                return False
+            def begin(self, codec, init_segment):
+                return True
+
+            def send(self, fragment, keyframe):
+                return self._drop()
 
             def close(self):
                 pass
 
-            def describe(self):
-                return self.name
-
         self.agent.stream.start({})
-        self.agent.stream.uplink = Refusing()
-        unit = self.agent.stream.source.frame()
-        self.agent.stream._on_unit(unit)
-        self.assertEqual(self.agent.stream.dropped, 1)
+        source = self.agent.stream.source
+        # Drive the frames by hand: the encoder's own thread would race the
+        # assertions, and what is being tested is what happens to a frame, not
+        # when it happens.
+        source.stop()
+        refusing = Refusing()
+        self.agent.stream.uplink = refusing
+        for _ in range(4):
+            self.agent.stream._on_unit(source.frame())
+        # Nothing was held back for a link that might come good: each frame was
+        # offered once and lost.
+        self.assertEqual(self.agent.stream.dropped, 4)
+        self.assertEqual(refusing.dropped, 4)
+        self.assertEqual(refusing.fragments, 0)
 
     def test_the_state_says_which_encoder_ran_and_what_was_available(self):
         # Moving a station between a board with an encode block and one without
@@ -909,13 +943,26 @@ class OnDemandTests(AgentFixture):
         self.assertIn("fps_measured", state)
         self.assertIn("bitrate_bps", state)
 
-    def test_the_state_says_the_uplink_goes_nowhere_yet(self):
-        # A station can be encoding and delivering to nothing while the platform
-        # has not specified a wire format. A console must not read that as a
-        # working stream, so it is said in the payload rather than implied.
+    def test_the_state_says_where_the_stream_is_actually_going(self):
+        # A station can be encoding into a file or into a counter rather than to
+        # a platform. A console must not read either as a working stream, so it
+        # is said in the payload rather than implied.
         self.agent.stream.start({})
-        self.assertIn("no stream uplink",
-                      self.agent.health_payload()["video"]["stream"]["uplink"])
+        _wait_for(lambda: self.agent.stream.codec)
+        state = self.agent.health_payload()["video"]["stream"]
+        self.assertTrue(state["uplink"].startswith("file:"))
+        self.assertTrue(state["codec"].startswith("avc1."), state["codec"])
+
+    def test_a_station_with_nowhere_to_send_says_so_rather_than_looking_healthy(self):
+        from gsu.transport.stream import build_uplink
+
+        class Nowhere:
+            stream_sink = None
+            media_url = None
+            platform_url = ""
+
+        uplink = build_uplink(Nowhere(), None)
+        self.assertIn("no media URL", uplink.describe())
 
     def test_a_real_camera_cannot_do_both_at_once_and_says_so(self):
         # One sensor, one user: while rpicam-vid holds the CSI camera a snapshot
@@ -943,6 +990,301 @@ class OnDemandTests(AgentFixture):
         source = self.agent.stream.source
         self.agent.stream.stop("test")
         self.assertFalse(source.running)
+
+
+class RecordingWebSocketServer:
+    """A WebSocket server that records what the station sent it.
+
+    Written out rather than mocked, because what is being tested is the wire:
+    the handshake, the masking, the frame headers and the order of the three
+    things the platform expects before the first fragment. A mock of
+    `WebSocket.send_binary` would pass whatever this file believed, which is
+    precisely the belief under test.
+    """
+
+    def __init__(self, stall: bool = False) -> None:
+        self.stall = stall
+        self.messages: list[tuple[int, bytes]] = []
+        self.headers: dict[str, str] = {}
+        self.request_line = ""
+        self.handshakes = 0
+        self._listener = socket.socket()
+        self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._listener.bind(("127.0.0.1", 0))
+        self._listener.listen(1)
+        self.port = self._listener.getsockname()[1]
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    @property
+    def url(self) -> str:
+        return f"ws://127.0.0.1:{self.port}/media/ingest"
+
+    def stop(self) -> None:
+        self._stop.set()
+        try:
+            self._listener.close()
+        except OSError:
+            pass
+        self._thread.join(timeout=3.0)
+
+    def _serve(self) -> None:
+        import base64
+        import hashlib
+
+        while not self._stop.is_set():
+            try:
+                client, _ = self._listener.accept()
+            except OSError:
+                return
+            try:
+                request = b""
+                while b"\r\n\r\n" not in request:
+                    chunk = client.recv(4096)
+                    if not chunk:
+                        break
+                    request += chunk
+                head = request.split(b"\r\n\r\n", 1)[0].decode("latin-1").split("\r\n")
+                self.request_line = head[0]
+                for line in head[1:]:
+                    name, _, value = line.partition(":")
+                    self.headers[name.strip().lower()] = value.strip()
+                key = self.headers.get("sec-websocket-key", "")
+                accept = base64.b64encode(hashlib.sha1(
+                    (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()
+                ).digest()).decode()
+                client.sendall(
+                    b"HTTP/1.1 101 Switching Protocols\r\n"
+                    b"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                    b"Sec-WebSocket-Accept: " + accept.encode() + b"\r\n\r\n"
+                )
+                self.handshakes += 1
+                if self.stall:
+                    # Never read again: the station's socket buffer fills and it
+                    # must drop rather than block or queue.
+                    while not self._stop.is_set():
+                        time.sleep(0.05)
+                    return
+                self._read_frames(client)
+            finally:
+                try:
+                    client.close()
+                except OSError:
+                    pass
+
+    def _read_frames(self, client) -> None:
+        import struct
+
+        buffer = bytearray()
+        while not self._stop.is_set():
+            try:
+                chunk = client.recv(65536)
+            except OSError:
+                return
+            if not chunk:
+                return
+            buffer += chunk
+            while True:
+                if len(buffer) < 2:
+                    break
+                opcode = buffer[0] & 0x0F
+                masked = buffer[1] & 0x80
+                length = buffer[1] & 0x7F
+                offset = 2
+                if length == 126:
+                    if len(buffer) < 4:
+                        break
+                    length = struct.unpack_from(">H", buffer, 2)[0]
+                    offset = 4
+                elif length == 127:
+                    if len(buffer) < 10:
+                        break
+                    length = struct.unpack_from(">Q", buffer, 2)[0]
+                    offset = 10
+                if not masked:
+                    raise AssertionError("a client frame must be masked (RFC 6455)")
+                if len(buffer) < offset + 4 + length:
+                    break
+                key = bytes(buffer[offset:offset + 4])
+                payload = bytes(buffer[offset + 4:offset + 4 + length])
+                del buffer[:offset + 4 + length]
+                payload = bytes(b ^ key[i % 4] for i, b in enumerate(payload))
+                self.messages.append((opcode, payload))
+
+
+class MediaUplinkTests(unittest.TestCase):
+    """The wire, against a server that records it."""
+
+    def setUp(self):
+        self.server = RecordingWebSocketServer()
+        self.addCleanup(self.server.stop)
+
+    def uplink(self, **kwargs):
+        from gsu.transport.stream import MediaUplink
+
+        return MediaUplink(self.server.url, "the-station-secret", **kwargs)
+
+    def test_the_handshake_carries_the_credential_and_nothing_else(self):
+        uplink = self.uplink()
+        self.assertTrue(uplink.open(), uplink.reason)
+        self.addCleanup(uplink.close)
+        _wait_for(lambda: self.server.handshakes)
+        self.assertEqual(self.server.headers.get("authorization"),
+                         "Bearer the-station-secret")
+        self.assertEqual(self.server.headers.get("upgrade", "").lower(), "websocket")
+        self.assertIn("/media/ingest", self.server.request_line)
+        # contract/README.md rule 1: a station never asserts which station it
+        # is. The platform derives that from the credential.
+        joined = " ".join(f"{k}: {v}" for k, v in self.server.headers.items())
+        self.assertNotIn(STATION, joined + self.server.request_line)
+
+    def test_the_platform_gets_codec_then_init_then_the_segment(self):
+        uplink = self.uplink()
+        self.assertTrue(uplink.open(), uplink.reason)
+        self.addCleanup(uplink.close)
+        self.assertTrue(uplink.begin("avc1.420033", b"\x00\x00\x00\x18ftypisom"))
+        self.assertTrue(uplink.send(b"moof-and-mdat", keyframe=True))
+        messages = _wait_for(lambda: self.server.messages
+                             if len(self.server.messages) >= 4 else None) or []
+        kinds = [opcode for opcode, _ in messages]
+        self.assertEqual(kinds[:4], [1, 1, 2, 2], "text, text, binary, binary")
+        self.assertEqual(json.loads(messages[0][1]), {"codec": "avc1.420033"})
+        self.assertEqual(messages[1][1], b"init")
+        self.assertEqual(messages[2][1], b"\x00\x00\x00\x18ftypisom")
+        self.assertEqual(messages[3][1], b"moof-and-mdat")
+
+    def test_a_real_stream_arrives_intact_and_in_order(self):
+        # End to end through the muxer: what the platform receives is what the
+        # encoder produced, byte for byte, including a 200 kB keyframe fragment
+        # that exercises the 64-bit length path and the masking.
+        from gsu.camera.h264 import StreamSettings
+        from gsu.camera.h264_synthetic import SyntheticH264Source
+        from gsu.media.fmp4 import Fmp4Muxer
+
+        source = SyntheticH264Source(StreamSettings(width=320, height=240, fps=10,
+                                                    intra_period=5))
+        muxer = Fmp4Muxer(320, 240, fps=10)
+        uplink = self.uplink()
+        self.assertTrue(uplink.open(), uplink.reason)
+        self.addCleanup(uplink.close)
+        expected = []
+        for index in range(8):
+            fragment, keyframe, _ = muxer.feed(source.frame())
+            if index == 0:
+                self.assertTrue(uplink.begin(muxer.codec(), muxer.init_segment()))
+                expected.append(muxer.init_segment())
+            if fragment is not None:
+                self.assertTrue(uplink.send(fragment, keyframe))
+                expected.append(fragment)
+        binaries = _wait_for(
+            lambda: [p for op, p in self.server.messages if op == 2]
+            if len([p for op, p in self.server.messages if op == 2]) >= len(expected)
+            else None
+        )
+        self.assertEqual(binaries, expected)
+
+    def test_a_stalled_link_drops_frames_and_resynchronises_on_a_keyframe(self):
+        # The behaviour the whole uplink exists to get right: when the link
+        # cannot carry the stream, drop — never queue — and then wait for a
+        # keyframe, because the frames in between depend on one that never
+        # arrived and would render as a smear that looks like a broken camera.
+        stalled = RecordingWebSocketServer(stall=True)
+        self.addCleanup(stalled.stop)
+        from gsu.transport.stream import MediaUplink
+
+        uplink = MediaUplink(stalled.url, "secret")
+        self.assertTrue(uplink.open(), uplink.reason)
+        self.addCleanup(uplink.close)
+        uplink.begin("avc1.420033", b"init-segment")
+        # Push until the socket buffer fills and the uplink starts refusing.
+        big = b"x" * 200_000
+        for _ in range(200):
+            if not uplink.send(big, keyframe=False):
+                break
+        self.assertGreater(uplink.dropped, 0, "a stalled link must produce drops")
+        self.assertEqual(uplink.send(big, keyframe=False), False,
+                         "still congested, and still not queueing")
+        # It stays skipping until a keyframe, and never grows a queue.
+        self.assertTrue(uplink._skipping)
+        self.assertLess(uplink.fragments, 200)
+
+    def test_a_refused_upgrade_is_reported_as_itself(self):
+        # 401 from the platform is a rejected credential, not a network problem,
+        # and an operator does something different about each.
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+
+        def refuse():
+            client, _ = listener.accept()
+            client.recv(4096)
+            client.sendall(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n")
+            client.close()
+
+        thread = threading.Thread(target=refuse, daemon=True)
+        thread.start()
+        self.addCleanup(listener.close)
+        from gsu.transport.stream import MediaUplink
+
+        uplink = MediaUplink(f"ws://127.0.0.1:{port}/media/ingest", "wrong-secret")
+        self.assertFalse(uplink.open())
+        self.assertIn("401", uplink.reason)
+
+    def test_it_will_not_open_a_plaintext_uplink_when_tls_is_required(self):
+        from gsu import tls
+        from gsu.transport.stream import MediaUplink
+
+        uplink = MediaUplink(self.server.url, "secret",
+                             trust=tls.Trust(require_tls=True, purpose="media"))
+        self.assertFalse(uplink.open())
+        self.assertIn("unencrypted", uplink.reason.lower() + uplink.reason)
+
+
+class MediaUrlTests(unittest.TestCase):
+    """Where the media endpoint is, and who gets to say."""
+
+    def test_it_follows_the_platform_api_by_default(self):
+        from gsu.transport.stream import media_url
+
+        class Config:
+            media_url = None
+            platform_url = "https://platform.example:8000"
+
+        self.assertEqual(media_url(Config()),
+                         "wss://platform.example:8000/media/ingest")
+
+    def test_a_plaintext_platform_gives_a_plaintext_media_url(self):
+        # Development only, and it has to be visible as such rather than
+        # quietly becoming wss and failing at the handshake.
+        from gsu.transport.stream import media_url
+
+        class Config:
+            media_url = None
+            platform_url = "http://localhost:8000"
+
+        self.assertEqual(media_url(Config()), "ws://localhost:8000/media/ingest")
+
+    def test_the_override_wins_because_the_station_is_somewhere_else(self):
+        from gsu.transport.stream import media_url
+
+        class Config:
+            media_url = "wss://10.0.0.1:9000/media/ingest"
+            platform_url = "https://platform.example:8000"
+
+        self.assertEqual(media_url(Config()), "wss://10.0.0.1:9000/media/ingest")
+
+
+def _wait_for(condition, timeout: float = 5.0):
+    """Wait for the encoder thread to get somewhere. Returns what it produced."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        value = condition()
+        if value:
+            return value
+        time.sleep(0.02)
+    return condition()
 
 
 def _real_device():

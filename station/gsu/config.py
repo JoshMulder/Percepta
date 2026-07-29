@@ -82,6 +82,12 @@ class AgentConfig:
     #: — still works; **on** in the deployed environment file.
     require_tls: bool = False
 
+    #: Where the platform's media endpoint is, when it is not simply the API's
+    #: host. Same reason `GSU_BROKER_URL` exists: the address a platform states
+    #: may only be routable from inside its own network, and the station is by
+    #: definition somewhere else. Unset, it is derived from `platform_url`.
+    media_url: str | None = None
+
     #: Which H.264 encoder to use: `auto`, `hardware` or `software`.
     #:
     #: A property of the *board*, not of the site, which is why it is here and
@@ -118,6 +124,7 @@ class AgentConfig:
             airband_traffic=_env("GSU_AIRBAND_TRAFFIC", "low"),
             stream_sink=_env("GSU_STREAM_SINK"),
             encoder=_env("GSU_ENCODER", "auto"),
+            media_url=_env("GSU_MEDIA_URL"),
             single_instance=_env("GSU_SINGLE_INSTANCE", "1") not in ("0", "false"),
             ca_file=_env("GSU_CA_FILE"),
             api_ca_file=_env("GSU_API_CA_FILE"),

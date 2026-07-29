@@ -62,6 +62,10 @@ class Broker:
     #: keeps working, and so that a stored credential from either era loads.
     video_topic: str | None = None
 
+    #: Where the live H.264 goes, if the platform names it. Derived from the
+    #: API's host when it does not — see `transport/stream.py`.
+    media_url: str | None = None
+
     def resolve_video_topic(self) -> str:
         """Where video goes: what the platform said, or the same namespace as
         telemetry with `video` on the end.
@@ -123,6 +127,7 @@ class Enrolment:
                 command_topic=broker["command_topic"],
                 ca_pem=broker.get("ca_pem"),
                 video_topic=broker.get("video_topic"),
+                media_url=broker.get("media_url"),
             ),
             site=Site(
                 name=station.get("name") or "unnamed station",

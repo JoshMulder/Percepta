@@ -167,7 +167,7 @@ def _stream(agent, config: AgentConfig, seconds: float, out: str | None,
 
     sink = out or os.path.join(
         "/dev/shm" if os.path.isdir("/dev/shm") else tempfile.gettempdir(),
-        "gsu-stream.h264",
+        "gsu-stream.mp4",
     )
     agent.config = dataclasses.replace(config, stream_sink=sink)
     if size:
@@ -438,8 +438,8 @@ def main(argv: list[str] | None = None) -> int:
                              "credential and no token.")
     parser.add_argument("--seconds", type=float, default=20.0,
                         help="stream: how long to encode for")
-    parser.add_argument("--out", help="stream: where to write the H.264 (default "
-                                      "/dev/shm/gsu-stream.h264)")
+    parser.add_argument("--out", help="stream: where to write the fragmented MP4 "
+                                      "(default /dev/shm/gsu-stream.mp4)")
     parser.add_argument("--size", help="stream/camera: WxH, e.g. 1920x1080")
     parser.add_argument("--fps", type=float, help="stream: frames per second")
     parser.add_argument("--bitrate", type=int, help="stream: kbit/s target")

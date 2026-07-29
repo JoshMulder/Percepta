@@ -421,11 +421,43 @@ python -m gsu stream --seconds 30 --size 1280x720
 ```
 
 It prints the probe result, measured frames per second, measured bitrate and
-dropped frames, writes the stream to a file so it can be played back, and says
-plainly when the encoder did not keep up. Things worth knowing before running
-it on a 2B: `gpu_mem` has to be large enough for the encoder (the default 64 MB
-split may not be), and §3's USB contention applies to the network the stream
-leaves by rather than to the camera, which is on CSI.
+dropped frames, and writes **fragmented MP4** to a file — the same container the
+platform receives, so playing it back checks the container as well as the
+camera. It says plainly when the encoder did not keep up. Things worth knowing
+before running it on a 2B: `gpu_mem` has to be large enough for the encoder (the
+default 64 MB split may not be), and §3's USB contention applies to the network
+the stream leaves by rather than to the camera, which is on CSI.
+
+### The uplink, measured against the running platform
+
+fMP4 over a WebSocket (`wss://…/media/ingest`), muxed on the station, one
+fragment per frame. Measured from the bench station to the live platform over
+the LAN, with the synthetic encoder at the site default:
+
+| | |
+|---|---|
+| 1080p30, 15 seconds | **459 fragments, 0 dropped, 0 resynchronisations, 30.1 fps measured** |
+| Carried | 14–21 Mbit/s — synthetic `I_PCM` rates, not a camera's |
+| Codec string sent | `avc1.420033`, derived from the encoder's own SPS |
+| Initialisation segment | 651 bytes, sent once per session |
+| Container overhead | ~120 bytes a frame — 4 kB/s at 30 fps |
+
+That is the pipe proven at full frame rate; it is **not** a bandwidth
+measurement, because the synthetic encoder's bitrate is uncompressed. A real
+camera at 3 Mbit/s is about a fifth of what the LAN carried here.
+
+**When the link cannot carry it**, which is the case that matters on Starlink:
+the uplink asks whether the socket is writable, and if it is not within 250 ms
+the fragment is **dropped whole** — nothing is queued and no partial frame is
+ever written, because a half-written frame leaves the platform waiting on bytes
+that never arrive, and a stall is much harder to see than a drop. After a drop
+it waits for the next keyframe before sending again: the frames in between
+depend on one that never arrived and would render as a smear that looks like a
+broken camera rather than a busy link. Both counters — `dropped` and `resyncs` —
+are in health telemetry, and `resyncs` is the one an operator feels, because it
+is a gap in what they can see rather than a number of frames. Tested against a
+server that accepts the connection and then stops reading
+(`tests/test_video.py::MediaUplinkTests`).
 
 ### What it costs to leave off
 

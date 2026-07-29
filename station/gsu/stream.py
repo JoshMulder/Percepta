@@ -38,7 +38,8 @@ import time
 
 from . import clock
 from .camera.h264 import StreamSettings, choose_encoder, probe_encoders
-from .transport.stream import build_uplink
+from .media.fmp4 import Fmp4Muxer
+from .transport.stream import build_uplink, media_url
 
 log = logging.getLogger("gsu.stream")
 
@@ -68,6 +69,9 @@ class StreamSession:
         self.bytes_out = 0
         self.dropped = 0
         self.encoder_choice = ""
+        self.muxer: Fmp4Muxer | None = None
+        self.codec = ""
+        self._session_open = False
         self._last_frame_at: float | None = None
 
     # --- what the platform asks for -------------------------------------
@@ -79,7 +83,16 @@ class StreamSession:
         the platform actually reads, in the next health frame.
         """
         request = request or {}
-        lease = _lease_seconds(request.get("lease_s", request.get("ttl_s")))
+        # `lease_seconds` is the platform's name for it. The other two are
+        # accepted because they were this station's provisional names before the
+        # platform answered, and a station that only understands the newest
+        # spelling of a field is a station that breaks on the day someone
+        # deploys an older console.
+        lease = _lease_seconds(next(
+            (request[key] for key in ("lease_seconds", "lease_s", "ttl_s")
+             if key in request),
+            None,
+        ))
         self.viewers = max(1, int(request.get("viewers", 1) or 1))
         self.expires_at = time.monotonic() + lease
 
@@ -95,10 +108,17 @@ class StreamSession:
             self.state = "unavailable"
             return self.reason
 
-        self.uplink = build_uplink(self.agent.config.stream_sink)
+        # Opened here and closed on stop: the connection exists only while
+        # somebody is watching, which is the same rule as the encoder.
+        self.uplink = build_uplink(
+            self.agent.config, self.agent.enrolment, trust=self.agent.api_trust,
+        )
         if not self.uplink.open():
             self.state = "unavailable"
-            self.reason = f"the stream sink {self.uplink.describe()} could not be opened"
+            self.reason = (
+                self.uplink.reason
+                or f"the media uplink {self.uplink.describe()} could not be opened"
+            )
             self.uplink = None
             return self.reason
 
@@ -106,6 +126,12 @@ class StreamSession:
         self.bytes_out = 0
         self.dropped = 0
         self._last_frame_at = None
+        self._session_open = False
+        self.codec = ""
+        # One muxer per session. It holds the parameter sets and the decode
+        # clock, so a new stream starts at zero rather than continuing a
+        # timeline the platform has already forgotten.
+        self.muxer = Fmp4Muxer(settings.width, settings.height, settings.fps)
         if not source.start(self._on_unit):
             self.state = "unavailable"
             self.reason = source.reason or "the encoder would not start"
@@ -144,9 +170,14 @@ class StreamSession:
             return "not streaming"
         source, self.source = self.source, None
         uplink, self.uplink = self.uplink, None
+        self.muxer = None
+        self._session_open = False
         if source is not None:
             source.stop()
         if uplink is not None:
+            # Closed here, not left open between sessions: an idle socket to the
+            # platform is a thing somebody has to reason about, and this one
+            # carries a credential.
             uplink.close()
         elapsed = time.monotonic() - (self.started_at or time.monotonic())
         self.state = "idle"
@@ -191,15 +222,38 @@ class StreamSession:
     def _on_unit(self, unit) -> None:
         """One access unit, from the encoder's own thread.
 
-        Dropped rather than queued when the uplink will not take it — the same
-        rule as telemetry, and more important here: a buffered second of 1080p is
-        several megabytes of a picture that is already out of date.
+        Muxed into a fragment here rather than in the encoder, so all three
+        encoders produce identical container output, and dropped rather than
+        queued when the uplink will not take it — the same rule as telemetry,
+        and more important here: a buffered second of 1080p is several megabytes
+        of a picture that is already out of date.
         """
         self.frames += 1
         self.bytes_out += len(unit.data)
         self._last_frame_at = time.monotonic()
-        uplink = self.uplink
-        if uplink is None or not uplink.send(unit):
+        uplink, muxer = self.uplink, self.muxer
+        if uplink is None or muxer is None:
+            return
+
+        fragment, keyframe, changed = muxer.feed(unit)
+        if changed or not self._session_open:
+            # A new encoder session: parameters that no longer match decode as
+            # corruption rather than as an error, so the platform is told to
+            # discard what it was holding before the new segment arrives.
+            segment = muxer.init_segment()
+            if segment is None:
+                # No parameter sets yet, so there is nothing a decoder could do
+                # with a fragment. Waiting is correct; the next keyframe carries
+                # them, and `--inline` means that is at most one keyframe away.
+                return
+            self.codec = muxer.codec()
+            self._session_open = uplink.begin(self.codec, segment)
+            if not self._session_open:
+                self.dropped += 1
+                return
+        if fragment is None:
+            return
+        if not uplink.send(fragment, keyframe):
             self.dropped += 1
 
     def _build_source(self, settings: StreamSettings):
@@ -265,14 +319,14 @@ class StreamSession:
     def state_payload(self) -> dict:
         """The live half of `video` in the health frame.
 
-        Deliberately says `uplink` out loud: with no wire format agreed yet, a
-        station can be encoding and delivering to nothing, and a console must
-        not be able to read that as a working stream.
+        Deliberately says `uplink` and `codec` out loud: a station with no
+        media URL configured is encoding into a counter, and a console must not
+        be able to read that as a working stream.
         """
         now = time.monotonic()
         elapsed = max(0.001, now - self.started_at) if self.started_at else 0.0
         settings = self.settings()
-        return {
+        payload = {
             "state": self.state,
             "viewers": self.viewers,
             "since": self.started_clock.isoformat() if (
@@ -289,7 +343,9 @@ class StreamSession:
                 "fps": settings.fps, "bitrate_kbps": settings.bitrate_kbps,
             },
             "uplink": self.uplink.describe() if self.uplink else
-                      build_uplink(self.agent.config.stream_sink).describe(),
+                      build_uplink(self.agent.config, self.agent.enrolment).describe(),
+            "media_url": media_url(self.agent.config, self.agent.enrolment),
+            "codec": self.codec,
             # Which encoder is doing the work, what this box could have used,
             # and what it actually achieved. A station on the software path at
             # 11 fps and one on the hardware path at 30 are the same telemetry
@@ -303,6 +359,12 @@ class StreamSession:
             "keyframes": getattr(self.source, "keyframes", 0),
             "reason": self.reason or self.stopped_reason,
         }
+        # What the uplink itself saw: fragments away, bytes, and — the number
+        # that matters on a congested link — how many times the picture had to
+        # wait for a keyframe after a drop.
+        if self.uplink is not None:
+            payload.update(self.uplink.stats())
+        return payload
 
 
 def _lease_seconds(value) -> float:

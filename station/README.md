@@ -152,6 +152,8 @@ gsu/
                  contract/README.md rule 3 makes station-side correctness
   camera/        the Pi CSI camera under libcamera, a synthetic test card, and
                  the H.264 encoders — hardware and software, probed not assumed
+  media/         fragmented MP4, muxed here, and a WebSocket client written out
+                 rather than depended on
   video.py       snapshots: one complete JPEG at a low rate, on its own thread
   stream.py      the live H.264 stream, which runs only while somebody is
                  watching and stops when the platform stops asking
@@ -198,10 +200,16 @@ see. Which encoder does the work — a hardware block or x264 on the CPU — is
 probed at start-up and reported in telemetry, so moving between boards is a
 setting rather than a rewrite.
 
-Two things are not built and both are the platform's to specify: the broker does
-not yet grant the video channel (CONTRACT-QUESTIONS item 12 — measured, it
-refuses), and there is no transport for H.264 at all (item 14). `gsu camera` and
-`gsu stream` need neither, which is the point of them.
+Both halves are live and verified against the running platform: snapshots on
+`gsu/{station_id}/video`, and the stream as **fragmented MP4 over a WebSocket**
+to `wss://…/media/ingest`, authenticated with the same credential as the broker
+and opened only while streaming. The station muxes the fMP4 itself, so all three
+encoders — hardware, software and synthetic — produce identical container
+output. Measured at 1080p30: 459 fragments, none dropped (HARDWARE.md §9).
+
+`gsu camera` and `gsu stream` need no platform, no network and no enrolment,
+which is the point of them: they are how the first person with a Pi finds out
+whether the camera and the encoder work.
 
 **To put one on a Raspberry Pi, read `DEPLOYMENT.md`.** It goes from a blank SD
 card to an enrolled station, running as a **container** (`deploy/install.sh`,

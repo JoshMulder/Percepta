@@ -488,7 +488,20 @@ to know about, and it is currently only in the station's local journal.
 
 ---
 
-## 12. The video channel exists, and the broker refuses it — **BLOCKER, measured**
+## 12. The video channel exists, and the broker refuses it — **RESOLVED**
+
+**Shipped on the platform, verified from here.** The ACL now grants
+`gsu/{station_id}/video` and the enrolment response carries `video_topic`. The
+bench station publishes snapshots to it: 14.8 kB payloads at 2 fps, no refusal,
+telemetry unaffected. The station still derives the topic when the field is
+absent, so a credential issued before the change keeps working, and it stops
+guessing the moment one carries it.
+
+The rest of this item is the original argument, kept because the failure it
+describes — a channel in the schema and not in the ACL — is one that can recur
+at every future channel.
+
+### The original
 
 **Where** `contract/enrolment.md` §4 (`broker` object), `transport.md` (the
 channel table), and the platform's `services/broker_acl.py`.
@@ -538,7 +551,24 @@ cadence for the same statement.
 
 ---
 
-## 13. On-demand video needs a command, and here is the shape
+## 13. On-demand video needs a command — **RESOLVED, and implemented**
+
+**Decided: the platform repeats `video.start` as the renewal**, every 10 seconds
+while anyone is watching, with `lease_seconds`; `video.stop` when the last
+viewer leaves. No separate keepalive. Silence is the stop signal, which is
+exactly the failure this had to be built around.
+
+**The station accepts `lease_seconds`**, and also the two provisional names this
+side used before the answer came (`lease_s`, `ttl_s`) — a station that
+understands only the newest spelling of a field breaks on the day somebody
+deploys an older console. A repeat while streaming extends the lease and counts
+viewers; it never restarts the encoder. Verified end to end against the running
+platform: `video.start` → streaming, a repeat → `already streaming; lease
+extended`, `video.stop` → stopped.
+
+The rest of this item is the original proposal, which is what shipped.
+
+### The original
 
 **Where** `schemas/command.schema.json`.
 
@@ -591,7 +621,33 @@ version and it works.
 
 ---
 
-## 14. There is no transport for H.264, and the station must not invent one
+## 14. The transport for H.264 — **RESOLVED: fMP4 over a WebSocket**
+
+**Shipped and verified against the running platform.** `wss://…/media/ingest`,
+`Authorization: Bearer <credential>`, opened only while streaming; a text frame
+carrying the codec string, a text frame `init`, then the initialisation segment
+and one fragment per frame as binary frames. The station id is never sent.
+
+Three things this side had to decide, and did:
+
+- **The station muxes.** `gsu/media/fmp4.py` turns access units into fMP4, so
+  the hardware encoder, the software encoder and the synthetic source produce
+  identical container output and nothing depends on which muxer flags a given
+  build of rpicam-apps supports. That is not something to discover on a remote
+  box.
+- **The codec string is derived, not configured.** `avc1.PPCCLL` comes from the
+  encoder's own SPS. Guessing it is how a browser accepts a source buffer and
+  then decodes nothing, which from the far end looks like a dead camera.
+- **The WebSocket client is written out**, like the Annex B parser and the
+  broker's TLS handling, because `requirements.txt` is one line on purpose.
+
+Measured: 1080p30 for 15 seconds, 459 fragments, none dropped, 30.1 fps.
+HARDWARE.md §9 has the numbers and what happens when the link cannot carry it.
+
+The rest of this item is what was asked for, kept because the reasoning is why
+the shape is what it is.
+
+### The original
 
 **Where** nothing yet — this is the piece that does not exist on either side.
 
