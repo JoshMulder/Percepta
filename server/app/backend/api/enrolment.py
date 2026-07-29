@@ -73,6 +73,7 @@ class BrokerOut(BaseModel):
     ca_pem: str | None = None
     telemetry_topic: str
     audio_topic: str
+    video_topic: str
     command_topic: str
     username: str
 
@@ -120,6 +121,7 @@ def _broker(station_id: uuid.UUID) -> BrokerOut:
         ca_pem=_ca_pem(),
         telemetry_topic=f"gsu/{station_id}/telemetry",
         audio_topic=f"gsu/{station_id}/audio",
+        video_topic=f"gsu/{station_id}/video",
         command_topic=f"cmd/gsu/{station_id}",
         username=broker_acl.principal(station_id),
     )
