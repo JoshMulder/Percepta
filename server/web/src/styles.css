@@ -2732,12 +2732,16 @@ body {
   height: 100%;
   overflow: visible;
 }
+/* The same line style as .fault-x, deliberately: a missing sensor in a stats
+   row and a dead panel are the same statement at different sizes, and the
+   fat rounded strokes this had made the small ones read as a different
+   symbol - closer to a "wrong" glyph than a strike-through. Only the opacity
+   differs: a hairline at the panel X's 0.45 disappears at a centimetre wide. */
 .no-source line {
   stroke: var(--danger);
-  stroke-width: 9;
-  stroke-linecap: round;
+  stroke-width: 1.5;
   vector-effect: non-scaling-stroke;
-  opacity: 0.85;
+  opacity: 0.7;
 }
 
 /* A whole stream with no source. Sits in the display corner rather than

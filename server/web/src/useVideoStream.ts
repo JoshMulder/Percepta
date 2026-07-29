@@ -53,6 +53,30 @@ export function useVideoStream(
     const pending: ArrayBuffer[] = [];
     let objectUrl: string | null = null;
 
+    /** Drop media the playhead has left behind.
+     *
+     *  Without this the SourceBuffer holds every frame ever played and the
+     *  stream has a fuse on it: at ~3 Mbit/s Chrome's quota arrives in four to
+     *  five minutes (measured - 89.4 MB and 278 s on the first real station),
+     *  appends start throwing QuotaExceededError, and the picture collapses
+     *  for a viewer who did nothing but watch. Thirty seconds of history is
+     *  kept so a brief seek back still works; this is a live view, and the
+     *  past belongs to recordings.
+     */
+    const trim = () => {
+      const el = video.current;
+      if (!buffer || buffer.updating || !el || !el.buffered.length) return;
+      const start = el.buffered.start(0);
+      const cut = el.currentTime - 30;
+      if (cut - start > 30) {
+        try {
+          buffer.remove(start, cut);
+        } catch {
+          /* mid-teardown; the next updateend tries again */
+        }
+      }
+    };
+
     /** Feed the buffer only when it is idle; MSE throws if it is not. */
     const drain = () => {
       if (!buffer || buffer.updating || pending.length === 0) return;
@@ -60,10 +84,18 @@ export function useVideoStream(
       if (chunk) {
         try {
           buffer.appendBuffer(chunk);
-        } catch {
-          // A failed append means the stream and the buffer have diverged -
-          // usually a new encoder session whose parameters do not match. Drop
-          // what is queued rather than appending fragments that will not decode.
+        } catch (err) {
+          if (chunk && (err as DOMException)?.name === "QuotaExceededError") {
+            // Full, not broken. Put the fragment back, make room, and let the
+            // updateend from remove() re-run this drain.
+            pending.unshift(chunk);
+            trim();
+            return;
+          }
+          // Any other failed append means the stream and the buffer have
+          // diverged - usually a new encoder session whose parameters do not
+          // match. Drop what is queued rather than appending fragments that
+          // will not decode.
           pending.length = 0;
         }
       }
@@ -122,6 +154,7 @@ export function useVideoStream(
             buffer.addEventListener("updateend", () => {
               drain();
               catchUp();
+              trim();
             });
             drain();
           });
