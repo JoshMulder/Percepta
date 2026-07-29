@@ -650,12 +650,18 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
           stationId={stationId}
           onSelect={setStationId}
         />
-        <Dot ok={online} />
-        {/* Raw socket states ("open", "closed") were being shown here, which on
-            a console with a radio panel saying SQL OPEN reads as squelch. These
-            say what the words mean to an operator instead. */}
-        <span className={`link-state ${socket.state}`} title="Console's link to the server">
-          {LINK_LABEL[socket.state]}
+        {/* Sits beside the picker without being part of what gets centred.
+            While these were in the same flex row, the grid centred the whole
+            group - picker plus dot plus label - which put the control itself
+            visibly left of centre. */}
+        <span className="station-status">
+          <Dot ok={online} />
+          {/* Raw socket states ("open", "closed") were being shown here, which
+              on a console with a radio panel saying SQL OPEN reads as squelch.
+              These say what the words mean to an operator instead. */}
+          <span className={`link-state ${socket.state}`} title="Console's link to the server">
+            {LINK_LABEL[socket.state]}
+          </span>
         </span>
       </div>
       <div className="topbar-right">

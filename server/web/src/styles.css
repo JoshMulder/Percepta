@@ -216,11 +216,25 @@ body {
   font-size: 0.812rem;
 }
 
+/* Only the picker is centred. The online dot and the link label hang off its
+   right edge rather than sharing the row, because anything sharing the row is
+   included in what the grid centres - which put the control itself off centre
+   by half the width of "CONNECTED". */
 .station-select {
   justify-self: center;
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.station-status {
+  position: absolute;
+  left: calc(100% + 0.625rem);
+  top: 50%;
+  transform: translateY(-50%);
   display: flex;
   align-items: center;
   gap: 0.625rem;
+  white-space: nowrap;
 }
 .station-select select {
   background: var(--panel);
@@ -981,8 +995,11 @@ body {
   align-items: center;
   text-align: center;
 }
+/* The headline number on the panel, sized against the dial beside it. At
+   1.75rem it read as a caption next to a 10.2rem rose rather than as the
+   reading the panel exists to show. */
 .wind-speed {
-  font: 600 1.75rem var(--mono);
+  font: 600 2.5rem var(--mono);
   line-height: 1;
   display: flex;
   align-items: baseline;

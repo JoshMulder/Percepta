@@ -117,6 +117,11 @@ These are absences, not defects, but they are load-bearing for the product:
   warning until someone trusts it. Fine for operators on known machines, wrong
   for a public deployment - that wants a real domain and a public certificate,
   while stations keep pinning the private CA.
+- **`scripts/screenshot.py` and its image are development-only.** They sign in
+  with the seeded credentials and accept the platform's certificate without
+  verifying it. Useful for looking at the console; wrong anywhere near a real
+  deployment, and the reason both are called out here rather than left to be
+  noticed.
 - **The seeded development password is in the repository.**
   `backend/scripts/seed_dev.py` hardcodes `percepta-dev-2026` for
   `admin@`, `operator@` and `viewer@percepta.local`, and that file is pushed to
