@@ -120,6 +120,29 @@ class Settings(BaseSettings):
 
     demo_mode: bool = False
 
+    # --- Outbound email -----------------------------------------------------
+    # Dormant until smtp_host and smtp_from are set; see core/email.py, which
+    # raises rather than dropping mail. Username is optional - some relays
+    # authenticate by IP. In development docker-compose runs Mailpit, which
+    # wants neither credentials nor TLS.
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
+    smtp_use_tls: bool = True
+    smtp_use_ssl: bool = False
+
+    # Where a password-reset link points. The API's own address is not usable:
+    # it is behind a reverse proxy, and the host a request arrives on is
+    # attacker-controlled (Host header), which is the classic way reset links
+    # get sent pointing at somebody else's server.
+    console_base_url: str = "https://localhost:8000"
+
+    # How long a reset link lasts. Short, because it is a bearer token sitting
+    # in a mailbox - but long enough to survive being read the next morning.
+    password_reset_ttl_hours: int = 12
+
     # --- Basemap ------------------------------------------------------------
     # Styles are defined in services/basemaps.py and match DroneOps'.
     tile_cache_dir: str = "/tiles"
@@ -130,6 +153,11 @@ class Settings(BaseSettings):
     # fully offline deployment, where only what scripts/cache_map.py prefetched
     # is available.
     tile_live_fetch: bool = True
+
+    @computed_field
+    @property
+    def email_enabled(self) -> bool:
+        return bool(self.smtp_host and self.smtp_from)
 
     @computed_field
     @property

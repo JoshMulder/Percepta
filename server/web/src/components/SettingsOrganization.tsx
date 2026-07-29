@@ -167,6 +167,8 @@ function MemberDetail({
       <h4>{member.display_name}</h4>
       <p className="settings-note">{member.email}</p>
 
+      <PasswordReset member={member} />
+
       <div className="field">
         <span>Role</span>
         <div className="role-buttons">
@@ -268,6 +270,83 @@ function MemberDetail({
           )}
         </>
       )}
+    </div>
+  );
+}
+
+/**
+ * Send this member a password reset link.
+ *
+ * The admin never sees or chooses the password. A password an administrator
+ * picked is known to two people from the moment it exists, and is the one
+ * nobody changes.
+ *
+ * Confirmed before sending, because it invalidates any link already outstanding
+ * and, once redeemed, signs the person out everywhere.
+ */
+function PasswordReset({ member }: { member: Member }) {
+  const [state, setState] = useState<"idle" | "confirming" | "sending" | "sent">(
+    "idle",
+  );
+  const [error, setError] = useState<string | null>(null);
+
+  async function send() {
+    setState("sending");
+    setError(null);
+    try {
+      await api.sendPasswordReset(member.user_id);
+      setState("sent");
+    } catch (err) {
+      setError(
+        err instanceof ApiError ? err.message : "The reset could not be sent.",
+      );
+      setState("idle");
+    }
+  }
+
+  if (state === "sent") {
+    return (
+      <p className="settings-ok">
+        Reset link sent to {member.email}. It works once and expires.
+      </p>
+    );
+  }
+
+  return (
+    <div className="settings-actions">
+      {state === "confirming" ? (
+        <>
+          <button
+            type="button"
+            className="btn primary"
+            disabled={state !== "confirming"}
+            onClick={() => void send()}
+          >
+            Send the link
+          </button>
+          <button
+            type="button"
+            className="btn ghost"
+            onClick={() => setState("idle")}
+          >
+            Cancel
+          </button>
+          <span className="settings-note">
+            Any link already sent stops working. Once used, this signs them out
+            everywhere.
+          </span>
+        </>
+      ) : (
+        <button
+          type="button"
+          className="btn ghost"
+          disabled={state === "sending"}
+          onClick={() => setState("confirming")}
+        >
+          {state === "sending" ? "Sending…" : "Send password reset"}
+        </button>
+      )}
+      {error && <span className="settings-error">{error}</span>}
     </div>
   );
 }

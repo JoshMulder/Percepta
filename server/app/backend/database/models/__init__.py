@@ -13,6 +13,7 @@ from backend.database.models.enums import UserRole
 from backend.database.models.ground_station import GroundStation
 from backend.database.models.organization import Organization
 from backend.database.models.organization_membership import OrganizationMembership
+from backend.database.models.password_reset_token import PasswordResetToken
 from backend.database.models.power_sample import PowerSample
 from backend.database.models.station_credential import StationCredential
 from backend.database.models.station_enrolment_token import (
@@ -28,6 +29,7 @@ __all__ = [
     "DeviceKind",
     "GroundStation",
     "Organization",
+    "PasswordResetToken",
     "OrganizationMembership",
     "PowerSample",
     "StationCredential",

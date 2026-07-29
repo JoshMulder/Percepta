@@ -239,4 +239,17 @@ export const api = {
       `/api/organization/members/${userId}/roles`,
       { method: "PUT", body: JSON.stringify({ roles }) },
     ),
+
+  sendPasswordReset: (userId: string) =>
+    request<{ user_id: string; sent_to: string }>(
+      `/api/organization/members/${userId}/password-reset`,
+      { method: "POST" },
+    ),
+
+  /** Redeeming an emailed reset link. The only call made while signed out. */
+  redeemPasswordReset: (token: string, newPassword: string) =>
+    request<{ reset: boolean }>("/api/auth/password-reset/redeem", {
+      method: "POST",
+      body: JSON.stringify({ token, new_password: newPassword }),
+    }),
 };

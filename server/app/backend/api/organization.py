@@ -42,6 +42,8 @@ from backend.database.models.organization_membership import OrganizationMembersh
 from backend.database.models.station_grant import StationGrant
 from backend.database.models.user import User
 from backend.realtime.revocation import grants_changed, revoke_user
+from backend.core.email import EmailNotConfiguredError
+from backend.services import password_reset
 from backend.services.audit import record
 
 log = logging.getLogger(__name__)
@@ -313,3 +315,60 @@ def set_roles(
         detail={"from": previous, "to": roles},
     )
     return {"user_id": str(user_id), "roles": roles}
+
+
+@router.post("/members/{user_id}/password-reset", status_code=200)
+def send_password_reset(
+    user_id: uuid.UUID,
+    request: Request,
+    identity: Identity = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Email this member a link to set a new password.
+
+    The admin never learns or chooses the password. A password an administrator
+    picked is known to two people from the moment it exists, usually travels
+    over chat, and tends to be the one nobody changes.
+
+    Membership is checked first, so this cannot be used to probe for or reset
+    accounts outside the organisation being administered.
+    """
+    _membership(db, identity.organization_id, user_id)
+
+    user = db.get(User, user_id)
+    if user is None or not user.is_active:
+        raise HTTPException(status_code=404, detail="Not a member of this organisation")
+
+    _, plaintext = password_reset.issue(
+        db, user=user, requested_by=identity.user_id
+    )
+
+    # Sent before the commit. If the mail server refuses, nothing is written and
+    # the admin gets an error instead of a live link nobody received - which
+    # they would otherwise have no way to distinguish from a full inbox.
+    try:
+        password_reset.send(user=user, plaintext=plaintext, by_admin=True)
+    except EmailNotConfiguredError as exc:
+        db.rollback()
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except OSError as exc:
+        db.rollback()
+        log.exception("Password reset mail failed")
+        raise HTTPException(
+            status_code=502,
+            detail=f"The email could not be sent: {exc}",
+        ) from exc
+
+    email = user.email
+    db.commit()
+
+    record(
+        action="user.password_reset.sent",
+        organization_id=identity.organization_id,
+        actor_user_id=identity.user_id,
+        target_type="user",
+        target_id=str(user_id),
+        ip_address=request.client.host if request.client else None,
+        detail={"target_email": email},
+    )
+    return {"user_id": str(user_id), "sent_to": email}

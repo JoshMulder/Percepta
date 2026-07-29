@@ -4,12 +4,13 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.auth.cookies import clear_access_cookie, set_access_cookie
 from backend.auth.dependencies import get_identity
 from backend.auth.identity import Identity
-from backend.auth.password import verify_password
+from backend.auth.password import PasswordError, verify_password
 from backend.auth.platform import PLATFORM_ORGANIZATION_ID
 from backend.auth.security import create_access_token
 from backend.core.config import settings
@@ -17,12 +18,16 @@ from backend.database.dependencies import get_db
 from backend.database.models.audit_log import AuditLog
 from backend.database.session import PrivilegedSessionLocal
 from backend.database.models.enums import UserRole
+from backend.database.models.organization_membership import (
+    OrganizationMembership,
+)
 from backend.realtime.revocation import revoke_session
 from backend.repositories.auth_session_repository import AuthSessionRepository
 from backend.repositories.organization_membership_repository import (
     OrganizationMembershipRepository,
 )
 from backend.repositories.user_repository import UserRepository
+from backend.services import password_reset
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -400,3 +405,61 @@ def me(
         is_platform_admin=identity.is_platform_admin,
         is_guest=identity.is_guest,
     )
+
+
+class PasswordResetRedeem(BaseModel):
+    token: str
+    new_password: str
+
+
+@router.post("/password-reset/redeem", status_code=200)
+def redeem_password_reset(
+    body: PasswordResetRedeem,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Set a new password from an emailed link. No session required.
+
+    Unauthenticated by necessity - the point of a reset is that the person
+    cannot sign in. The token is the whole of the authorisation, which is why it
+    is single use, short lived, and stored only as a hash.
+
+    Runs on a privileged session. Row-level security binds queries to an
+    organisation taken from the caller's identity, and there is no caller and no
+    identity here; a normal session would evaluate every policy against an unset
+    org and find nothing, so every valid link would report itself invalid.
+    """
+    with PrivilegedSessionLocal() as privileged:
+        try:
+            user = password_reset.redeem(
+                privileged, token_value=body.token, new_password=body.new_password
+            )
+        except PasswordError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except password_reset.ResetError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        # Read before the commit. Org context here is unset, so anything read
+        # afterwards comes back through policies that match nothing.
+        user_id, email = user.id, user.email
+        # Only so the audit entry lands somewhere an admin will find it. A user
+        # can belong to several organisations and a password belongs to none of
+        # them, so any one of theirs is as correct as another.
+        organization_id = privileged.execute(
+            select(OrganizationMembership.organization_id)
+            .where(OrganizationMembership.user_id == user_id)
+            .limit(1)
+        ).scalar_one_or_none()
+        privileged.commit()
+
+    _audit(
+        "user.password_reset.redeemed",
+        request=request,
+        actor_email=email,
+        actor_user_id=user_id,
+        organization_id=organization_id,
+    )
+    # Deliberately does not sign them in. Redemption revoked every session this
+    # user had, and handing one straight back to whoever held the link would
+    # undo exactly what that is for.
+    return {"reset": True}

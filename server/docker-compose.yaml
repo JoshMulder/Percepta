@@ -91,6 +91,26 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  # Development mail sink. Accepts anything on 1025 and shows it at 8025; no
+  # message ever leaves the host, so a reset link in a test account's inbox
+  # cannot reach the real address it is addressed to. It is also the only honest
+  # way to see what these mails look like.
+  #
+  # Bound to loopback for both ports: the web inbox is unauthenticated and holds
+  # live password-reset links. Do not run this in production - point SMTP_HOST
+  # at a real relay and delete this service.
+  mailpit:
+    image: axllent/mailpit:v1.21
+    container_name: percepta-mailpit
+    restart: unless-stopped
+    environment:
+      MP_MAX_MESSAGES: "500"
+      MP_SMTP_AUTH_ACCEPT_ANY: "true"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "true"
+    ports:
+      - "127.0.0.1:${MAILPIT_SMTP_PORT:-1025}:1025"
+      - "127.0.0.1:${MAILPIT_WEB_PORT:-8025}:8025"
+
   app:
     build:
       # Root context: the image builds the console from web/ and the API from
@@ -133,6 +153,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      mailpit:
+        condition: service_started
 
   # Scheduled database backups. Same image as the database so pg_dump always
   # matches the server version - a newer server with an older pg_dump refuses
