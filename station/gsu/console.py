@@ -560,7 +560,14 @@ class Console:
         handler.send_header("Cache-Control", "no-store")
         handler.send_header("X-Content-Type-Options", "nosniff")
         handler.send_header("X-Frame-Options", "DENY")
-        handler.send_header("Referrer-Policy", "no-referrer")
+        # same-origin, not no-referrer. Since Chrome 85 the Origin header on a
+        # POST follows the referrer policy, so no-referrer redacts it to the
+        # literal "null" even on a same-origin form - which _same_origin then
+        # rightly refuses, and every browser login 403s while curl (no Origin
+        # at all) sails through. same-origin sends nothing to any other site,
+        # which for a page with no outbound links is the same privacy, and
+        # lets the browser vouch for its own posts.
+        handler.send_header("Referrer-Policy", "same-origin")
         handler.send_header("Content-Security-Policy", CSP)
         if cookie:
             # No `Secure`: this is plain HTTP and always will be — see

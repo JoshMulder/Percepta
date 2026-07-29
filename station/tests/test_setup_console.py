@@ -456,7 +456,10 @@ class ServedPageTests(unittest.TestCase):
         self.assertEqual(response.getheader("Cache-Control"), "no-store")
         self.assertEqual(response.getheader("X-Frame-Options"), "DENY")
         self.assertEqual(response.getheader("X-Content-Type-Options"), "nosniff")
-        self.assertEqual(response.getheader("Referrer-Policy"), "no-referrer")
+        # same-origin, not no-referrer: Chrome redacts the Origin header to
+        # "null" under no-referrer even on same-origin form posts, which made
+        # _same_origin refuse every real browser's login while curl passed.
+        self.assertEqual(response.getheader("Referrer-Policy"), "same-origin")
         self.assertIn("default-src 'none'",
                       response.getheader("Content-Security-Policy") or "")
         cookie = response.getheader("Set-Cookie") or ""
