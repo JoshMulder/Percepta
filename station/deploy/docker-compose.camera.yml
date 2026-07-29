@@ -1,6 +1,10 @@
-# Overrides for a container station with a CSI camera. Not optional if you take
-# the container path with a camera fitted, and **never run** — see
-# Dockerfile.camera, DEPLOYMENT.md §3.
+# Overrides for a container station with a CSI camera. Not optional if you
+# take the container path with a camera fitted — and **run on real hardware**:
+# on the first real Pi (2B, Trixie, ov5647) these constraints were each
+# necessary and together sufficient for the sensor to enumerate and picamera2
+# to capture snapshots inside the container. What still fails in the container
+# is the live encoder, for reasons that are the image's, not this file's — see
+# Dockerfile.camera, DEPLOYMENT.md §3. Camera stations run systemd.
 #
 #   sudo docker compose -f deploy/docker-compose.yml \
 #                       -f deploy/docker-compose.camera.yml up -d

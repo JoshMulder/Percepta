@@ -1,9 +1,11 @@
 """The Raspberry Pi camera on the CSI ribbon, under libcamera.
 
-**Never run against hardware.** There is no Pi and no camera on the machine this
-was written on, and HARDWARE.md §7 records it as untested. What follows is
-written to fail in ways somebody can diagnose from a log line rather than to
-look convincing.
+**Now run against hardware.** This driver met its first real camera — an ov5647
+on a Pi 2B (Raspbian 13, armhf) — in July 2026, and the picamera2 path carries
+the live station's 2 fps snapshot channel today. HARDWARE.md §7 is the register
+of what is measured and what still is not. It remains written to fail in ways
+somebody can diagnose from a log line rather than to look convincing, which is
+how every fault the hardware surfaced was found.
 
 Bookworm dropped the old `raspistill`/MMAL stack for libcamera, so there are two
 ways in and this driver takes whichever is there:

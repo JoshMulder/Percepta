@@ -81,7 +81,18 @@ services:
       # Overridden here rather than in the env file: inside the container the
       # state directory is always this path, whatever the host maps to it.
       GSU_HOME: /var/lib/percepta-gsu
-      GSU_CA_FILE: /etc/percepta/broker-ca.pem
+      # GSU_CA_FILE is deliberately NOT set here, and setting it would break
+      # the normal enrolment flow — this file used to, and the first real Pi
+      # paid for it. The broker CA normally *arrives in the enrolment
+      # response* and is persisted at $GSU_HOME/broker-ca.pem, which is on the
+      # writable state mount. Pointing GSU_CA_FILE at /etc/percepta instead
+      # names a file on a read-only mount that exists only if somebody
+      # pre-provisioned it — and a set-but-unreadable GSU_CA_FILE is a hard
+      # refusal, never a fallback (gsu/tls.py), so an un-pre-provisioned
+      # station could not build broker trust at all, and a pre-provisioned one
+      # could never be superseded by enrolment. Pre-provisioning is opt-in:
+      # uncomment GSU_CA_FILE in /etc/percepta/gsu.env (the path is the same
+      # inside and outside the container) — exactly as on the systemd path.
       # The console must be reachable from outside the container to be reachable
       # at all, so it binds 0.0.0.0 *inside* and is published to loopback only
       # by `ports:` below. The container's network namespace is the boundary.

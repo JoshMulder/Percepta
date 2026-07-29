@@ -359,8 +359,7 @@ REGISTRY: tuple[DeviceType, ...] = (
               "network device. Bookworm, so libcamera: the driver uses "
               "picamera2 if it imports and rpicam-jpeg if it does not. Motion "
               "JPEG rather than H.264 — the reasoning is in "
-              "contract/schemas/video.schema.json. **Never run against real "
-              "hardware** (HARDWARE.md §7).",
+              "contract/schemas/video.schema.json.",
     ),
     DeviceType(
         id="simulated-camera",

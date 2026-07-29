@@ -597,6 +597,17 @@ been started, on any architecture. The compose file validates against the schema
 Everything about the runtime behaviour of the device mappings is reasoned from
 documentation. Expect an hour on those specifically.
 
+**Update, 2026-07-29, from the first real Pi:** the paragraphs above are now
+history rather than status. The image built and the container ran on a Pi 2B
+(Trixie, armhf); the device mappings behaved as reasoned; the camera overlay's
+constraints were each necessary and together sufficient for the sensor. Two
+things the desk got wrong are fixed and pinned by tests: the installer's
+floating service uid against the image's pinned 10001 (one uid on both paths
+now — `deploy/install.sh`), and the compose file's `GSU_CA_FILE` pointing at a
+read-only path that contradicted enrolment-delivered trust. And one honest
+limit: `rpicam-vid` inside the Debian-based camera image takes a bus error on
+the Raspbian host, so camera stations run systemd — DEPLOYMENT.md §3.
+
 ## 36. Two trust roots: the broker is pinned, the API is not by default
 
 **This corrects a real design error of mine.** I used `broker.ca_pem` to verify

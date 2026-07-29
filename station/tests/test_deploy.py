@@ -272,11 +272,13 @@ class UnitFileTests(unittest.TestCase):
 class ContainerTests(unittest.TestCase):
     """The container files. **This is the deployment path** (DECISIONS 35c).
 
-    Neither file has ever been built or run — there is no Docker daemon on the
-    machine this was written on — so these check what a careful read can check:
-    the base image is pinned, device access is permissive enough that a missing
-    sensor cannot stop the station, the log rotation that protects the SD card
-    is present, and no `privileged: true` has crept in.
+    Both files have now been built and run on the first real Pi, and the
+    device reasoning held (DECISIONS.md item 35's dated update). There is
+    still no Docker daemon where this suite runs, so these check what a
+    careful read can check: the base image is pinned, device access is
+    permissive enough that a missing sensor cannot stop the station, the log
+    rotation that protects the SD card is present, and no `privileged: true`
+    has crept in.
 
     The device assertions are the ones that matter. They encode a decision that
     reversed twice, and a well-meaning tightening of them would restore the
@@ -394,6 +396,78 @@ class ContainerTests(unittest.TestCase):
     def test_the_dockerignore_keeps_one_stations_identity_out_of_the_image(self):
         ignored = (DEPLOY.parent / ".dockerignore").read_text()
         self.assertIn("var/", ignored)
+
+
+class ServiceAccountTests(unittest.TestCase):
+    """One uid on both paths — the convention the first real Pi forced.
+
+    The installer used to let `useradd --system` pick a floating uid while the
+    image pinned 10001, so a bind-mounted state directory was readable on one
+    path and not the other, and flipping paths needed a manual `chown -R`.
+    These tests hold the three files to one number and the compose file to not
+    contradicting enrolment.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.install = (DEPLOY / "install.sh").read_text()
+        cls.dockerfile = (DEPLOY / "Dockerfile").read_text()
+        cls.camera = (DEPLOY / "Dockerfile.camera").read_text()
+        cls.compose = (DEPLOY / "docker-compose.yml").read_text()
+        cls.compose_directives = "\n".join(
+            line for line in cls.compose.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        )
+
+    def test_the_host_account_and_both_images_agree_on_the_uid(self):
+        # The whole convention is one number in four places. A drift in any of
+        # them recreates the field failure: state owned by a uid the container
+        # is not.
+        installer = re.search(r"^SERVICE_UID=(\d+)", self.install, re.M)
+        self.assertIsNotNone(installer, "install.sh no longer pins the uid")
+        uid = installer.group(1)
+        for name, text in (("Dockerfile", self.dockerfile),
+                           ("Dockerfile.camera", self.camera)):
+            self.assertIn(f"--uid {uid}", text, f"{name} pins a different uid")
+            self.assertIn(f"--gid {uid}", text, f"{name} pins a different gid")
+
+    def test_the_installer_creates_the_account_with_the_pinned_uid(self):
+        # `useradd --system` with no --uid picks a floating number, which is
+        # exactly the bug. The uid must be passed explicitly.
+        self.assertRegex(self.install, r'useradd --system --uid "\$SERVICE_UID"')
+        self.assertRegex(self.install, r'groupadd --system --gid "\$SERVICE_UID"')
+
+    def test_the_state_directory_is_reowned_on_every_run(self):
+        # A path flip must never need a manual chown again — the installer
+        # repairs ownership unconditionally, and with a shared uid the repair
+        # is a no-op on a healthy box.
+        self.assertRegex(
+            self.install, r'chown -R "\$SERVICE_USER:\$SERVICE_USER" "\$STATE"')
+
+    def test_an_existing_account_on_the_wrong_uid_is_migrated_not_ignored(self):
+        # Idempotence has to include installs made before the convention:
+        # the first real Pi already has a floating-uid gsu on it.
+        self.assertIn('usermod -u "$SERVICE_UID"', self.install)
+        self.assertIn('groupmod -g "$SERVICE_UID"', self.install)
+
+    def test_the_compose_file_does_not_shadow_the_enrolment_delivered_ca(self):
+        # GSU_CA_FILE set in the environment block points at a read-only mount
+        # that exists only when pre-provisioned — and a set-but-unreadable
+        # GSU_CA_FILE is a hard refusal, never a fallback (gsu/tls.py). The
+        # enrolment response is where the broker CA normally comes from, and
+        # compose must not override that for every container station.
+        self.assertNotIn("GSU_CA_FILE", self.compose_directives)
+        # ...while the opt-in stays documented where a person would set it.
+        env_example = (DEPLOY / "gsu.env.example").read_text()
+        self.assertIn("#GSU_CA_FILE=", env_example)
+
+    def test_ca_certificates_are_installed_as_the_public_material_they_are(self):
+        # 0640 root:gsu blocked the container's user from the trust root it
+        # was configured to verify the broker against. A CA certificate has no
+        # secret in it; gsu.env does, and keeps its tighter mode.
+        self.assertRegex(self.install, r'install -m 0644 -o root -g root "\$1" "\$2"')
+        self.assertIn('install -m 0640 -o root -g "$SERVICE_USER" '
+                      '"$SRC/deploy/gsu.env.example"', self.install)
 
 
 if __name__ == "__main__":

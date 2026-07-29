@@ -281,10 +281,14 @@ class ProcessEncoder:
     the difference — both are `rpicam-vid`, and which block of silicon does the
     work is a flag.
 
-    **Never run against hardware.** There is no Pi here; HARDWARE.md §7 is the
-    register of what has and has not been executed. It is written to fail
-    legibly: every failure path produces a sentence naming the tool and what it
-    said.
+    **Now run against hardware.** On the first real station (Pi 2B, ov5647)
+    the hardware path encoded 1080p30 through /dev/video11 and carried a live
+    stream a browser decoded; HARDWARE.md §7 is the register. One measured
+    property matters to callers: on an acquisition failure the process spawns
+    cleanly and dies *asynchronously* — `start` returning True is not proof of
+    a camera, and retrying the spawn never helps. It is written to fail
+    legibly: every failure path produces a sentence naming the tool and what
+    it said.
     """
 
     name = "process"

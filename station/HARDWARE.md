@@ -83,7 +83,9 @@ The 12.3 ms is **simulation only** — synthesising a second of audio in pure
 Python. On real hardware that work belongs to the SDR pipeline in its own
 process, and this agent's share of a tick is the 0.32 ms figure.
 
-**Not measured: the Pi.** There is no Pi 2B on this machine and I will not
+**Not measured: the Pi's own bench numbers.** The station now runs on a real
+Pi 2B (§7), but `python -m gsu bench` has not been re-run there and folded in,
+so the table above stays x86 and stays labelled. I will not
 convert an x86 number into an ARM one and present it as a measurement. Even at a
 pessimistic 50× penalty the agent is ~1.6% of one core, so *this software* is
 not the constraint on that hardware. What is, on published third-party figures:
@@ -262,32 +264,35 @@ fully removes.
 
 The distinction that matters when reading anything above: some of this has been
 run against real hardware and some has not, and this section is the honest
-register of which.
+register of which. It was rewritten on 2026-07-29, the day the first real
+station went live — **Station1**, a Pi 2B rev 1.1 on Raspberry Pi OS 13
+(Trixie), armhf, with an ov5647 camera and an Airmar 110WX — and the caveats it
+used to carry are retired below rather than deleted, because which claims
+survived contact with hardware is itself information.
 
 | | Status |
 |---|---|
-| The agent, the loop, telemetry, enrolment, renewal | Run continuously on x86-64. Not run on a Pi |
-| TLS to the broker, CA pinning, refusal to downgrade | **Verified against a real TLS-only Redis with a per-station ACL.** Not on ARM |
-| The NMEA and MAVLink decoders | Unit-tested against synthetic and hand-worked frames. Never fed by a real instrument |
-| The serial layer beneath them (`serialio.py`) | **Never opened a real UART.** Its error paths are tested; its success path is not |
+| The agent, the loop, telemetry, enrolment, renewal | Run continuously on x86-64, and **now live on the Pi 2B**: enrolled, publishing, renewing |
+| TLS to the broker, CA pinning, refusal to downgrade | Verified against a real TLS-only Redis with a per-station ACL, and now in daily use from ARM |
+| The NMEA decoder | **Fed by a real Airmar 110WX**, publishing real weather. MAVLink remains synthetic-only |
+| The serial layer beneath them (`serialio.py`) | **Has opened a real UART** — the Airmar's — and runs it continuously |
 | RTL-SDR airband | No driver. Reports `not supported by this software build` |
-| Pi camera, snapshots (`camera/picsi.py`) | **Never run against a camera.** Both paths — picamera2 and `rpicam-jpeg` — are untested by definition. What is tested is that on a machine with neither it says which is missing |
-| Pi camera, H.264 (`camera/h264.py`) | **Never run against a camera, and never against the hardware encoder.** The command line is tested; the encoder is not |
+| Pi camera, snapshots (`camera/picsi.py`) | **Run against the real ov5647.** The picamera2 path carries the live 2 fps snapshot channel; the same path also ran inside the camera container |
+| Pi camera, H.264 (`camera/h264.py`) | **Run against the hardware encoder.** The Pi 2B presents `/dev/video11`; `GSU_ENCODER=auto` chose it; 804 KB of 1080p30 H.264 in a 3-second test |
 | The synthetic camera and its JPEG encoder | Run continuously. Output decoded with libjpeg (Pillow 12.3) and checked pixel for pixel |
 | The synthetic H.264 source | Run. Output decoded with ffmpeg 7.0.2 at 640×480 and 1920×1080, no errors, picture correct |
-| The on-demand stream logic | Run against the synthetic encoder end to end, including lease expiry and the ceiling. Never against `rpicam-vid` |
-| The stream uplink to the platform | **Verified against the running platform.** fMP4 over a WebSocket, 1080p30, 459 fragments, none dropped, played in a browser. Never over a real satellite link |
-| The camera stack in a container | **Never built, never run.** The slim image has no libcamera, so a container station has no camera at all; `deploy/Dockerfile.camera` is written-down knowledge, not a tested path. DEPLOYMENT.md §3 recommends the systemd path for camera-equipped stations |
-| `picamera2` vs `rpicam-jpeg` | Neither has met a camera. Which one a box will use is now **decided and reported** rather than discovered: the installer creates the venv with `--system-site-packages` so the fast path is reachable, and the driver states which path it took and why |
-| The systemd unit | Parses cleanly under `systemd-analyze verify`. Never started on a Pi |
-| `install.sh` | Syntax-checked and read through. **Never run end to end on a Pi** |
-| ARMv7 itself | Nothing in this repository has executed on it |
+| The on-demand stream logic | Run end to end against the synthetic encoder **and against `rpicam-vid` on the real camera**, including the sensor handover the synthetic rig could never show (the fixes are pinned in `tests/test_video.py`, `StartupContentionTests`) |
+| The stream uplink to the platform | Verified against the running platform with the synthetic source (1080p30, 459 fragments, none dropped) and **from the real station with the real encoder: live stream end to end in a real browser, 208 fragments, `avc1.640028`.** Never over a real satellite link |
+| The camera stack in a container | **Built (271 MB) and run on the Pi.** It enumerates the ov5647 and captures snapshots under exactly the overlay's constraints — and `rpicam-vid` takes a bus error in the encoder path (Debian armhf userland against a Raspbian host) and dies before one frame. Camera stations therefore run systemd; DEPLOYMENT.md §3 has the account and the route past it |
+| `picamera2` vs `rpicam-jpeg` | Decided, reported, and now **measured**: picamera2 is the path in production on both host and container. The driver still states which path it took and why |
+| The systemd unit | **Runs the live station** — after its `DeviceAllow` list gained `char-video4linux`, `char-media` and `char-dma_heap`, the three entries libcamera actually opens. An allow-list with the camera missing reads as "no cameras available" from a service whose own user can see the camera from a shell |
+| `install.sh` | **Run end to end on the Pi.** It surfaced the uid mismatch between the host account and the image, now pinned to one number (10001) on both paths |
+| ARMv7 itself | **The whole station runs on it** |
 
-`python -m gsu bench` and `python -m gsu preflight` are both in the build so
-that the first two rows of that table can be closed by whoever first has the
-hardware in front of them, rather than by arithmetic here. `python -m gsu
-camera` and `python -m gsu stream` close the camera rows the same way, and
-neither needs a platform, a network or an enrolment.
+`python -m gsu bench`, `python -m gsu preflight`, `python -m gsu camera` and
+`python -m gsu stream` were built so those rows could be closed by whoever
+first had the hardware, rather than by arithmetic here. That is how each of
+them was closed.
 
 ---
 
@@ -328,12 +333,14 @@ An `available: false` frame is about 90 bytes and is rate-limited to 1 Hz, so a
 station with no camera costs **0.7 kbit/s** to keep saying so. That is the price
 of not going quiet, and it is the right price.
 
-**Not measured: the Pi.** Nothing in this repository has run on ARMv7. The
-encode figures above are the station's own CPU and would be perhaps 10–20× on a
-Pi 2B — 50–100 ms a frame at 640×480, which at 2 fps is 10–20% of one core for a
-*synthetic* card. **A real camera does not use that path at all**: picamera2 and
-`rpicam-jpeg` produce their JPEG in hardware, and the station only base64-encodes
-it. Run `python -m gsu camera` on the box to close this.
+**The Pi now runs this, and the prediction that mattered held.** The table
+above remains x86 numbers for the *synthetic* encoder — but the real station
+does not use that path at all, exactly as predicted: picamera2 produces the
+JPEG in hardware and the station only base64-encodes it, and the live 2 fps
+channel runs on the Pi 2B without the CPU cost the synthetic arithmetic
+feared. The station's own measured figures are in every health frame
+(`health.video.bytes_per_frame`, `bitrate_bps`), which is the number to plan
+any further site with.
 
 ---
 
@@ -410,11 +417,19 @@ exactly the fact somebody set the option to establish. Health telemetry carries
 list, alongside the frame rate and bitrate actually achieved — so no one has to
 work out later which path a given station was on.
 
-### What is still unmeasured, and is now a measurement rather than a blocker
+### What was measured on the Pi 2B, and what is still open
 
-The owner's position: the Pi 2B is what is to hand for testing, a Pi 5 can be
-dropped in, and hardware sizing is a later decision. So this is no longer a
-question to block on — it is a number to report:
+The Pi 2B has now answered the questions it could answer:
+
+| | Measured on Station1 |
+|---|---|
+| Hardware encode block | **Present and used.** `/dev/video11` exists; `GSU_ENCODER=auto` probed it and chose hardware |
+| 1080p30 | **804 KB of H.264 in a 3-second test** — about 2.1 Mbit/s, inside the 3 Mbit/s target — and the live stream verified end to end in a real browser (208 fragments, `avc1.640028`) |
+| CPU cost | As designed for a fixed-function block: the station copies bytes and finds frame boundaries; the encode itself is not the CPU's problem |
+
+Still open, and still worth a number before it decides a purchase: **the Pi 5**
+(believed to have no H.264 encode block — the software path exists for it and
+has never met that board). The command that closes it is unchanged:
 
 ```bash
 python -m gsu stream --seconds 30                    # the site default

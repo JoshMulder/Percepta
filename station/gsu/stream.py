@@ -109,15 +109,22 @@ class StreamSession:
             return self.reason
 
         # Opened here and closed on stop: the connection exists only while
-        # somebody is watching, which is the same rule as the encoder.
-        self.uplink = build_uplink(
+        # somebody is watching, which is the same rule as the encoder. Held in
+        # a local as well as on self, and everything below reads the local:
+        # the moment the state says "streaming", the monitor half of this class
+        # (tick, on the sensing thread) may stop the stream and null
+        # `self.uplink` — it cannot null a local. The first real station
+        # proved the race is real; reading the attribute "just once" only
+        # narrowed it.
+        uplink = build_uplink(
             self.agent.config, self.agent.enrolment, trust=self.agent.api_trust,
         )
-        if not self.uplink.open():
+        self.uplink = uplink
+        if not uplink.open():
             self.state = "unavailable"
             self.reason = (
-                self.uplink.reason
-                or f"the media uplink {self.uplink.describe()} could not be opened"
+                uplink.reason
+                or f"the media uplink {uplink.describe()} could not be opened"
             )
             self.uplink = None
             return self.reason
@@ -179,7 +186,7 @@ class StreamSession:
         if not started:
             self.state = "unavailable"
             self.reason = source.reason or "the encoder would not start"
-            self.uplink.close()
+            uplink.close()
             self.uplink = None
             return self.reason
 
@@ -189,12 +196,14 @@ class StreamSession:
         self.started_clock = clock.now()
         self.reason = ""
         self.stopped_reason = ""
-        # Read once, before anything can race it: if the encoder dies in its
-        # first second, the monitor thread stops the stream and nulls
-        # `self.uplink` while this method is still composing its own report -
-        # which is not hypothetical, it is how the first real station turned a
-        # dead encoder into an AttributeError on top of it.
-        uplink_name = self.uplink.describe()
+        # The local, never the attribute: if the encoder dies in its first
+        # second, the monitor thread stops the stream and nulls `self.uplink`
+        # while this method is still composing its own report - which is not
+        # hypothetical, it is how the first real station turned a dead encoder
+        # into an AttributeError on top of it. (Reading the attribute once was
+        # the first version of this fix, and it only made the window smaller;
+        # tests/test_video.py holds the door open and slams it.)
+        uplink_name = uplink.describe()
         log.info(
             "Streaming %dx%d at %d fps, %d kbit/s target, to %s. Lease %.0fs.",
             settings.width, settings.height, settings.fps, settings.bitrate_kbps,

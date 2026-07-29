@@ -7,27 +7,36 @@
 #                       -f deploy/docker-compose.camera.yml up -d
 #
 # ---------------------------------------------------------------------------
-# **NEVER BUILT AND NEVER RUN.** Not on ARM, not on x86, not at all. There is no
-# Docker daemon and no Pi on the machine this was written on. Everything below
-# is reasoned from Raspberry Pi OS packaging and from how libcamera finds
-# hardware; treat it as a starting point that needs one person with a board and
-# an hour, not as a working image. DEPLOYMENT.md §3 says the same thing in the
-# place somebody will actually read it.
+# **BUILT AND RUN on the first real station** — a Pi 2B rev 1.1, Raspberry Pi
+# OS 13 (Trixie), armhf, ov5647 on the ribbon. The image builds at 271 MB.
+# What it measured, which is the whole story of this file:
 #
-# **For a camera-equipped station today, use the systemd path.** The host
-# already has libcamera, `rpicam-apps` and `python3-picamera2`, all built for
-# its own kernel and firmware, and none of the three risks below apply. This
-# file exists so that the container path has a route to the camera rather than
-# a permanent gap — not because it is the recommended one.
+#   * The sensor **enumerates** and picamera2 **captures snapshots**, under
+#     exactly docker-compose.camera.yml's constraints — the udev mount, the
+#     widened device cgroup and the render gid were each necessary, and
+#     together sufficient.
+#   * `rpicam-vid` takes a **bus error in the encoder path and dies before one
+#     frame** — Debian armhf userland against a Raspbian host. It spawns
+#     cleanly and dies asynchronously, so retrying never helps. The identical
+#     command on the host encodes 1080p30 through /dev/video11, so the fault
+#     is this image's userland: not the kernel, not device access, not the
+#     compose overlay.
 #
-# Three couplings that make this harder than adding a package, in the order
-# they will bite:
+# **So a camera-equipped station uses the systemd path.** The host has
+# libcamera, `rpicam-apps` and `python3-picamera2` built for its own kernel and
+# firmware. This file remains the container path's route to *snapshots*, and
+# the starting point for whoever attempts the route past the bus error — a
+# Raspbian-based image; DEPLOYMENT.md §3 writes up the two ways to build one
+# and what each costs.
 #
-#   1. **libcamera in here talks to drivers out there.** The container's
-#      libcamera and rpicam-apps must be compatible with the *host's* kernel and
-#      firmware. Raspberry Pi OS updates them together; a container pins one
-#      half of that pair and the host moves the other. A mismatch presents as
-#      "no cameras available" — the same message as an unplugged ribbon.
+# Three couplings, the first now demonstrated rather than predicted:
+#
+#   1. **Userland in here runs against drivers out there.** The container's
+#      libcamera and rpicam-apps must be compatible with the *host's* kernel,
+#      firmware — and, as the bus error showed, its architecture baseline.
+#      Raspberry Pi OS updates its half of that pair with the kernel; a
+#      container pins the other half. A mismatch presents as "no cameras
+#      available", or as an encoder that dies before its first frame.
 #   2. **SUITE must match the host's release.** Build with
 #      `--build-arg SUITE=trixie` on Raspberry Pi OS 13, `bookworm` on 12. The
 #      Raspberry Pi archive publishes per-suite, and mixing them is how you get
@@ -36,11 +45,10 @@
 #      opens more than /dev/video*, and it enumerates through udev. See
 #      docker-compose.camera.yml, which is not optional.
 #
-# What this costs that the slim image does not: roughly 300–400 MB unpacked
-# against 40 MB, and an update layer that is no longer 91 KB. That is a real
-# loss on a metered link and it is the second reason the recommendation is
-# systemd — DECISIONS.md item 40 has the measured update-bandwidth numbers this
-# breaks.
+# What this costs that the slim image does not: 271 MB measured against 40, and
+# an update layer that is no longer 91 KB. That is a real loss on a metered
+# link and it is the second reason the recommendation is systemd — DECISIONS.md
+# item 40 has the measured update-bandwidth numbers this breaks.
 # ---------------------------------------------------------------------------
 
 ARG SUITE=trixie

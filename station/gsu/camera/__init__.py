@@ -18,7 +18,8 @@ and most easily assumes.
 Two implementations behind one interface, exactly as `sensors/` does it:
 
     picsi.py       the real CSI camera. picamera2 if it imports, rpicam-jpeg if
-                   it does not. Never run against hardware — see HARDWARE.md §7
+                   it does not. Carries the live station's snapshots since the
+                   first real camera — see HARDWARE.md §7
     synthetic.py   a generated test card, which says SYNTHETIC on its face
 
 and `jpeg.py`, a small baseline JPEG writer that exists **only** for the

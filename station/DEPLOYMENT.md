@@ -24,7 +24,7 @@ normal.
 | Airmar 110WX | on a USB-UART |
 | uAvionix ping RX Pro | on a USB-UART. Not yet connected as of HARDWARE.md |
 | RTL2838 | airband. **No driver in this build** — see §10 |
-| Pi camera | CSI ribbon. Driven: snapshots on the video channel, and live H.264 on demand. **Never yet run against a real camera** — see §10 |
+| Pi camera | CSI ribbon. Driven and **proven on real hardware**: snapshots on the video channel, and live 1080p30 H.264 on demand through the hardware encoder — see §10 |
 | Network | Ethernet or a Starlink terminal. The Pi 2B has no onboard Wi-Fi |
 
 **Software**
@@ -76,13 +76,13 @@ runbook is it. Running it as a plain systemd service is fully supported and
 documented in **Appendix B**; use that if you would rather not have Docker on
 the box.
 
-> **If this station has a camera, use the systemd path (Appendix B).** The
-> container path cannot reach a CSI camera as shipped — the slim image contains
-> no libcamera, no `rpicam-apps` and no `picamera2`, so the camera is correctly
-> reported as unavailable and there is no picture. The host has all three,
-> built for its own kernel and firmware. §3 has the full reasoning, what a
-> camera-capable image would take, and why it is not the recommendation today.
-> Everything else in this runbook applies to both paths.
+> **If this station has a camera, use the systemd path (Appendix B).** Measured
+> on the first real Pi, not reasoned: the slim image has no camera stack at
+> all, and the camera image gets snapshots but its `rpicam-vid` dies with a
+> bus error before the first live-stream frame. The host runs the full
+> pipeline. §3 has the measurements, and the route to a camera-capable image
+> if one is ever worth building. Everything else in this runbook applies to
+> both paths.
 
 The reason containers won is the owner's constraint, not a preference about
 packaging: *once these stations are installed they are going to be difficult to
@@ -182,7 +182,7 @@ What it does:
 | `/etc/percepta/gsu.env` | configuration, `0640 root:gsu` |
 | `/etc/percepta/platform-api-ca.pem` | the API's CA, if you pinned it |
 | `/var/lib/percepta-gsu` | state: credential, pinned broker CA, inventory, events, recordings. `0700 gsu` |
-| user `gsu` | system account, no login, in `dialout`, `video`, `plugdev` |
+| user `gsu` | system account, **uid 10001** — the same number the image pins, so state and configuration read correctly on either path and flipping paths moves no files. An older install's floating-uid `gsu` is migrated on re-run. No login; in `dialout`, `video`, `plugdev` |
 | `/etc/systemd/system/gsu-update.{service,timer}` | the update check, timer enabled |
 | `/etc/systemd/system/gsu.service` | the systemd path, installed but **disabled** |
 | `/etc/udev/rules.d/99-percepta-sdr.rules` | so the SDR is readable without root |
@@ -196,9 +196,13 @@ machine that has one, copy `deploy/wheels` across, and use `--offline`.
 
 ### The camera decides which path this station takes
 
-**A camera-equipped station should take the systemd path.** Not a preference —
-the container path cannot reach the camera as shipped, and the fixes are all
-box-specific in ways nobody can verify from a desk.
+**A camera-equipped station takes the systemd path.** This used to be a
+recommendation reasoned from a desk; it is now a measurement. The first real
+station — a Pi 2B rev 1.1 on Raspberry Pi OS 13 (Trixie), armhf, with an
+ov5647 on the ribbon — ran both paths, and the result splits cleanly: **the
+host runs the full pipeline** (804 KB of 1080p30 H.264 in a 3-second test, and
+the live stream verified end to end in a real browser), while **the camera
+container gets snapshots but not the stream**.
 
 **Why the slim image cannot see a camera.** It is `python:3.11-slim-bookworm`
 plus one pip dependency. There is no libcamera in it, no `rpicam-jpeg`, no
@@ -206,23 +210,49 @@ plus one pip dependency. There is no libcamera in it, no `rpicam-jpeg`, no
 and the live stream needs `rpicam-vid`, so the camera is reported unavailable
 with *"picamera2 is not importable and no rpicam-jpeg was found"* — accurate,
 and still no picture. That is not a bug in the image; the image was sized for an
-update layer of 91 KB over a metered link, and a camera stack is 300–400 MB.
+update layer of 91 KB over a metered link, and a camera stack is hundreds of
+megabytes.
 
-**What a camera-capable image would take**, written down in
-`deploy/Dockerfile.camera` and `deploy/docker-compose.camera.yml` so the
-knowledge is not lost — **both never built and never run**:
+**What the camera image actually does on real hardware.**
+`deploy/Dockerfile.camera` and `deploy/docker-compose.camera.yml` have now been
+built and run on the Pi 2B (the image builds at 271 MB):
 
-| | |
+| | Measured |
 |---|---|
-| The stack | `rpicam-apps` and `python3-picamera2` from the Raspberry Pi archive, which is not Debian proper. Build with `--build-arg SUITE=` matching the host's release |
-| udev | libcamera enumerates through udev. Without `/run/udev` mounted it finds nothing, however many device nodes are visible |
-| Device access | `/dev/video*` is major 81 and is already allowed. **`/dev/media*` and `/dev/dma_heap/*` are dynamically allocated**, so their majors are kernel-specific and cannot be written down in advance — the override widens the cgroup rule to all character devices and explains how to narrow it once you can read the real numbers off the box |
-| Version coupling | The container's libcamera talks to the host's kernel and firmware, and Raspberry Pi OS updates those together. A container pins one half of that pair while the host moves the other, and a mismatch reads as *"no cameras available"* — the same message as an unplugged ribbon |
+| Sensor enumeration | **Works.** The ov5647 enumerates inside the container — under exactly the overlay's constraints: `/run/udev` mounted read-only, the device cgroup widened to all character devices, the `render` gid added. Every one of those was needed |
+| Snapshots | **Work.** picamera2 inside the container captures frames from the real sensor |
+| The live stream | **Fails.** `rpicam-vid` takes a **bus error in the encoder path** and dies before producing one frame — Debian armhf userland running against a Raspbian host. It spawns cleanly and dies asynchronously, so retrying the spawn never helps (`gsu/stream.py` says the same thing in code). The identical command on the host encodes 1080p30 through `/dev/video11`, so the fault is the image's userland — not the kernel, not device access, not the overlay |
+| The stack | `rpicam-apps` and `python3-picamera2` from the Raspberry Pi archive, which is not Debian proper. Build with `--build-arg SUITE=` matching the host's release. The archive keyring is vendored at `deploy/raspberrypi-archive-keyring.pgp` — the key on the website carries a SHA-1 binding signature that Trixie's Sequoia policy rejects outright, so fetching it at build time reads as an unsigned repository |
 
-That last row is the one that makes this a recommendation rather than a fix. On
-the systemd path none of it applies: the host's own libcamera, `rpicam-apps` and
+**Conclusion, as deployed: camera stations run systemd; the container path is
+fine for everything else.** On the systemd path the coupling that produced the
+bus error does not exist — the host's own libcamera, `rpicam-apps` and
 `python3-picamera2` are built for the kernel they are running on, and they are
 updated with it.
+
+**The route past the bus error is a Raspbian-based image, and it has not been
+attempted.** There is no official Raspbian Trixie Docker base image, so the
+plausible routes are these, written down so the option is a plan rather than a
+hunch:
+
+1. **debootstrap a Raspbian rootfs** (from the Raspbian mirror plus
+   `archive.raspberrypi.com`) and import it as the base. Costs: you become the
+   maintainer of a base image nobody publishes — its security update cadence,
+   its provenance (nothing vouches for the rootfs beyond the archive keyrings),
+   and keeping its suite in lockstep with the host's release.
+2. **Use the host's own rootfs as the base** — a pristine Raspberry Pi OS Lite
+   image's root filesystem, `docker import`ed. This guarantees the exact
+   userland the host already proved works. Costs: the image is per-OS-release
+   and must be rebuilt on every host upgrade or the coupling returns as
+   staleness; and a rootfs taken from a *live* box rather than a pristine
+   image would carry that box's identity (host keys, machine-id) into an
+   image, which must not happen.
+
+Either route keeps the overlay unchanged — udev, the cgroup widening and the
+`render` gid were proven right by the snapshots working. Both break the
+91 KB-update-layer economics (DECISIONS.md item 40) as thoroughly as the Debian
+camera image does. Until a second camera station makes that maintenance worth
+buying, the answer stays systemd.
 
 **Related, and the reason the installer changed:** on the systemd path the venv
 is now created with **`--system-site-packages`**, because `python3-picamera2` is
@@ -363,10 +393,10 @@ system CA bundle` instead, and that is also a PASS.
 The two FAILs are dealt with in §8 and §10. Anything under **Trust** that fails
 must be fixed here, not later.
 
-**On the container path that camera line is a `FAIL`**, reading *"picamera2 is
+**In the slim container that camera line is a `FAIL`**, reading *"picamera2 is
 not importable and no rpicam-jpeg was found"*. That is the expected answer
-there, not a fault to chase: §3 explains it and recommends the systemd path for
-a station with a camera.
+there, not a fault to chase. In the camera image it is a `PASS` — and the live
+stream still is not (§3, the bus error). A station with a camera runs systemd.
 
 **Read the camera line carefully — preflight does not take a picture.** It
 reports that the driver could be built: that libcamera tooling is installed and
@@ -565,7 +595,13 @@ and a separate uplink, and it has its own three checks. Do them in this order �
 each one needs less of the world than the one after it.
 
 **1. Does the camera produce a picture at all?** No platform, no network, no
-enrolment:
+enrolment. On a camera station — which runs systemd, §3:
+
+```bash
+sudo -u gsu /opt/percepta/station/.venv/bin/python -m gsu camera --frames 3 --out /tmp/frame.jpg
+```
+
+or, on the container path (where snapshots work; the live stream does not — §3):
 
 ```bash
 cd /opt/percepta/station
@@ -589,10 +625,12 @@ right. **No frame** prints libcamera's own message, which is the diagnosis:
 *"no cameras available"* is a ribbon or a camera, *"picamera2 is not installed
 and no rpicam-jpeg was found"* is a package.
 
-**2. Does the live encoder keep up?** Still no platform needed:
+**2. Does the live encoder keep up?** Still no platform needed. This one must
+run on the host — inside the container `rpicam-vid` takes a bus error before
+its first frame (§3):
 
 ```bash
-sudo docker compose -f deploy/docker-compose.yml run --rm gsu stream --seconds 30
+sudo -u gsu /opt/percepta/station/.venv/bin/python -m gsu stream --seconds 30
 ```
 
 It prints which encoders this board has, then measured frames per second,
@@ -661,35 +699,41 @@ stubbed to look like it works.
 `power` and `light` have no hardware specified for this site, so those slots are
 empty and their streams are declared unavailable for that reason instead.
 
-### The camera is driven now, and none of it has met a camera
+### The camera is driven now, and has met a camera
 
-This row used to say the camera "reports as configured and undriveable" and that
-there was no media channel to carry anything it produced. **Both are now false.**
-What exists:
+This section has been rewritten twice, each time to retire a claim: first "the
+camera is configured and undriveable", then "none of it has met a camera".
+**Both retirements held.** What exists, all of it now running on the first real
+station (a Pi 2B with an ov5647, live as of July 2026):
 
 | | |
 |---|---|
-| Snapshots | `gsu/{station_id}/video`, one complete JPEG per message, 640×480 at 2 fps by default. `contract/schemas/video.schema.json` |
-| Live video | H.264, fragmented MP4 over a WebSocket to the platform, started only while somebody is watching |
+| Snapshots | `gsu/{station_id}/video`, one complete JPEG per message, 640×480 at 2 fps by default. `contract/schemas/video.schema.json`. Live from the real sensor, via `picamera2` |
+| Live video | H.264, fragmented MP4 over a WebSocket to the platform, started only while somebody is watching. 1080p30 through the Pi's hardware encode block (`/dev/video11`, chosen by `GSU_ENCODER=auto`), decoded in a real browser |
 | Driver | `gsu/camera/picsi.py` for stills — `picamera2` if it imports, `rpicam-jpeg` if it does not. `gsu/camera/h264.py` for the stream — a hardware encode block, or libav/x264, probed at start-up |
 | No camera fitted | `available: false` with a reason, on a cadence. Never silence, never a black frame |
 
-**What has never happened**, and the owner is about to be the first to find out:
+**What the first camera taught it** — five fixes (the sensor contention counts
+twice: it held in both directions), none reproducible without hardware, all
+made and all pinned by tests (`tests/test_video.py`, `StartupContentionTests`;
+HARDWARE.md §7 has the register):
 
-- **No part of this has run against a real camera.** Not `picamera2`, not
-  `rpicam-jpeg`, not `rpicam-vid`, not the hardware encoder. There is no Pi and
-  no camera on the machine this was written on.
-- **Nothing has executed on ARMv7 at all**, so the timings in HARDWARE.md §8 are
-  x86 numbers and are labelled as such.
-- The **synthetic** camera and the synthetic H.264 source have been run
-  continuously and verified — the JPEG against libjpeg, the H.264 and the
-  fragmented MP4 against ffmpeg, and the whole uplink end to end against the
-  running platform at 1080p30 for fifteen seconds with nothing dropped. That
-  proves the *pipe*. It says nothing about the sensor.
+- The systemd unit's `DeviceAllow` list was missing every node libcamera opens
+  (`char-video4linux`, `char-media`, `char-dma_heap`) — an allow-list with the
+  camera missing reads as *"no cameras available"* from a service whose own
+  user can see the camera perfectly well from a shell.
+- The snapshot path held the sensor against the encoder, both directions:
+  picamera2's long-lived hold is now closed before the encoder starts, a
+  "starting" state pauses the publisher, and a bounded wait outlasts a cli
+  capture already in flight — which can only be outlasted, because the encoder
+  spawns cleanly and dies *asynchronously* on acquisition failure.
+- `stream.start` read state the monitor thread could null mid-start, turning a
+  dead encoder into an `AttributeError` on top of a dead stream.
+- The camera image's keyring fetch fell foul of Trixie's Sequoia policy (§3).
 
-So the first two commands in §9 are the ones that matter on the day: `gsu camera`
-proves the picture, `gsu stream` proves the encoder. Both work with no platform
-and no network, and both print numbers rather than opinions.
+The first two commands in §9 remain the ones that matter on install day:
+`gsu camera` proves the picture, `gsu stream` proves the encoder. Both work
+with no platform and no network, and both print numbers rather than opinions.
 
 One thing that follows from a single camera: **the live stream takes the sensor
 while it runs**, so snapshots pause and publish `available: false` with
@@ -1193,13 +1237,15 @@ noticed. On a site that is hours away, that is the risk §14 exists to remove.
 
 Three things, honestly:
 
-- **The camera works here and does not work in the container.** The host has
-  libcamera, `rpicam-apps` and `python3-picamera2`, all built for the kernel and
-  firmware they are running on and updated with them. The slim image has none of
-  the three, and a camera-capable image is coupled to the host in ways that
-  cannot be verified from a desk (§3). **For a station with a camera, this is the
-  path.** The installer creates the venv with `--system-site-packages` so that
-  `picamera2` — a Debian package, not a pip one — is importable.
+- **The camera works fully here and only partly in the container — measured,
+  not reasoned (§3).** The host has libcamera, `rpicam-apps` and
+  `python3-picamera2`, all built for the kernel and firmware they are running
+  on and updated with them; on the first real Pi this path ran 1080p30 through
+  the hardware encoder end to end. The camera image enumerates the sensor and
+  captures snapshots, but `rpicam-vid` dies with a bus error before its first
+  frame. **For a station with a camera, this is the path.** The installer
+  creates the venv with `--system-site-packages` so that `picamera2` — a
+  Debian package, not a pip one — is importable.
 - **A missing device was never a problem here.** The unit has no device list to
   be wrong; the agent opens what it finds and reports what it cannot. The
   container path only matches this because its device mapping was made
@@ -1229,7 +1275,10 @@ SDR. A `DeviceAllow` list is used instead.
 ## Appendix C: what has actually been run, and what has not
 
 The distinction matters more than usual here, because the deployment path
-changed twice and none of it has touched the target hardware.
+changed twice — and because the register below was written before any of it
+had touched the target hardware, and has now been corrected against the first
+real station: **Station1**, a Pi 2B rev 1.1 on Raspberry Pi OS 13 (Trixie),
+armhf, enrolled and live as of 2026-07-29.
 
 **Verified, on x86-64:**
 
@@ -1257,29 +1306,27 @@ changed twice and none of it has touched the target hardware.
   reading, fragments are dropped whole and the picture resynchronises on the
   next keyframe. Nothing is ever queued and no partial frame is ever written.
 
+**Verified on the first real station (Pi 2B, Raspbian 13 Trixie, armhf):**
+
+- `install.sh`, end to end — and it surfaced the uid convention now pinned:
+  the host account and the image share uid 10001, because the first install's
+  floating uid left the docker path unable to read its own state.
+- The systemd unit runs the live station, after its `DeviceAllow` list gained
+  the three entries libcamera actually opens (`char-video4linux`,
+  `char-media`, `char-dma_heap`).
+- ARMv7, a real UART (the Airmar 110WX, publishing real weather), and the
+  camera. Enrolment, telemetry, snapshots at 2 fps, and the on-demand 1080p30
+  stream — 804 KB of H.264 in a 3-second test, and the live stream decoded in
+  a real browser (208 fragments, `avc1.640028`).
+- The slim image builds and the container runs; the camera image builds
+  (271 MB) and enumerates the sensor and captures snapshots under exactly the
+  overlay's constraints. `rpicam-vid` in that container takes a bus error
+  before its first frame — §3 has the full account and the route past it.
+
 **Never run, anywhere:**
 
-- The image has **never been built**, on any architecture. There is no Docker
-  daemon on the machine this was written on.
-- The container has **never been started**, so the `/dev` bind mount, the
-  `device_cgroup_rules` majors, `group_add`, `read_only` and the tmpfs are all
-  reasoned from documentation.
-- `gsu-update.sh` has **never driven a real container** — only the stub.
-- `install.sh` has never been run end to end.
-- Nothing has executed on ARMv7, a real UART, the camera or the SDR.
-- **No camera code has met a camera.** `picamera2`, `rpicam-jpeg`, `rpicam-vid`
-  and the hardware H.264 encoder are all reasoned from documentation. Everything
-  verified above ran against the synthetic camera and the synthetic encoder,
-  which exercise the publisher, the muxer, the uplink and the on-demand logic —
-  and none of the sensor.
-- **`Dockerfile.camera` and `docker-compose.camera.yml` have never been built
-  or started.** They are written-down knowledge, not a tested path: the Raspberry
-  Pi archive, the udev mount and the device cgroup widening are all reasoned
-  from how libcamera finds hardware. Whoever tries them first should expect the
-  `render` gid and the suite pinning to need correcting, and should read §3
-  before deciding it is worth it at all rather than using systemd.
-
-The first person with the hardware should expect the device cgroup majors and
-the `group_add` gids to need adjusting, should run `gsu-update.sh` by hand once
-before letting the timer near it, and should run `gsu camera` and `gsu stream`
-(§9) before trusting anything this document says about video.
+- `gsu-update.sh` has **never driven a real container** — only the stub. Run
+  it by hand once before letting the timer near it.
+- The SDR has no driver, so nothing has exercised it beyond enumeration.
+- No stream has crossed a real satellite link; every live-stream measurement
+  so far is LAN.

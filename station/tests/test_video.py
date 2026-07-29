@@ -1036,6 +1036,150 @@ class OnDemandTests(AgentFixture):
         self.assertFalse(source.running)
 
 
+class StartupContentionTests(AgentFixture):
+    """What the first real camera taught `stream.start` (HARDWARE.md §7).
+
+    Every behaviour here was found on a Pi 2B with an ov5647 on the ribbon, and
+    none of it is visible on a box whose camera is synthetic — which was every
+    box this ran on before a real one. These tests pin the fixes so that the
+    synthetic rig cannot quietly lose them again.
+    """
+
+    def _fake_time(self):
+        """`gsu.stream`'s clock, with sleep recorded instead of slept.
+
+        The drain wait is 2.5 s of a real test run if it fires; whether it
+        fires is the thing under test, not the waiting itself.
+        """
+        import gsu.stream as stream_module
+
+        real = stream_module.time
+        slept: list[float] = []
+
+        class Recording:
+            monotonic = staticmethod(real.monotonic)
+
+            @staticmethod
+            def sleep(seconds: float) -> None:
+                slept.append(seconds)
+
+        stream_module.time = Recording
+        self.addCleanup(setattr, stream_module, "time", real)
+        return slept
+
+    def _real_camera(self):
+        camera = StubCamera(SyntheticCamera().capture())
+        camera.describe = _real_device
+        self.agent.camera = camera
+        return camera
+
+    def _instant_source(self, order: list | None = None, closed: list | None = None):
+        """An encoder that spawns without a thread, recording when it did."""
+
+        class Source:
+            running = True
+            reason = ""
+            keyframes = 0
+            name = "stub"
+
+            def start(self, on_unit) -> bool:
+                if order is not None:
+                    order.append(("spawn", bool(closed)))
+                return True
+
+            def stop(self) -> None:
+                pass
+
+        self.agent.stream._build_source = lambda settings: Source()
+
+    def test_starting_pauses_the_snapshot_publisher(self):
+        # Under the cli backend a snapshot is a subprocess that owns the sensor
+        # for the best part of a second; one dispatched while the encoder is
+        # spawning wins the race and kills the stream at birth. "starting"
+        # must read as "the stream has the camera" — before the first frame.
+        camera = self._real_camera()
+        self.agent.stream.state = "starting"
+        self.video.cycle()
+        payload = self.published()[0]
+        self.assertIs(payload["available"], False)
+        self.assertIn("live stream", payload["unavailable_reason"])
+        # The point is not the payload; it is that no capture was dispatched.
+        self.assertEqual(camera.captures, 0)
+
+    def test_starting_does_not_pause_the_synthetic_camera(self):
+        # The synthetic camera is a drawing routine: two can run at once, and
+        # the platform's test rig relies on that. Pausing it would be an
+        # artefact of the fix, not of the hardware.
+        self.agent.stream.state = "starting"
+        self.assertTrue(self.video.cycle())
+        self.assertIn("jpeg", self.published()[0])
+
+    def test_the_drain_wait_is_only_for_real_cameras(self):
+        # 2.5 s exists to outlast an in-flight snapshot subprocess, which only
+        # a real camera can have. On the synthetic path it would slow every
+        # start on the platform's test rig for a hold that cannot exist.
+        slept = self._fake_time()
+        self.agent.stream.start({})
+        self.agent.stream.stop("test")
+        self.assertNotIn(2.5, slept)
+
+    def test_a_real_camera_is_closed_and_drained_before_the_encoder_spawns(self):
+        # Ordering is the fix: picamera2's long-lived hold is released, the
+        # in-flight cli capture is outlasted, and only then does the encoder
+        # spawn. A spawn before the close reintroduces the device-busy that
+        # reads like broken hardware.
+        camera = self._real_camera()
+        closed: list[bool] = []
+        camera.close = lambda: closed.append(True)
+        order: list = []
+        self._instant_source(order=order, closed=closed)
+        slept = self._fake_time()
+        self.agent.stream.start({})
+        self.agent.stream.stop("test")
+        self.assertEqual(order, [("spawn", True)], "the encoder spawned before "
+                         "the snapshot path had let go of the sensor")
+        self.assertIn(2.5, slept)
+
+    def test_start_survives_the_monitor_stopping_the_stream_at_birth(self):
+        # The field failure: the encoder spawns cleanly, dies within a second,
+        # and the sensing thread notices and stops the stream — nulling
+        # `self.uplink` — while `start` is still composing its report. On the
+        # first real station that turned a dead encoder into an AttributeError
+        # on top of it. Emulated deterministically: the moment the state flips
+        # to "streaming", the monitor has already been and gone.
+        from gsu.stream import StreamSession
+
+        class MonitorWins(StreamSession):
+            def __setattr__(self, name, value):
+                object.__setattr__(self, name, value)
+                if name == "state" and value == "streaming":
+                    # What stop() does, in the order stop() does it.
+                    uplink = self.__dict__.get("uplink")
+                    if uplink is not None:
+                        uplink.close()
+                    object.__setattr__(self, "uplink", None)
+                    object.__setattr__(self, "source", None)
+
+        session = MonitorWins(self.agent)
+        session._build_source = self.agent.stream._build_source
+
+        class InstantlyDead:
+            running = False
+            reason = "the encoder died in its first second"
+            keyframes = 0
+            name = "stub"
+
+            def start(self, on_unit) -> bool:
+                return True
+
+            def stop(self) -> None:
+                pass
+
+        session._build_source = lambda settings: InstantlyDead()
+        effect = session.start({})   # must report, not raise
+        self.assertIn("streaming", effect)
+
+
 class RecordingWebSocketServer:
     """A WebSocket server that records what the station sent it.
 

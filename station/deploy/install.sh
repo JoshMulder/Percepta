@@ -125,13 +125,64 @@ fi
 
 # --- 2. the service account ------------------------------------------------
 say "Service account"
+# One uid on both paths, and it is the image's: the container pins gsu at
+# 10001 (deploy/Dockerfile and Dockerfile.camera), and the host account is
+# created to match. The first version of this script let `useradd --system`
+# pick a floating uid from the 100-999 range, and it bit on the first real Pi:
+# the state directory was owned by a uid the container's user was not, so on
+# the docker path the agent could not read its own credential — and 0750
+# root:gsu on /etc/percepta was a directory the container's user could not
+# even traverse. One shared number means the state directory, gsu.env's group
+# and the CA files read correctly whichever path runs, and flipping paths
+# later (DEPLOYMENT.md Appendix B) is the one systemctl command it claims to
+# be, with no re-chown hiding behind it.
+SERVICE_UID=10001
+
 if id "$SERVICE_USER" >/dev/null 2>&1; then
-  info "user $SERVICE_USER exists."
+  HAVE_UID="$(id -u "$SERVICE_USER")"
+  if [ "$HAVE_UID" = "$SERVICE_UID" ]; then
+    info "user $SERVICE_USER exists (uid $SERVICE_UID, shared with the image)."
+  else
+    say "Migrating $SERVICE_USER from uid $HAVE_UID to $SERVICE_UID"
+    info "An earlier version of this installer created $SERVICE_USER with a"
+    info "floating system uid; the container runs as $SERVICE_UID and the two"
+    info "paths now share one number. This is a one-time change."
+    if getent passwd "$SERVICE_UID" >/dev/null; then
+      die "uid $SERVICE_UID is already taken by user
+   '$(getent passwd "$SERVICE_UID" | cut -d: -f1)'. Both deployment paths share
+   that uid because the image pins it (deploy/Dockerfile). Free the uid, or
+   change it everywhere at once — here and in both Dockerfiles."
+    fi
+    # A uid cannot change under a running process, so both possible services
+    # are stopped first. Idempotent and safe when neither is running.
+    systemctl stop "$UNIT" >/dev/null 2>&1 || true
+    docker stop percepta-gsu >/dev/null 2>&1 || true
+    HAVE_GID="$(id -g "$SERVICE_USER")"
+    groupmod -g "$SERVICE_UID" "$SERVICE_USER" \
+      || die "could not move group $SERVICE_USER to gid $SERVICE_UID."
+    usermod -u "$SERVICE_UID" -g "$SERVICE_UID" "$SERVICE_USER" \
+      || die "could not move user $SERVICE_USER to uid $SERVICE_UID. If a
+   process is still running as $SERVICE_USER, stop it and re-run this script."
+    # Files remember numbers, not names. The state directory is re-owned in
+    # step 5, which every run does anyway; the config directory's group is
+    # fixed here because nothing later touches files it does not install.
+    [ -d "$ETC" ] && chgrp -R "$SERVICE_USER" "$ETC" 2>/dev/null || true
+    info "moved $SERVICE_USER from $HAVE_UID:$HAVE_GID to $SERVICE_UID:$SERVICE_UID."
+  fi
 else
+  if getent passwd "$SERVICE_UID" >/dev/null; then
+    die "uid $SERVICE_UID is already taken by user
+   '$(getent passwd "$SERVICE_UID" | cut -d: -f1)'. Both deployment paths share
+   that uid because the image pins it (deploy/Dockerfile). Free the uid, or
+   change it everywhere at once — here and in both Dockerfiles."
+  fi
   # System account, no login shell, no home directory: it owns a state
   # directory and two device nodes and has no other business on this box.
-  useradd --system --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER"
-  info "created system user $SERVICE_USER."
+  groupadd --system --gid "$SERVICE_UID" "$SERVICE_USER"
+  useradd --system --uid "$SERVICE_UID" --gid "$SERVICE_USER" \
+          --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER"
+  info "created system user $SERVICE_USER (uid $SERVICE_UID — the image's uid,"
+  info "so a bind-mounted state directory reads the same on either path)."
 fi
 for group in dialout video plugdev; do
   if getent group "$group" >/dev/null; then
@@ -200,6 +251,10 @@ fi
 
 # --- 4. configuration ------------------------------------------------------
 say "Configuration"
+# 0750 root:gsu — and the gid is the same number inside the container (step 2),
+# which is what makes this traversable on the docker path. The first real Pi
+# had gsu at a floating gid here, and the container's user could not enter the
+# directory that held the trust roots it was told to read.
 install -d -m 0750 -o root -g "$SERVICE_USER" "$ETC"
 if [ -f "$ETC/gsu.env" ]; then
   info "$ETC/gsu.env exists — left alone. Compare it against"
@@ -212,11 +267,23 @@ fi
 install_ca() {   # source, destination, description
   [ -f "$1" ] || die "no such CA file: $1"
   grep -q "BEGIN CERTIFICATE" "$1" || die "$1 is not a PEM certificate."
-  install -m 0640 -o root -g "$SERVICE_USER" "$1" "$2"
+  # 0644: a CA certificate is public material — the secret is the private key,
+  # which is not on this box. These were 0640 root:gsu once, and on the first
+  # real Pi that meant the container's user could not read the trust root it
+  # was configured to verify the broker against. gsu.env stays 0640; it can
+  # carry credentials, and a certificate cannot.
+  install -m 0644 -o root -g root "$1" "$2"
   info "installed the $3:"
   openssl x509 -in "$2" -noout -fingerprint -sha256 2>/dev/null \
     | sed 's/^/      /' || true
 }
+
+# Older installs wrote the CA files 0640. Public material, so opened up rather
+# than preserved — this is the one mode this script corrects on files it
+# otherwise leaves alone.
+for ca in "$ETC/broker-ca.pem" "$ETC/platform-api-ca.pem"; do
+  if [ -f "$ca" ]; then chmod 0644 "$ca"; fi
+done
 
 if [ -n "$BROKER_CA" ]; then
   install_ca "$BROKER_CA" "$ETC/broker-ca.pem" "broker CA"
@@ -248,7 +315,13 @@ say "State directory"
 # systemd's StateDirectory= creates this too; doing it here as well means
 # `gsu preflight` works before the service has ever been started.
 install -d -m 0700 -o "$SERVICE_USER" -g "$SERVICE_USER" "$STATE"
-info "$STATE (0700, $SERVICE_USER)"
+# Re-owned recursively on every run, not only on creation. The first real Pi
+# flipped paths during bring-up and needed a manual `chown -R` before the
+# station could read its own credential; with the uid now shared between the
+# host account and the image (step 2) this is a no-op on a healthy box, and it
+# repairs one that was ever chowned by hand.
+chown -R "$SERVICE_USER:$SERVICE_USER" "$STATE"
+info "$STATE (0700, $SERVICE_USER, uid $SERVICE_UID on both paths)"
 
 if [ -f "$STATE/devices.json" ]; then
   info "device inventory exists — left alone. It records decisions about this site."
