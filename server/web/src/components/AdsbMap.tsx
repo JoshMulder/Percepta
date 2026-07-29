@@ -1,35 +1,58 @@
-import { useEffect, useRef, useState } from "react";
-import { memo } from "react";
-import L from "leaflet";
+import maplibregl from "maplibre-gl";
+import { memo, useEffect, useRef, useState } from "react";
 import type { Aircraft, MapConfig } from "../types";
 
-/** Round a ring spacing to something a person would actually say: 1, 2, 5, 10,
- *  20, 50... Raw radius/4 gives values like 12.5 km, which reads as noise. */
-function niceStep(raw: number): number {
-  const magnitude = 10 ** Math.floor(Math.log10(Math.max(raw, 0.1)));
-  const scaled = raw / magnitude;
-  const step = scaled >= 5 ? 5 : scaled >= 2 ? 2 : 1;
-  return step * magnitude;
+/**
+ * Range rings, in kilometres.
+ *
+ * A fixed set rather than a spacing derived from the cache radius. The rings
+ * exist to answer "how far away is that" at the distances this station is
+ * actually judged at, and evenly dividing a 40km tile-cache radius put the
+ * first ring 10km out - past everything close enough to matter. The cache
+ * radius is a storage decision and was never the right thing to scale these to.
+ */
+const RING_KM = [1, 2, 5, 8, 10];
+
+/** A circle on the globe as a GeoJSON ring. Longitude degrees shrink with
+ *  latitude, which is a large correction at the ~45S these stations sit at. */
+function ringCoords(lat: number, lon: number, km: number, points = 128): number[][] {
+  const latR = km / 110.574;
+  const lonR = km / (111.32 * Math.cos((lat * Math.PI) / 180));
+  const coords: number[][] = [];
+  for (let i = 0; i <= points; i++) {
+    const t = (i / points) * 2 * Math.PI;
+    coords.push([lon + lonR * Math.cos(t), lat + latR * Math.sin(t)]);
+  }
+  return coords;
 }
 
 /**
  * Aircraft plotted on the station's basemap.
  *
- * Tiles come from our own API, never straight from a provider. The server serves
- * them from its cache and fetches upstream once on a miss, so a second viewer of
- * the same station costs nothing, the map keeps working on a degraded link, and
- * opening a station tells no third party where a customer's site is or when
- * someone is watching it.
+ * MapLibre GL rather than Leaflet, matching DroneOps. The difference that
+ * matters is the renderer, not the data: Leaflet composites raster tiles in the
+ * DOM and snaps to whole zoom levels, so one wheel notch jumps a power of two
+ * and the map lurches. MapLibre draws through WebGL and zooms continuously,
+ * scaling the tiles it already has while the next ones arrive.
  *
- * Zoom is clamped to the lower of the station's configured maximum and what the
- * chosen basemap actually has. Letting a user past it shows a blank grid, which
- * reads as a broken map rather than a limit.
+ * Tiles still come from our own API, never straight from a provider. The server
+ * serves them from its cache and fetches upstream once on a miss, so a second
+ * viewer of the same station costs nothing, the map keeps working on a degraded
+ * link, and opening a station tells no third party where a customer's site is or
+ * when someone is watching it. DroneOps does the same thing - MapLibre with
+ * plain raster sources, no vector tiles and no API key.
  *
- * The station stays at the centre: panning is off, and zoom recentres on it.
- * A ground station does not move, so the useful frame is always the one around
- * it - and a map that has been dragged somewhere else is a map an operator has
- * to re-orient before they can read it, which is the wrong thing to be doing
- * when something is happening.
+ * **No glyphs, so no external fonts.** Text in a MapLibre symbol layer needs a
+ * glyph server, and the usual one is a third-party URL the browser fetches at
+ * view time - which would give away exactly the property the tile proxy exists
+ * to protect. Every label here is an HTML marker instead: a DOM node each,
+ * against not phoning home.
+ *
+ * The station stays at the centre: panning is off, and zoom is anchored on the
+ * centre rather than the pointer. A ground station does not move, so the useful
+ * frame is always the one around it - and a map that has been dragged somewhere
+ * else is a map an operator has to re-orient before they can read it, which is
+ * the wrong thing to be doing when something is happening.
  */
 function AdsbMapInner({
   stationId,
@@ -43,10 +66,10 @@ function AdsbMapInner({
   compact?: boolean;
 }) {
   const holderRef = useRef<HTMLDivElement>(null);
-  const mapRef = useRef<L.Map | null>(null);
-  const layerRef = useRef<L.LayerGroup | null>(null);
+  const mapRef = useRef<maplibregl.Map | null>(null);
   /** Markers by ICAO address, reused between updates. */
-  const markersRef = useRef(new Map<string, { marker: L.Marker; ring?: L.CircleMarker }>());
+  const markersRef = useRef(new Map<string, maplibregl.Marker>());
+  const readyRef = useRef(false);
   const [style, setStyle] = useState(config.default_basemap);
 
   const basemap =
@@ -61,156 +84,179 @@ function AdsbMapInner({
   useEffect(() => {
     const holder = holderRef.current;
     if (!holder || config.latitude === null || config.longitude === null) return;
-    if (!basemap) return;
+    if (!config.basemaps.length) return;
 
-    const centre: L.LatLngExpression = [config.latitude, config.longitude];
-    const map = L.map(holder, {
+    const lat = config.latitude;
+    const lon = config.longitude;
+    const centre: [number, number] = [lon, lat];
+
+    // Every basemap is a source in one style and switching toggles layer
+    // visibility. The alternative - setStyle per switch - discards every custom
+    // layer and marker and needs them re-added on styledata, which is a lot of
+    // ceremony for three raster layers.
+    const map = new maplibregl.Map({
+      container: holder,
+      style: {
+        version: 8,
+        sources: Object.fromEntries(
+          config.basemaps.map((b) => [
+            b.key,
+            {
+              type: "raster" as const,
+              tiles: [
+                `${window.location.origin}/api/stations/${stationId}/tiles/${b.key}/{z}/{x}/{y}.png`,
+              ],
+              tileSize: 256,
+              // Past this MapLibre upscales the deepest tile it has rather than
+              // requesting a level that 404s and renders blank.
+              maxzoom: b.max_zoom,
+            },
+          ]),
+        ),
+        layers: config.basemaps.map((b) => ({
+          id: `base-${b.key}`,
+          type: "raster" as const,
+          source: b.key,
+          layout: { visibility: (b.key === style ? "visible" : "none") as "visible" | "none" },
+        })),
+      },
       center: centre,
       zoom: Math.min(maxZoom, Math.max(config.min_zoom, compact ? 9 : 12)),
       minZoom: config.min_zoom,
       maxZoom,
-      zoomControl: !compact,
-      // No attribution control at all. Note that the tile providers' terms
-      // generally *require* their notice to be displayed - Esri's and
-      // OpenStreetMap's both do - so this is the same licensing question as the
-      // tile sourcing itself, and is tracked with it in
-      // docs/04-production-readiness.md rather than being quietly dropped.
       attributionControl: false,
-      // Locked to the station. Dragging, keyboard panning and double-click zoom
-      // (which recentres on the click point) are all off, so the station cannot
-      // drift off centre by any route.
-      dragging: false,
+      // Locked to the station. Dragging, rotation, pitch and double-click zoom
+      // are all off, so it cannot drift off centre by any route.
+      dragPan: false,
+      dragRotate: false,
+      pitchWithRotate: false,
+      touchPitch: false,
       keyboard: false,
       doubleClickZoom: false,
-      // "center", not true. Leaflet's default scroll zoom is *anchored on the
-      // pointer*, which moves the centre - disabling dragging does not change
-      // that, and the comment that used to sit here claimed otherwise. The
-      // effect was a map that zoomed toward the cursor, drifted the station off
-      // centre, and then appeared to snap back on the next zoom step as the
-      // anchor moved again.
-      //
-      // This map is locked to its station by design, so every zoom must be
-      // about the centre. Same for pinch zoom, for the same reason.
-      scrollWheelZoom: compact ? false : "center",
-      touchZoom: compact ? false : "center",
-      // Fractional zoom. Leaflet's default snaps to whole levels, so a wheel
-      // notch jumps a full power of two and the map lurches - which is most of
-      // what reads as clunky next to a WebGL map doing continuous zoom.
-      // zoomSnap 0 lets it land anywhere and scale the tiles it already has,
-      // and a larger wheelPxPerZoomLevel spreads a level over more scrolling
-      // so a single notch is a nudge rather than a jump.
-      zoomSnap: 0,
-      zoomDelta: 0.4,
-      wheelPxPerZoomLevel: 140,
-      wheelDebounceTime: 20,
+      maxPitch: 0,
     });
-
-    L.tileLayer(`/api/stations/${stationId}/tiles/${basemap.key}/{z}/{x}/{y}.png`, {
-      minZoom: config.min_zoom,
-      maxZoom,
-      // A tile the server has neither cached nor could fetch 404s. Showing
-      // nothing is right - the aircraft overlay stays usable over a gap.
-      errorTileUrl:
-        "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7",
-      className: basemap.invert_for_dark ? "tile-dark" : undefined,
-      // Keep more tiles than the default 2 around the viewport, so panning and
-      // zooming reuse what is already decoded instead of showing gaps while a
-      // request goes out. Cheap: these are 256px tiles and the cost is memory
-      // we have, against a visible hole in a security view we do not want.
-      keepBuffer: 4,
-      // Do not request tiles for intermediate zoom levels during an animation.
-      // With fractional zoom the map passes through many levels on the way to
-      // one, and fetching each of them means a burst of requests for pictures
-      // nobody ever sees - which is what makes the real tiles arrive late.
-      updateWhenZooming: false,
-    }).addTo(map);
-
-    L.circleMarker(centre, {
-      radius: 5,
-      color: "#35c48a",
-      fillColor: "#35c48a",
-      fillOpacity: 1,
-      weight: 2,
-    }).addTo(map);
-
-    if (!compact) {
-      // Rings scale with the configured extent rather than being fixed, so a
-      // 15 km site and a 120 km site both get four useful references instead of
-      // one ring or a dozen.
-      const step = niceStep(config.radius_km / 4);
-      for (let km = step; km <= config.radius_km; km += step) {
-        L.circle(centre, {
-          radius: km * 1000,
-          color: "rgba(255,255,255,0.22)",
-          weight: 1,
-          fill: false,
-          dashArray: "4 6",
-          interactive: false,
-        }).addTo(map);
-
-        // Label each ring due north of the station. Without this the rings are
-        // decoration - an operator can see something is 'about two rings out'
-        // but not what that means in kilometres.
-        const north = L.latLng(
-          config.latitude + km / 111.0,
-          config.longitude,
-        );
-        L.marker(north, {
-          interactive: false,
-          keyboard: false,
-          icon: L.divIcon({
-            className: "range-label",
-            html: `${km} km`,
-            iconSize: [44, 14],
-            iconAnchor: [22, 7],
-          }),
-        }).addTo(map);
-      }
-    }
-
-    // NO moveend re-centring here, deliberately.
-    //
-    // An earlier version snapped the view back on `moveend` as belt and braces.
-    // That recurses without end: setView -> panBy -> fires moveend -> setView,
-    // and floating-point centres never compare exactly equal, so the guard never
-    // stops. It blew the stack on every load and pinned the main thread, which
-    // is what made the sidebar scale look like it never settled and stopped the
-    // rest of the console initialising at all.
-    //
-    // The map is already locked by its options above - dragging, keyboard
-    // panning and double-click zoom are off, and scroll zoom keeps the centre.
-    // There is nothing left that can move it, so there is nothing to correct.
-
-    layerRef.current = L.layerGroup().addTo(map);
-    markersRef.current.clear();
     mapRef.current = map;
 
-    // Leaflet measures its container on creation; inside a flex/grid panel that
-    // can still be zero at that moment, leaving a grey box until something
-    // forces a relayout.
-    const observer = new ResizeObserver(() => map.invalidateSize());
-    observer.observe(holder);
+    // Zoom is handled here rather than by the built-in scroll handler.
+    //
+    // MapLibre zooms toward the pointer, and `scrollZoom.enable({around:
+    // "center"})` did not change that - measured, not assumed: six wheel steps
+    // with the pointer off-centre walked the station 465px right and 324px down.
+    // This map is pinned to its station, so that is not a preference.
+    //
+    // setZoom keeps the centre by definition. Applying it per wheel event is
+    // still smooth because MapLibre renders continuously and scales the tiles
+    // it already has - the smoothness comes from the renderer, not from an
+    // animation wrapped around each step.
+    map.scrollZoom.disable();
+    map.touchZoomRotate.disable();
+    let onWheel: ((e: WheelEvent) => void) | null = null;
+    if (!compact) {
+      onWheel = (e: WheelEvent) => {
+        e.preventDefault();
+        // deltaMode 1 is lines rather than pixels, which some mice and most of
+        // Firefox report; without scaling it a single notch would jump levels.
+        const px = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+        map.setZoom(map.getZoom() - px / 260);
+      };
+      holder.addEventListener("wheel", onWheel, { passive: false });
+    }
+
+    map.on("load", () => {
+      readyRef.current = true;
+
+      const features: GeoJSON.Feature[] = RING_KM.map((km) => ({
+        type: "Feature" as const,
+        properties: { km },
+        geometry: {
+          type: "LineString" as const,
+          coordinates: ringCoords(lat, lon, km),
+        },
+      }));
+      map.addSource("rings", {
+        type: "geojson",
+        data: { type: "FeatureCollection", features },
+      });
+      map.addLayer({
+        id: "rings",
+        type: "line",
+        source: "rings",
+        paint: {
+          "line-color": "#2c3d49",
+          "line-width": 1,
+          "line-dasharray": [2, 4],
+        },
+      });
+
+      // Ring labels, due north of the station. Without them the rings are
+      // decoration: an operator can see something is about two rings out and
+      // has no idea what that is in kilometres.
+      if (!compact) {
+        for (const km of RING_KM) {
+          const el = document.createElement("div");
+          el.className = "map-ring-label";
+          el.textContent = `${km} km`;
+          new maplibregl.Marker({ element: el })
+            .setLngLat([lon, lat + km / 110.574])
+            .addTo(map);
+        }
+      }
+
+      const dot = document.createElement("div");
+      dot.className = "map-station";
+      new maplibregl.Marker({ element: dot }).setLngLat(centre).addTo(map);
+    });
 
     return () => {
-      observer.disconnect();
+      readyRef.current = false;
+      if (onWheel) holder.removeEventListener("wheel", onWheel);
+      markersRef.current.clear();
       map.remove();
       mapRef.current = null;
-      layerRef.current = null;
     };
-  }, [stationId, config, compact, basemap, maxZoom]);
+    // `style` is deliberately not a dependency: switching basemaps toggles
+    // layer visibility below rather than rebuilding the map, which would throw
+    // away the zoom the operator had chosen.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stationId, config, compact, maxZoom]);
+
+  // Basemap switch, and the dark treatment.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !basemap) return;
+    const apply = () => {
+      for (const b of config.basemaps) {
+        if (map.getLayer(`base-${b.key}`)) {
+          map.setLayoutProperty(
+            `base-${b.key}`,
+            "visibility",
+            b.key === basemap.key ? "visible" : "none",
+          );
+        }
+      }
+      // Applied to the canvas rather than per layer: MapLibre's raster paint
+      // properties adjust brightness, saturation and hue but cannot invert, and
+      // inversion is what turns a street map drawn for white paper into one that
+      // belongs on this console. Imagery must never be inverted - it would show
+      // false colour - which is why this follows the basemap and is not a theme.
+      map.getCanvas().style.filter = basemap.invert_for_dark
+        ? "invert(1) hue-rotate(180deg) brightness(0.88) contrast(0.95)"
+        : "";
+    };
+    if (map.isStyleLoaded()) apply();
+    else map.once("load", apply);
+  }, [basemap, config.basemaps]);
 
   /**
-   * Update the contacts in place rather than clearing and rebuilding.
+   * Update contacts in place rather than clearing and rebuilding.
    *
-   * The previous version called clearLayers() and recreated every marker and
-   * permanent tooltip once a second. Each rebuild destroys and recreates a dozen
-   * DOM nodes and forces a layout pass, every second, forever - which is a
-   * steady cost paid for nothing, since the aircraft are the same aircraft and
-   * have only moved.
+   * Recreating every marker once a second destroys and recreates a dozen DOM
+   * nodes and forces a layout pass, every second, forever - a steady cost paid
+   * for nothing, since the aircraft are the same aircraft and have only moved.
    */
   useEffect(() => {
-    const layer = layerRef.current;
-    if (!layer) return;
+    const map = mapRef.current;
+    if (!map || !readyRef.current) return;
     const existing = markersRef.current;
     const seen = new Set<string>();
 
@@ -218,70 +264,42 @@ function AdsbMapInner({
       if (contact.latitude === null || contact.longitude === null) continue;
       seen.add(contact.icao);
 
-      const pos: L.LatLngExpression = [contact.latitude, contact.longitude];
+      const pos: [number, number] = [contact.longitude, contact.latitude];
       const colour = contact.alert ? "#ff7a45" : "#e8b04b";
       const label = contact.callsign?.trim() || contact.icao;
-      const html = `<svg viewBox="0 0 18 18" width="18" height="18"
-                 style="transform: rotate(${contact.track ?? 0}deg)">
-                 <path d="M9 1 L13 15 L9 12 L5 15 Z" fill="${colour}"
-                   stroke="#0b0f13" stroke-width="0.8"/>
-               </svg>`;
-      const tooltip = `${label}${
-        contact.altitude !== null ? ` · ${Math.round(contact.altitude)} m` : ""
-      }${contact.speed !== null ? ` · ${Math.round(contact.speed)} kt` : ""}`;
 
-      let entry = existing.get(contact.icao);
-      if (!entry) {
-        const marker = L.marker(pos, {
-          icon: L.divIcon({
-            className: "aircraft-icon",
-            iconSize: [18, 18],
-            iconAnchor: [9, 9],
-            html,
-          }),
-          keyboard: false,
-        }).addTo(layer);
-        if (!compact) {
-          marker.bindTooltip(tooltip, {
-            permanent: true,
-            direction: "right",
-            offset: [8, 0],
-            className: `aircraft-label${contact.alert ? " alert" : ""}`,
-          });
-        }
-        entry = { marker };
-        existing.set(contact.icao, entry);
+      let marker = existing.get(contact.icao);
+      if (!marker) {
+        const el = document.createElement("div");
+        el.className = "map-contact";
+        el.innerHTML =
+          '<svg viewBox="0 0 18 18" width="18" height="18">' +
+          '<path d="M9 1 L13 15 L9 12 L5 15 Z" stroke="#0b0f13" stroke-width="0.8"/>' +
+          "</svg><span></span>";
+        marker = new maplibregl.Marker({ element: el }).setLngLat(pos).addTo(map);
+        existing.set(contact.icao, marker);
       } else {
-        entry.marker.setLatLng(pos);
-        // Rewrite the icon's SVG in place; replacing the icon would recreate
-        // the element and undo the point of this.
-        const el = entry.marker.getElement();
-        if (el && el.innerHTML !== html) el.innerHTML = html;
-        if (!compact) entry.marker.setTooltipContent(tooltip);
+        marker.setLngLat(pos);
       }
 
-      // The proximity ring comes and goes with the alert flag.
-      if (contact.alert && !entry.ring) {
-        entry.ring = L.circleMarker(pos, {
-          radius: 13,
-          color: "#ff7a45",
-          weight: 1,
-          fill: false,
-          interactive: false,
-        }).addTo(layer);
-      } else if (contact.alert && entry.ring) {
-        entry.ring.setLatLng(pos);
-      } else if (!contact.alert && entry.ring) {
-        layer.removeLayer(entry.ring);
-        entry.ring = undefined;
+      const el = marker.getElement();
+      el.classList.toggle("alert", Boolean(contact.alert));
+      const svg = el.querySelector("svg");
+      if (svg) svg.style.transform = `rotate(${contact.track ?? 0}deg)`;
+      const path = el.querySelector("path");
+      if (path) path.setAttribute("fill", colour);
+      const span = el.querySelector("span");
+      if (span) {
+        // Compact hides the label: at that size a dozen callsigns overlap into
+        // an unreadable smear over the contacts they name.
+        span.textContent = compact ? "" : label;
+        span.style.color = colour;
       }
     }
 
-    // Anything that dropped off the feed.
-    for (const [icao, entry] of existing) {
+    for (const [icao, marker] of existing) {
       if (seen.has(icao)) continue;
-      layer.removeLayer(entry.marker);
-      if (entry.ring) layer.removeLayer(entry.ring);
+      marker.remove();
       existing.delete(icao);
     }
   }, [aircraft, compact]);
@@ -301,6 +319,7 @@ function AdsbMapInner({
               type="button"
               className={`basemap-btn${b.key === style ? " active" : ""}`}
               onClick={() => setStyle(b.key)}
+              title={b.attribution}
             >
               {b.label}
             </button>
@@ -311,10 +330,4 @@ function AdsbMapInner({
   );
 }
 
-/**
- * Memoised. Telemetry arrives on several streams at about 1 Hz each, so the
- * console re-renders a few times a second; without this every panel re-rendered
- * on every frame regardless of whose data it was. The map is the expensive one -
- * reconciling it also re-ran its contact update.
- */
 export const AdsbMap = memo(AdsbMapInner);

@@ -2909,3 +2909,53 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.08em;
 }
+
+/* ------------------------------------------------------------ map (GL) ---
+
+   MapLibre replaced Leaflet for the renderer, not the data: the tiles are the
+   same, from the same proxy. These are the HTML markers it draws - labels are
+   DOM nodes rather than symbol layers, so no glyph server is contacted. */
+
+.map-station {
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid #0b0f13;
+  box-shadow: 0 0 0.5rem rgba(53, 196, 138, 0.7);
+}
+.map-ring-label {
+  font: 0.62rem var(--mono);
+  color: var(--dim);
+  background: rgba(11, 15, 19, 0.7);
+  padding: 0 0.25rem;
+  border-radius: 0.15rem;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.map-contact {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.1rem;
+  pointer-events: none;
+}
+.map-contact svg {
+  display: block;
+  /* Rotated to the track. transform-box keeps the rotation about the glyph's
+     own centre rather than the marker's layout box, which otherwise swings the
+     aircraft around a point beside it. */
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.map-contact span {
+  font: 0.6rem var(--mono);
+  text-shadow: 0 0 0.2rem #000, 0 0 0.2rem #000;
+  white-space: nowrap;
+}
+.map-contact.alert svg { filter: drop-shadow(0 0 0.3rem rgba(255, 122, 69, 0.9)); }
+
+/* MapLibre draws into a canvas that fills its container; the container is the
+   one that must be told how big it is. */
+.map-canvas { width: 100%; height: 100%; }
+.maplibregl-canvas { outline: none; }

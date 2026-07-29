@@ -4,7 +4,7 @@ import { App } from "./App";
 // Bundled, not fetched at runtime - see the note in styles.css.
 import "@fontsource-variable/inter";
 import "@fontsource-variable/jetbrains-mono";
-import "leaflet/dist/leaflet.css";
+import "maplibre-gl/dist/maplibre-gl.css";
 import "./styles.css";
 
 createRoot(document.getElementById("root")!).render(
