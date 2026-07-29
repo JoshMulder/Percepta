@@ -2770,7 +2770,13 @@ body {
 .station-trigger:hover { border-color: var(--brand-dim); }
 .station-trigger:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
 .station-trigger:disabled { color: var(--dim); cursor: default; }
-.station-trigger-name { flex: 1; }
+/* The name does NOT stretch. With flex:1 it filled the control and shoved the
+   DEMO chip and the caret against the right edge, leaving a gap in the middle -
+   so the badge read as unrelated furniture rather than as a mark against the
+   station it describes. Name and badge sit together; only the caret is pushed
+   to the edge. */
+.station-trigger-name { flex: none; }
+.station-caret { margin-left: auto; }
 /* Slightly tighter than the panel chips: it sits inside a control rather than
    beside one, and the full-size badge made the trigger taller than the row. */
 .station-trigger .demo-chip,
@@ -2780,7 +2786,14 @@ body {
   line-height: 1.5;
   flex: none;
 }
-.station-caret { color: var(--muted); font-size: 0.75rem; }
+.station-caret {
+  color: var(--muted);
+  font-size: 0.75rem;
+  /* min-width keeps the control a constant size, so the centred switcher does
+     not jump every time a station with a longer name is selected. The caret
+     takes the slack rather than the name. */
+  margin-left: auto;
+}
 
 .station-list {
   position: absolute;
