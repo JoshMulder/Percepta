@@ -1335,8 +1335,8 @@ body {
   cursor: not-allowed;
 }
 .led {
-  width: 0.6rem;
-  height: 0.6rem;
+  width: 0.85rem;
+  height: 0.85rem;
   border-radius: 50%;
   background: #17222c;
   border: 1px solid var(--line);

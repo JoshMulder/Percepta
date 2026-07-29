@@ -93,6 +93,16 @@ function AdsbMapInner({
       // about the centre. Same for pinch zoom, for the same reason.
       scrollWheelZoom: compact ? false : "center",
       touchZoom: compact ? false : "center",
+      // Fractional zoom. Leaflet's default snaps to whole levels, so a wheel
+      // notch jumps a full power of two and the map lurches - which is most of
+      // what reads as clunky next to a WebGL map doing continuous zoom.
+      // zoomSnap 0 lets it land anywhere and scale the tiles it already has,
+      // and a larger wheelPxPerZoomLevel spreads a level over more scrolling
+      // so a single notch is a nudge rather than a jump.
+      zoomSnap: 0,
+      zoomDelta: 0.4,
+      wheelPxPerZoomLevel: 140,
+      wheelDebounceTime: 20,
     });
 
     L.tileLayer(`/api/stations/${stationId}/tiles/${basemap.key}/{z}/{x}/{y}.png`, {
@@ -103,6 +113,16 @@ function AdsbMapInner({
       errorTileUrl:
         "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7",
       className: basemap.invert_for_dark ? "tile-dark" : undefined,
+      // Keep more tiles than the default 2 around the viewport, so panning and
+      // zooming reuse what is already decoded instead of showing gaps while a
+      // request goes out. Cheap: these are 256px tiles and the cost is memory
+      // we have, against a visible hole in a security view we do not want.
+      keepBuffer: 4,
+      // Do not request tiles for intermediate zoom levels during an animation.
+      // With fractional zoom the map passes through many levels on the way to
+      // one, and fetching each of them means a burst of requests for pictures
+      // nobody ever sees - which is what makes the real tiles arrive late.
+      updateWhenZooming: false,
     }).addTo(map);
 
     L.circleMarker(centre, {
