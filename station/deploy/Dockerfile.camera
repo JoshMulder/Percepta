@@ -55,12 +55,11 @@ ENV PYTHONUNBUFFERED=1 \
 # come from — they are not in Debian proper. The keyring is fetched and
 # dearmoured rather than trusted from a `curl | apt-key` pipeline, and the repo
 # is pinned to the same suite as the base image.
+COPY deploy/raspberrypi-archive-keyring.pgp /usr/share/keyrings/raspberrypi-archive-keyring.pgp
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends ca-certificates curl gnupg; \
-    curl -fsSL https://archive.raspberrypi.com/debian/raspberrypi.gpg.key \
-      | gpg --dearmor -o /usr/share/keyrings/raspberrypi-archive-keyring.gpg; \
-    echo "deb [signed-by=/usr/share/keyrings/raspberrypi-archive-keyring.gpg] \
+    apt-get install -y --no-install-recommends ca-certificates; \
+    echo "deb [signed-by=/usr/share/keyrings/raspberrypi-archive-keyring.pgp] \
 https://archive.raspberrypi.com/debian/ ${SUITE} main" \
       > /etc/apt/sources.list.d/raspi.list; \
     apt-get update; \
@@ -71,7 +70,6 @@ https://archive.raspberrypi.com/debian/ ${SUITE} main" \
         python3-picamera2 \
         libcamera-ipa \
         libcamera-tools; \
-    apt-get purge -y curl gnupg; \
     apt-get autoremove -y; \
     rm -rf /var/lib/apt/lists/*
 

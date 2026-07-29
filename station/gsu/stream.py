@@ -122,6 +122,35 @@ class StreamSession:
             self.uplink = None
             return self.reason
 
+        # The snapshot path must let go of the sensor before the encoder can
+        # take it, and there are two different holds to break. Under picamera2
+        # the camera is one long-lived object held between snapshots - the very
+        # thing that makes that path fast - so it is closed here and reopens
+        # lazily on the first snapshot after the stream ends. Under the cli
+        # backend each snapshot is a subprocess that owns the sensor for the
+        # best part of a second on this hardware, so at 2 fps the sensor is
+        # busy more often than not: "starting" makes the publisher hold off
+        # dispatching another (video.py, _stream_has_the_camera), and the
+        # retries below outlast the one already in flight. Neither hold was
+        # visible on a box where the camera is synthetic, which is every box
+        # this ran on before a real one.
+        self.state = "starting"
+        camera = getattr(self.agent, "camera", None)
+        if camera is not None and hasattr(camera, "close"):
+            camera.close()
+            # And wait out the capture already running. close() frees the
+            # picamera2 hold, but a cli snapshot is a subprocess that owns the
+            # sensor until it finishes, and it cannot be signalled - only
+            # outlasted. The encoder spawns cleanly either way and dies
+            # asynchronously when acquisition fails, which is why retrying the
+            # spawn never helped. Two and a half seconds covers the slowest
+            # capture this hardware has produced; a real camera is the only
+            # case that needs it, and the platform's viewer is already seconds
+            # of tickets and websockets away from instant.
+            describe = getattr(camera, "describe", None)
+            if not (describe and describe().simulated):
+                time.sleep(2.5)
+
         self.frames = 0
         self.bytes_out = 0
         self.dropped = 0
@@ -132,7 +161,22 @@ class StreamSession:
         # clock, so a new stream starts at zero rather than continuing a
         # timeline the platform has already forgotten.
         self.muxer = Fmp4Muxer(settings.width, settings.height, settings.fps)
-        if not source.start(self._on_unit):
+
+        started = False
+        for attempt in range(3):
+            if attempt:
+                # An in-flight snapshot subprocess finishes on its own; there
+                # is nothing to signal, only to outlast.
+                time.sleep(1.5)
+                self.muxer = Fmp4Muxer(settings.width, settings.height, settings.fps)
+            if source.start(self._on_unit):
+                started = True
+                break
+            log.info(
+                "The encoder could not take the camera (attempt %d of 3): %s",
+                attempt + 1, source.reason or "no reason given",
+            )
+        if not started:
             self.state = "unavailable"
             self.reason = source.reason or "the encoder would not start"
             self.uplink.close()
@@ -145,10 +189,16 @@ class StreamSession:
         self.started_clock = clock.now()
         self.reason = ""
         self.stopped_reason = ""
+        # Read once, before anything can race it: if the encoder dies in its
+        # first second, the monitor thread stops the stream and nulls
+        # `self.uplink` while this method is still composing its own report -
+        # which is not hypothetical, it is how the first real station turned a
+        # dead encoder into an AttributeError on top of it.
+        uplink_name = self.uplink.describe()
         log.info(
             "Streaming %dx%d at %d fps, %d kbit/s target, to %s. Lease %.0fs.",
             settings.width, settings.height, settings.fps, settings.bitrate_kbps,
-            self.uplink.describe(), lease,
+            uplink_name, lease,
         )
         self.agent.store.record_event(
             "video.stream_started", "info",
@@ -157,7 +207,7 @@ class StreamSession:
         )
         return (
             f"streaming {settings.width}x{settings.height} at {settings.fps} fps "
-            f"to {self.uplink.describe()}, lease {lease:.0f}s"
+            f"to {uplink_name}, lease {lease:.0f}s"
         )
 
     def stop(self, reason: str = "stopped by the platform") -> str:

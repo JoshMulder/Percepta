@@ -198,7 +198,11 @@ class VideoPublisher:
         be an artefact of the test rig rather than of the design.
         """
         stream = getattr(self.agent, "stream", None)
-        if stream is None or stream.state != "streaming":
+        # "starting" counts as held: the encoder is about to open the sensor
+        # and a snapshot dispatched in that window would win the race and kill
+        # the stream at birth. On a Pi 2B a snapshot subprocess runs for the
+        # best part of a second, so at 2 fps that window is most of the time.
+        if stream is None or stream.state not in ("streaming", "starting"):
             return False
         describe = getattr(camera, "describe", None)
         return not (describe and describe().simulated)

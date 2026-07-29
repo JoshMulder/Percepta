@@ -108,6 +108,14 @@ DeviceAllow=char-ttyACM rw
 DeviceAllow=char-ttyAMA rw
 DeviceAllow=/dev/vchiq rw
 DeviceAllow=char-usb_device rw
+# The libcamera set, missing at first and found on the first real camera: the
+# capture pipeline opens /dev/video* AND /dev/media* AND a dma_heap for its
+# buffers, and DeviceAllow is an allow-list - one omission reads as
+# "no cameras available" from a service whose user can see the camera
+# perfectly well from a shell.
+DeviceAllow=char-video4linux rw
+DeviceAllow=char-media rw
+DeviceAllow=char-dma_heap rw
 
 # A remote box with a full disk is a site visit, and so is one that swaps itself
 # to death on an SD card. The agent's own footprint is small; this is a fence,
