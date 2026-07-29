@@ -415,7 +415,7 @@ body {
   position: absolute;
   right: 0.438rem;
   bottom: 0.375rem;
-  /* Above Leaflet's panes (200-700) and its controls (800), same reason as the
+  /* Above the map canvas and its controls, same reason as the
      label overlay: at a lower value the map paints over it. */
   z-index: 1100;
   background: rgba(11, 15, 19, 0.85);
@@ -850,28 +850,6 @@ body {
 
 /* Leaflet ships a light theme. These consoles are watched at night, so the
    chrome is darkened to match rather than punching a white hole in the UI. */
-.leaflet-container {
-  background: #0a1015;
-  font: inherit;
-  outline: none;
-}
-.leaflet-control-zoom a {
-  background: var(--panel);
-  color: var(--text);
-  border-color: var(--line);
-}
-.leaflet-control-zoom a:hover {
-  background: #16202a;
-  color: var(--brand);
-}
-.leaflet-control-attribution {
-  background: rgba(11, 15, 19, 0.78);
-  color: var(--dim);
-  font-size: 0.625rem;
-}
-.leaflet-control-attribution a {
-  color: var(--muted);
-}
 
 /* Street and terrain tiles are drawn for white paper. Inverting and rotating
    the hue gives a dark basemap without needing a second dark tile set, which
@@ -880,10 +858,6 @@ body {
    Applied per layer, NOT to the whole tile pane: satellite imagery must never
    be inverted - it would render vegetation magenta and water orange, and an
    operator would not trust anything on the screen after seeing it. */
-.leaflet-tile-pane .tile-dark {
-  filter: invert(1) hue-rotate(180deg) brightness(0.88) contrast(0.95)
-    saturate(0.5);
-}
 
 .aircraft-icon {
   background: none;
@@ -1520,12 +1494,6 @@ body {
   border: none;
 }
 
-/* The attribution control is not created at all, but Leaflet adds one by
-   default in some code paths - keep it hidden regardless so nothing appears in
-   the corner of a customer's console. */
-.leaflet-control-attribution {
-  display: none !important;
-}
 
 /* ------------------------------------------------------------- alerts drawer */
 
@@ -1875,10 +1843,10 @@ body {
    to a header bar. Scrimmed, because it sits over live video and has to stay
    readable against whatever is underneath.
 
-   z-index has to clear Leaflet's, not just the canvas camera's. Leaflet paints
-   its panes from 200 up and its controls at 800, so at any lower value the map
-   renders straight over the label - which is exactly what it was doing, while
-   the camera (no z-index of its own) looked fine. */
+   z-index has to clear the map's, not just the canvas camera's. The map draws
+   into a canvas with controls above it, so at a low value the map renders
+   straight over the label - which is exactly what it was doing, while the
+   camera (no z-index of its own) looked fine. */
 .swap-card .card-head {
   position: absolute;
   top: 0;
@@ -2086,7 +2054,7 @@ body {
 
 /* Status riding on the main view, in place of the header bar that used to sit
    above it. Same treatment as the basemap switcher opposite, and above
-   Leaflet's panes for the same reason. */
+   the map canvas for the same reason. */
 .view-status {
   position: absolute;
   left: var(--s3);
@@ -2871,8 +2839,8 @@ body {
      the control was on the left. */
   left: 50%;
   transform: translateX(-50%);
-  z-index: 2000;   /* Above the map: Leaflet paints its panes from 200 and its
-                      controls at 800, and the console's overlays sit at 1100. */
+  z-index: 2000;   /* Above the map canvas and above the console's own overlays,
+                      which sit at 1100. */
   margin: 0;
   padding: 0.25rem;
   list-style: none;
