@@ -24,6 +24,7 @@ import { useSocket } from "../useSocket";
 import { AdsbMap } from "./AdsbMap";
 import { SOC_WINDOWS, type SocSample, type SocWindowKey } from "./BatteryChart";
 import {
+  Dot,
   IconAirspace,
   IconAlert,
   IconCamera,
@@ -647,9 +648,9 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
         <StationPicker
           stations={stations}
           stationId={stationId}
-          online={online}
           onSelect={setStationId}
         />
+        <Dot ok={online} />
         {/* Raw socket states ("open", "closed") were being shown here, which on
             a console with a radio panel saying SQL OPEN reads as squelch. These
             say what the words mean to an operator instead. */}

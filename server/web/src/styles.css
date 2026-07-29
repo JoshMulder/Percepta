@@ -2732,16 +2732,22 @@ body {
 /* Station switcher. A custom listbox rather than a native select, because an
    <option> can hold text and nothing else and the DEMO marker has to be a badge
    in the list - " · DEMO" appended to a name reads as part of the name. */
+/* Wraps the trigger and the list and nothing else. It used to also hold the
+   online dot, which meant the dropdown was positioned against - and sized to -
+   a box wider than the control it belongs to, and the row had two nested flex
+   gaps fighting each other. Spacing belongs to .station-select, one level up. */
 .station-picker {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 0.625rem;
 }
 .station-trigger {
   display: flex;
   align-items: center;
   gap: 0.5rem;
+  /* Matches what the native select occupied, so swapping the control did not
+     move the header. */
+  line-height: 1.4;
   background: var(--panel);
   color: var(--text);
   border: 1px solid var(--line);
@@ -2756,6 +2762,15 @@ body {
 .station-trigger:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
 .station-trigger:disabled { color: var(--dim); cursor: default; }
 .station-trigger-name { flex: 1; }
+/* Slightly tighter than the panel chips: it sits inside a control rather than
+   beside one, and the full-size badge made the trigger taller than the row. */
+.station-trigger .demo-chip,
+.station-option .demo-chip {
+  font-size: 0.6rem;
+  padding: 0 0.312rem;
+  line-height: 1.5;
+  flex: none;
+}
 .station-caret { color: var(--muted); font-size: 0.75rem; }
 
 .station-list {

@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import type { StationSummary } from "../types";
-import { Dot } from "./Icons";
 
 /**
  * The station switcher.
@@ -18,12 +17,10 @@ import { Dot } from "./Icons";
 export function StationPicker({
   stations,
   stationId,
-  online,
   onSelect,
 }: {
   stations: StationSummary[];
   stationId: string | null;
-  online: boolean;
   onSelect: (id: string) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -71,12 +68,22 @@ export function StationPicker({
         <span className="station-trigger-name">
           {current?.name ?? (stations.length === 0 ? "No stations available" : "Select a station")}
         </span>
+        {/* Also on the closed control, not only in the open list. In the list it
+            answers "which of these is synthetic" while choosing; here it answers
+            "is what I am looking at right now real", which is the question an
+            operator has for the rest of the session. */}
+        {current?.is_simulated && (
+          <span
+            className="demo-chip"
+            title="This station's data is synthetic — not a live site"
+          >
+            DEMO
+          </span>
+        )}
         <span className="station-caret" aria-hidden>
           ▾
         </span>
       </button>
-
-      <Dot ok={online} />
 
       {open && (
         <ul className="station-list" role="listbox" aria-label="Ground stations">
