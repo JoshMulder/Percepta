@@ -402,38 +402,90 @@ class ProcessEncoder:
         if thread is not None:
             thread.join(timeout=3.0)
 
+    #: How many times a brand-new encoder process is respawned when the camera
+    #: refuses to be acquired, and how long to wait between tries. The snapshot
+    #: path's in-flight subprocess owns the sensor for up to a few seconds, it
+    #: cannot be signalled - only outlasted - and the encoder loses that race by
+    #: dying asynchronously AFTER a clean spawn, which is why no amount of
+    #: retrying the spawn ever helped. Four tries spaced 1.5s apart outlasts the
+    #: slowest capture this hardware has produced, with room.
+    ACQUIRE_RETRIES = 4
+    ACQUIRE_RETRY_DELAY_S = 1.5
+
+    #: What a lost acquisition race looks like in libcamera's own words. An
+    #: exit for any other reason is a real fault and is not retried.
+    _ACQUIRE_MARKERS = (
+        "failed to acquire camera",
+        "no cameras available",
+        "device or resource busy",
+    )
+
     def _pump(self) -> None:
-        process = self._process
-        if process is None or process.stdout is None:  # pragma: no cover - defensive
-            return
-        try:
-            while not self._stop.is_set():
-                chunk = process.stdout.read(65536)
-                if not chunk:
-                    break
-                self.bytes_out += len(chunk)
-                for unit in self._reader.feed(chunk):
-                    self._deliver(unit)
-        except (OSError, ValueError) as exc:  # pragma: no cover - defensive
-            log.warning("Reading from %s stopped: %s", self.tool, exc)
-        finally:
+        attempts = 0
+        while True:
+            process = self._process
+            if process is None or process.stdout is None:  # pragma: no cover - defensive
+                return
+            frames_before = self.frames
+            try:
+                while not self._stop.is_set():
+                    chunk = process.stdout.read(65536)
+                    if not chunk:
+                        break
+                    self.bytes_out += len(chunk)
+                    for unit in self._reader.feed(chunk):
+                        self._deliver(unit)
+            except (OSError, ValueError) as exc:  # pragma: no cover - defensive
+                log.warning("Reading from %s stopped: %s", self.tool, exc)
             for unit in self._reader.flush():
                 self._deliver(unit)
-            if not self._stop.is_set():
-                # It ended on its own, which is a fault: read what it said,
-                # because libcamera's own message is the whole diagnosis.
-                detail = b""
-                if process.stderr is not None:
-                    try:
-                        detail = process.stderr.read() or b""
-                    except (OSError, ValueError):  # pragma: no cover
-                        pass
-                text = detail.decode("utf-8", "replace").strip()
+            if self._stop.is_set():
+                return
+
+            # It ended on its own, which is a fault: read what it said,
+            # because libcamera's own message is the whole diagnosis.
+            detail = b""
+            if process.stderr is not None:
+                try:
+                    detail = process.stderr.read() or b""
+                except (OSError, ValueError):  # pragma: no cover
+                    pass
+            text = detail.decode("utf-8", "replace").strip()
+            last_line = text.splitlines()[-1] if text else ""
+
+            lost_race = (
+                self.frames == frames_before
+                and attempts < self.ACQUIRE_RETRIES
+                and any(m in text.lower() for m in self._ACQUIRE_MARKERS)
+            )
+            if not lost_race:
                 self.reason = (
-                    f"{self.tool} exited: {text.splitlines()[-1]}"
+                    f"{self.tool} exited: {last_line}"
                     if text else f"{self.tool} exited unexpectedly"
                 )[:200]
                 log.error("%s", self.reason)
+                return
+
+            # Died at birth because something else held the sensor. Wait for
+            # that something to finish and go again, from in here rather than
+            # from the caller: the death is asynchronous, so this thread is the
+            # only place that ever actually sees it.
+            attempts += 1
+            log.info(
+                "%s could not take the camera (attempt %d of %d); retrying in %.1fs.",
+                self.tool, attempts, self.ACQUIRE_RETRIES, self.ACQUIRE_RETRY_DELAY_S,
+            )
+            if self._stop.wait(self.ACQUIRE_RETRY_DELAY_S):
+                return
+            try:
+                self._process = subprocess.Popen(
+                    self.command(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+            except OSError as exc:  # pragma: no cover - the tool just ran
+                self.reason = f"{self.tool} could not be restarted: {exc}"[:200]
+                log.error("%s", self.reason)
+                return
+            self._reader = AnnexBReader()
 
     def _deliver(self, unit) -> None:
         self.frames += 1

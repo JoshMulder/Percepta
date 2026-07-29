@@ -169,21 +169,13 @@ class StreamSession:
         # timeline the platform has already forgotten.
         self.muxer = Fmp4Muxer(settings.width, settings.height, settings.fps)
 
-        started = False
-        for attempt in range(3):
-            if attempt:
-                # An in-flight snapshot subprocess finishes on its own; there
-                # is nothing to signal, only to outlast.
-                time.sleep(1.5)
-                self.muxer = Fmp4Muxer(settings.width, settings.height, settings.fps)
-            if source.start(self._on_unit):
-                started = True
-                break
-            log.info(
-                "The encoder could not take the camera (attempt %d of 3): %s",
-                attempt + 1, source.reason or "no reason given",
-            )
-        if not started:
+        # No retry loop here, deliberately - one was tried and it was dead
+        # weight. source.start() returns False only for a missing tool or a
+        # spawn error, neither of which waiting cures, while losing the sensor
+        # to an in-flight snapshot shows up as an asynchronous death that only
+        # the encoder's own pump thread ever sees. The respawn lives there
+        # (camera/h264.py, _pump), where the death is actually observed.
+        if not source.start(self._on_unit):
             self.state = "unavailable"
             self.reason = source.reason or "the encoder would not start"
             uplink.close()
