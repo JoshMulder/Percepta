@@ -9,6 +9,13 @@ import type { StationSummary } from "../types";
  * badge in the list where a station is chosen. " · DEMO" appended to a name is
  * read as part of the name.
  *
+ * The wrapper class is `station-switch`, not `station-picker`: the settings
+ * pane already owns `.station-picker` for its own station selector, and that
+ * rule adds bottom padding and a border for a control that sits above a form.
+ * Applied here it made the trigger sit 8px high in the header and overflow the
+ * bar - and every attempt to fix the alignment in the header's own rules was
+ * arguing with a stylesheet that was never being consulted.
+ *
  * Everything a native select gives away by not being one is put back
  * deliberately - keyboard navigation, Escape and outside-click to dismiss,
  * `role="listbox"` with `aria-selected`, and focus returning to the trigger.
@@ -54,7 +61,7 @@ export function StationPicker({
   }
 
   return (
-    <div className="station-picker" ref={wrap}>
+    <div className="station-switch" ref={wrap}>
       <button
         ref={trigger}
         type="button"

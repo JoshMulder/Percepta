@@ -2775,11 +2775,14 @@ body {
 /* Station switcher. A custom listbox rather than a native select, because an
    <option> can hold text and nothing else and the DEMO marker has to be a badge
    in the list - " · DEMO" appended to a name reads as part of the name. */
-/* Wraps the trigger and the list and nothing else. It used to also hold the
-   online dot, which meant the dropdown was positioned against - and sized to -
-   a box wider than the control it belongs to, and the row had two nested flex
-   gaps fighting each other. Spacing belongs to .station-select, one level up. */
-.station-picker {
+/* Named station-switch, not station-picker: the settings pane owns that class
+   for its own selector, and its rule - bottom padding and a border, right for a
+   control above a form - was silently applying here and pushing the trigger to
+   the top of the header. Two components, two names.
+
+   Wraps the trigger and the list and nothing else. Spacing belongs to
+   .station-select, one level up. */
+.station-switch {
   position: relative;
   display: flex;
   align-items: center;
