@@ -24,7 +24,6 @@ import { useSocket } from "../useSocket";
 import { AdsbMap } from "./AdsbMap";
 import { SOC_WINDOWS, type SocSample, type SocWindowKey } from "./BatteryChart";
 import {
-  Dot,
   IconAirspace,
   IconAlert,
   IconCamera,
@@ -36,6 +35,7 @@ import {
   IconWind,
 } from "./Icons";
 import { Logo } from "./Logo";
+import { StationPicker } from "./StationPicker";
 import { OrgSwitcher } from "./OrgSwitcher";
 import { Settings } from "./Settings";
 import { FloodlightPanel, has, NotPermitted, PowerPanel, VideoPanel } from "./Panels";
@@ -644,42 +644,18 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
     >
       <Logo />
       <div className="station-select">
-        <select
-          value={stationId ?? ""}
-          onChange={(e) => setStationId(e.target.value)}
-          aria-label="Ground station"
-        >
-          {stations.length === 0 && <option value="">No stations available</option>}
-          {stations.map((s) => (
-            <option key={s.id} value={s.id}>
-              {/* A native select cannot hold a chip, so the label carries it.
-                  Which stations are synthetic matters most at the moment of
-                  choosing one - finding out afterwards, from a badge on a panel
-                  you are already reading, is finding out too late. */}
-              {s.name}
-              {s.is_simulated ? " · DEMO" : ""}
-            </option>
-          ))}
-        </select>
-        <Dot ok={online} />
+        <StationPicker
+          stations={stations}
+          stationId={stationId}
+          online={online}
+          onSelect={setStationId}
+        />
         {/* Raw socket states ("open", "closed") were being shown here, which on
             a console with a radio panel saying SQL OPEN reads as squelch. These
             say what the words mean to an operator instead. */}
         <span className={`link-state ${socket.state}`} title="Console's link to the server">
           {LINK_LABEL[socket.state]}
         </span>
-        {simulated && (
-          <span
-            className="demo-chip"
-            title={
-              simulatedDevices.length > 0
-                ? `Synthetic data. The station reports these as simulated: ${simulatedDevices.join(", ")}`
-                : "This station's data is synthetic — not a live site"
-            }
-          >
-            DEMO
-          </span>
-        )}
       </div>
       <div className="topbar-right">
         <OrgSwitcher me={me} />
