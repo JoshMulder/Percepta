@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://percepta/contract/video.schema.json",
+  "title": "Ground station video",
+  "description": "One frame per message on gsu/{station_id}/video.\n\nMotion JPEG - whole independent frames, not an encoded stream. That is a deliberate choice for what this camera is for, and the reasoning matters because it is the wrong choice for a different job.\n\nA security overview at a remote site is watched occasionally, at a low frame rate, over a metered satellite link that drops. Independent frames survive that: a dropped frame costs one frame, there is no keyframe to wait for after a dropout, and the console renders it with an image element and no player, no signalling and no negotiation. H.264 over WebRTC would be several times more efficient per frame and would bring a signalling path, session state, and a stream that is useless until the next keyframe arrives - on a link whose defining property is that it stops without warning.\n\nIf this ever needs smooth full-rate video, MJPEG is the wrong answer and should be replaced rather than tuned.\n\nBandwidth is the constraint that shapes everything here. At 640x480 and reasonable quality a frame is roughly 30-60 kB, so 2 fps is around half a megabit per second sustained. That is significant on a metered link, which is why the rate is low by default and why the platform is expected to ask for video rather than have it pushed continuously - see `available` and the note on on-demand below.",
+  "type": "object",
+  "required": ["kind"],
+  "properties": {
+    "kind": {
+      "const": "video"
+    },
+    "format": {
+      "type": "string",
+      "enum": ["mjpeg"],
+      "description": "Only MJPEG today. Present so a second format can be added without the console having to guess from the payload."
+    },
+    "jpeg": {
+      "type": "string",
+      "contentEncoding": "base64",
+      "description": "One complete JPEG frame, base64. Complete on purpose: a partial frame is dropped rather than rendered, because half a picture of a site is worse than none - it invites an operator to believe they have seen something."
+    },
+    "width": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Pixels. Sent with every frame rather than assumed, so a camera that changes resolution does not silently rescale what an operator is looking at."
+    },
+    "height": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "captured_at": {
+      "type": "string",
+      "description": "When the frame was taken, ISO 8601. Not when it was sent, and not when it arrived: on a link that buffers and drops, the age of the picture is the thing an operator most needs and most easily assumes."
+    },
+    "available": {
+      "type": "boolean",
+      "default": true,
+      "description": "False when the station has no camera fitted or the one configured is not answering. Absent means true. Same rule as telemetry: a still image and a dead camera are otherwise indistinguishable, and only the station knows which it is."
+    },
+    "unavailable_reason": {
+      "type": "string",
+      "maxLength": 200,
+      "description": "Short and human-readable. 'no camera fitted', 'CSI camera not detected'."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "available": { "const": false } },
+        "required": ["available"]
+      },
+      "then": { "required": ["kind"] },
+      "else": {
+        "required": ["kind", "format", "jpeg", "width", "height", "captured_at"]
+      }
+    }
+  ]
+}

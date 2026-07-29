@@ -5,7 +5,8 @@ to channels named for itself and knows nothing about organisations, groups or
 subscribers. Everything on the platform side of that line happens here.
 
     gsu/{station_id}/telemetry  ─┐
-    gsu/{station_id}/audio      ─┴─► ingest ─► org:{org}:gsu:{station}:{stream}
+    gsu/{station_id}/audio      ─┤
+    gsu/{station_id}/video      ─┴─► ingest ─► org:{org}:gsu:{station}:{stream}
 
 **The organisation is resolved here, from the device registry, keyed on the
 station id — never from anything the station sent.** That single rule is what
@@ -55,6 +56,7 @@ log = logging.getLogger(__name__)
 
 TELEMETRY_PATTERN = "gsu/*/telemetry"
 AUDIO_PATTERN = "gsu/*/audio"
+VIDEO_PATTERN = "gsu/*/video"
 
 #: Payload kinds the platform understands. Anything else is dropped rather than
 #: rejected: a station may legitimately be newer than the platform, and the
@@ -65,7 +67,9 @@ AUDIO_PATTERN = "gsu/*/audio"
 #: is actually attached, whether its credential is renewing, what it is holding
 #: locally. It rides the telemetry stream and needs telemetry.view like the
 #: rest.
-KNOWN_KINDS = {"adsb", "weather", "power", "radio", "light", "audio", "health"}
+KNOWN_KINDS = {
+    "adsb", "weather", "power", "radio", "light", "audio", "health", "video",
+}
 
 #: How often a station's last_seen_at is written. Telemetry arrives several
 #: times a second; the console's online threshold is two minutes, so writing
@@ -124,8 +128,8 @@ class StationIngest:
                 while not await self._acquire():
                     await asyncio.sleep(CONTEND_SECONDS)
                 log.info(
-                    "Station ingest leading (%s); listening on %s and %s.",
-                    self._token, TELEMETRY_PATTERN, AUDIO_PATTERN,
+                    "Station ingest leading (%s); listening on %s, %s and %s.",
+                    self._token, TELEMETRY_PATTERN, AUDIO_PATTERN, VIDEO_PATTERN,
                 )
                 try:
                     await self._lead()
@@ -144,7 +148,7 @@ class StationIngest:
         """
         assert self._redis is not None
         pubsub = self._redis.pubsub()
-        await pubsub.psubscribe(TELEMETRY_PATTERN, AUDIO_PATTERN)
+        await pubsub.psubscribe(TELEMETRY_PATTERN, AUDIO_PATTERN, VIDEO_PATTERN)
         try:
             next_renew = time.monotonic() + RENEW_SECONDS
             while True:

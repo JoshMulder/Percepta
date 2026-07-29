@@ -1,6 +1,7 @@
 import { memo } from "react";
 import type { Capability, LightPayload, PowerPayload } from "../types";
 import { DemoCamera } from "./DemoCamera";
+import type { VideoPayload } from "../types";
 import {
   BatteryChart,
   SOC_WINDOWS,
@@ -24,6 +25,7 @@ export function NotPermitted({ what }: { what: string }) {
 function VideoPanelInner({
   compact,
   streaming,
+  frame,
   canPtz,
   online,
   demo,
@@ -31,6 +33,8 @@ function VideoPanelInner({
 }: {
   compact?: boolean;
   streaming: boolean;
+  /** Latest frame from the station, if any. */
+  frame?: VideoPayload | null;
   canPtz: boolean;
   online: boolean;
   /** Demo deployments render a synthetic camera view rather than an empty
@@ -42,7 +46,26 @@ function VideoPanelInner({
   return (
     <div className="video-panel">
       <div className="video-surface">
-        {demo ? (
+        {frame?.available === false ? (
+          // A camera that is not fitted is not a camera that has failed, and an
+          // operator does different things about each.
+          <div className="video-idle">
+            <span className="no-source-badge">NO CAMERA</span>
+            <span>{frame.unavailable_reason ?? "No camera on this station"}</span>
+          </div>
+        ) : frame?.jpeg ? (
+          <>
+            <img
+              className="video-frame"
+              src={`data:image/jpeg;base64,${frame.jpeg}`}
+              alt="Camera view"
+            />
+            <div className="video-live">
+              <span className="video-live-dot" />
+              {compact ? "live" : <FrameAge capturedAt={frame.captured_at} />}
+            </div>
+          </>
+        ) : demo ? (
           <>
             <DemoCamera lightOn={lightOn ?? false} compact={compact} />
             <div className="video-live demo">
@@ -209,3 +232,22 @@ function PowerPanelInner({
 export const PowerPanel = memo(PowerPanelInner);
 export const FloodlightPanel = memo(FloodlightPanelInner);
 export const VideoPanel = memo(VideoPanelInner);
+
+
+/**
+ * How old the picture is, not when it arrived.
+ *
+ * On a link that buffers and drops, an operator looking at a still image will
+ * assume it is current unless told otherwise - and a frozen frame from four
+ * minutes ago is exactly the thing that gets acted on wrongly. The station
+ * timestamps at capture for this reason.
+ */
+function FrameAge({ capturedAt }: { capturedAt?: string }) {
+  if (!capturedAt) return <>live</>;
+  const ms = Date.now() - new Date(capturedAt).getTime();
+  if (Number.isNaN(ms)) return <>live</>;
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 5) return <>live</>;
+  if (seconds < 90) return <>{seconds}s old</>;
+  return <>{Math.round(seconds / 60)} min old</>;
+}

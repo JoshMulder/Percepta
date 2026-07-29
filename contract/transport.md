@@ -10,6 +10,7 @@ talks to a browser (`server/docs/00-topology.md`, rule 8).
 |---|---|---|
 | station → platform | `gsu/{station_id}/telemetry` | one telemetry object, JSON |
 | station → platform | `gsu/{station_id}/audio` | one audio object, JSON |
+| station → platform | `gsu/{station_id}/video` | one MJPEG frame, JSON |
 | platform → station | `cmd/gsu/{station_id}` | one command object, JSON |
 
 `{station_id}` is the UUID the platform issued at enrolment. A station publishes
@@ -51,6 +52,23 @@ One thing that pinning does **not** yet do: Redis' `default` user is still open
 on the development stack, so an unauthenticated client can publish anywhere. The
 per-station principals are real and enforced for anyone using them; closing
 `default` is a deployment change and is the last gap on this boundary.
+
+## Video
+
+Motion JPEG, one whole frame per message, on `gsu/{station_id}/video`. See
+`schemas/video.schema.json` - the reasoning for independent frames over an
+encoded stream is written there, and it is a decision about *this* camera on
+*this* link rather than a general preference.
+
+It is the heaviest thing a station sends. 640x480 at 2 fps is roughly half a
+megabit per second sustained, which is significant on a metered link, so the
+rate is low by default. Publishing continuously to a console nobody is watching
+is waste, and asking for video on demand is the intended next step - it needs a
+command, and that is an open contract question rather than something to invent.
+
+`captured_at` is when the frame was **taken**. An operator looking at a still
+image assumes it is current unless told otherwise, and a frozen frame from four
+minutes ago is exactly what gets acted on wrongly.
 
 ## Streams with no source
 

@@ -3,6 +3,7 @@ import { api } from "../api";
 import type {
   AdsbPayload,
   HealthPayload,
+  VideoPayload,
   Capability,
   LightPayload,
   MapConfig,
@@ -120,6 +121,10 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
   const [radio, setRadio] = useState<RadioPayload | null>(null);
   const [light, setLight] = useState<LightPayload | null>(null);
   const [health, setHealth] = useState<HealthPayload | null>(null);
+  // Only the most recent frame is kept. Video is current state, not a
+  // recording: a queue of stale frames replayed after a dropout is worse than a
+  // gap, which is the same rule the contract applies to telemetry.
+  const [frame, setFrame] = useState<VideoPayload | null>(null);
   // Conditions already raised, so one that stays true for hours does not refill
   // the drawer once a second. A ref rather than state: it is bookkeeping, and
   // nothing renders from it.
@@ -218,6 +223,9 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
       case "radio":
         setRadio(message.payload as RadioPayload);
         break;
+      case "video":
+        setFrame(message.payload as VideoPayload);
+        break;
       case "health": {
         const h = message.payload as HealthPayload;
         setHealth(h);
@@ -310,6 +318,7 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
     setMapConfig(null);
     setAdsb(null);
     setHealth(null);
+    setFrame(null);
     raisedConditions.current = new Set();
     setUnavailable({});
     setWeather(null);
@@ -482,7 +491,8 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
     ) : canVideo ? (
       <VideoPanel
         compact={small}
-        streaming={false}
+        frame={frame}
+        streaming={frame?.jpeg != null}
         canPtz={!small && has(caps, "video.ptz")}
         online={detail?.online ?? false}
         demo={simulated}

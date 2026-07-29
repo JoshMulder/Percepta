@@ -90,7 +90,23 @@ export interface AudioPayload {
   pcm: string;
 }
 
+/** One MJPEG frame. Whole independent frames rather than an encoded stream:
+ *  a dropped frame costs one frame, there is no keyframe to wait for after a
+ *  Starlink dropout, and it renders in an <img> with no player. See
+ *  contract/schemas/video.schema.json for why that is right for this camera and
+ *  wrong for smooth full-rate video. */
+export interface VideoPayload extends Availability {
+  kind: "video";
+  format?: "mjpeg";
+  jpeg?: string;
+  width?: number;
+  height?: number;
+  /** When the frame was TAKEN, not when it arrived. */
+  captured_at?: string;
+}
+
 export type EventPayload =
+  | VideoPayload
   | AudioPayload
   | HealthPayload
   | AdsbPayload
