@@ -208,7 +208,10 @@ export function SkyIcon({
         {isDay ? (
           <>
             <circle cx="30" cy="15" r="6" />
-            <path d="M30 4v3M30 23v3M39 15h3M18 15h3M36.4 8.6l2.1-2.1M21.5 23.5l2.1-2.1M36.4 21.4l2.1 2.1" opacity="0.7" />
+            {/* All eight rays. The NW one was left out on the assumption the
+                cloud would cover that corner; it does not, and a seven-rayed
+                sun reads as a mistake rather than a style. */}
+            <path d="M30 4v3M30 23v3M39 15h3M18 15h3M36.4 8.6l2.1-2.1M23.6 8.6l-2.1-2.1M21.5 23.5l2.1-2.1M36.4 21.4l2.1 2.1" opacity="0.7" />
           </>
         ) : (
           <path d="M34 9a8 8 0 1 0 6 12 9 9 0 0 1-6-12Z" />

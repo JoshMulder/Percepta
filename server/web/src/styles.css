@@ -914,12 +914,18 @@ body {
 .rose-wrap {
   display: flex;
   align-items: center;
-  gap: 0.875rem;
+  /* Clustered in the centre rather than pinned to the panel's edges. With the
+     readout stretched between two fixed blocks, every spare pixel the panel
+     had landed in the two gulfs beside the number - the one element that
+     cannot fill space. Centring the trio puts the spare space at the edges,
+     where nothing is trying to be read. */
+  justify-content: center;
+  gap: 1.25rem;
 }
 .rose {
   /* Grown to take up the room the radio panel released. Sized in rem, so it
-     still scales with everything else - this raises its share of the stack
-     rather than pinning it to a pixel size. */
+     still scales with everything else. The number between the dials carries
+     its own weight at 4.5rem, so these can be generous without demoting it. */
   width: 10.2rem;
   height: 10.2rem;
   flex: none;
@@ -970,8 +976,12 @@ body {
   stroke: var(--line);
 }
 .rose-readout {
-  min-width: 0;
-  flex: 1;
+  /* A fixed column, not flex: 1. It sits between the dial and the sky icon in
+     a centred cluster now, and its width must not follow its text - "9" and
+     "104" would otherwise nudge the rose and the sun sideways every time the
+     wind changed. Wide enough for "gusting 999 kt". */
+  flex: 0 0 auto;
+  width: 9.5rem;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -979,13 +989,22 @@ body {
 }
 /* The headline number on the panel, sized against the dial beside it. At
    1.75rem it read as a caption next to a 10.2rem rose rather than as the
-   reading the panel exists to show. */
+   reading the panel exists to show; 2.5rem was still the smallest thing in a
+   row where it is the point of the row. */
 .wind-speed {
-  font: 600 2.5rem var(--mono);
+  /* 4.125: 4.5 read a size too loud against the dials, 3.75 a size too quiet.
+     The grid centres the digits on the column and lets the unit hang beside
+     them - equal 1fr flanks, digits in the middle - so the number sits on the
+     same centreline as the rose row and the bearing under it. */
+  font: 600 4.125rem var(--mono);
   line-height: 1;
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: baseline;
-  gap: 0.25rem;
+  width: 100%;
+}
+.wind-speed .num {
+  grid-column: 2;
 }
 .wind-speed.warn {
   color: var(--warn);
@@ -994,18 +1013,21 @@ body {
   color: var(--danger);
 }
 .wind-speed .unit {
-  font-size: 0.75rem;
+  grid-column: 3;
+  justify-self: start;
+  margin-left: 0.375rem;
+  font-size: 1rem;
   font-weight: 400;
   color: var(--muted);
 }
 .wind-from {
   color: var(--muted);
-  font: 0.75rem var(--mono);
-  margin-top: 0.312rem;
+  font: 0.875rem var(--mono);
+  margin-top: 0.375rem;
 }
 .wind-gust {
-  font: 0.688rem var(--mono);
-  margin-top: 0.188rem;
+  font: 0.812rem var(--mono);
+  margin-top: 0.25rem;
   color: var(--warn);
 }
 .wind-gust.critical {
@@ -1928,10 +1950,6 @@ body {
 }
 
 /* -------------------------------------------------------------- sky state */
-
-.rose-wrap {
-  justify-content: space-between;
-}
 /* Same width as the dial opposite it. The readout between them is centred in
    its own column, but the column only lands in the middle of the panel if the
    two flanks match - with a 10.2rem dial against a ~6.6rem icon the wind speed
@@ -1944,6 +1962,8 @@ body {
   justify-content: center;
   gap: var(--s1);
   flex: none;
+  /* Matches .rose - the two are the bookends of a centred row and any
+     difference between them reads as the row leaning. */
   width: 10.2rem;
   /* Space above the icon equal to the label below it, so the ICON centres on
      the row rather than the icon-plus-label block doing so. Without it the

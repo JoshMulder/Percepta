@@ -209,6 +209,13 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
         else next[kind] = reason;
         return next;
       });
+      // An unavailable frame carries a kind, a flag and a reason - no readings.
+      // It must never reach the panels as data: they render fields the frame
+      // does not have, and the first real station (whose radio has no driver
+      // and whose power slot is empty) took the whole console down with
+      // `undefined.toFixed()`. The simulator sends every field, always, which
+      // is why this survived until real hardware.
+      if (declared.available === false) return;
     }
     switch (payload.kind) {
       case "adsb":

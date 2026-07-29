@@ -99,7 +99,11 @@ function WeatherPanelInner({ weather }: { weather: WeatherPayload | null }) {
 
         <div className="rose-readout">
           <div className={`wind-speed ${level}`}>
-            {has ? weather.wind_kt.toFixed(0) : "--"}
+            {/* The digits are wrapped so they can be centred on the column by
+                themselves. Centring digits-plus-unit as one lump left the
+                number half a unit-width off the centreline of the rose row,
+                which the eye reads long before it works out why. */}
+            <span className="num">{has ? weather.wind_kt.toFixed(0) : "--"}</span>
             <span className="unit">kt</span>
           </div>
           <div className="wind-from">
