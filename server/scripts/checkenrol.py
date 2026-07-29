@@ -98,10 +98,14 @@ async def main() -> int:
                 "Cut this station off" not in hs,
                 "no revoke on a station that never enrolled",
             )
-            check(
-                await page.locator('button:has-text("Issue a code")').count() == 1,
-                "issue button present",
-            )
+            # One or the other, never both: to replace a code you cancel it
+            # first, so there is never a moment with two live codes.
+            issue = await page.locator('button:has-text("Issue a code")').count()
+            cancel = await page.locator(
+                'button:has-text("Cancel outstanding code")'
+            ).count()
+            print(f"    issue={issue} cancel={cancel}")
+            check(issue + cancel == 1, "exactly one of issue/cancel is offered")
 
         # --- the add-new page ---------------------------------------------
         print("\nAdd new")

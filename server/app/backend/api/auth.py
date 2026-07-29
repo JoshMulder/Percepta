@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from backend.auth.cookies import clear_access_cookie, set_access_cookie
 from backend.auth.dependencies import get_identity
 from backend.auth.identity import Identity
+from backend.auth import mfa
 from backend.auth.password import PasswordError, verify_password
 from backend.auth.platform import PLATFORM_ORGANIZATION_ID
 from backend.auth.security import create_access_token
@@ -18,9 +19,11 @@ from backend.database.dependencies import get_db
 from backend.database.models.audit_log import AuditLog
 from backend.database.session import PrivilegedSessionLocal
 from backend.database.models.enums import UserRole
+from backend.database.models.organization import Organization
 from backend.database.models.organization_membership import (
     OrganizationMembership,
 )
+from backend.database.models.user import User
 from backend.realtime.revocation import revoke_session
 from backend.repositories.auth_session_repository import AuthSessionRepository
 from backend.repositories.organization_membership_repository import (
@@ -42,6 +45,26 @@ class LoginRequest(BaseModel):
     # which is a small account-enumeration signal for free.
     email: str
     password: str
+    # Absent on the first attempt. The console sends it after the server has
+    # asked for it, which is also the only time the user has been told to look.
+    mfa_code: str | None = None
+
+
+class LoginChallenge(BaseModel):
+    """Returned instead of a session when a second factor is outstanding.
+
+    200, not 401. The password was correct - that is exactly what distinguishes
+    this from a failed login, and the console has to be able to tell, because it
+    must ask for a code rather than say the password was wrong.
+
+    The enrolment fields carry a freshly minted secret and are populated only on
+    `mfa_enrollment_required`, after the password has already been verified.
+    """
+
+    status: str
+    secret: str | None = None
+    otpauth_uri: str | None = None
+    qr_svg: str | None = None
 
 
 class OrganizationSummary(BaseModel):
@@ -113,13 +136,36 @@ def _audit(
         log.exception("Failed to write audit record for %s.", action)
 
 
-@router.post("/login", response_model=MeResponse)
+def _mfa_required_for(db: Session, user: User) -> bool:
+    """Whether any organisation this user belongs to insists on a second factor.
+
+    Any, not all. A person in two organisations where one requires MFA is
+    protected by it everywhere - the alternative is that whether they need a
+    code depends on which organisation their session happens to land in, and a
+    second factor that comes and goes is one people learn to work around.
+    """
+    return db.execute(
+        select(Organization.id)
+        .join(
+            OrganizationMembership,
+            OrganizationMembership.organization_id == Organization.id,
+        )
+        .where(
+            OrganizationMembership.user_id == user.id,
+            Organization.is_active.is_(True),
+            Organization.mfa_required.is_(True),
+        )
+        .limit(1)
+    ).scalar_one_or_none() is not None
+
+
+@router.post("/login", response_model=None)
 def login(
     body: LoginRequest,
     request: Request,
     response: Response,
     db: Session = Depends(get_db),
-) -> MeResponse:
+) -> MeResponse | LoginChallenge:
     user = UserRepository(db).get_by_email(body.email)
 
     # One failure message and one code path for every reason: unknown email,
@@ -139,13 +185,6 @@ def login(
     memberships = OrganizationMembershipRepository(db)
     # These reads run before any org context exists. organization_memberships is
     # outside RLS for exactly this reason.
-    from sqlalchemy import select
-
-    from backend.database.models.organization import Organization
-    from backend.database.models.organization_membership import (
-        OrganizationMembership,
-    )
-
     rows = db.execute(
         select(Organization)
         .join(
@@ -163,6 +202,51 @@ def login(
         _audit("login_failed", request=request, actor_email=body.email,
                actor_user_id=user.id, detail={"reason": "no_membership"})
         raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    # --- second factor ----------------------------------------------------
+    #
+    # Checked after the password and after membership, so a wrong password never
+    # reveals whether an account exists or whether it carries MFA. From here on
+    # the caller has already proved they know the password.
+    if _mfa_required_for(db, user):
+        code = (body.mfa_code or "").strip()
+
+        if user.mfa_enabled:
+            if not code:
+                return LoginChallenge(status="mfa_required")
+            if not mfa.verify_code(secret=user.mfa_secret, code=code):
+                _audit("login_failed", request=request, actor_email=body.email,
+                       actor_user_id=user.id, detail={"reason": "bad_mfa_code"})
+                raise HTTPException(status_code=401, detail="Invalid code")
+        else:
+            # Enrolment. The secret is minted once and kept across attempts:
+            # regenerating it on every request would invalidate the QR the user
+            # is in the middle of scanning.
+            if user.mfa_secret is None:
+                user.mfa_secret = mfa.generate_secret()
+                db.commit()
+            if not code:
+                uri = mfa.provisioning_uri(
+                    secret=user.mfa_secret, account_name=user.email
+                )
+                return LoginChallenge(
+                    status="mfa_enrollment_required",
+                    secret=user.mfa_secret,
+                    otpauth_uri=uri,
+                    qr_svg=mfa.qr_svg_data_uri(uri),
+                )
+            if not mfa.verify_code(secret=user.mfa_secret, code=code):
+                _audit("login_failed", request=request, actor_email=body.email,
+                       actor_user_id=user.id,
+                       detail={"reason": "bad_mfa_enrollment_code"})
+                raise HTTPException(status_code=401, detail="Invalid code")
+            # Only now, having produced a working code, is it actually on. A
+            # user who scanned nothing but reached this screen is not locked out
+            # of an account they can still get into with the password alone.
+            user.mfa_enabled = True
+            db.commit()
+            _audit("mfa_enrolled", request=request, actor_email=user.email,
+                   actor_user_id=user.id)
 
     organization = rows[0]
     expires_at = datetime.now(UTC) + timedelta(

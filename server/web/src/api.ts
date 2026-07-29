@@ -1,6 +1,7 @@
 import type {
   EnrolmentStatus,
   IssuedToken,
+  LoginChallenge,
   MapConfig,
   Me,
   OrganizationDetail,
@@ -50,10 +51,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  login: (email: string, password: string) =>
-    request<Me>("/api/auth/login", {
+  /** Either a session or a challenge. The password was correct in both cases -
+   *  a 200 carrying `status` means the second factor is outstanding, which the
+   *  caller must be able to tell apart from a rejected password. */
+  login: (email: string, password: string, mfaCode?: string) =>
+    request<Me | LoginChallenge>("/api/auth/login", {
       method: "POST",
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({ email, password, mfa_code: mfaCode ?? null }),
     }),
 
   logout: () => request<void>("/api/auth/logout", { method: "POST" }),
@@ -239,6 +243,23 @@ export const api = {
       `/api/organization/members/${userId}/roles`,
       { method: "PUT", body: JSON.stringify({ roles }) },
     ),
+
+  setOrgMfaRequired: (required: boolean) =>
+    request<{ mfa_required: boolean }>("/api/organization/mfa", {
+      method: "PUT",
+      body: JSON.stringify({ mfa_required: required }),
+    }),
+
+  inviteMember: (email: string, displayName: string, roles: string[]) =>
+    request<{
+      user_id: string;
+      email: string;
+      roles: string[];
+      invitation_sent: boolean;
+    }>("/api/organization/members", {
+      method: "POST",
+      body: JSON.stringify({ email, display_name: displayName, roles }),
+    }),
 
   sendPasswordReset: (userId: string) =>
     request<{ user_id: string; sent_to: string }>(

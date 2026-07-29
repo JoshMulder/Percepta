@@ -343,6 +343,8 @@ export interface MemberGrant {
 }
 
 export interface Member {
+  /** Has completed second-factor enrolment. Never the secret. */
+  mfa_enabled?: boolean;
   user_id: string;
   email: string;
   display_name: string;
@@ -352,6 +354,8 @@ export interface Member {
 }
 
 export interface OrganizationDetail {
+  /** Members must present a second factor to sign in. */
+  mfa_required?: boolean;
   id: string;
   name: string;
   members: Member[];
@@ -398,4 +402,23 @@ export interface PlatformOverview {
   organizations: PlatformOrg[];
   users: PlatformUser[];
   roles: string[];
+}
+
+/**
+ * Returned by login when a second factor is still outstanding.
+ *
+ * `mfa_required` - they have an authenticator; ask for the code.
+ * `mfa_enrollment_required` - their organisation requires MFA and they have not
+ * set it up; the QR and secret are for scanning, and enrolment completes when
+ * they send back a working code.
+ */
+export interface LoginChallenge {
+  status: "mfa_required" | "mfa_enrollment_required";
+  secret?: string | null;
+  otpauth_uri?: string | null;
+  qr_svg?: string | null;
+}
+
+export function isChallenge(v: Me | LoginChallenge): v is LoginChallenge {
+  return "status" in v;
 }

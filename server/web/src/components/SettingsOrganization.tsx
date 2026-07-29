@@ -85,6 +85,21 @@ export function SettingsOrganization({ me }: { me: Me }) {
     <div className="settings-sections">
       <section className="settings-section">
         <h3>{org.name}</h3>
+
+        <label className="field checkbox-field">
+          <input
+            type="checkbox"
+            checked={org.mfa_required ?? false}
+            disabled={busy === "mfa"}
+            onChange={(e) =>
+              run("mfa", () => api.setOrgMfaRequired(e.target.checked))
+            }
+          />
+          <span>Require two-factor authentication</span>
+        </label>
+
+        <InviteMember roles={org.roles} onInvited={load} />
+
         <div className="member-layout">
           <ul className="member-list">
             {org.members.map((m) => (
@@ -348,5 +363,117 @@ function PasswordReset({ member }: { member: Member }) {
       )}
       {error && <span className="settings-error">{error}</span>}
     </div>
+  );
+}
+
+/**
+ * Add someone to this organisation.
+ *
+ * No password field, deliberately. They receive a link and choose their own —
+ * a password an admin typed here is one two people know before it has been used
+ * once.
+ */
+function InviteMember({
+  roles,
+  onInvited,
+}: {
+  roles: string[];
+  onInvited: () => void | Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [email, setEmail] = useState("");
+  const [name, setName] = useState("");
+  const [role, setRole] = useState(roles.includes("viewer") ? "viewer" : roles[0]);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await api.inviteMember(email.trim(), name.trim(), [role]);
+      setMessage(
+        result.invitation_sent
+          ? `Invitation sent to ${result.email}.`
+          : `${result.email} already had an account and has been added.`,
+      );
+      setEmail("");
+      setName("");
+      setOpen(false);
+      await onInvited();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not add them.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!open) {
+    return (
+      <div className="settings-actions">
+        <button
+          type="button"
+          className="btn primary"
+          onClick={() => {
+            setOpen(true);
+            setMessage(null);
+          }}
+        >
+          Add someone
+        </button>
+        {message && <span className="settings-ok">{message}</span>}
+      </div>
+    );
+  }
+
+  return (
+    <form onSubmit={submit}>
+      <div className="field-row">
+        <label className="field">
+          <span>Email</span>
+          <input
+            type="text"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            autoFocus
+            required
+          />
+        </label>
+        <label className="field">
+          <span>Name</span>
+          <input
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            required
+          />
+        </label>
+        <label className="field">
+          <span>Role</span>
+          <select value={role} onChange={(e) => setRole(e.target.value)}>
+            {roles.map((r) => (
+              <option key={r} value={r}>
+                {r}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <div className="settings-actions">
+        <button
+          type="submit"
+          className="btn primary"
+          disabled={busy || !email.trim() || !name.trim()}
+        >
+          {busy ? "Sending…" : "Send invitation"}
+        </button>
+        <button type="button" className="btn ghost" onClick={() => setOpen(false)}>
+          Cancel
+        </button>
+        {error && <span className="settings-error">{error}</span>}
+      </div>
+    </form>
   );
 }

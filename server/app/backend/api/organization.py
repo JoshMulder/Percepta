@@ -65,11 +65,20 @@ class MemberOut(BaseModel):
     is_active: bool
     roles: list[str]
     grants: list[GrantOut]
+    #: Whether they have completed enrolment. Never the secret - an admin has no
+    #: business holding somebody else's second factor.
+    mfa_enabled: bool = False
+
+
+class MfaUpdate(BaseModel):
+    mfa_required: bool
 
 
 class OrganizationOut(BaseModel):
     id: str
     name: str
+    #: Members of this organisation must present a second factor to sign in.
+    mfa_required: bool = False
     members: list[MemberOut]
     stations: list[dict]
     #: What an admin is allowed to tick. radio.transmit is excluded and stays
@@ -120,6 +129,7 @@ def _members(db: Session, organization_id: uuid.UUID) -> list[MemberOut]:
                 email=user.email,
                 display_name=user.display_name,
                 is_active=user.is_active,
+                mfa_enabled=user.mfa_enabled,
                 roles=list(membership.roles or []),
                 grants=[
                     GrantOut(
@@ -178,6 +188,7 @@ def get_organization(
     return OrganizationOut(
         id=str(org.id),
         name=org.name,
+        mfa_required=org.mfa_required,
         members=_members(db, identity.organization_id),
         stations=[
             {"id": str(s.id), "name": s.name, "is_active": s.is_active}
@@ -372,3 +383,162 @@ def send_password_reset(
         detail={"target_email": email},
     )
     return {"user_id": str(user_id), "sent_to": email}
+
+
+@router.put("/mfa", status_code=200)
+def set_mfa_required(
+    body: MfaUpdate,
+    request: Request,
+    identity: Identity = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Require a second factor from everyone in this organisation.
+
+    Turning it on does not lock anybody out. Members who have not enrolled are
+    walked through it at their next sign-in, after their password has already
+    been accepted, so the worst case is one extra screen rather than a support
+    call from someone who cannot get in.
+
+    Turning it off leaves existing enrolments alone. Someone who set up an
+    authenticator keeps using it - the setting governs who is compelled, not who
+    is permitted, and silently weakening an account because an admin changed an
+    organisation-wide switch is not a thing to do quietly.
+    """
+    org = db.get(Organization, identity.organization_id)
+    if org is None:
+        raise HTTPException(status_code=404, detail="Organisation not found")
+
+    previous = org.mfa_required
+    org.mfa_required = body.mfa_required
+    db.commit()
+
+    record(
+        action="organization.mfa_required.updated",
+        organization_id=identity.organization_id,
+        actor_user_id=identity.user_id,
+        target_type="organization",
+        target_id=str(identity.organization_id),
+        ip_address=request.client.host if request.client else None,
+        detail={"from": previous, "to": body.mfa_required},
+    )
+    return {"mfa_required": body.mfa_required}
+
+
+class MemberInvite(BaseModel):
+    email: str
+    display_name: str
+    roles: list[str] = ["viewer"]
+
+
+@router.post("/members", status_code=201)
+def invite_member(
+    body: MemberInvite,
+    request: Request,
+    identity: Identity = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Add someone to this organisation and email them a link to set a password.
+
+    The admin supplies an address and a name, never a password. An invitation
+    carrying a password an administrator chose is a password two people know
+    before it has been used once - the same reason resets are emailed rather
+    than typed in on somebody's behalf.
+
+    An address that already has an account is added to this organisation rather
+    than rejected. People legitimately belong to more than one, and refusing
+    would also turn this into a way to ask whether an address is registered.
+    """
+    email = body.email.strip().lower()
+    if not email or "@" not in email:
+        raise HTTPException(status_code=422, detail="That is not an email address")
+
+    roles = sorted(set(body.roles))
+    unknown = [r for r in roles if r not in _ROLES]
+    if unknown:
+        raise HTTPException(status_code=422, detail=f"Unknown roles: {unknown}")
+    if not roles:
+        raise HTTPException(status_code=422, detail="A member needs at least one role")
+
+    org = db.get(Organization, identity.organization_id)
+    if org is None:
+        raise HTTPException(status_code=404, detail="Organisation not found")
+
+    # users sits outside RLS - it has to, since an account exists before and
+    # independently of any organisation.
+    user = db.execute(select(User).where(User.email == email)).scalar_one_or_none()
+    created = user is None
+    if user is None:
+        user = User(
+            email=email,
+            display_name=body.display_name.strip() or email,
+            # No password. The account cannot be signed into until the person
+            # sets one, so an invitation that goes astray grants nothing.
+            password_hash=None,
+            is_active=True,
+        )
+        db.add(user)
+        db.flush()
+
+    existing = db.execute(
+        select(OrganizationMembership).where(
+            OrganizationMembership.user_id == user.id,
+            OrganizationMembership.organization_id == identity.organization_id,
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        raise HTTPException(
+            status_code=409, detail="They are already in this organisation"
+        )
+
+    db.add(
+        OrganizationMembership(
+            user_id=user.id,
+            organization_id=identity.organization_id,
+            roles=roles,
+        )
+    )
+
+    # Only someone who cannot yet sign in needs a link. An existing account has
+    # a password already, and sending them a set-password link would be handing
+    # an org admin a way to take over an account in someone else's tenancy.
+    invited = created or user.password_hash is None
+    if invited:
+        _, plaintext = password_reset.issue(
+            db, user=user, requested_by=identity.user_id
+        )
+        actor = db.get(User, identity.user_id)
+        try:
+            password_reset.send_invitation(
+                user=user,
+                plaintext=plaintext,
+                organization_name=org.name,
+                inviter=actor.display_name if actor else "An administrator",
+            )
+        except EmailNotConfiguredError as exc:
+            db.rollback()
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except OSError as exc:
+            db.rollback()
+            log.exception("Invitation mail failed")
+            raise HTTPException(
+                status_code=502, detail=f"The invitation could not be sent: {exc}"
+            ) from exc
+
+    user_id, user_email = user.id, user.email
+    db.commit()
+
+    record(
+        action="organization.member.invited",
+        organization_id=identity.organization_id,
+        actor_user_id=identity.user_id,
+        target_type="user",
+        target_id=str(user_id),
+        ip_address=request.client.host if request.client else None,
+        detail={"email": user_email, "roles": roles, "new_account": created},
+    )
+    return {
+        "user_id": str(user_id),
+        "email": user_email,
+        "roles": roles,
+        "invitation_sent": invited,
+    }

@@ -2982,3 +2982,23 @@ body {
   background: #000;
 }
 .video-live-el.hidden { display: none; }
+
+/* ------------------------------------------------------- MFA enrolment --- */
+
+.mfa-enrol { display: flex; flex-direction: column; gap: 10px; align-items: center; }
+.mfa-enrol p { margin: 0; color: var(--muted); font-size: 0.85rem; text-align: center; }
+/* White plate behind the QR. The code is black on transparent, which on this
+   console's background is black on near-black and scans as nothing at all. */
+.mfa-qr {
+  width: 180px;
+  height: 180px;
+  background: #fff;
+  border-radius: 6px;
+  padding: 6px;
+}
+.mfa-secret code {
+  font: 0.8rem var(--mono);
+  color: var(--text);
+  letter-spacing: 0.06em;
+  word-break: break-all;
+}

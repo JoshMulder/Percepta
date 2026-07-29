@@ -59,8 +59,10 @@ def generate_token() -> str:
     return secrets.token_urlsafe(_TOKEN_BYTES)
 
 
-def reset_url(token: str) -> str:
-    return f"{settings.console_base_url.rstrip('/')}/reset-password?token={token}"
+def reset_url(token: str, *, invite: bool = False) -> str:
+    base = settings.console_base_url.rstrip("/")
+    suffix = "&invite=1" if invite else ""
+    return f"{base}/reset-password?token={token}{suffix}"
 
 
 def issue(
@@ -157,3 +159,29 @@ def redeem(db: Session, *, token_value: str, new_password: str) -> User:
     # step that actually removes them.
     AuthSessionRepository(db).revoke_all_for_user(user_id=user.id)
     return user
+
+
+def send_invitation(
+    *, user: User, plaintext: str, organization_name: str, inviter: str
+) -> None:
+    """Email a new member the link that sets their first password.
+
+    The same machinery as a reset, and for the same reason: the person who will
+    use the account is the only one who should ever know its password. An
+    invitation that carries a password an administrator chose is a password two
+    people know before it has been used once.
+    """
+    hours = settings.password_reset_ttl_hours
+    link = reset_url(plaintext, invite=True)
+    email_service.send(
+        to=user.email,
+        subject=f"You have been added to {organization_name} on Percepta",
+        body_text=(
+            f"{inviter} has added you to {organization_name} on Percepta.\n\n"
+            f"Choose a password to finish setting up your account:\n\n{link}\n\n"
+            f"The link works once and expires in {hours} hours. If it expires, "
+            f"ask an administrator to send another.\n\n"
+            f"If you were not expecting this, you can ignore this email - the "
+            f"account cannot be used until a password is set.\n"
+        ),
+    )
