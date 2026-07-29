@@ -52,6 +52,16 @@ BACKOFF_MAX = 30.0
 CONNECT_TIMEOUT = 3.0
 SOCKET_TIMEOUT = 3.0
 
+#: What Redis says when a principal is not granted a channel. Matched as text as
+#: well as by exception class because older redis-py versions raise a plain
+#: `ResponseError` for it, and a station that mistook this for a broken link
+#: would drop everything else too.
+_PERMISSION_MARKERS = ("noperm", "no permissions")
+
+
+def _is_permission_error(exc: Exception) -> bool:
+    return any(marker in str(exc).lower() for marker in _PERMISSION_MARKERS)
+
 
 class RedisTransport(Transport):
     def __init__(
@@ -93,6 +103,10 @@ class RedisTransport(Transport):
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
         self._last_error: str | None = None
+        #: Topics this station's principal is not granted, and what the broker
+        #: said about each. Cleared per topic on the first successful publish to
+        #: it, so a fixed ACL clears the condition without a restart.
+        self._refusals: dict[str, str] = {}
         #: Set when the last failure was a rejected certificate rather than an
         #: unreachable host. The agent reports the two differently: one is a
         #: dropout, the other is a station talking to the wrong broker.
@@ -137,11 +151,37 @@ class RedisTransport(Transport):
             self._connected = True
             self._backoff = BACKOFF_START
             self._last_error = None
+            self._refusals.pop(topic, None)
             return True
+        except redis.exceptions.NoPermissionError as exc:
+            # The connection is fine and this station is authenticated; it is
+            # simply not granted this channel. Treating that as a dead link —
+            # which is what it used to do — would close a working connection and
+            # back off the whole uplink because of one topic, so telemetry would
+            # start dropping because video is not permitted. Recorded per topic,
+            # counted as a drop, and nothing else disturbed.
+            self._note_refusal(topic, exc)
+            self._dropped += 1
+            return False
         except (redis.RedisError, OSError) as exc:
+            if _is_permission_error(exc):
+                self._note_refusal(topic, exc)
+                self._dropped += 1
+                return False
             self._fail(exc)
             self._dropped += 1
             return False
+
+    def _note_refusal(self, topic: str, exc: Exception) -> None:
+        text = str(exc)
+        if self._refusals.get(topic) != text:
+            log.error(
+                "The broker refused %s for %s: %s. The connection is up and "
+                "authenticated — this is an ACL that does not grant the channel, "
+                "and it will not clear on its own.",
+                topic, self._username or "(no username)", text,
+            )
+        self._refusals[topic] = text
 
     # --- subscribing ----------------------------------------------------
 
@@ -320,6 +360,10 @@ class RedisTransport(Transport):
     @property
     def dropped(self) -> int:
         return self._dropped
+
+    @property
+    def refusals(self) -> dict[str, str]:
+        return dict(self._refusals)
 
     @property
     def last_error(self) -> str | None:

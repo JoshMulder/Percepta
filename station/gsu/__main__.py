@@ -5,6 +5,8 @@
     python -m gsu enrol --token …     # claim a code without the local console
     python -m gsu devices             # what is fitted, and what was actually found
     python -m gsu bench               # what a tick costs — run this on the target
+    python -m gsu camera              # grab one snapshot and say what it cost
+    python -m gsu stream --seconds 20 # run the H.264 encoder and measure it
     python -m gsu status              # what the platform thinks of us
     python -m gsu whoami              # what this box thinks it is, offline
 
@@ -17,10 +19,12 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import platform
 import socket
 import ssl
 import sys
+import tempfile
 import time
 
 from . import AGENT_VERSION, clock, tls
@@ -84,6 +88,149 @@ def _bench(agent) -> int:
         "\nThe simulated airband front end synthesises audio in Python, which no\n"
         "real station does — on hardware that work is the SDR pipeline's, in its\n"
         "own process. Measure that separately.\n"
+    )
+    agent.shutdown()
+    return 0
+
+
+def _camera(agent, frames: int, size: str | None, out: str | None) -> int:
+    """Take a few snapshots and say what each one costs on the link.
+
+    The other half of `stream`: this is the cheap path — one complete JPEG at a
+    low rate — and the number it prints is the one to plan a metered link with,
+    because it is measured from the payload that is actually published rather
+    than from the JPEG inside it.
+    """
+    camera = agent.camera
+    if camera is None:
+        print("\nNo camera fitted. The video channel is publishing "
+              "available: false, which is the correct thing for it to say.\n")
+        agent.shutdown()
+        return 1
+    if size:
+        from .camera import parse_resolution
+
+        camera.width, camera.height = parse_resolution(size)
+        columns = getattr(camera, "columns", None)
+        if columns is not None:  # the synthetic test card redraws its grid
+            camera.columns = (camera.width + 7) // 8
+            camera.rows = (camera.height + 7) // 8
+
+    print(f"\n{platform.machine()} / {camera.describe().detail}\n")
+    sizes: list[int] = []
+    last = None
+    for index in range(max(1, frames)):
+        started = time.monotonic()
+        frame = camera.capture()
+        elapsed = (time.monotonic() - started) * 1000
+        if frame is None:
+            print(f"  {index + 1}: no frame — {camera.unavailable_reason}")
+            continue
+        payload = len(frame.to_payload()["jpeg"]) + 160
+        sizes.append(payload)
+        last = frame
+        print(f"  {index + 1}: {len(frame.jpeg) / 1024:6.1f} kB JPEG, "
+              f"{payload / 1024:6.1f} kB published, {elapsed:6.1f} ms, "
+              f"captured {frame.captured_at.isoformat()}")
+    if not sizes:
+        print("\nNothing was captured. The reason above is the whole diagnosis.\n")
+        agent.shutdown()
+        return 1
+    mean = sum(sizes) / len(sizes)
+    fps = agent.site.video_fps
+    print(f"\n  {mean / 1024:.1f} kB per published frame; at {fps:g} fps that is "
+          f"{mean * 8 * fps / 1000:.0f} kbit/s sustained on the uplink.")
+    if out and last is not None:
+        with open(out, "wb") as handle:
+            handle.write(last.jpeg)
+        print(f"  last frame written to {out}")
+    print()
+    agent.shutdown()
+    return 0
+
+
+def _stream(agent, config: AgentConfig, seconds: float, out: str | None,
+            size: str | None, fps: float | None, bitrate: int | None) -> int:
+    """Run the live encoder for a few seconds and say exactly what it produced.
+
+    **This is the first thing to run on the Pi**, before the platform, before
+    the console, before anything else about video. It answers the largest open
+    hardware question in this build — whether the VideoCore's H.264 encoder
+    sustains 1080p30 on a Pi 2B — with frames, bytes and a file that can be
+    played, rather than with arithmetic from a different machine.
+
+    It needs no platform, no network and no enrolment.
+    """
+    import dataclasses
+
+    from .camera.h264 import StreamSettings
+
+    sink = out or os.path.join(
+        "/dev/shm" if os.path.isdir("/dev/shm") else tempfile.gettempdir(),
+        "gsu-stream.h264",
+    )
+    agent.config = dataclasses.replace(config, stream_sink=sink)
+    if size:
+        width, _, height = size.lower().partition("x")
+        agent.site.stream_width, agent.site.stream_height = int(width), int(height)
+    if fps:
+        agent.site.stream_fps = fps
+    if bitrate:
+        agent.site.stream_bitrate_kbps = bitrate
+
+    from .camera.h264 import probe_encoders
+
+    settings: StreamSettings = agent.stream.settings()
+    print(f"\n{platform.machine()} / agent {AGENT_VERSION}")
+    print("encoders on this box:")
+    for probe in probe_encoders():
+        print(f"  {'yes' if probe.available else 'no ':4} {probe.name:9} {probe.detail}")
+    print(f"asking for {settings.width}x{settings.height} at {settings.fps} fps, "
+          f"{settings.bitrate_kbps} kbit/s target, keyframe every "
+          f"{settings.intra_period} frames\n")
+    effect = agent.stream.start({"lease_s": seconds + 30, "viewers": 1})
+    print(f"  {effect}")
+    if agent.stream.state != "streaming":
+        print("\nNothing was encoded. That message is the whole diagnosis.\n")
+        agent.shutdown()
+        return 1
+
+    started = time.monotonic()
+    try:
+        while time.monotonic() - started < seconds:
+            time.sleep(0.5)
+            agent.stream.tick()
+            state = agent.stream.state_payload()
+            print(
+                f"\r  {state['frames']:6d} frames  {state['bytes'] / 1e6:7.2f} MB  "
+                f"{state['bitrate_bps'] / 1e6:5.2f} Mbit/s  "
+                f"{state['fps_measured']:5.1f} fps  {state['dropped']} dropped",
+                end="", flush=True,
+            )
+            if state["state"] != "streaming":
+                break
+    except KeyboardInterrupt:
+        pass
+    state = agent.stream.state_payload()
+    agent.stream.stop("the stream test finished")
+
+    elapsed = time.monotonic() - started
+    print(f"\n\n{state['frames']} frames in {elapsed:.1f}s")
+    print(f"  measured   {state['fps_measured']:.1f} fps, "
+          f"{state['bitrate_bps'] / 1e6:.2f} Mbit/s "
+          f"({state['bytes'] / max(1, state['frames']) / 1024:.1f} kB/frame)")
+    print(f"  asked for  {settings.fps} fps, {settings.bitrate_kbps / 1000:.2f} Mbit/s")
+    print(f"  encoder    {state['encoder_choice'] or state['encoder']}")
+    print(f"  written to {sink}")
+    if state["frames"] and state["fps_measured"] < settings.fps * 0.9:
+        print(
+            "\n  The encoder did not keep up. That is a hardware answer, not a\n"
+            "  setting to nudge: report the number rather than quietly dropping\n"
+            "  to 720p (HARDWARE.md §9)."
+        )
+    print(
+        "\nPlay it back to prove the picture is real:\n"
+        f"  ffplay {sink}     # or copy it off and open it anywhere\n"
     )
     agent.shutdown()
     return 0
@@ -283,12 +430,25 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="gsu", description=__doc__)
     parser.add_argument("command", nargs="?", default="run",
                         choices=["run", "preflight", "enrol", "status", "whoami",
-                                 "devices", "bench"])
+                                 "devices", "bench", "camera", "stream"])
     parser.add_argument("--token", help="enrolment code, as issued (XXXX-XXXX-XXXX)")
     parser.add_argument("--probe", action="store_true",
                         help="preflight: open a TLS connection to the platform and "
                              "the broker and verify their certificates. Sends no "
                              "credential and no token.")
+    parser.add_argument("--seconds", type=float, default=20.0,
+                        help="stream: how long to encode for")
+    parser.add_argument("--out", help="stream: where to write the H.264 (default "
+                                      "/dev/shm/gsu-stream.h264)")
+    parser.add_argument("--size", help="stream/camera: WxH, e.g. 1920x1080")
+    parser.add_argument("--fps", type=float, help="stream: frames per second")
+    parser.add_argument("--bitrate", type=int, help="stream: kbit/s target")
+    parser.add_argument("--encoder", choices=["auto", "hardware", "software"],
+                        help="stream: which H.264 encoder to use. Default auto, "
+                             "which probes and prefers a hardware encode block. "
+                             "Overrides GSU_ENCODER.")
+    parser.add_argument("--frames", type=int, default=5,
+                        help="camera: how many snapshots to take")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
     _logging(args.verbose)
@@ -325,6 +485,18 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\nNot published at all (no source): {', '.join(sorted(unsourced))}")
         agent.shutdown()
         return 0
+
+    if args.command == "stream":
+        if args.encoder:
+            import dataclasses
+
+            config = dataclasses.replace(config, encoder=args.encoder)
+            agent.config = config
+        return _stream(agent, config, args.seconds, args.out, args.size,
+                       args.fps, args.bitrate)
+
+    if args.command == "camera":
+        return _camera(agent, args.frames, args.size, args.out)
 
     if args.command == "bench":
         # Run this on the target hardware. The station's own cost is only part

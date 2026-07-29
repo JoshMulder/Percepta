@@ -55,6 +55,30 @@ class Broker:
     #: sent yet because the development broker has no TLS. Expect it; do not
     #: require it.
     ca_pem: str | None = None
+    #: The video channel, if the platform names one. It does not yet — §4 of
+    #: `contract/enrolment.md` lists three topics and the video schema is newer
+    #: than that document (CONTRACT-QUESTIONS.md item 12). Optional rather than
+    #: required so that a station enrolled before the platform gained the field
+    #: keeps working, and so that a stored credential from either era loads.
+    video_topic: str | None = None
+
+    def resolve_video_topic(self) -> str:
+        """Where video goes: what the platform said, or the same namespace as
+        telemetry with `video` on the end.
+
+        Deriving a topic is exactly what `transport/__init__.py` says not to do
+        — the station uses the channels it was told and does not invent names.
+        This is the one exception and it is a deliberate, temporary one: the
+        contract fixes the channel as `gsu/{station_id}/video`, the platform's
+        ingest already subscribes to it, and its enrolment response has not
+        caught up. Derived from `telemetry_topic` rather than built from the
+        station id so that a platform which moves its namespace moves this with
+        it, and the day the field arrives this stops guessing.
+        """
+        if self.video_topic:
+            return self.video_topic
+        head, _, _ = self.telemetry_topic.rpartition("/")
+        return f"{head}/video" if head else "video"
 
 
 @dataclass(frozen=True)
@@ -98,6 +122,7 @@ class Enrolment:
                 audio_topic=broker["audio_topic"],
                 command_topic=broker["command_topic"],
                 ca_pem=broker.get("ca_pem"),
+                video_topic=broker.get("video_topic"),
             ),
             site=Site(
                 name=station.get("name") or "unnamed station",

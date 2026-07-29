@@ -38,7 +38,9 @@ from .enrolment import EnrolmentClient, Renewer
 from .health import Health
 from .radio.receiver import RadioController
 from .store import LocalStore
+from .stream import StreamSession
 from .transport import Transport, build_transport, redact_url
+from .video import VideoPublisher
 
 log = logging.getLogger("gsu.agent")
 
@@ -62,6 +64,7 @@ NO_SOURCE = {
     "weather": "no weather station connected",
     "power": "no charge controller connected",
     "light": "no floodlight fitted",
+    "video": "no camera fitted",
 }
 
 #: `unavailable_reason` is capped by the schema.
@@ -102,9 +105,23 @@ class Agent:
         self.weather = None
         self.power = None
         self.light = None
+        self.camera = None
         self.radio: RadioController | None = None
         self._last_discovery = 0.0
         self.build_devices()
+
+        # Two separate things, both video and neither the other:
+        #
+        #   video    snapshots — one complete JPEG at a low rate on the video
+        #            channel, cheap enough to leave running, and what a console
+        #            shows when nobody is watching live.
+        #   stream   H.264 1080p30, hardware-encoded, several Mbit/s, started
+        #            only while somebody is actually watching.
+        #
+        # Both run off the sensing loop. The first has its own thread; the
+        # second is driven by the encoder's.
+        self.video = VideoPublisher(self)
+        self.stream = StreamSession(self)
 
         self._attach_lock = threading.Lock()
         self._stop = threading.Event()
@@ -224,6 +241,9 @@ class Agent:
             "latitude": site.latitude if site and site.latitude is not None else -43.5,
             "longitude": site.longitude if site and site.longitude is not None else 172.6,
             "timezone": site.timezone if site else "UTC",
+            # The synthetic camera writes this on its test card, so that a
+            # console showing two demo stations shows which is which.
+            "station_name": site.name if site else "",
             "alert_range_km": self.site.alert_range_km,
             "alert_altitude_m": self.site.alert_altitude_m,
             "traffic": self.config.airband_traffic,
@@ -241,7 +261,7 @@ class Agent:
                 self.radio.shutdown()
             except Exception:  # noqa: BLE001
                 pass
-        for slot in ("adsb", "weather", "power", "light"):
+        for slot in ("adsb", "weather", "power", "light", "camera"):
             driver = self.inventory.drivers.get(slot)
             close = getattr(driver, "close", None)
             if close:
@@ -259,10 +279,16 @@ class Agent:
             RadioController(front_end, state_path=self.config.receiver_state_path)
             if front_end is not None else None
         )
-        self.inventory.build("camera", context)
+        # Constructed here and read from the video thread. Constructing it must
+        # stay cheap for that reason — `camera/picsi.py` opens nothing and runs
+        # no subprocess until the first capture, which happens off this loop.
+        self.camera = self.inventory.build("camera", context)
 
         if self.router is not None:
-            self.router.handlers = build_handlers(self.radio, self.light, self._apply_config)
+            self.router.handlers = build_handlers(
+                self.radio, self.light, self._apply_config,
+                getattr(self, "stream", None),
+            )
 
         self._report_capabilities()
 
@@ -374,7 +400,9 @@ class Agent:
                 self.health.clear("uplink.refused")
                 self.transport.start()
 
-            handlers = build_handlers(self.radio, self.light, self._apply_config)
+            handlers = build_handlers(
+                self.radio, self.light, self._apply_config, self.stream,
+            )
             self.router = CommandRouter(enrolment.broker.command_topic, handlers)
             if self.transport is not None:
                 self.transport.subscribe(enrolment.broker.command_topic, self._on_command)
@@ -394,6 +422,10 @@ class Agent:
                 self.site.save(self.config.site_config_path)
 
             self._credential_mtime = self.credentials.mtime()
+
+            # Now there is somewhere to publish frames to. Idempotent, so a
+            # re-attach after a renewal or a re-enrolment does not restart it.
+            self.video.start()
 
             if self.renewer is not None:
                 self.renewer.stop()
@@ -612,6 +644,11 @@ class Agent:
                 label=f"{self.radio.freq_hz // 1000}kHz",
             )
 
+        # The fail-closed half of the live stream: an expired lease, the
+        # ceiling, or an encoder that has died stops it here rather than needing
+        # a command that may never arrive.
+        self.stream.tick()
+
         self._evaluate_alerts(contacts, reading)
 
         # --- publishing, which is allowed to fail -----------------------
@@ -656,6 +693,18 @@ class Agent:
             )
 
         self._update_link_state()
+
+    def video_state(self) -> dict:
+        """Both video paths in one place, because they are one question.
+
+        "What is the camera costing me" has two answers on this station — the
+        snapshot channel, which runs continuously at a low rate, and the live
+        stream, which runs only while somebody is watching — and an operator
+        looking at a metered link needs both together.
+        """
+        state = self.video.stats()
+        state["stream"] = self.stream.state_payload()
+        return state
 
     def unavailable_payload(self, kind: str, reports: dict | None = None) -> dict:
         """Declare a stream the station has no source for.
@@ -876,6 +925,11 @@ class Agent:
             "unsourced_fields": self._unsourced_fields(),
             "resources": [resource.to_dict() for resource in self.inventory.resources()],
             "storage": self.store.stats(),
+            # What video is costing, measured. It is the largest single consumer
+            # on the link when it is running, and the only honest way to know
+            # what a given camera and setting cost is for the box to say — see
+            # gsu/video.py and HARDWARE.md §8.
+            "video": self.video_state(),
             "uptime_s": round(time.monotonic() - self._started, 1),
         }
         # Renewal health, and only when there is a credential to have any. The
@@ -942,6 +996,7 @@ class Agent:
                 "auto": self.radio.auto_squelch if self.radio else False,
                 "threshold_db": round(self.radio.last_threshold_db, 1) if self.radio else None,
             },
+            "video": self.video_state(),
             "health": self.health.to_list(),
             "devices": [report.to_dict() for report in self.inventory.report()],
             "resources": [resource.to_dict() for resource in self.inventory.resources()],
@@ -999,6 +1054,12 @@ class Agent:
         # is stopped gracefully: a dongle killed mid-transfer needs a physical
         # replug, which on an unattended site is a truck
         # (server/docs/05-radio-integration.md obligation 2).
+        # Stopped before the drivers are closed: they hold the camera and would
+        # otherwise be mid-capture on a device being shut underneath them. The
+        # stream first — a `rpicam-vid` left running holds the sensor, and the
+        # next start fails with a device-busy that reads like broken hardware.
+        self.stream.stop("the station is shutting down")
+        self.video.stop()
         if self.radio is not None:
             try:
                 self.radio.shutdown()

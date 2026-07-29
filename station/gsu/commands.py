@@ -79,7 +79,7 @@ class CommandRouter:
         return False
 
 
-def build_handlers(radio, light, on_config) -> dict[str, Handler]:
+def build_handlers(radio, light, on_config, stream=None) -> dict[str, Handler]:
     """Wire the contract's commands to the things that carry them out.
 
     Every entry here has a matching field in a telemetry payload — that pairing
@@ -140,6 +140,26 @@ def build_handlers(radio, light, on_config) -> dict[str, Handler]:
         handlers["light.set"] = light_set
     else:
         log.warning("No floodlight fitted: light.set will be ignored and logged.")
+
+    def video_start(payload: dict) -> str:
+        # Idempotent by construction: a second viewer extends the lease rather
+        # than starting a second encoder, because there is one camera and the
+        # second `rpicam-vid` fails with a device-busy that reads like broken
+        # hardware. -> health.video.stream.state
+        return stream.start(payload)
+
+    def video_stop(payload: dict) -> str:
+        return stream.stop(str(payload.get("reason") or "stopped by the platform"))
+
+    if stream is not None:
+        # Not in command.schema.json yet — proposed in CONTRACT-QUESTIONS.md
+        # item 12, and the platform is building the other half now. Both are
+        # handled here so the station is ready, and both report their actual
+        # effect in `health.video.stream` rather than being assumed to have
+        # worked: `video.start` on a station with no camera is a state of
+        # `unavailable` and a reason, not silence.
+        handlers["video.start"] = video_start
+        handlers["video.stop"] = video_stop
 
     if on_config is not None:
         # Not in command.schema.json yet: `contract/enrolment.md` §7 describes

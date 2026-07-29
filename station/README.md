@@ -150,6 +150,11 @@ gsu/
                  weather, serial I/O under both
   radio/         the receiver, and the squelch and noise-floor logic that
                  contract/README.md rule 3 makes station-side correctness
+  camera/        the Pi CSI camera under libcamera, a synthetic test card, and
+                 the H.264 encoders — hardware and software, probed not assumed
+  video.py       snapshots: one complete JPEG at a low rate, on its own thread
+  stream.py      the live H.264 stream, which runs only while somebody is
+                 watching and stops when the platform stops asking
   sensors/       interfaces, and simulated implementations behind them
   console.py     the local setup and device-selection app (enrolment.md §5, §7)
   enrolment.py   claim, renew with backoff, and alarm early
@@ -172,19 +177,44 @@ GSU_BROKER_URL=redis://127.0.0.1:6380/0 .venv/bin/python -m gsu run
 .venv/bin/python -m gsu preflight  # everything that must be true before it works
 .venv/bin/python -m gsu devices    # what is fitted, and what was found
 .venv/bin/python -m gsu bench      # what a tick costs — run this on the Pi
+.venv/bin/python -m gsu camera     # one snapshot, and what it costs on the link
+.venv/bin/python -m gsu stream --seconds 30   # run the H.264 encoder, measure it
 .venv/bin/python -m unittest discover -s tests -t . -q
 ```
 
-**To put one on a Raspberry Pi, read `DEPLOYMENT.md`.** It goes from a blank SD
-card to an enrolled station, running as a **systemd service**
-(`deploy/install.sh`, `deploy/gsu.service`).
+## Video, which is two different things
 
-A container image also exists in `deploy/` and **must not be used for an
-unattended site**: Docker will not start a container whose mapped device is
-missing, so one USB adapter failing to enumerate at boot takes the whole station
-down and needs somebody there. DEPLOYMENT.md Appendix B and DECISIONS.md item 35
-have the reasoning, including the mitigation that exists and why it costs more
-than it saves.
+**Snapshots** — `gsu/{station_id}/video`, one complete JPEG per message, 640x480
+at 2 fps by default. Cheap enough to leave running, survives a link too poor for
+anything else, and it is what a console shows when nobody is watching live. A
+station with no camera publishes `available: false` with a reason rather than
+going quiet.
+
+**The live stream** — H.264 1080p30, an order of magnitude more expensive, and
+therefore **off until the platform asks**. `video.start` carries a lease and the
+stream stops when the platform stops renewing it, because the failure to design
+for is a console closing while the station keeps paying for a picture nobody can
+see. Which encoder does the work — a hardware block or x264 on the CPU — is
+probed at start-up and reported in telemetry, so moving between boards is a
+setting rather than a rewrite.
+
+Two things are not built and both are the platform's to specify: the broker does
+not yet grant the video channel (CONTRACT-QUESTIONS item 12 — measured, it
+refuses), and there is no transport for H.264 at all (item 14). `gsu camera` and
+`gsu stream` need neither, which is the point of them.
+
+**To put one on a Raspberry Pi, read `DEPLOYMENT.md`.** It goes from a blank SD
+card to an enrolled station, running as a **container** (`deploy/install.sh`,
+`deploy/Dockerfile`, `deploy/docker-compose.yml`). Running it as a plain systemd
+service is fully supported too — `install.sh --path systemd`, DEPLOYMENT.md
+Appendix B.
+
+Containers won on one constraint: these stations are hard to reach physically,
+so an update is the riskiest routine operation there is. `deploy/gsu-update.sh`
+pulls on a jittered timer, **proves the new image enrols and publishes before
+keeping it**, and rolls back to the image already on disk if it does not —
+no download, over a link that may be why you are rolling back. DEPLOYMENT.md §14
+and DECISIONS.md items 35a–c and 39; the reversal history is kept deliberately.
 
 `GSU_BROKER_URL` overrides only the broker *address* — an address and nothing
 else, never credentials — and the username and topics still come from enrolment.

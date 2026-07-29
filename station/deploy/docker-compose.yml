@@ -1,34 +1,36 @@
-# ===========================================================================
-#  DO NOT USE THIS FOR AN UNATTENDED STATION.
-#
-#  `devices:` below names specific device nodes, and Docker REFUSES TO START a
-#  container whose mapped device does not exist. So a reboot after a USB
-#  adapter fails to enumerate takes down THE WHOLE STATION — not just the
-#  affected sensor — and recovery needs somebody on site. The systemd unit
-#  beside this file does not have that failure: a missing device is a health
-#  condition the station reports and recovers from on its own, while every
-#  other sensor keeps working.
-#
-#  The owner ruled on this. deploy/gsu.service is the deployment path.
-#
-#  Kept because it may suit a CO-LOCATED station — in a rack, in a building,
-#  with someone who can reach it. DEPLOYMENT.md Appendix B has the reasoning,
-#  including the mitigation that exists (bind-mount /dev/serial and
-#  /dev/bus/usb as directories) and why it is not taken: it hands the
-#  container every USB device on the box, which gives away most of the
-#  isolation that was the reason to containerise at all.
-# ===========================================================================
-#
-# The ground station agent, as a container.
+# The ground station agent, as a container. **This is the deployment path.**
 #
 #   cd /opt/percepta/station
 #   docker compose -f deploy/docker-compose.yml up -d
 #
 # ---------------------------------------------------------------------------
-# THE PART THAT NEEDS EDITING BEFORE THIS WILL START
+# DEVICE ACCESS IS DELIBERATELY BROAD, AND THAT IS A DECISION
 #
-# `devices:` below has to match the box: comment out what is not fitted, and
-# add what is.
+# The container gets the host's whole /dev and a cgroup rule for every device
+# major it might need — not a list of specific nodes. **This is on the owner's
+# instruction**, who said isolation is not a goal here because nothing else
+# runs on this box, and that the station must be easy to stand up, maintain and
+# debug given that it will be hard to reach physically.
+#
+# It buys the two things a narrow mapping cannot:
+#
+#   * **A missing device no longer stops the station.** With named `devices:`
+#     entries, Docker refuses to start a container whose mapped node is absent
+#     — so one USB adapter failing to enumerate at boot took the whole station
+#     down. Now it starts, and reports the missing sensor as a health
+#     condition exactly as the systemd path does.
+#   * **Hot-replug works.** A UART or the SDR re-enumerating gets a new node,
+#     which appears through the bind mount and is permitted by the cgroup rule.
+#     The agent's 30-second rediscovery loop then picks it up with nobody
+#     touching anything.
+#
+# What it costs: the container can reach every device on the box, including
+# ones fitted later. Accepted, and written down in DECISIONS.md item 35c rather
+# than apologised for in a comment.
+#
+# `privileged: true` is still NOT used, and not for isolation's sake: it also
+# changes cgroup, apparmor and /sys handling, which is a blunter instrument
+# than needed and one more thing to reason about when something misbehaves.
 #
 # Find the numeric group ids for `group_add` on the host with:
 #   getent group dialout plugdev video
@@ -43,7 +45,19 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-    image: percepta/gsu:0.1.0
+
+    # A local moving tag, never a registry tag, and never `latest`.
+    #
+    # deploy/gsu-update.sh owns this name: it pulls the new image, retags the
+    # one currently running as `percepta/gsu:previous`, points `current` at the
+    # new one, and — if the new one does not prove itself — points `current`
+    # back. Compose therefore always starts "whatever passed last", and a
+    # rollback is a retag of something already on the disk rather than a
+    # download over a link that may be why you are rolling back.
+    image: percepta/gsu:current
+    # Never go to a registry for `current`: it is a local name and a pull would
+    # either fail or, worse, find something unrelated.
+    pull_policy: never
     container_name: percepta-gsu
 
     # Restart for ever. Same reasoning as the systemd unit: on a site hours
@@ -80,46 +94,37 @@ services:
       # works whichever way the station was deployed, which matters at 2am.
       - /var/lib/percepta-gsu:/var/lib/percepta-gsu
       - /etc/percepta:/etc/percepta:ro
-      # The stable serial names. This is a directory of symlinks pointing at
-      # ../../ttyUSB0 and friends, so it only works in combination with the
-      # `devices:` entries below — the symlink resolves inside the container to
-      # a node that has to be mapped. Mapped read-only: the station reads these
-      # names, it never creates them.
-      - /dev/serial/by-id:/dev/serial/by-id:ro
+      # The host's whole /dev, so that device nodes appear and disappear inside
+      # the container exactly as they do outside it.
+      #
+      # It has to be all of /dev rather than just /dev/serial and /dev/bus/usb,
+      # because /dev/serial/by-id holds *relative symlinks* — `../../ttyUSB0` —
+      # which resolve against the container's own /dev. Mounting the symlink
+      # directory without the nodes it points at gives you stable names that
+      # resolve to nothing.
+      #
+      # Not read-only: opening a serial port is O_RDWR.
+      - /dev:/dev
 
-    devices:
-      # --- the two USB-UARTs -------------------------------------------------
-      # Both are mapped by their kernel names because that is what the by-id
-      # symlinks point at. Which physical instrument is on which node still does
-      # not matter — the station is configured with the by-id path and resolves
-      # it — but BOTH nodes have to exist here or the container will not start.
-      - /dev/ttyUSB0:/dev/ttyUSB0
-      - /dev/ttyUSB1:/dev/ttyUSB1
-
-      # --- the Pi camera -----------------------------------------------------
-      # Commented out because there is no camera driver in this build, so
-      # mapping it would grant access to a device nothing opens. Uncomment with
-      # the driver. On Bookworm the camera is libcamera/V4L2, which needs more
-      # than one node: /dev/video0, /dev/media0 and /dev/dma_heap/*. Untested.
-      # - /dev/video0:/dev/video0
-      # - /dev/media0:/dev/media0
-
-    # --- the SDR ------------------------------------------------------------
-    # libusb needs /dev/bus/usb/<bus>/<device>, and the <device> number changes
-    # every time the dongle re-enumerates — so a `devices:` entry for today's
-    # node stops working after a replug, and the container would have to be
-    # recreated to see the new one. The whole USB bus is mapped instead, with a
-    # cgroup rule for the USB device major (189).
+    # Visibility is not permission — the device cgroup still has to allow each
+    # major, or every open() returns EPERM against a node that is plainly
+    # there. One rule per major this station can use, including the two whose
+    # drivers do not exist yet, so that fitting them later is not also a
+    # container change:
     #
-    # This is broader than one dongle and it is the honest cost of the container
-    # path: the systemd unit's `DeviceAllow=char-usb_device` is the same breadth,
-    # but there it is one line in a file describing a sandbox, and here it has to
-    # be traded against the alternative of a station that silently loses its
-    # receiver after somebody unplugs it.
-    #
-    # No driver in this build, so it is commented out. Uncomment with the driver.
-    # volumes: - /dev/bus/usb:/dev/bus/usb
-    # device_cgroup_rules: - 'c 189:* rmw'
+    #   188  USB serial adapters (ttyUSB*) — Airmar, ping RX Pro
+    #   166  USB CDC-ACM (ttyACM*) — some GPS receivers enumerate here
+    #   204  on-chip serial (ttyAMA*) — the Pi's own GPIO-header UART
+    #   189  USB raw (/dev/bus/usb/*) — libusb, so the RTL-SDR
+    #    81  video4linux (video*, media*) — the CSI camera on Bookworm
+    #   249  pps (pps*) — the GPS pulse-per-second line, when it arrives
+    device_cgroup_rules:
+      - 'c 188:* rmw'
+      - 'c 166:* rmw'
+      - 'c 204:* rmw'
+      - 'c 189:* rmw'
+      - 'c 81:* rmw'
+      - 'c 249:* rmw'
 
     # The console is published to loopback only. It has no authentication —
     # physical presence, or an SSH tunnel, is the control — and publishing it on

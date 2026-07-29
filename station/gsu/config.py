@@ -82,6 +82,22 @@ class AgentConfig:
     #: — still works; **on** in the deployed environment file.
     require_tls: bool = False
 
+    #: Which H.264 encoder to use: `auto`, `hardware` or `software`.
+    #:
+    #: A property of the *board*, not of the site, which is why it is here and
+    #: not in site configuration: a Pi 2/3/4 has a fixed-function encode block
+    #: and a Pi 5 is understood to have dropped it for a faster CPU. `auto`
+    #: probes and prefers hardware, and whichever ran is reported in health
+    #: telemetry with the frame rate it actually achieved — so moving a station
+    #: between boards is a setting and a measurement rather than a rewrite.
+    encoder: str = "auto"
+
+    #: Where the live H.264 stream goes while there is no uplink to the
+    #: platform: a file, so that whoever first has a Pi can prove the hardware
+    #: encoder works without needing a platform at all. Unset in the field —
+    #: `gsu/transport/stream.py` explains what replaces it.
+    stream_sink: str | None = None
+
     #: Refuse to start a second agent for the same station. Two instances
     #: publishing independent worlds onto one channel makes the console flicker
     #: between them, which looks like a platform bug rather than an operator
@@ -100,6 +116,8 @@ class AgentConfig:
             setup_port=int(_env("GSU_SETUP_PORT", "8088")),
             setup_enabled=_env("GSU_SETUP", "1") not in ("0", "false", "no"),
             airband_traffic=_env("GSU_AIRBAND_TRAFFIC", "low"),
+            stream_sink=_env("GSU_STREAM_SINK"),
+            encoder=_env("GSU_ENCODER", "auto"),
             single_instance=_env("GSU_SINGLE_INSTANCE", "1") not in ("0", "false"),
             ca_file=_env("GSU_CA_FILE"),
             api_ca_file=_env("GSU_API_CA_FILE"),
@@ -159,6 +177,18 @@ class AgentConfig:
         return self.home / "agent.lock"
 
 
+#: Strings a person or a form means as "off". `bool("false")` is `True`, which
+#: would turn "video_enabled": "false" from the platform into video switched on
+#: — the sort of thing nobody notices until the bill arrives.
+_FALSE = {"0", "false", "no", "off", ""}
+
+
+def _coerce(target: type, value: object):
+    if target is bool and isinstance(value, str):
+        return value.strip().lower() not in _FALSE
+    return target(value)
+
+
 @dataclass
 class SiteConfig:
     """Versioned site policy. Persisted locally, updated by `config.set`.
@@ -192,6 +222,36 @@ class SiteConfig:
     weather_period_s: float = 5.0
     health_period_s: float = 30.0
 
+    #: Video, which is the heaviest thing this station sends and therefore the
+    #: setting most worth being able to change from a desk. Two fields and not
+    #: five on purpose: resolution and quality describe the *camera* and live
+    #: with the device (`devices/registry.py`), while rate and whether to send
+    #: at all are *bandwidth policy* and belong to the site — which is to say,
+    #: to whoever is paying for the satellite link.
+    #:
+    #: 2 fps at 640x480 is roughly half a megabit per second sustained
+    #: (`contract/schemas/video.schema.json`), so this default is already a
+    #: significant share of a metered link. Turning it down, or off, is a
+    #: `config.set` away and needs nobody on site.
+    video_enabled: bool = True
+    video_fps: float = 2.0
+
+    #: The live H.264 stream, which is a different thing from the snapshots
+    #: above and an order of magnitude more expensive. These are the **ceiling**:
+    #: `video.start` may ask for less and never for more, because the link is
+    #: the site's constraint and not the viewer's choice.
+    #:
+    #: 1080p30 at 3 Mbit/s is the owner's requirement. Whether the Pi 2B's
+    #: hardware encoder sustains it is the largest open hardware question in
+    #: this build — HARDWARE.md §9, and `gsu stream` is how it gets answered.
+    stream_width: int = 1920
+    stream_height: int = 1080
+    stream_fps: float = 30.0
+    stream_bitrate_kbps: int = 3000
+    #: A stream still stops here even if the platform keeps renewing its lease.
+    #: Nobody watches a remote site for an hour; something has gone wrong.
+    stream_max_minutes: float = 60.0
+
     def apply(self, patch: dict, version: int | None = None) -> list[str]:
         """Merge a `config.set` payload. Unknown keys are ignored, not rejected:
         a newer platform must be able to talk to an older station."""
@@ -202,7 +262,7 @@ class SiteConfig:
                 continue
             current = getattr(self, key)
             try:
-                coerced = type(current)(value)
+                coerced = _coerce(type(current), value)
             except (TypeError, ValueError):
                 continue
             if coerced != current:

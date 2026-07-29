@@ -246,7 +246,8 @@ cannot be told apart from an identical one.** The console says so and suggests
 | ADS-B | yes, **once the ping RX Pro is connected** — nothing today |
 | weather | partly: wind, temperature, pressure. **No humidity unless the RH module is fitted, and no rainfall, visibility or sky at all** |
 | power | no device specified yet |
-| camera | hardware is capable; **the contract has no media channel**, so nothing it produces can be sent |
+| camera, snapshots | yes — MJPEG on the video channel, 640×480 at 2 fps by default. §6b has what it costs |
+| camera, live 1080p30 | **unproven on this hardware**, and no longer a blocker: hardware sizing is a later decision. The encoder is an interface with a hardware and a software implementation, probed at start-up. §9 |
 | floodlight | needs a relay and, for honest reporting, a read-back line |
 
 Two *hardware* gaps rather than software ones. **Rainfall is now closed as a
@@ -270,11 +271,167 @@ register of which.
 | The NMEA and MAVLink decoders | Unit-tested against synthetic and hand-worked frames. Never fed by a real instrument |
 | The serial layer beneath them (`serialio.py`) | **Never opened a real UART.** Its error paths are tested; its success path is not |
 | RTL-SDR airband | No driver. Reports `not supported by this software build` |
-| Pi camera | No driver, and no media channel in the contract to carry one |
+| Pi camera, snapshots (`camera/picsi.py`) | **Never run against a camera.** Both paths — picamera2 and `rpicam-jpeg` — are untested by definition. What is tested is that on a machine with neither it says which is missing |
+| Pi camera, H.264 (`camera/h264.py`) | **Never run against a camera, and never against the hardware encoder.** The command line is tested; the encoder is not |
+| The synthetic camera and its JPEG encoder | Run continuously. Output decoded with libjpeg (Pillow 12.3) and checked pixel for pixel |
+| The synthetic H.264 source | Run. Output decoded with ffmpeg 7.0.2 at 640×480 and 1920×1080, no errors, picture correct |
+| The on-demand stream logic | Run against the synthetic encoder end to end, including lease expiry and the ceiling. Never against `rpicam-vid` |
+| The stream uplink to the platform | **Does not exist.** `transport/stream.py` is a documented stub; the platform has not specified a wire format |
 | The systemd unit | Parses cleanly under `systemd-analyze verify`. Never started on a Pi |
 | `install.sh` | Syntax-checked and read through. **Never run end to end on a Pi** |
 | ARMv7 itself | Nothing in this repository has executed on it |
 
 `python -m gsu bench` and `python -m gsu preflight` are both in the build so
 that the first two rows of that table can be closed by whoever first has the
-hardware in front of them, rather than by arithmetic here.
+hardware in front of them, rather than by arithmetic here. `python -m gsu
+camera` and `python -m gsu stream` close the camera rows the same way, and
+neither needs a platform, a network or an enrolment.
+
+---
+
+## 8. Video: snapshots, measured
+
+Two video paths exist and they are different things. This section is the cheap
+one — one complete JPEG per message on `gsu/{station_id}/video`, published
+continuously at a low rate. §9 is the live H.264 stream.
+
+**Measured here** (x86-64 Xeon 4310, Python 3.14), from the synthetic test card,
+via `python -m gsu camera`. "Published" is the JSON payload that actually
+crosses the link — base64 costs a third on top of the JPEG, exactly as it does
+for audio (CONTRACT-QUESTIONS item 9) — and is the number to plan with:
+
+| Resolution | JPEG | Published | CPU/frame | At 2 fps |
+|---|---|---|---|---|
+| 320×240 | 3.7 kB | 5.0 kB | 1.9 ms | **82 kbit/s** |
+| **640×480** | **11.1 kB** | **14.9 kB** | **5.4 ms** | **245 kbit/s** |
+| 1280×720 | 27.8 kB | 37.2 kB | 9.3 ms | 610 kbit/s |
+| 1920×1080 | 58.8 kB | 78.5 kB | 16.5 ms | 1287 kbit/s |
+
+Quality moves those by about ±10% between q40 and q90, which is **not** what
+quality normally does and is a property of the synthetic source rather than of
+JPEG: its test card is made of flat blocks, so there are no high-frequency
+coefficients for a quantiser to throw away (`gsu/camera/jpeg.py` explains why
+the encoder is built that way — a general one would cost hundreds of
+milliseconds a frame on an ARMv7 core).
+
+**The synthetic frame is 3–5× smaller than a real one.** A photographic 640×480
+JPEG at reasonable quality is 30–60 kB (`contract/schemas/video.schema.json`),
+so a real camera publishes 40–80 kB a frame and costs **640–1280 kbit/s at
+2 fps**. Plan with that, not with the table above. The station measures and
+reports its own figure in every health frame (`health.video.bytes_per_frame` and
+`bitrate_bps`), so the real number arrives from the real hardware rather than
+from arithmetic here.
+
+An `available: false` frame is about 90 bytes and is rate-limited to 1 Hz, so a
+station with no camera costs **0.7 kbit/s** to keep saying so. That is the price
+of not going quiet, and it is the right price.
+
+**Not measured: the Pi.** Nothing in this repository has run on ARMv7. The
+encode figures above are the station's own CPU and would be perhaps 10–20× on a
+Pi 2B — 50–100 ms a frame at 640×480, which at 2 fps is 10–20% of one core for a
+*synthetic* card. **A real camera does not use that path at all**: picamera2 and
+`rpicam-jpeg` produce their JPEG in hardware, and the station only base64-encodes
+it. Run `python -m gsu camera` on the box to close this.
+
+---
+
+## 9. The live stream: 1080p30 H.264, and which chip encodes it
+
+The owner's requirement is **1080p at 30 fps, on demand**. That is not a setting
+change on the snapshot path, it is a different format, and the reason is
+arithmetic rather than preference:
+
+| At 1080p30 | Per frame | Sustained |
+|---|---|---|
+| MJPEG, as the snapshot channel sends it | 200–400 kB | **50–100 Mbit/s** |
+| H.264, hardware-encoded | ~12 kB average | **2–4 Mbit/s** |
+
+A factor of about twenty-five. `contract/schemas/video.schema.json` says so in
+its own description: if this ever needs smooth full-rate video, MJPEG is the
+wrong answer and should be replaced rather than tuned.
+
+### What was measured, here, and what it does and does not mean
+
+**Reference encodes** (x264 `veryfast`, CRF 23, 1080p30, on this x86 machine —
+*not* the Pi's encoder):
+
+| Content | Bitrate |
+|---|---|
+| High motion (`testsrc2`, everything moving) | **5.4 Mbit/s** |
+| Near-static scene, small moving element | **0.05 Mbit/s** |
+
+A remote site is nearly always the second case and occasionally the first, which
+is why 3 Mbit/s is the default target and why it is a *target*: the hardware
+encoder is rate-controlled, so on this path bitrate is a setting and quality is
+the variable. The honest question is not "how many bytes per second" — you
+choose that — but "what does 1080p30 look like at 3 Mbit/s from this sensor",
+and that needs the sensor.
+
+**The station's own cost of carrying the stream** is negligible and is the one
+thing that can be settled from here: it copies bytes and finds frame boundaries,
+never touching a macroblock. Parsing measured at **1071 MB/s** on this machine —
+0.04% of one core at 3 Mbit/s. Even at a pessimistic 50× penalty on ARMv7 that
+is under 2%.
+
+**The synthetic H.264 source is not a bandwidth measurement.** It emits real,
+decodable H.264 built from `I_PCM` macroblocks — uncompressed samples — so the
+platform can build against a genuine bitstream with no camera in existence. Same
+picture, three ways: **18.1 Mbit/s** synthetic, **0.05 Mbit/s** through x264.
+Use it to prove the pipe; never to size the link.
+
+### Which encoder does the work is discovered, not assumed
+
+There are two ways to make H.264 and this station implements both behind one
+interface, probed at start-up and reported in telemetry
+(`gsu/camera/h264.py`, `HardwareEncoder` and `SoftwareEncoder`;
+`GSU_ENCODER=auto|hardware|software`):
+
+| | Encoder | Cost |
+|---|---|---|
+| Pi 2/3/4 | Fixed-function block in the VideoCore, via V4L2 M2M (`/dev/video11`) | Near zero CPU |
+| Pi 5 | **Believed to have none** — `libav`/x264 on the CPU instead | Real CPU work |
+
+**The Pi 5 claim needs verifying before it decides a purchase.** The BCM2712 is
+understood to have dropped the H.264 *encode* block that the earlier VideoCore
+parts carry, trading it for a much faster CPU on which 1080p30 x264 is
+plausible. That is my understanding and not something I have confirmed on
+hardware — and it is the sort of thing that is cheap to check and expensive to
+be wrong about, because the two boards then sit at opposite ends: hardware
+encode with a weak CPU, or no hardware encode with a strong one.
+
+Which is why the encoder is an interface rather than a code path. `auto` probes
+for `/dev/video11`, prefers hardware when it is there, and falls back to
+software; asking explicitly for one that is not available is **refused with the
+reason rather than silently swapped**, because a quiet fallback would hide
+exactly the fact somebody set the option to establish. Health telemetry carries
+`video.stream.encoder`, `encoder_kind`, `encoder_choice` and the full probe
+list, alongside the frame rate and bitrate actually achieved — so no one has to
+work out later which path a given station was on.
+
+### What is still unmeasured, and is now a measurement rather than a blocker
+
+The owner's position: the Pi 2B is what is to hand for testing, a Pi 5 can be
+dropped in, and hardware sizing is a later decision. So this is no longer a
+question to block on — it is a number to report:
+
+```bash
+python -m gsu stream --seconds 30                    # the site default
+python -m gsu stream --seconds 30 --encoder software # the Pi 5 path
+python -m gsu stream --seconds 30 --size 1280x720
+```
+
+It prints the probe result, measured frames per second, measured bitrate and
+dropped frames, writes the stream to a file so it can be played back, and says
+plainly when the encoder did not keep up. Things worth knowing before running
+it on a 2B: `gpu_mem` has to be large enough for the encoder (the default 64 MB
+split may not be), and §3's USB contention applies to the network the stream
+leaves by rather than to the camera, which is on CSI.
+
+### What it costs to leave off
+
+Everything above is why the stream is **off by default and leased**: it starts
+only when the platform asks and stops when the platform stops asking
+(`gsu/stream.py`). At 3 Mbit/s, an hour of forgotten stream is 1.35 GB. The
+snapshot channel at 640×480/2 fps is 245 kbit/s of synthetic frames or around
+1 Mbit/s of real ones — a twelfth of the stream — and is what a console shows
+when nobody is watching live.

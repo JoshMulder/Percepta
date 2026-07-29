@@ -55,9 +55,23 @@ response and is pinned from then on.
 
 You never type the station's UUID. It comes back in the enrolment response.
 
-**The station runs as a systemd service.** That is the deployment path; this
-runbook is it. A container image exists in `deploy/` and **is not to be used for
-an unattended site** — Appendix B says why in one line and in more detail.
+**The station runs as a container.** That is the deployment path and this
+runbook is it. Running it as a plain systemd service is fully supported and
+documented in **Appendix B**; use that if you would rather not have Docker on
+the box.
+
+The reason containers won is the owner's constraint, not a preference about
+packaging: *once these stations are installed they are going to be difficult to
+physically access.* An update is then the highest-risk routine operation there
+is, and a container makes it atomic and makes the rollback a tag already on the
+disk — no download, over a link that may be the reason you are rolling back.
+§14 is that mechanism and is the most important section here.
+
+**Isolation was traded away deliberately**, on the owner's instruction, because
+nothing else runs on this box. The container gets the host's whole `/dev` and
+broad device permissions so that a missing sensor cannot stop the station
+starting and a replugged one is picked up without anybody touching it. See
+`DECISIONS.md` item 35c.
 
 ---
 
@@ -71,9 +85,12 @@ Then, on the box:
 
 ```bash
 sudo apt update && sudo apt full-upgrade -y
-sudo apt install -y python3-venv chrony
+sudo apt install -y docker.io docker-compose-v2 chrony
+sudo systemctl enable --now docker
 sudo raspi-config     # expand the filesystem; set the hostname and timezone
 ```
+
+(For the systemd path instead, install `python3-venv` rather than Docker.)
 
 **Time.** Install `chrony` even though `systemd-timesyncd` is present — chrony
 is what a GPS time source will later plug into, so putting it in now means the
@@ -120,7 +137,14 @@ sudo /tmp/station/deploy/install.sh --api-ca /tmp/platform-api-ca.pem
 
 # Once it is behind a proxy with a public certificate:
 sudo /tmp/station/deploy/install.sh
+
+# The systemd path instead:
+sudo /tmp/station/deploy/install.sh --path systemd
 ```
+
+`--path docker` is the default. It builds the image, tags it
+`percepta/gsu:current`, installs both unit files but enables only the ones that
+path needs, and enables the update timer.
 
 It is idempotent — re-run it to upgrade — and it never overwrites
 `/etc/percepta/gsu.env`, the state directory, or an existing device inventory.
@@ -129,13 +153,14 @@ What it does:
 
 | | |
 |---|---|
-| `/opt/percepta/station` | the code, owned by root and **not writable by the agent** |
-| `/opt/percepta/station/.venv` | Python environment with one dependency, `redis` |
+| `/opt/percepta/station` | the code and `deploy/`, owned by root |
+| `percepta/gsu:current` | the image the container runs. The updater moves this tag |
 | `/etc/percepta/gsu.env` | configuration, `0640 root:gsu` |
 | `/etc/percepta/platform-api-ca.pem` | the API's CA, if you pinned it |
 | `/var/lib/percepta-gsu` | state: credential, pinned broker CA, inventory, events, recordings. `0700 gsu` |
 | user `gsu` | system account, no login, in `dialout`, `video`, `plugdev` |
-| `/etc/systemd/system/gsu.service` | the unit, enabled but not started |
+| `/etc/systemd/system/gsu-update.{service,timer}` | the update check, timer enabled |
+| `/etc/systemd/system/gsu.service` | the systemd path, installed but **disabled** |
 | `/etc/udev/rules.d/99-percepta-sdr.rules` | so the SDR is readable without root |
 
 **Check any CA fingerprint it prints against the one you were told.** This is
@@ -203,8 +228,7 @@ Before starting anything:
 
 ```bash
 cd /opt/percepta/station
-sudo -u gsu env $(grep -v '^#' /etc/percepta/gsu.env | xargs) \
-  .venv/bin/python -m gsu preflight --probe
+sudo docker compose -f deploy/docker-compose.yml run --rm gsu preflight --probe
 ```
 
 `--probe` opens a TLS connection to the platform and the broker and verifies
@@ -244,13 +268,16 @@ must be fixed here, not later.
 ## 6. Start it
 
 ```bash
-sudo systemctl start gsu
-journalctl -u gsu -f
+cd /opt/percepta/station
+sudo docker compose -f deploy/docker-compose.yml up -d
+sudo docker compose -f deploy/docker-compose.yml logs -f
 ```
 
 It starts whether or not there is a network, whether or not it is enrolled, and
-whether or not any sensor answers. That is deliberate: sensing, recording and
-local alerting must not depend on anything remote.
+whether or not any sensor answers — **and whether or not the sensors are
+plugged in**. That last one is why the device mapping is permissive: with named
+device entries, one absent UART would stop the container, and stopping is
+exactly what a remote station must not do.
 
 ---
 
@@ -275,12 +302,13 @@ Headless alternative, over SSH:
 
 ```bash
 cd /opt/percepta/station
-sudo -u gsu env $(grep -v '^#' /etc/percepta/gsu.env | xargs) \
-  .venv/bin/python -m gsu enrol --token XXXX-XXXX-XXXX
+sudo docker compose -f deploy/docker-compose.yml run --rm gsu enrol --token XXXX-XXXX-XXXX
 ```
 
-The running service notices the new credential on disk within a few seconds and
-attaches without a restart.
+That writes the credential into the shared state directory, and **the running
+container notices it on disk within a few seconds** and attaches without a
+restart — the state directory is a bind mount, so the one-shot container and
+the long-running one are looking at the same files.
 
 **If the code is refused**, the message is deliberately the same for unknown,
 expired and already-used: *"This code is not valid. Ask for a new one."* Asking
@@ -318,8 +346,8 @@ Airmar is 4800 baud, the ping RX Pro 57600.
 Then:
 
 ```bash
-sudo -u gsu env $(grep -v '^#' /etc/percepta/gsu.env | xargs) \
-  /opt/percepta/station/.venv/bin/python -m gsu devices
+cd /opt/percepta/station
+sudo docker compose -f deploy/docker-compose.yml run --rm gsu devices
 ```
 
 `present` means the driver is constructed **and the device is talking**.
@@ -333,7 +361,8 @@ from `configured, not detected`, and worth different action.
 **On the box**
 
 ```bash
-journalctl -u gsu -n 50
+cd /opt/percepta/station
+sudo docker compose -f deploy/docker-compose.yml logs --tail 50
 ```
 
 Look for, in order:
@@ -345,8 +374,9 @@ Station <name> (<uuid>) attached: publishing to gsu/<uuid>/telemetry …
 Subscribed to cmd/gsu/<uuid> as gsu:<uuid>.
 ```
 
-Then `systemctl status gsu` should show `active (running)` with a low restart
-count.
+Then `sudo docker ps` should show `percepta-gsu` as `Up`, not `Restarting`. A
+container cycling through `Restarting` is a crash loop — `logs --tail 100` says
+why, and §14 covers what the updater does about one it caused.
 
 **On the setup page** — the rows that matter: Enrolled *yes*, Link *up*, Broker
 security *TLS, CA pinned*, Platform API security *TLS*, Clock kept by *NTP*,
@@ -429,10 +459,22 @@ NTP it replaced.
 ## 12. Reading the logs
 
 ```bash
-journalctl -u gsu -f                     # follow
-journalctl -u gsu -p warning --since -1h # just the problems
-journalctl -u gsu --since "2026-07-28"   # a day
+cd /opt/percepta/station
+C="docker compose -f deploy/docker-compose.yml"
+
+sudo $C logs -f                          # follow the agent
+sudo $C logs --since 1h                  # the last hour
+sudo $C logs --tail 200 | grep -i warn   # just the problems
+
+journalctl -u gsu-update -n 50           # what the updater last decided
+sudo /opt/percepta/station/deploy/gsu-update.sh --status
 ```
+
+Container logs are rotated at 10 MB × 3 by the compose file. Docker's default
+is **no rotation at all**, which on a station that logs for months fills the SD
+card and takes the site down — a slow failure with an annoying cause, and the
+one thing the container path needs configured that the systemd path gets free
+from journald.
 
 The lines that matter are health conditions. Each is raised once with a
 severity, kept while it persists — the age of a problem is the useful number —
@@ -459,19 +501,36 @@ no link at all.
 
 ## 13. When something is wrong
 
-**The service will not start.**
-`systemctl status gsu` and `journalctl -u gsu -n 50`. Most likely:
+**The container will not start.**
+`sudo docker compose -f deploy/docker-compose.yml logs --tail 50`. Most likely
 `/etc/percepta/gsu.env` has a syntax error (it is shell-ish: `KEY=value`, no
-spaces around `=`), or the venv is missing — re-run the installer.
+spaces around `=`), or the image is missing because the build failed — re-run
+`docker compose ... build`.
 
-If it fails with a memory-protection error after someone has added a dependency
-with a native extension, remove `MemoryDenyWriteExecute=yes` from the unit —
-and write down why.
+If it fails with a *device* error, that should no longer be possible: the
+compose file bind-mounts `/dev` wholesale rather than naming nodes, precisely so
+that a missing sensor cannot stop the station. If somebody has reintroduced a
+`devices:` list, that is the cause and `DECISIONS.md` item 35c is why it was
+removed.
+
+**The container is in a restart loop.**
+`sudo docker ps` shows `Restarting`. If it started after an update window, the
+updater should already have rolled it back — check `sudo
+/opt/percepta/station/deploy/gsu-update.sh --status` and `journalctl -u
+gsu-update -n 50`. If it did not (the timer was disabled, or the update was
+applied by hand), roll back with `sudo ... gsu-update.sh --rollback`.
+
+**A sensor is not visible inside the container.**
+Check it exists on the host first (`ls -l /dev/serial/by-id/`). If it is there
+and the container cannot open it, the cause is the device cgroup rather than the
+mount: `device_cgroup_rules` in the compose file needs the major for that device
+class. `ls -l /dev/<node>` prints the major as the first of the two numbers.
 
 **"Another agent is already running."**
-A stale lock, or genuinely two copies. `systemctl stop gsu`, check for strays
-with `pgrep -af "gsu run"`, then start again. Two agents on one station publish
-two independent worlds onto one channel and the console alternates between them.
+Two copies. Almost always both deployment paths at once — check `systemctl
+is-enabled gsu` and stop it: the container path leaves that unit installed but
+disabled deliberately. Two agents on one station publish two independent worlds
+onto one channel and the console alternates between them.
 
 **Nothing is being published, and the link looks fine.**
 Check **Broker security** on the setup page. `uplink.refused` means the station
@@ -520,9 +579,11 @@ recording throughout; it is cut off, not disabled.
 **Start again from nothing.**
 
 ```bash
-sudo systemctl stop gsu
+cd /opt/percepta/station
+C="docker compose -f deploy/docker-compose.yml"
+sudo $C down
 sudo rm /var/lib/percepta-gsu/credential.json /var/lib/percepta-gsu/broker-ca.pem
-sudo systemctl start gsu
+sudo $C up -d
 ```
 
 Keeps the device inventory, the events and the recordings; drops the identity.
@@ -530,21 +591,136 @@ Then enrol with a fresh code.
 
 ---
 
-## 14. Upgrading
+## 14. Updates, and what happens when one is bad
 
-```bash
-rsync -a --exclude var/ --exclude .venv/ ~/percepta/station/ pi@<box>:/tmp/station/
-sudo /tmp/station/deploy/install.sh
-sudo systemctl restart gsu
+**This is the section that justifies the container.** Everything else is
+roughly a wash between the two paths; this is not.
+
+The failure being designed against is not "the update did not arrive". It is
+**"the update arrived, the station stopped working, and now somebody has to
+drive there"** — which on these sites is the most expensive thing that can
+happen, and an update is the routine operation most likely to cause it.
+
+### How a station is told
+
+It is not told. **Nothing can reach inward** — Starlink is CGNAT and the
+platform can never initiate a connection to a station
+(`contract/enrolment.md` §1) — so the station asks, on a timer:
+
+```
+gsu-update.timer  →  gsu-update.service  →  deploy/gsu-update.sh
 ```
 
-Configuration, state and the device inventory all survive. The restart is
-graceful: the agent stops the receiver through its own shutdown path rather than
-being killed, because a dongle killed mid-transfer needs a physical replug.
+Every 6 hours, **plus up to 2 hours of random delay**. The jitter is the
+important part: without it every station in a fleet checks in the same minute,
+so a bad image reaches all of them at once and they fail together. Spread out,
+the first station fails long before the last one has looked — the difference
+between one site visit and all of them.
 
-**There is no automatic update path and there should not be one yet.** It is the
-same trust root as enrolment, and `contract/enrolment.md` §9.5 is unanswered —
-see `DECISIONS.md`.
+A check that finds nothing new costs **about 6 KB** (an auth token plus a
+manifest HEAD). Four a day is ~24 KB against roughly 113 MB/day of telemetry
+from this station: 0.02%. That measurement is why polling is reasonable here at
+all, and it is in `DECISIONS.md` item 40 with how it was taken.
+
+Set what to track in `/etc/percepta/gsu.env`. **Prefer a digest** — a tag can be
+moved under you, and on a box you cannot reach you want to know exactly what
+will arrive:
+
+```sh
+GSU_UPDATE_REF=registry.example.net/percepta/gsu@sha256:abc123…
+```
+
+Unset, the station never updates. That is a safe default, not an oversight.
+
+### What happens when one arrives
+
+```
+pull  →  tag the running image as `previous`  →  start the new one
+      →  GATE  →  keep it, or put `previous` back
+```
+
+**The gate is the whole design.** Within `GSU_GATE_SECONDS` (180 by default) the
+new container must:
+
+1. be running — not restarting, not exited;
+2. answer on its own console;
+3. report itself **enrolled** — the credential survived the swap;
+4. report the **uplink up**;
+5. **increase its published-frame counter.**
+
+Point 5 is the one that earns its keep. A container can start, log cheerfully
+and publish nothing at all — and that failure is invisible to a "did it start?"
+check and indistinguishable from a healthy station until somebody looks at a
+console days later. The gate insists the station is doing its job, not that it
+launched.
+
+If the gate fails, the updater retags `previous` back to `current`, recreates
+the container, **and gates the restored image too** — so "the rollback worked"
+is a fact rather than an assumption. If even the old image cannot pass, it says
+so specifically: that is not an update fault and sending someone after the
+update would waste the trip.
+
+The rejected digest is recorded, and **not retried**. Without that, a bad image
+is re-pulled every 6 hours for ever, spending metered bandwidth and flapping the
+station in and out of service each time.
+
+### If the link drops mid-pull
+
+Nothing happens, which is the point. `docker pull` is atomic at the image level:
+layers are content-addressed and verified as they arrive, and the local
+reference only moves once every layer is present. **A half-completed pull cannot
+produce a half-built image** — it fails, the running container is untouched, and
+the next check resumes from the layers already in the content store. The
+updater treats a failed pull as a non-event and exits 0.
+
+*(Documented Docker behaviour. Not verified on this hardware — see "what was
+never tested" below.)*
+
+### Doing it by hand
+
+```bash
+U=/opt/percepta/station/deploy/gsu-update.sh
+
+sudo $U --status      # what is running, what the rollback target is
+sudo $U               # check and apply now, with the gate
+sudo $U --rollback    # go back to `previous` deliberately
+sudo $U --force       # retry a digest that previously failed its gate
+```
+
+`--status` is the first thing to run when a station is behaving oddly after an
+update window.
+
+### Disk
+
+Two images, sharing every layer they have in common — the base and the pip layer
+are identical between builds, so keeping `previous` costs only its own code
+layer, about 91 KB. Keeping a rollback target on disk is close to free, which is
+what makes this design possible on an SD card.
+
+### Building and publishing an update
+
+```bash
+# on a build machine
+docker buildx build --platform linux/arm/v7 \
+  -f deploy/Dockerfile -t registry.example.net/percepta/gsu:0.1.1 .
+docker push registry.example.net/percepta/gsu:0.1.1
+docker inspect --format '{{index .RepoDigests 0}}' registry.example.net/percepta/gsu:0.1.1
+```
+
+Put that digest in `GSU_UPDATE_REF` on **one** station first, watch it, then the
+rest. The jitter means a fleet staggers itself, but deliberately staging one
+box is better than relying on luck.
+
+### What this does not do
+
+- **No signature verification.** A digest pin means the image cannot change
+  under you, but it does not prove who built it. Proper signing is part of the
+  §9.5 answer that is still open — see `DECISIONS.md` item 39.
+- **No way to trigger an update from the platform.** The station checks when its
+  timer says so, up to ~8 hours after a release. A command-channel trigger would
+  need a contract change; it is written up as `CONTRACT-QUESTIONS.md` item 11
+  rather than invented here.
+- **No host OS updates.** This updates the agent, not Raspberry Pi OS.
 
 ---
 
@@ -590,8 +766,7 @@ field.
 
 ```bash
 # on the box, as root
-/opt/percepta/station                    code (root-owned, not agent-writable)
-/opt/percepta/station/.venv/bin/python   the interpreter the service runs
+/opt/percepta/station                    code and deploy/ (root-owned)
 /etc/percepta/gsu.env                    configuration        0640 root:gsu
 /etc/percepta/platform-api-ca.pem        the API's CA, if pinned
 /var/lib/percepta-gsu/                   state                0700 gsu
@@ -600,102 +775,135 @@ field.
   devices.json                           what is fitted
   station.db                             events
   recordings/                            audio
-/etc/systemd/system/gsu.service          the unit
+  update/rejected                        digests that failed their gate
+/etc/systemd/system/gsu-update.timer     the update check (container path)
+/etc/systemd/system/gsu.service          the systemd path (disabled by default)
 
-# commands, all as the gsu user with the env file loaded
-python -m gsu preflight --probe          everything that must be true
-python -m gsu devices                    intent against fact
-python -m gsu whoami                     what this box thinks it is, offline
-python -m gsu status                     what the platform thinks of it
-python -m gsu bench                      what a tick costs on this hardware
+# images
+percepta/gsu:current                     what runs. The updater moves this tag
+percepta/gsu:previous                    the rollback target, already on disk
+
+# everything, via compose
+C="docker compose -f /opt/percepta/station/deploy/docker-compose.yml"
+sudo $C up -d                            start
+sudo $C logs -f                          follow
+sudo $C run --rm gsu preflight --probe   everything that must be true
+sudo $C run --rm gsu devices             intent against fact
+sudo $C run --rm gsu whoami              what this box thinks it is, offline
+sudo $C run --rm gsu status              what the platform thinks of it
+sudo $C run --rm gsu bench               what a tick costs on this hardware
+
+# updates
+U=/opt/percepta/station/deploy/gsu-update.sh
+sudo $U --status                         running / previous / tracking
+sudo $U                                  check and apply, gated
+sudo $U --rollback                       go back deliberately
+journalctl -u gsu-update -n 50           what it last decided
 ```
 
 ---
 
-## Appendix B: the container image, and why it is not the deployment path
+## Appendix B: running it as a plain systemd service instead
 
-**Do not deploy an unattended station with Docker.** A container will not start
-if a device it maps is missing, so a reboot after a USB adapter fails to
-enumerate takes down **the entire station** — not just the affected sensor — and
-recovery needs somebody on site. The owner's ruling, and it is the right one.
+Fully supported, and the right choice if you would rather not have Docker on the
+box. What you give up is §14 — atomic updates and a rollback that is already on
+disk — which is the reason it is not the default, not a defect in this path.
 
-The systemd service does not have that failure: a missing device is a health
-condition the station reports and recovers from on its own when the device
-reappears, while every other sensor keeps working throughout.
-
-`deploy/Dockerfile` and `deploy/docker-compose.yml` are kept because they are
-sound work and may suit a **co-located** station — one in a rack, in a building,
-with someone who can reach it. Both files carry this warning at the top. Nothing
-in the runbook above depends on them.
-
-### The mitigation that exists, and why it is not taken
-
-This is not an oversight and it should not be discovered as one later.
-
-The won't-start failure **can** be avoided: bind-mount `/dev/serial` and
-`/dev/bus/usb` as *directories* rather than mapping individual device nodes.
-Then nothing is missing at start, and hot-replug works — a UART plugged in after
-the container is running becomes visible, and the SDR survives re-enumeration
-without recreating anything.
-
-The cost is that the container then has access to **every USB device on the
-box**, present and future, rather than the three it needs. That gives away most
-of the isolation which was the reason to containerise in the first place: what
-remains is a filesystem boundary the systemd unit already provides via
-`ProtectSystem=strict`, plus a supervisor systemd already is.
-
-So the choice is between a container that can strand the site and a container
-that is barely isolating anything. Neither is better than the unit file, which
-is why the decision went the way it did rather than being mitigated. It is
-written down here so a future reader knows the option was understood and
-rejected, not missed.
-
-### If you run it anyway, on a site with people
+Everything from §4 (configuration) onwards is identical. The differences:
 
 ```bash
-sudo apt install -y docker.io docker-compose-v2
-sudo systemctl enable --now docker
+sudo apt install -y python3-venv chrony          # instead of docker
+sudo /tmp/station/deploy/install.sh --path systemd --api-ca /tmp/platform-api-ca.pem
 
-# The installer still lays down /etc/percepta and /var/lib/percepta-gsu,
-# which the container binds:
-sudo /tmp/station/deploy/install.sh --api-ca /tmp/platform-api-ca.pem
-sudo systemctl disable --now gsu      # only one of the two may run at a time
-
+# preflight, start, logs
 cd /opt/percepta/station
-sudo nano deploy/docker-compose.yml   # devices: MUST match the box, or it will
-                                      # not start. group_add MUST carry the
-                                      # host's numeric gids, not names.
-sudo docker compose -f deploy/docker-compose.yml build
-sudo docker compose -f deploy/docker-compose.yml up -d
+sudo -u gsu env $(grep -v '^#' /etc/percepta/gsu.env | xargs) \
+  .venv/bin/python -m gsu preflight --probe
+sudo systemctl start gsu
+journalctl -u gsu -f
+
+# enrol headless
+sudo -u gsu env $(grep -v '^#' /etc/percepta/gsu.env | xargs) \
+  .venv/bin/python -m gsu enrol --token XXXX-XXXX-XXXX
 ```
 
-Subcommands work as they do everywhere else:
+`--path systemd` disables the update timer, because it updates a container and
+there is not one.
+
+**Upgrading is manual**, and this is the trade:
 
 ```bash
-sudo docker compose -f deploy/docker-compose.yml run --rm gsu preflight --probe
-sudo docker compose -f deploy/docker-compose.yml run --rm gsu enrol --token XXXX-XXXX-XXXX
-sudo docker compose -f deploy/docker-compose.yml logs -f
+rsync -a --exclude var/ --exclude .venv/ ~/percepta/station/ pi@<box>:/tmp/station/
+sudo /tmp/station/deploy/install.sh --path systemd
+sudo systemctl restart gsu
 ```
 
-Building on the Pi itself is fine — one pure-Python dependency, nothing
-compiles. To build elsewhere: `docker buildx build --platform linux/arm/v7`.
+Configuration, state and the device inventory survive. There is **no health gate
+and no automatic rollback** — if the new code does not work, somebody has to
+notice and put the old code back by hand, over a link that may be why they
+noticed. On a site that is hours away, that is the risk §14 exists to remove.
 
-The SDR and camera are commented out in the compose file: there is no driver for
-either in this build, and mapping a device nothing opens is access granted for
-no reason.
+### What this path is better at
 
-### What was never tested
+Two things, honestly:
 
-**None of it.** The Docker daemon is not reachable from the machine this was
-written on — `docker info` returns a permission error — so the image has never
-been built and the container has never been started, on any architecture. The
-device mappings, the `group_add` gids, the `read_only` filesystem and the tmpfs
-are reasoned from documentation, not observed.
+- **A missing device was never a problem here.** The unit has no device list to
+  be wrong; the agent opens what it finds and reports what it cannot. The
+  container path only matches this because its device mapping was made
+  permissive (`DECISIONS.md` item 35c).
+- **Tighter sandboxing.** `ProtectSystem=strict`, an empty
+  `CapabilityBoundingSet`, a `@system-service` syscall filter and a
+  `DeviceAllow` list, against a container that has the host's whole `/dev`. That
+  difference does not matter on a box where nothing else runs — which is the
+  owner's position and the reason the trade was made — but it is real and it
+  should be stated rather than glossed.
 
-Two things *were* checked: the compose file validates against the schema
-(`docker compose config`), and the ARMv7 base image is verified at the registry
-— `python:3.11-slim-bookworm` publishes `linux/arm/v7`, manifest
-`sha256:d2091b0d…`, 39.9 MB compressed across 4 layers.
+### The hardening in the unit, and two lines that could bite
 
-`DECISIONS.md` item 35 has the full cost comparison, including which of my own
-original arguments against Docker did not survive checking.
+- **`MemoryDenyWriteExecute=yes`** — CPython and the one pure-Python dependency
+  do not need writable-executable pages. If a native extension is ever added and
+  the service will not start, this is the first line to remove, and the reason
+  should be written down when it is.
+- **`RestrictAddressFamilies` includes `AF_NETLINK`**, which looks removable and
+  is not: glibc's `getaddrinfo()` uses it to enumerate local addresses, so
+  dropping it breaks DNS and the station cannot find the broker.
+
+`PrivateDevices` is deliberately not set — it would take away the UARTs and the
+SDR. A `DeviceAllow` list is used instead.
+
+---
+
+## Appendix C: what has actually been run, and what has not
+
+The distinction matters more than usual here, because the deployment path
+changed twice and none of it has touched the target hardware.
+
+**Verified, on x86-64:**
+
+- TLS to the broker with a pinned private CA, refusal of the wrong CA, refusal
+  of plaintext, and refusal to downgrade — against a real TLS-only Redis with a
+  per-station ACL.
+- Enrolment over HTTPS, CA persistence at 0600, reconnection from the persisted
+  CA alone, and the broker/API trust split in both configurations.
+- Full contract conformance over `rediss://` with no `--insecure`.
+- **The updater's decision logic** — accept, gate-fail, roll back, verify the
+  rollback, refuse to retry a rejected digest, survive a failed pull, no-op on
+  an unchanged digest — driven against a stubbed Docker and a real HTTP console.
+  21 scenarios.
+- The ARMv7 base image, verified at the registry.
+- Update bandwidth: the code layer and the cost of a no-op check, both measured.
+
+**Never run, anywhere:**
+
+- The image has **never been built**, on any architecture. There is no Docker
+  daemon on the machine this was written on.
+- The container has **never been started**, so the `/dev` bind mount, the
+  `device_cgroup_rules` majors, `group_add`, `read_only` and the tmpfs are all
+  reasoned from documentation.
+- `gsu-update.sh` has **never driven a real container** — only the stub.
+- `install.sh` has never been run end to end.
+- Nothing has executed on ARMv7, a real UART, the camera or the SDR.
+
+The first person with the hardware should expect the device cgroup majors and
+the `group_add` gids to need adjusting, and should run `gsu-update.sh` by hand
+once before letting the timer near it.

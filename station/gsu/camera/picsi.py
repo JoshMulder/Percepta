@@ -1,0 +1,340 @@
+"""The Raspberry Pi camera on the CSI ribbon, under libcamera.
+
+**Never run against hardware.** There is no Pi and no camera on the machine this
+was written on, and HARDWARE.md §7 records it as untested. What follows is
+written to fail in ways somebody can diagnose from a log line rather than to
+look convincing.
+
+Bookworm dropped the old `raspistill`/MMAL stack for libcamera, so there are two
+ways in and this driver takes whichever is there:
+
+    picamera2      the Python API, if it imports. One long-lived camera object,
+                   configured once, grabbing a JPEG per frame.
+    rpicam-jpeg    a subprocess per frame, writing to a file we then read. Slower
+                   by a long way - a process start, camera open and AE settle
+                   every frame - but it depends on nothing but the packages a
+                   stock Bookworm image already has.
+
+Three rules the rest of the station relies on, all of them enforced here:
+
+**Nothing blocks the sensing loop.** Every camera operation happens on the video
+thread. The constructor does only cheap checks - no import of picamera2, no
+subprocess - because it runs inside a tick.
+
+**A frame is complete or it is absent.** The subprocess path reads the file only
+after the process has exited cleanly, and both paths go through
+`complete_jpeg()`. A capture that timed out, half-wrote, or returned a truncated
+buffer produces `None` and a sentence, never a partial picture.
+
+**`captured_at` is the shutter, not the send.** Taken immediately after the
+capture call returns and carried on the frame from there. It is the closest this
+software can get to the exposure without the camera telling it - which picamera2
+can, in request metadata, and which is worth revisiting on hardware.
+
+A camera that is not answering backs off rather than being retried at the frame
+rate: on a box nobody is standing next to, a failing subprocess twice a second
+for a week is its own fault.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import logging
+import os
+import shutil
+import subprocess
+import tempfile
+import time
+
+from .. import clock
+from ..sensors import Device
+from . import Frame, complete_jpeg, parse_resolution
+
+log = logging.getLogger("gsu.camera")
+
+#: Command-line capture tools, best first. Bookworm renamed `libcamera-*` to
+#: `rpicam-*` and ships both names for now; an older image has only the former.
+CLI_TOOLS = ("rpicam-jpeg", "rpicam-still", "libcamera-jpeg", "libcamera-still")
+
+#: How long a still capture may take before it is abandoned. Generous, because
+#: a cold camera on a Pi 2B is not quick, and bounded, because an unattended box
+#: cannot afford a subprocess that never returns.
+CAPTURE_TIMEOUT_S = 8.0
+
+#: Preview/auto-exposure settle time given to the command-line tool. The default
+#: is five seconds, which would be one frame every five seconds; this is the
+#: shortest value that still lets exposure converge at all.
+CLI_SETTLE_MS = 300
+
+#: How long to leave a failed camera alone before trying again.
+RETRY_SECONDS = 10.0
+
+#: Failures in a row before the slot is reported as failed rather than silent.
+FAILURES_BEFORE_FAILED = 3
+
+
+class PiCsiCamera:
+    """A CSI camera, captured one still at a time."""
+
+    def __init__(
+        self,
+        resolution: object = "640x480",
+        quality: int = 75,
+        rotation: int = 0,
+        camera_num: int = 0,
+    ) -> None:
+        self.width, self.height = parse_resolution(resolution)
+        self.quality = max(1, min(100, int(quality or 75)))
+        self.rotation = 180 if int(rotation or 0) == 180 else 0
+        self.camera_num = int(camera_num or 0)
+
+        # Cheap checks only: this constructor runs inside a sensing tick.
+        self._picamera2_installed = importlib.util.find_spec("picamera2") is not None
+        self._tool = next((tool for tool in CLI_TOOLS if shutil.which(tool)), None)
+        self._backend = "picamera2" if self._picamera2_installed else (
+            "cli" if self._tool else "none"
+        )
+        self._camera = None            # a Picamera2, once one has been opened
+        self._reason = "" if self._backend != "none" else (
+            "no CSI camera support on this box: picamera2 is not installed and "
+            "no rpicam-jpeg was found. Install python3-picamera2 or rpicam-apps."
+        )
+        self._failures = 0
+        self._next_attempt = 0.0
+        self.frames = 0
+        self.last_bytes = 0
+        self.last_capture_ms = 0.0
+        # Scratch file for the command-line path. /dev/shm keeps a frame twice a
+        # second off the SD card, which is the part of a Pi that wears out.
+        self._scratch = os.path.join(
+            "/dev/shm" if os.path.isdir("/dev/shm") else tempfile.gettempdir(),
+            f"gsu-camera-{os.getpid()}.jpg",
+        )
+
+    # --- the interface --------------------------------------------------
+
+    @property
+    def status(self) -> str:
+        if self._backend == "none":
+            return "absent"
+        if self._failures >= FAILURES_BEFORE_FAILED:
+            return "failed"
+        return "streaming" if self.frames else "silent"
+
+    @property
+    def unavailable_reason(self) -> str:
+        return self._reason
+
+    def capture(self) -> Frame | None:
+        if self._backend == "none":
+            return None
+        if time.monotonic() < self._next_attempt:
+            # Backing off. The reason from the last failure is still the truth,
+            # and the station keeps publishing it rather than going quiet.
+            return None
+
+        started = time.monotonic()
+        data = None
+        if self._backend == "picamera2":
+            data = self._capture_picamera2()
+            if data is None and self._backend == "cli":
+                # picamera2 disqualified itself mid-capture; try the fallback in
+                # the same tick rather than losing a frame to the switch.
+                data = self._capture_cli()
+        else:
+            data = self._capture_cli()
+
+        at = clock.now()
+        if not complete_jpeg(data):
+            if data is not None and not self._reason:
+                self._reason = (
+                    f"the camera returned {len(data)} bytes that are not a "
+                    "complete JPEG; the frame was dropped rather than published"
+                )
+            return self._failed(self._reason or "the camera returned no frame")
+
+        self._failures = 0
+        self._reason = ""
+        self.frames += 1
+        self.last_bytes = len(data)
+        self.last_capture_ms = (time.monotonic() - started) * 1000
+        return Frame(jpeg=data, width=self.width, height=self.height, captured_at=at)
+
+    def describe(self) -> Device:
+        if self._backend == "none":
+            detail = self._reason
+        else:
+            detail = (
+                f"Pi CSI camera via {self._backend}, {self.width}x{self.height}, "
+                f"quality {self.quality}"
+            )
+            if self.frames:
+                detail += (
+                    f", {self.last_bytes / 1024:.1f} kB/frame, "
+                    f"{self.last_capture_ms:.0f} ms/capture"
+                )
+            elif self._reason:
+                detail += f" — {self._reason}"
+        return Device(
+            id="camera",
+            kind="camera",
+            present=self.status in ("streaming", "silent"),
+            detail=detail[:200],
+            simulated=False,
+        )
+
+    def close(self) -> None:
+        camera, self._camera = self._camera, None
+        if camera is not None:
+            for method in ("stop", "close"):
+                try:
+                    getattr(camera, method)()
+                except Exception:  # noqa: BLE001 - shutting down, say so and go on
+                    log.debug("Camera %s() failed during shutdown.", method, exc_info=True)
+        try:
+            os.unlink(self._scratch)
+        except OSError:
+            pass
+
+    # --- backends -------------------------------------------------------
+
+    def _capture_picamera2(self) -> bytes | None:
+        """One JPEG through the Python API.
+
+        The camera object is opened once and kept: opening it costs the best
+        part of a second, and doing that per frame would put the frame rate out
+        of reach before anything else did.
+        """
+        try:
+            if self._camera is None:
+                self._camera = self._open_picamera2()
+            import io
+
+            buffer = io.BytesIO()
+            self._camera.capture_file(buffer, format="jpeg")
+            return buffer.getvalue()
+        except Exception as exc:  # noqa: BLE001 - reported, never raised upward
+            self._drop_picamera2(exc)
+            return None
+
+    def _open_picamera2(self):
+        from picamera2 import Picamera2  # noqa: PLC0415 - deliberately lazy
+
+        camera = Picamera2(self.camera_num)
+        options = {"quality": self.quality}
+        config = {"main": {"size": (self.width, self.height)}}
+        if self.rotation == 180:
+            try:
+                from libcamera import Transform  # noqa: PLC0415
+
+                config["transform"] = Transform(hflip=1, vflip=1)
+            except Exception:  # noqa: BLE001
+                log.warning(
+                    "libcamera.Transform is unavailable; the camera will not be "
+                    "rotated. Mount the camera the right way up or use the "
+                    "command-line path."
+                )
+        camera.configure(camera.create_video_configuration(**config))
+        camera.options.update(options)
+        camera.start()
+        log.info(
+            "Pi camera open via picamera2 at %dx%d, quality %d.",
+            self.width, self.height, self.quality,
+        )
+        return camera
+
+    def _drop_picamera2(self, exc: Exception) -> None:
+        """Give up on picamera2 and use the command-line tool instead.
+
+        The likeliest cause on a stock image is a missing dependency of
+        `capture_file` rather than a missing camera, and the two need different
+        answers from whoever reads this. Both are stated.
+        """
+        camera, self._camera = self._camera, None
+        if camera is not None:
+            try:
+                camera.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if self._tool:
+            self._backend = "cli"
+            self._reason = f"picamera2 failed ({exc}); using {self._tool} instead"
+            log.warning(
+                "picamera2 could not capture (%s). Falling back to %s, which is "
+                "slower per frame. If the camera itself is missing, %s will fail "
+                "too and say so.", exc, self._tool, self._tool,
+            )
+        else:
+            self._reason = (
+                f"picamera2 failed ({exc}) and no rpicam-jpeg is installed to "
+                "fall back to"
+            )[:200]
+
+    def _capture_cli(self) -> bytes | None:
+        """One JPEG through `rpicam-jpeg`, via a file rather than a pipe.
+
+        A file, because a partial pipe read and a complete one are hard to tell
+        apart under a timeout, and this is the path that must not produce half a
+        picture. The file is read only after the process has exited cleanly.
+        """
+        if not self._tool:
+            return None
+        command = [
+            self._tool,
+            "--nopreview",
+            "--timeout", str(CLI_SETTLE_MS),
+            "--width", str(self.width),
+            "--height", str(self.height),
+            "--quality", str(self.quality),
+            "--output", self._scratch,
+        ]
+        if self._tool.endswith("still"):
+            command += ["--encoding", "jpg"]
+        if self.rotation == 180:
+            command += ["--rotation", "180"]
+        if self.camera_num:
+            command += ["--camera", str(self.camera_num)]
+        try:
+            os.unlink(self._scratch)
+        except OSError:
+            pass
+        try:
+            done = subprocess.run(
+                command, capture_output=True, timeout=CAPTURE_TIMEOUT_S, check=False,
+            )
+        except subprocess.TimeoutExpired:
+            self._reason = (
+                f"{self._tool} did not return within {CAPTURE_TIMEOUT_S:.0f}s; "
+                "the frame was abandoned"
+            )
+            return None
+        except OSError as exc:
+            self._reason = f"{self._tool} could not be run: {exc}"[:200]
+            return None
+        if done.returncode != 0:
+            detail = (done.stderr or b"").decode("utf-8", "replace").strip()
+            # libcamera's own message is far more useful than anything this
+            # code could invent — "no cameras available" is the whole diagnosis.
+            self._reason = f"{self._tool} failed: {detail.splitlines()[-1]}"[:200] \
+                if detail else f"{self._tool} exited {done.returncode}"
+            return None
+        try:
+            with open(self._scratch, "rb") as handle:
+                return handle.read()
+        except OSError as exc:
+            self._reason = f"{self._tool} wrote nothing readable: {exc}"[:200]
+            return None
+
+    # --- failure ---------------------------------------------------------
+
+    def _failed(self, reason: str) -> None:
+        self._failures += 1
+        self._reason = reason[:200]
+        self._next_attempt = time.monotonic() + RETRY_SECONDS
+        if self._failures == FAILURES_BEFORE_FAILED:
+            log.error(
+                "The camera has failed %d captures in a row: %s. Retrying every "
+                "%.0fs; video is being published as unavailable meanwhile.",
+                self._failures, self._reason, RETRY_SECONDS,
+            )
+        return None

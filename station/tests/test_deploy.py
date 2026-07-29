@@ -9,6 +9,7 @@ this station actually has, and that the unit file has not quietly lost a line.
 
 from __future__ import annotations
 
+import os
 import re
 import tempfile
 import unittest
@@ -138,8 +139,16 @@ class ShippedInventoryTests(unittest.TestCase):
 
     def test_the_driverless_devices_say_exactly_that(self):
         reports = {report.slot: report for report in self.agent.inventory.report()}
-        for slot in ("radio", "camera"):
-            self.assertIn("not supported by this software build", reports[slot].detail)
+        self.assertIn("not supported by this software build", reports["radio"].detail)
+
+    def test_the_camera_says_what_is_missing_on_this_machine(self):
+        # The CSI camera has a driver now. On anything that is not a Pi it
+        # reports what is absent rather than "unsupported": the distinction is
+        # the whole point of the message, because one of them is fixed by
+        # installing a package and the other cannot be fixed at all.
+        detail = {r.slot: r for r in self.agent.inventory.report()}["camera"].detail
+        self.assertIn("picamera2", detail)
+        self.assertIn("rpicam", detail)
 
     def test_the_streams_with_no_driver_are_declared_unavailable(self):
         sent: list[dict] = []
@@ -230,24 +239,18 @@ class UnitFileTests(unittest.TestCase):
 
 
 class ContainerTests(unittest.TestCase):
-    """The container files, which are kept but are **not** the deployment path.
+    """The container files. **This is the deployment path** (DECISIONS 35c).
 
-    The owner rejected Docker for an unattended station: a container will not
-    start if a mapped device is missing, so one USB adapter failing to
-    enumerate at boot takes the whole station down and needs somebody on site
-    (DECISIONS.md item 35). The files remain because they may suit a co-located
-    station — so the first thing tested is that the warning saying so is still
-    on both of them.
+    Neither file has ever been built or run — there is no Docker daemon on the
+    machine this was written on — so these check what a careful read can check:
+    the base image is pinned, device access is permissive enough that a missing
+    sensor cannot stop the station, the log rotation that protects the SD card
+    is present, and no `privileged: true` has crept in.
 
-    The rest check what a careful read can check, since neither file has ever
-    been built or run: the base image is pinned, the hardening matches the
-    systemd path, the log rotation that protects the SD card is present, and no
-    `privileged: true` has crept in to make a device mapping work.
+    The device assertions are the ones that matter. They encode a decision that
+    reversed twice, and a well-meaning tightening of them would restore the
+    failure that made containers unacceptable the first time round.
     """
-
-    #: Both files must carry this, or one of them can be picked up by somebody
-    #: who never sees the reason it is not the deployment path.
-    WARNING = "DO NOT USE THIS FOR AN UNATTENDED STATION"
 
     @classmethod
     def setUpClass(cls):
@@ -262,25 +265,44 @@ class ContainerTests(unittest.TestCase):
             if line.strip() and not line.lstrip().startswith("#")
         )
 
-    def test_both_files_carry_the_warning(self):
-        for name, text in (("Dockerfile", self.dockerfile),
-                           ("docker-compose.yml", self.compose)):
-            self.assertIn(self.WARNING, text, name)
-            # ...and the reason, not just the prohibition. A bare "do not" gets
-            # argued with; the failure mode does not.
-            self.assertIn("will not start", text.lower().replace("refuses to start", "will not start"), name)
-            self.assertIn("gsu.service", text, name)
+    def test_no_named_device_list_that_could_stop_the_station_starting(self):
+        # THE regression this file exists to prevent. Docker refuses to start a
+        # container whose mapped device is missing, so a named `devices:` list
+        # means one USB adapter failing to enumerate at boot takes the whole
+        # station down — on a site nobody can reach. DECISIONS.md 35a/35c.
+        self.assertNotIn("devices:", self.directives)
+        self.assertNotIn("/dev/ttyUSB0:", self.directives)
 
-    def test_the_docs_agree_that_systemd_is_the_path(self):
+    def test_dev_is_mounted_whole_so_hot_replug_works(self):
+        # And it must be all of /dev: /dev/serial/by-id holds *relative*
+        # symlinks (../../ttyUSB0) that resolve against the container's own
+        # /dev, so mounting the symlink directory alone gives stable names
+        # pointing at nothing.
+        self.assertIn("- /dev:/dev", self.directives)
+        self.assertNotIn("/dev/serial/by-id:/dev/serial/by-id", self.directives)
+
+    def test_the_device_cgroup_allows_every_major_this_station_can_use(self):
+        # Visibility is not permission: without these, open() returns EPERM on
+        # a node that is plainly there.
+        for major, what in ((188, "USB serial"), (166, "CDC-ACM"),
+                            (204, "on-chip UART"), (189, "USB raw / libusb"),
+                            (81, "video4linux"), (249, "pps")):
+            self.assertIn(f"c {major}:* rmw", self.directives, what)
+
+    def test_privileged_is_still_not_used(self):
+        # Not for isolation — that was traded away deliberately — but because
+        # it also changes cgroup, AppArmor and /sys handling, which is a
+        # blunter tool and one more thing to reason about when debugging.
+        self.assertNotIn("privileged", self.directives.replace("no-new-privileges", ""))
+
+    def test_the_docs_agree_that_the_container_is_the_path(self):
         # Prose is line-wrapped, so match on collapsed whitespace rather than
         # on where the paragraph happened to break.
         runbook = " ".join((DEPLOY.parent / "DEPLOYMENT.md").read_text().split())
-        self.assertIn("Appendix B", runbook)
-        self.assertIn("is not to be used for an unattended site", runbook)
-        # The mitigation is recorded as understood-and-rejected rather than
-        # left to be rediscovered later as an oversight.
-        self.assertIn("/dev/bus/usb", runbook)
-        self.assertIn("understood and rejected, not missed", runbook)
+        self.assertIn("The station runs as a container", runbook)
+        self.assertIn("Appendix B: running it as a plain systemd service", runbook)
+        # The trade is stated, not glossed.
+        self.assertIn("Isolation was traded away deliberately", runbook)
 
     def test_the_base_image_is_pinned_by_digest(self):
         # An unpinned base is a different station every time it is rebuilt.
@@ -345,3 +367,93 @@ class ContainerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UpdaterTests(unittest.TestCase):
+    """The update mechanism (DECISIONS.md item 39).
+
+    Its decision logic is exercised properly against a stubbed Docker in
+    `scratchpad/updatelab` — 21 scenarios covering accept, gate failure,
+    rollback, rollback verification, rejected-digest suppression, failed pull
+    and no-op. **It has never driven a real container.**
+
+    What is checked here is the shape that scenario harness cannot: that the
+    protective behaviours are still written into the script and the units, so
+    that a later edit cannot quietly remove one and leave the tests green.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.script = (DEPLOY / "gsu-update.sh").read_text()
+        cls.timer = (DEPLOY / "gsu-update.timer").read_text()
+        cls.service = (DEPLOY / "gsu-update.service").read_text()
+
+    def test_the_script_is_executable(self):
+        self.assertTrue(os.access(DEPLOY / "gsu-update.sh", os.X_OK))
+
+    def test_the_gate_requires_publishing_not_merely_starting(self):
+        # The condition that earns the gate its keep: a container can start,
+        # log cheerfully and publish nothing, and that is invisible to a
+        # "did it start?" check.
+        self.assertIn("published", self.script)
+        self.assertIn("enrolled", self.script)
+        self.assertRegex(self.script, r'\[ "\$published" -gt "\$baseline" \]')
+
+    def test_a_failed_gate_rolls_back(self):
+        self.assertIn("rollback ", self.script)
+        self.assertIn("did not pass the health gate", self.script)
+
+    def test_the_rollback_is_itself_gated(self):
+        # So that "the rollback worked" is a fact, not an assumption — and so
+        # that an old image which also fails is reported as NOT an update fault.
+        rollback = self.script.split("rollback() {", 1)[1].split("\n}", 1)[0]
+        self.assertIn("if gate;", rollback)
+        self.assertIn("ALARM", rollback)
+
+    def test_a_rejected_digest_is_not_retried(self):
+        # Otherwise a bad image is re-pulled every timer tick for ever.
+        self.assertIn("REJECTED=", self.script)
+        self.assertIn("not being retried", self.script)
+
+    def test_a_failed_pull_changes_nothing(self):
+        pull = self.script.split('if ! docker pull', 1)[1].split("fi", 1)[0]
+        self.assertIn("return 0", pull)
+        self.assertIn("untouched", pull)
+
+    def test_the_previous_image_is_kept_before_the_swap(self):
+        # The rollback target has to exist before there is anything to roll
+        # back from, and it is captured by image id so a later retag cannot
+        # move it.
+        self.assertIn("PREVIOUS_TAG", self.script)
+        self.assertIn('docker tag "$before" "$PREVIOUS_TAG"', self.script)
+
+    def test_the_timer_is_jittered_and_not_at_boot(self):
+        # Without jitter a whole fleet checks in the same minute and a bad
+        # image takes all of them out together.
+        self.assertRegex(self.timer, r"RandomizedDelaySec=\d+h")
+        self.assertIn("OnBootSec=", self.timer)
+        self.assertNotIn("OnBootSec=0", self.timer)
+        self.assertIn("Persistent=true", self.timer)
+
+    def test_the_updater_runs_on_the_host_as_root(self):
+        # A container that can reach the docker socket can replace itself with
+        # anything, which would make the gate decorative.
+        self.assertIn("User=root", self.service)
+        self.assertNotIn("docker.sock", (DEPLOY / "docker-compose.yml").read_text())
+
+    def test_nothing_updates_until_a_reference_is_configured(self):
+        # A station that keeps running what it has is the safe default for a
+        # box nobody can reach.
+        self.assertIn("GSU_UPDATE_REF", self.script)
+        self.assertIn("Nothing to track", self.script)
+        env = (DEPLOY / "gsu.env.example").read_text()
+        self.assertIn("GSU_UPDATE_REF=", env)
+        self.assertIn("GSU_GATE_SECONDS", env)
+
+    def test_the_dockerfile_keeps_code_as_the_last_layer(self):
+        # A code-only update then ships one ~91 KB layer. Moving a COPY below
+        # this would quietly make every update a bigger download.
+        dockerfile = (DEPLOY / "Dockerfile").read_text()
+        copies = [line for line in dockerfile.splitlines()
+                  if line.startswith("COPY")]
+        self.assertTrue(copies[-1].startswith("COPY gsu/"), copies)

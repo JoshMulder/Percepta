@@ -32,19 +32,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-#: One slot per thing the box has, whether or not the contract has telemetry for
-#: it. `camera` is here with no telemetry kind at all — see CONTRACT-QUESTIONS.
 SLOTS = ("adsb", "radio", "weather", "power", "light", "camera")
 
-#: Which telemetry kind a slot sources, so an absent device can be reported as
-#: an absent *stream* rather than as an empty one.
+#: Which stream a slot sources, so an absent device can be reported as an absent
+#: *stream* rather than as an empty one.
+#:
+#: `camera` maps to `video`, which is not a telemetry kind — it is its own
+#: channel with its own schema — but it is the same fact and the console needs
+#: it in the same place: a station with no camera reports `video` in
+#: `unsourced_streams`, exactly as one with no receiver reports `adsb`.
 SLOT_TELEMETRY = {
     "adsb": "adsb",
     "radio": "radio",
     "weather": "weather",
     "power": "power",
     "light": "light",
-    "camera": None,
+    "camera": "video",
 }
 
 CONNECTIONS = (
@@ -333,18 +336,50 @@ REGISTRY: tuple[DeviceType, ...] = (
         slot="camera",
         label="Raspberry Pi camera (CSI ribbon)",
         connection="csi",
-        driver=None,
+        driver="gsu.camera.picsi:PiCsiCamera",
         parameters=(
-            Parameter("resolution", "Resolution", "select", "1920x1080",
-                      choices=("1920x1080", "1280x720", "640x480"), required=False),
-            Parameter("framerate", "Frame rate", "number", 15, required=False),
-            Parameter("bitrate_kbps", "Bitrate (kbit/s)", "number", 2000, required=False),
+            Parameter("resolution", "Resolution", "select", "640x480",
+                      choices=("640x480", "1280x720", "1920x1080"), required=False,
+                      help="640x480 by default, and not because the camera "
+                           "cannot do better: at 2 fps it is already around half "
+                           "a megabit per second on a metered satellite link. "
+                           "HARDWARE.md §8 has the measured cost of each."),
+            Parameter("quality", "JPEG quality", "number", 75, required=False,
+                      help="1-100, as libjpeg means it. Below about 50 the "
+                           "picture is visibly blocked; above about 85 the file "
+                           "grows fast for very little."),
+            Parameter("rotation", "Rotation", "select", 0, choices=(0, 180),
+                      required=False,
+                      help="180 for a camera mounted upside down. Only these "
+                           "two: the sensor rotates in 180° steps and anything "
+                           "else would be a CPU-side rotate of every frame."),
         ),
-        provides=(),
+        provides=("video",),
         notes="No address and no credentials: it is a ribbon cable, not a "
-              "network device. Encoding is done by the GPU's hardware H.264 "
-              "encoder rather than the CPU. There is no media channel in the "
-              "contract, so nothing it produces has anywhere to go yet.",
+              "network device. Bookworm, so libcamera: the driver uses "
+              "picamera2 if it imports and rpicam-jpeg if it does not. Motion "
+              "JPEG rather than H.264 — the reasoning is in "
+              "contract/schemas/video.schema.json. **Never run against real "
+              "hardware** (HARDWARE.md §7).",
+    ),
+    DeviceType(
+        id="simulated-camera",
+        slot="camera",
+        label="Simulated camera, test card (no hardware)",
+        connection="simulated",
+        driver="gsu.camera.synthetic:SyntheticCamera",
+        simulated=True,
+        parameters=(
+            Parameter("resolution", "Resolution", "select", "640x480",
+                      choices=("640x480", "1280x720", "320x240"), required=False),
+            Parameter("quality", "JPEG quality", "number", 75, required=False),
+        ),
+        provides=("video",),
+        notes="Draws a test card with the capture time across it, so that a "
+              "frame is unmistakable for a photograph and a stalled stream is "
+              "visible without instrumentation. Its frames are several times "
+              "smaller than a real camera's — see HARDWARE.md §8 before "
+              "planning bandwidth from them.",
     ),
     DeviceType(
         id="onvif-network-camera",
@@ -362,9 +397,11 @@ REGISTRY: tuple[DeviceType, ...] = (
             Parameter("rtsp_path", "RTSP path", "text", "/Streaming/Channels/101",
                       required=False),
         ),
-        provides=(),
+        provides=("video",),
         notes="The case contract/enrolment.md §7 describes. Driver not "
-              "implemented, and there is no media channel to carry it.",
+              "implemented: it would pull RTSP and re-encode, which is a "
+              "different job from grabbing a still off the CSI ribbon and is "
+              "the one place a station would need a decoder of its own.",
     ),
 )
 
@@ -392,5 +429,10 @@ def default_fitted() -> dict[str, str]:
         "weather": "simulated-weather",
         "power": "simulated-power",
         "light": "simulated-light",
-        "camera": "",
+        # Simulated like everything else here. A box with no camera selected
+        # publishes `available: false` on the video channel, which is correct
+        # and is also a blank panel on somebody's console the first time they
+        # look — so a fresh station shows a test card that says SYNTHETIC
+        # rather than nothing at all.
+        "camera": "simulated-camera",
     }

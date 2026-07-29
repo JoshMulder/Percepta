@@ -112,6 +112,22 @@ class Transport(ABC):
         telemetry, because a station that is quietly dropping everything looks
         exactly like a quiet site."""
 
+    @property
+    def refusals(self) -> dict[str, str]:
+        """Topics the broker refused this station, and what it said.
+
+        A refused channel and an unreachable broker both come back as a failed
+        publish, and they are completely different faults: the first is an ACL
+        that does not grant what the station was built to send, and it will
+        never fix itself. Kept per topic because it is per topic — a station may
+        be entitled to publish telemetry and not video, which is exactly the
+        state the video channel is in today (CONTRACT-QUESTIONS.md item 12).
+
+        Not abstract: a transport that cannot tell the difference reports none
+        rather than being unable to exist.
+        """
+        return {}
+
 
 def build_transport(
     url: str,

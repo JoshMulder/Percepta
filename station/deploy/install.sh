@@ -2,7 +2,15 @@
 #
 # Install the Percepta ground station agent on Raspberry Pi OS.
 #
-#   sudo ./deploy/install.sh [--broker-ca FILE] [--api-ca FILE] [--offline]
+#   sudo ./deploy/install.sh [--path docker|systemd] [--broker-ca FILE]
+#                            [--api-ca FILE] [--offline]
+#
+# --path docker   (default) the container, with the health-gated updater and
+#                 its timer. This is the deployment path: an update is atomic
+#                 and a rollback is a tag already on the disk, which is what
+#                 matters on a station that is hard to reach.
+# --path systemd  the agent as a plain systemd service, no Docker. The
+#                 documented alternative; DEPLOYMENT.md Appendix B.
 #
 # Two CAs, because the station verifies two things against two roots:
 #   --broker-ca  the broker's private CA. Optional: it normally arrives in the
@@ -35,6 +43,7 @@ UNIT=gsu.service
 BROKER_CA=""
 API_CA=""
 OFFLINE=0
+DEPLOY_PATH=docker
 # Python 3.11 or newer: the code uses datetime.UTC, which arrived in 3.11.
 # Raspberry Pi OS Bookworm ships 3.11.2. Bullseye ships 3.9 and will not run
 # this — that is an OS upgrade, not a patch, so it is checked loudly.
@@ -57,13 +66,18 @@ while [ $# -gt 0 ]; do
    separate trust roots. Use --broker-ca (the broker's private CA, usually
    delivered by enrolment) or --api-ca (pins the platform API). See
    DEPLOYMENT.md §4." ;;
+    --path)      DEPLOY_PATH="${2:-}"; shift 2 ;;
     --offline)   OFFLINE=1; shift ;;
-    -h|--help)   sed -n '2,40p' "$0"; exit 0 ;;
+    -h|--help)   sed -n '2,48p' "$0"; exit 0 ;;
     *)           die "unknown option: $1" ;;
   esac
 done
 
 [ "$(id -u)" -eq 0 ] || die "run this with sudo."
+case "$DEPLOY_PATH" in
+  docker|systemd) ;;
+  *) die "--path must be 'docker' (default) or 'systemd', not '$DEPLOY_PATH'." ;;
+esac
 
 # --- 1. what is this box ---------------------------------------------------
 say "Checking the machine"
@@ -87,8 +101,18 @@ sys.exit(0 if sys.version_info[:2] >= need else 1)
 PY
 info "python: $PY_VER — ok"
 
-python3 -c 'import venv' 2>/dev/null || die \
-  "python3-venv is missing. Install it: apt install python3-venv"
+if [ "$DEPLOY_PATH" = "docker" ]; then
+  command -v docker >/dev/null || die \
+    "docker is not installed. Either:
+     sudo apt install -y docker.io docker-compose-v2
+   or install the systemd path instead: sudo $0 --path systemd"
+  docker compose version >/dev/null 2>&1 || die \
+    "the docker compose plugin is missing. Install docker-compose-v2."
+  info "docker: $(docker --version 2>/dev/null | head -1)"
+else
+  python3 -c 'import venv' 2>/dev/null || die \
+    "python3-venv is missing. Install it: apt install python3-venv"
+fi
 
 if [ ! -f /sys/class/rtc/rtc0/name ]; then
   info "no hardware RTC: this box boots with no idea of the time."
@@ -130,23 +154,29 @@ chmod -R go-w "$PREFIX"
 info "code owned by root and not writable by the service user: a compromised"
 info "agent cannot rewrite the agent."
 
-say "Python environment"
-if [ ! -x "$PREFIX/.venv/bin/python" ]; then
-  python3 -m venv "$PREFIX/.venv"
-  info "created $PREFIX/.venv"
-fi
-PIP_ARGS=(--disable-pip-version-check)
-if [ "$OFFLINE" -eq 1 ]; then
-  [ -d "$SRC/deploy/wheels" ] || die \
-    "--offline needs pre-downloaded wheels in deploy/wheels. On a machine with
+chmod +x "$PREFIX/deploy/gsu-update.sh" 2>/dev/null || true
+
+if [ "$DEPLOY_PATH" = "systemd" ]; then
+  say "Python environment"
+  if [ ! -x "$PREFIX/.venv/bin/python" ]; then
+    python3 -m venv "$PREFIX/.venv"
+    info "created $PREFIX/.venv"
+  fi
+  PIP_ARGS=(--disable-pip-version-check)
+  if [ "$OFFLINE" -eq 1 ]; then
+    [ -d "$SRC/deploy/wheels" ] || die \
+      "--offline needs pre-downloaded wheels in deploy/wheels. On a machine with
    a network: pip download -r requirements.txt -d deploy/wheels"
-  PIP_ARGS+=(--no-index --find-links "$SRC/deploy/wheels")
+    PIP_ARGS+=(--no-index --find-links "$SRC/deploy/wheels")
+  fi
+  # One runtime dependency, and it is pure Python — there is nothing to compile
+  # on ARMv7 and no toolchain needed.
+  "$PREFIX/.venv/bin/pip" install "${PIP_ARGS[@]}" -q redis'>=5.0' \
+    || die "could not install the redis client. With no network, re-run with --offline."
+  info "redis client: $("$PREFIX/.venv/bin/python" -c 'import redis; print(redis.__version__)')"
+else
+  info "no host venv needed: the image carries its own interpreter and dependency."
 fi
-# One runtime dependency, and it is pure Python — there is nothing to compile
-# on ARMv7 and no toolchain needed.
-"$PREFIX/.venv/bin/pip" install "${PIP_ARGS[@]}" -q redis'>=5.0' \
-  || die "could not install the redis client. With no network, re-run with --offline."
-info "redis client: $("$PREFIX/.venv/bin/python" -c 'import redis; print(redis.__version__)')"
 
 # --- 4. configuration ------------------------------------------------------
 say "Configuration"
@@ -243,31 +273,77 @@ fi
 timedatectl 2>/dev/null | sed 's/^/      /' || true
 
 # --- 8. the service --------------------------------------------------------
-say "systemd unit"
+# Both unit files are installed either way, so switching paths later is one
+# systemctl command rather than another install. **Only one is ever enabled**:
+# two agents publishing independent worlds onto one channel makes the console
+# alternate between them and looks like a platform bug.
+say "Service"
 install -m 0644 "$SRC/deploy/$UNIT" "/etc/systemd/system/$UNIT"
+install -m 0644 "$SRC/deploy/gsu-update.service" /etc/systemd/system/
+install -m 0644 "$SRC/deploy/gsu-update.timer" /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable "$UNIT" >/dev/null
-info "installed and enabled $UNIT (not started — see below)."
+
+if [ "$DEPLOY_PATH" = "docker" ]; then
+  systemctl disable --now "$UNIT" >/dev/null 2>&1 || true
+  info "container path: $UNIT installed but DISABLED (the alternative)."
+
+  say "Building the image"
+  if docker compose -f "$PREFIX/deploy/docker-compose.yml" build 2>&1 | tail -3; then
+    # `current` is the tag compose runs and the updater moves. Point it at what
+    # was just built so the first start has something to run.
+    docker tag percepta/gsu:current percepta/gsu:previous 2>/dev/null || true
+    info "built, tagged percepta/gsu:current"
+  else
+    info "BUILD FAILED. Fix it before starting: the container has nothing to run."
+  fi
+
+  say "Update timer"
+  if grep -q '^GSU_UPDATE_REF=.\+' "$ETC/gsu.env" 2>/dev/null; then
+    systemctl enable --now gsu-update.timer >/dev/null
+    info "gsu-update.timer enabled — checks every 6h with up to 2h of jitter."
+  else
+    systemctl enable gsu-update.timer >/dev/null
+    info "gsu-update.timer enabled but GSU_UPDATE_REF is unset, so it will do"
+    info "  nothing. Set it in $ETC/gsu.env when there is a registry to track."
+  fi
+  info "A bad image is rolled back automatically: see 'gsu-update.sh --status'."
+else
+  systemctl disable --now gsu-update.timer >/dev/null 2>&1 || true
+  systemctl enable "$UNIT" >/dev/null
+  info "systemd path: $UNIT installed and enabled (not started — see below)."
+  info "  The update timer is disabled: it updates a container, and there"
+  info "  isn't one. Upgrade with rsync + re-running this script."
+fi
 
 # --- done ------------------------------------------------------------------
+if [ "$DEPLOY_PATH" = "docker" ]; then
+  COMPOSE="docker compose -f $PREFIX/deploy/docker-compose.yml"
+  PREFLIGHT="sudo $COMPOSE run --rm gsu preflight --probe"
+  START="sudo $COMPOSE up -d"
+  LOGS="sudo $COMPOSE logs -f"
+else
+  PREFLIGHT="sudo -u $SERVICE_USER $PREFIX/.venv/bin/python -m gsu preflight --probe"
+  START="sudo systemctl start $UNIT"
+  LOGS="journalctl -u $UNIT -f"
+fi
+
 cat <<EOF
 
-$(printf '\033[1m==> Installed. Three things left, in order:\033[0m')
+$(printf '\033[1m==> Installed (%s path). Three things left, in order:\033[0m' "$DEPLOY_PATH")
 
   1. Edit the addresses, and the trust settings if the platform is not yet
      behind a proxy with a public certificate:
        sudo nano $ETC/gsu.env
 
   2. Check everything that must be true before it can work:
-       sudo -u $SERVICE_USER $PREFIX/.venv/bin/python -m gsu preflight --probe
-     Run this from $PREFIX with the env file loaded — DEPLOYMENT.md §5 has the
-     exact line. Every FAIL is something that will not work; fix them first.
+       $PREFLIGHT
+     Every FAIL is something that will not work; fix them first.
 
   3. Start it, then enrol it with a code from an admin:
-       sudo systemctl start $UNIT
-       journalctl -u $UNIT -f
+       $START
+       $LOGS
 
-     The setup page is on 127.0.0.1:8088 by default, so from your laptop:
+     The setup page is on 127.0.0.1:8088, so from your laptop:
        ssh -L 8088:127.0.0.1:8088 <this-box>
      then open http://127.0.0.1:8088 and type the code.
 

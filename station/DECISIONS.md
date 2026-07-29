@@ -3,8 +3,8 @@
 Three lists. The first is what `contract/enrolment.md` §9 says needs a human —
 no answers invented, only what the station does in the absence of one. The
 second is every choice I made that someone should confirm. The third is the
-deployment session: **items 21–36 are new, all of them need review, and none of
-them has been run on a Raspberry Pi.**
+deployment sessions: **items 21–40 are new, all of them need review, and none
+of them has been run on a Raspberry Pi.**
 
 ---
 
@@ -12,7 +12,7 @@ them has been run on a Raspberry Pi.**
 
 ### 1. Compute platform (§9.1)
 
-Now partly answered — a Raspberry Pi 2B, deployed as a systemd service (item 21)
+Now partly answered — a Raspberry Pi 2B, deployed as a container (item 35c)
 — and that answer has consequences the decision has not caught up with, in
 HARDWARE.md:
 
@@ -64,19 +64,30 @@ is a stub carrying the requirements — now including that it must use the same
 client that has never connected to anything. The transport interface is the only
 place that knows the broker is Redis; swapping it is one class and a URL scheme.
 
-### 5. Software update path (§9.5)
+### 5. Software update path (§9.5) — **partly answered, and the rest is now urgent**
 
-Still nothing built, and deliberately so even now that there is an installer.
-`deploy/install.sh` is idempotent and can be re-run to upgrade, but that is a
-person with SSH, not an update mechanism: no self-update, no signature
-verification, no rollback. An update path is the same trust root as enrolment
-and is worse than useless improvised — a box that can be updated by anyone who
-can answer a DNS query is a box that can be replaced by them.
+**A mechanism now exists** (item 39): pull on a jittered timer, apply, prove the
+new image publishes, and roll back to the image already on disk if it does not.
+That was built because the owner's constraint — *"once these stations are
+installed they are going to be difficult to physically access"* — makes a bad
+update the most expensive routine failure there is.
 
-**This is now the most expensive of the five to leave open**, because there is
-hardware in the field to update. Whatever is chosen needs a signature check
-against a key that is not the one enrolment uses, and a way to roll back a bad
-build without a site visit.
+**What is still open, and it is the part that needs a human:**
+
+- **Signing.** A digest pin means the image cannot change under you; it does not
+  prove who built it. Anyone who can write to the registry, or substitute for
+  it, can publish a station update. Proper signing needs a key that is *not* the
+  enrolment trust root — a compromise of one should not be a compromise of both
+  — and neither key management nor a signing process exists.
+- **Who publishes, and how a release is approved.** Nothing technical stops a
+  half-finished build being pushed to the tag every station follows.
+- **Staging policy.** The timer's 2-hour jitter staggers a fleet by accident.
+  Deliberately updating one station first, watching it, then the rest, is a
+  process nobody owns.
+
+So the answer to "can a station be fixed remotely" is now *yes*, and the answer
+to "can a station be **trusted** to update itself" is still *not yet*. The
+mechanism is safe against a bad build; it is not safe against a hostile one.
 
 ---
 
@@ -414,10 +425,22 @@ credential in between.
 
 # Second pass — the container path, and splitting the trust roots
 
-## 35. Docker: built, evaluated, and rejected by the owner — **DECIDED**
+## 35. Docker — the full history, in three parts
 
-**The decision: systemd is the deployment path. Docker is not suitable for an
-unattended remote station.** The owner's words:
+This decision reversed twice. **The trail is kept deliberately**: 35a is my
+original argument, 35b is the owner rejecting containers on the strength of my
+own compose file, and 35c is the reversal once the premise underneath 35b turned
+out not to hold. Reading them in order is the only way to see why the final
+answer is right, and what a tidy single conclusion would have hidden.
+
+**Current decision: 35c. Docker is the deployment path.**
+
+---
+
+## 35a. Docker: built, evaluated, and rejected by the owner — *superseded*
+
+**The decision at the time: systemd is the deployment path. Docker is not
+suitable for an unattended remote station.** The owner's words:
 
 > so what you're saying is that using docker on the station is going to
 > complicate the setup, and possibly stop the station working - requiring manual
@@ -430,12 +453,12 @@ down **the entire station** rather than one sensor, and recovery needs a person
 on site. It is the exact failure class this project exists to avoid, and it
 outweighs everything in the table below.
 
-`deploy/Dockerfile` and `deploy/docker-compose.yml` are **kept** — they may suit
-a co-located station with someone on site — and both now carry that warning at
-the top. DEPLOYMENT.md Appendix B is the same warning where a deployer will meet
-it.
+`deploy/Dockerfile` and `deploy/docker-compose.yml` were **kept** — they may suit
+a co-located station with someone on site.
 
 ### The mitigation that exists, and why it was not taken
+
+*(This is the paragraph that 35c overturns. Left exactly as written.)*
 
 Recorded so nobody later finds it and assumes it was missed. The won't-start
 failure **is** avoidable: bind-mount `/dev/serial` and `/dev/bus/usb` as
@@ -453,7 +476,11 @@ So the honest choice was between a container that can strand the site and a
 container that isolates almost nothing. Neither beats the unit file. The option
 was understood and rejected, not overlooked.
 
-### What I got wrong along the way, which is why this was decided on the right grounds
+---
+
+## 35b. What I got wrong along the way
+
+*(Part of the 35a record: my original arguments, checked.)*
 
 **This table stays.** My original argument against Docker (item 21) was built
 partly on claims that did not survive checking, and the decision above was made
@@ -491,11 +518,76 @@ true:
   there is no SDR driver in this build. **This is a genuine finding rather than
   a failure to configure it properly.**
 
-The first of those four is the one the decision turned on. I originally called
-it a "recommendation, narrowly" and weighed it against memory, image size and
-update ergonomics as though those were comparable quantities. They are not: the
-others cost effort, and that one costs a site visit. The owner read the same
-list and said so plainly, which was the right call on the right grounds.
+The first of those four is the one 35a turned on. I originally called it a
+"recommendation, narrowly" and weighed it against memory, image size and update
+ergonomics as though those were comparable quantities. They are not: the others
+cost effort, and that one costs a site visit. The owner read the same list and
+said so plainly, which was the right call **on the information available**.
+
+---
+
+## 35c. Reversed: Docker is the deployment path — **CURRENT DECISION**
+
+The owner:
+
+> is docker the right option from a portability standpoint though? I'm not
+> overly concerned about the isolation factor, this will be the only thing
+> running on the station. this needs to be easy to stand up, easy to maintain,
+> and easy to debug. once these stations are installed they are going to be
+> difficult to physically access.
+
+**That removes the premise 35b rested on.** The rejection was not really about
+containers — it was about the won't-start failure, and the reason I did not
+simply fix that failure was the paragraph above: the fix costs isolation. If
+isolation has no value here, the fix is free, and the argument collapses.
+
+I should have surfaced that conditional myself. I wrote "the choice is between a
+container that can strand the site and a container that isolates almost
+nothing" and treated the second as obviously unacceptable, without ever asking
+whether the isolation being protected was worth anything on a single-purpose
+box. It was not. **The question "what is this isolation actually buying us
+here?" was mine to ask and I did not ask it.**
+
+### What changed in the files
+
+- **`devices:` is gone.** The container gets `/dev` bind-mounted wholesale plus
+  `device_cgroup_rules` for every major it might use (188 USB-serial, 166
+  CDC-ACM, 204 on-chip UART, 189 USB-raw, 81 V4L2, 249 PPS). A missing sensor
+  can no longer stop the station, and a replugged one is picked up by the
+  agent's existing 30-second rediscovery with nobody touching anything.
+- **It has to be all of `/dev`**, not just `/dev/serial` and `/dev/bus/usb`:
+  `by-id` entries are *relative* symlinks (`../../ttyUSB0`) that resolve against
+  the container's own `/dev`. Mounting the symlink directory without the nodes
+  gives you stable names pointing at nothing. This is the sort of thing that
+  looks like a typo at 2am, so it is commented in the compose file.
+- **`privileged: true` is still not used** — not for isolation, but because it
+  also changes cgroup, AppArmor and `/sys` handling, and that is a blunter tool
+  and one more thing to reason about when something misbehaves.
+- **Cheap hardening is kept** (`read_only`, `cap_drop: ALL`,
+  `no-new-privileges`) because it costs nothing operationally. It is not
+  protecting anything anyone is worried about; it is just tidy.
+
+### Why containers actually win here
+
+Not memory, not packaging elegance, not isolation. **The update story**, which
+is the only thing on the list that speaks to *"difficult to physically
+access"*: an update is atomic, and a rollback is a retag of an image already on
+the disk — no download, over a link that may be exactly why you are rolling
+back. Item 39 is that mechanism, and it is the deliverable that makes this
+decision worth having rather than a coin flip.
+
+### Accepted costs, written down rather than apologised for
+
+- The container can reach **every device on the box**, including ones fitted
+  later. Accepted: nothing else runs here.
+- **50–100 MB** of RAM for the daemon, of 1 GB. Estimated, not measured.
+- Container logs need rotation configured or they fill the SD card; journald
+  would have given that free. Configured at 10 MB × 3.
+- One more moving part to understand when debugging — mitigated by making every
+  `gsu` subcommand work identically through `docker compose run --rm`.
+
+**Verified: none of it.** No Docker daemon on this machine. The compose file
+validates against the schema and that is all.
 
 **What I could not test: all of it.** `docker info` returns a permission error
 on this machine, so the image has never been built and the container has never
@@ -592,3 +684,104 @@ is — applied in the wrong direction by the thing that keeps arguing for it.
   check appears only when a frame lands inside the sample, which at 30-second
   cadence is intermittent. "All checks passed" is the thing to read, not a
   count I quoted as though it were fixed.
+
+## 39. The update mechanism: pull on a jittered timer, gate on publishing, roll back
+
+Built because item 35c made it the reason to prefer containers, and because the
+owner's constraint makes it the highest-value thing on the list. `deploy/`:
+`gsu-update.sh`, `gsu-update.service`, `gsu-update.timer`.
+
+**Delivery is a pull, because nothing can reach inward.** Starlink is CGNAT and
+the platform can never initiate a connection to a station
+(`contract/enrolment.md` §1). So the station asks every 6 hours **plus up to
+2 hours of random delay**, which is the line that matters most in the whole
+timer: without jitter, every station in a fleet checks in the same minute and a
+bad image takes all of them out together. Staggered, the first station fails
+long before the last one has looked.
+
+Not at boot, either — `OnBootSec=30min`. A box in a boot loop must not pull a
+fresh image on every cycle, and a station that has just come up should prove
+itself on what it has before being handed something new.
+
+**The gate is the design, and it insists on publishing.** Within 180 seconds the
+new container must be running, answer its own console, report itself enrolled,
+report the uplink up, **and increase its published-frame counter**. That last
+condition is the one that earns its keep: a container can start, log cheerfully
+and publish nothing, and that failure is invisible to a "did it start?" check
+and indistinguishable from a healthy station until somebody looks days later.
+
+It reuses the console's `/status.json` rather than inventing a health endpoint —
+the station already reports exactly these facts for the local console, and a
+second mechanism would be a second thing to keep true.
+
+**Rollback is a retag, and the rollback is itself gated.** The previous image is
+already on disk, so recovery needs no network — which matters, because a broken
+uplink is one of the reasons an update might fail. After rolling back it runs
+the same gate again, so "the rollback worked" is a fact rather than an
+assumption; and if the *old* image also fails, it says so specifically, because
+that is not an update fault and sending someone after the update wastes the trip.
+
+**A rejected digest is recorded and not retried.** Otherwise a bad image is
+re-pulled every 6 hours for ever, spending metered bandwidth and flapping the
+station in and out of service each time. `--force` overrides, once somebody
+knows why.
+
+**A half-completed pull is a non-event.** `docker pull` is atomic at the image
+level — layers are content-addressed and verified as they arrive, and the local
+reference only moves once all of them are present — so a dropped link cannot
+produce a half-built image. The script treats a failed pull as normal, changes
+nothing and exits 0. *Documented Docker behaviour; not verified here.*
+
+**The updater runs as root on the host, not in the container.** A container that
+can reach `/var/run/docker.sock` can replace itself with anything, which would
+make the gate decorative. It also means a container that cannot start can still
+be rolled back by something that is still running.
+
+**Verified:** the decision logic, against a stubbed Docker and a real HTTP
+console — accept a good image; roll back one that starts but never publishes;
+verify the rollback; refuse to retry a rejected digest; survive a failed pull
+without touching the running container; no-op on an unchanged digest; refuse to
+roll back when there is no previous image. **21 scenarios, all passing.**
+
+**Not verified:** it has never driven a real container, because there is no
+Docker daemon on this machine. The stub exercises the branching, not Docker's
+actual behaviour. Run it by hand with `--status` and then once for real on the
+first box before letting the timer near it.
+
+**Needs review:** the 180-second gate. Long enough for an enrolled station on a
+working link; possibly not for a site whose uplink takes minutes to come back
+after a restart, and a gate that is too short rolls back good updates. It is one
+environment variable, and the first real site should set it from observation.
+
+## 40. Update bandwidth, measured
+
+The numbers that make pull-on-a-timer defensible on a metered link. Taken
+against the real registry and the real package, not estimated.
+
+| | |
+|---|---|
+| A check that finds nothing new | **~6 KB** — an auth token (5.4 KB) plus a manifest HEAD (0.6 KB of headers, no body) |
+| Four checks a day | ~24 KB |
+| A **code-only** update | **~91 KB** — one layer |
+| The docs layer, when only docs changed | ~40 KB |
+| The base image, first install only | 39.9 MB compressed, 4 layers |
+| This station's telemetry, for scale | ~113 MB/day (10.7 kbit/s, measured earlier) |
+
+**The update check is 0.02% of the telemetry budget.** That settles it: polling
+four times a day costs nothing worth discussing, and there is no case for a
+push-based trigger on bandwidth grounds. (There is a case on *latency* grounds —
+up to ~8 hours from release to a station having it — which is
+`CONTRACT-QUESTIONS.md` item 11 and is a contract change, not something to
+invent.)
+
+**The 91 KB depends on layer order**, so the Dockerfile now copies the docs
+*before* the code, leaving `COPY gsu/` as the last layer. A code change then
+invalidates nothing above it and ships one small layer. Keep it that way: moving
+a `COPY` line above it would quietly turn every update into a bigger download,
+and nobody would notice until somebody looked at a bill.
+
+Method, so it can be re-taken: `tar --exclude=__pycache__ -czf - gsu/ | wc -c`
+for the layer (a layer is a gzipped tar, so this is within a few percent), and
+`curl` against `registry-1.docker.io` with `-w '%{size_download}'` for the
+manifest and token. Both are in the session transcript rather than a script,
+which is a small gap — a `make measure-update` target would be better.

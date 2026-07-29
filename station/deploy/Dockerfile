@@ -1,21 +1,12 @@
-# ===========================================================================
-#  DO NOT USE THIS FOR AN UNATTENDED STATION.
+# The ground station agent as a container image. **This is the deployment path**
+# (DEPLOYMENT.md; DECISIONS.md item 35c). The systemd unit beside this file is
+# the documented alternative.
 #
-#  A container will not start if a device it maps is missing, so a reboot
-#  after a USB adapter fails to enumerate takes down THE WHOLE STATION — not
-#  just the affected sensor — and recovery needs somebody on site. The systemd
-#  unit beside this file does not have that failure: a missing device is a
-#  health condition the station reports and recovers from on its own.
-#
-#  The owner ruled on this. deploy/gsu.service is the deployment path.
-#
-#  Kept because it may suit a CO-LOCATED station — in a rack, in a building,
-#  with someone who can reach it. DEPLOYMENT.md Appendix B has the reasoning,
-#  including the mitigation that exists and why it is not taken; DECISIONS.md
-#  item 35 has the full cost comparison.
-# ===========================================================================
-#
-# The ground station agent as a container image.
+# Containers won on the constraint that actually matters here: *"once these
+# stations are installed they are going to be difficult to physically access."*
+# An update is atomic and a rollback is a tag already on the disk — see
+# deploy/gsu-update.sh, which is the reason this path is preferred rather than
+# merely tolerated.
 #
 #   docker buildx build --platform linux/arm/v7 -f deploy/Dockerfile -t percepta/gsu:0.1.0 .
 #
@@ -61,8 +52,14 @@ WORKDIR /opt/percepta/station
 COPY requirements.txt ./
 RUN pip install --no-cache-dir "redis>=5.0"
 
-COPY gsu/ ./gsu/
+# Docs before code, so that the last layer in the image is the one that changes
+# most often. A code-only update then ships **one 91 KB layer** and nothing
+# else: the base is unchanged, the pip layer is unchanged, and the docs layer is
+# unchanged. On a metered Starlink link that is the difference between an update
+# being routine and an update being a decision. Measured, not assumed —
+# DECISIONS.md item 40 has the numbers and how they were taken.
 COPY README.md DECISIONS.md DEPLOYMENT.md HARDWARE.md CONTRACT-QUESTIONS.md ./
+COPY gsu/ ./gsu/
 
 # Root-owned and not writable by the agent, matching the systemd path: a
 # compromised agent should not be able to rewrite the thing that restarts it.

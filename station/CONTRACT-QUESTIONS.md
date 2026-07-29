@@ -7,10 +7,11 @@ of a proposed change and what the station does about it.
 **Items 1, 2, 3 and 8 are settled and implemented** (contract commits `ee44e25`
 and `ed02b31`, station side done and conformant). They are kept here with what
 shipped, because the reasoning is why the schema and the harness look the way
-they do. **Item 5 is with the owner. Items 4, 6, 7 and 9 are open** — the event
+they do. **Items 4, 6, 7, 9 and 11 are open** — the event
 channel and the camera media path are the two that matter most. **Item 10 is
 new**: TLS has landed, and `enrolment.md` §4 and §11 now describe a state of the
-world that has passed.
+world that has passed. **Item 11 is new**: the station can update itself, but
+nothing can tell it to look.
 
 ---
 
@@ -432,3 +433,200 @@ fails. `transport.md`'s "Broker" section, which still says "Redis pub/sub
 today", could say Redis-over-TLS in the same commit — and its "Identity" section
 still says enrolment "is not built yet on either side", which is two revisions
 out of date.
+
+---
+
+## 11. There is no way to tell a station to check for an update
+
+**Where** `command.schema.json`; `enrolment.md` §9.5.
+
+The station now updates itself: it pulls a pinned image reference on a timer,
+applies it, proves the new build enrols and publishes, and rolls back to the
+image already on disk if it does not (`DECISIONS.md` item 39). That mechanism
+needs no contract change and none has been made.
+
+What it cannot do is find out sooner. The timer runs every 6 hours with up to
+2 hours of jitter, so **a release takes up to about 8 hours to reach a
+station**. For a routine update that is fine. For a fix to something that is
+actively wrong at a site — a bad build that got through, a decoder crashing on
+real traffic — 8 hours of waiting while the answer already exists is the wrong
+shape, and the only alternative today is SSH to a box that is *"difficult to
+physically access"*.
+
+**Proposed, additive:** a command on the existing channel that means only *"run
+your update check now"*.
+
+```jsonc
+{"kind": "update.check"}
+```
+
+Deliberately **not** `{"kind": "update.apply", "image": "…"}`. The command must
+not carry an image reference, a URL or anything else the station would act on:
+
+- The station already knows what it is allowed to run — `GSU_UPDATE_REF`, set
+  locally, ideally a digest. A command that could name an image would turn the
+  command channel into a code-execution path, and the broker credential into a
+  way to replace the software on every station in an organisation. That is a
+  much larger blast radius than the credential is meant to have.
+- Everything protective stays in force: the same digest pin, the same health
+  gate, the same automatic rollback. The command changes *when* the station
+  looks, never *what* it fetches or whether it keeps it.
+- It fits the contract's existing shape — commands are requests, may be missed,
+  and are never assumed to have taken effect. A missed `update.check` costs at
+  most the normal timer interval, which is exactly the current behaviour.
+
+**Reporting it back.** Every command has a corresponding field in telemetry, per
+`transport.md`. The station already publishes `health.agent_version`, so the
+effect is observable: the platform sees the version change, or it does not.
+Worth considering an explicit `health.update` block (`last_check`,
+`last_result`, `rolled_back`) so a rollback is visible without inferring it from
+a version that stayed the same — the rollback is the case somebody most needs
+to know about, and it is currently only in the station's local journal.
+
+**Until this exists** the station polls, which costs about 6 KB a check
+(item 40) and works. This is a latency proposal, not a bandwidth one.
+
+---
+
+## 12. The video channel exists, and the broker refuses it — **BLOCKER, measured**
+
+**Where** `contract/enrolment.md` §4 (`broker` object), `transport.md` (the
+channel table), and the platform's `services/broker_acl.py`.
+
+`schemas/video.schema.json` defines `gsu/{station_id}/video` and the platform's
+ingest already subscribes to it — `VIDEO_PATTERN` is there and `video` is in
+`KNOWN_KINDS`. **The broker ACL was not changed with it.** A station's principal
+is granted exactly three channels:
+
+```python
+f"&gsu/{station_id}/telemetry", f"&gsu/{station_id}/audio", f"&cmd/gsu/{station_id}"
+```
+
+Measured against the live broker with this station's own credential, not
+inferred:
+
+```
+PUBLISH gsu/29ed8568-…/telemetry  -> OK, 1 subscriber
+PUBLISH gsu/29ed8568-…/video      -> NoPermissionError: No permissions to
+                                     access a channel
+```
+
+**Two changes are needed on the platform side and neither is this side's to
+make:**
+
+1. Add `&gsu/{station_id}/video` to `_channels()` in `broker_acl.py`. Existing
+   stations need `sync_all` — which runs at start-up — or a re-enrolment.
+2. Add `video_topic` to the enrolment response's `broker` object, and to §4's
+   worked example beside the other three.
+
+**What the station does meanwhile.** It publishes to
+`telemetry_topic`-with-`video`-on-the-end, derived rather than told, and says in
+`credentials.py` that this is a temporary exception to "topics come from
+enrolment, never from string-building". The moment `video_topic` arrives it stops
+guessing. A refused publish is reported as `video.topic_refused` in health
+telemetry, retried every five minutes so a fixed ACL needs nobody on site, and —
+importantly — **does not take the uplink down**: a `NOPERM` used to be handled as
+a broken connection, which would have closed the client and backed off *all*
+telemetry because video was not permitted. That is fixed and tested
+(`tests/test_video.py::RefusedChannelTests`).
+
+**Also worth a line in `transport.md`.** Its channel table still lists two
+station→platform channels. Video is a third, and the "Streams with no source"
+rule applies to it unchanged — this station sends `available: false` with a
+reason when no camera is fitted, rate-limited to 1 Hz, which is telemetry's own
+cadence for the same statement.
+
+---
+
+## 13. On-demand video needs a command, and here is the shape
+
+**Where** `schemas/command.schema.json`.
+
+Publishing video to a console nobody is watching is the most expensive mistake
+this station can make, and it makes no noise. The platform knows whether anyone
+is attached; the station cannot. So the platform has to ask.
+
+**Implemented on this side already, provisionally, and easy to change:**
+
+```jsonc
+{"kind": "video.start", "viewers": 2, "lease_s": 30,
+ "width": 1920, "height": 1080, "fps": 30, "bitrate_kbps": 3000}
+{"kind": "video.stop", "reason": "the last viewer detached"}
+```
+
+Four properties, each of which is a failure designed out rather than noticed:
+
+- **Idempotent.** A second viewer extends the lease and does not start a second
+  encoder. There is one camera, and the second `rpicam-vid` fails with a
+  device-busy that reads like broken hardware.
+- **Leased, so it fails closed.** `lease_s` is a deadline, not a preference: the
+  station stops when the platform stops renewing. That is deliberately the
+  opposite of "stop when told to stop", because the case to design for is the
+  console closing or the link dropping while the station keeps paying for a
+  stream nobody can see. Bounded to 5–300 s, defaulting to 30.
+- **A ceiling as well.** `stream_max_minutes` in site config stops a stream that
+  is somehow still being renewed after an hour.
+- **The station may narrow what is asked for, never widen it.** Resolution, rate
+  and bitrate are capped by site configuration, because the link belongs to
+  whoever pays for it rather than to whoever opened a console.
+
+**Reported, not assumed**, per `transport.md`: `health.video.stream` carries
+`state`, `viewers`, `since`, `lease_remaining_s`, measured `fps` and
+`bitrate_bps`, `dropped`, and a `reason` when it is not running. A `video.start`
+that silently did nothing is visible — a station with no camera answers
+`state: "unavailable"` with `"no camera fitted, so there is nothing to stream"`.
+
+**The one thing to decide together:** whether the lease is renewed by repeating
+`video.start` (what this implements) or by a separate `video.keepalive`. Repeating
+`video.start` is fewer moving parts and is naturally idempotent; a distinct
+keepalive is cheaper on the wire and easier to rate-limit. Either is a small
+change here.
+
+**And a snapshot equivalent.** The same argument applies to the MJPEG channel at
+2 fps, which is a twelfth of the stream but still continuous. A `subscribers`
+count pushed by the platform, or `video.snapshots {on|off, fps}`, would let the
+console drop it to a frame every ten seconds when nobody has the station open.
+Until then `config.set` with `video_enabled` and `video_fps` is the manual
+version and it works.
+
+---
+
+## 14. There is no transport for H.264, and the station must not invent one
+
+**Where** nothing yet — this is the piece that does not exist on either side.
+
+1080p30 is 2–4 Mbit/s. That cannot go through the broker: Redis pub/sub carries
+telemetry and commands, and several Mbit/s alongside them would compete with the
+traffic it must not delay. It cannot go to a viewer either
+(`00-topology.md` rule 8, `03-realtime-isolation.md` §7). So it is an outbound
+connection from the station to the platform, TLS, authenticated with the
+credential the station already holds — outbound because Starlink is CGNAT and
+nothing reaches inward.
+
+**`gsu/transport/stream.py` is a documented stub**, like `mqtt.py` beside it,
+because a wire format guessed at from this side would be discovered to be wrong
+by somebody debugging a black video panel over a satellite link.
+
+What is convenient to produce, from the encoder outward:
+
+- **Annex B, untouched.** `rpicam-vid -o -` emits NAL units with start codes.
+  Fragmented MP4 means muxing on a 900 MHz core that is already running the
+  station and buys the station nothing. The platform can remux once, centrally,
+  where there is CPU.
+- **One frame per message, length-prefixed.** Four bytes of length, a flag byte
+  for keyframe, eight bytes of capture timestamp, then the access unit. The
+  station already has all three; anything self-describing beyond that is work it
+  would have to do per frame.
+- **Parameter sets repeated at every keyframe** — the station passes
+  `--inline`, and also keeps the last SPS/PPS so a viewer attaching mid-stream
+  can be given them without waiting up to two seconds for the next IDR.
+- **Back-pressure the station can see.** When the link cannot carry the stream
+  the station must drop frames rather than buffer them — a buffered second of
+  1080p is several megabytes of a picture that is already out of date — and it
+  needs to know it is happening in order to report it. A socket that simply
+  blocks turns a bandwidth problem into a stalled encoder.
+- **Capture timestamps, not arrival ones.** Same rule as the snapshot channel
+  and for the same reason.
+
+**Say what you want and it gets implemented behind `StreamUplink`**, which is
+one class with `open`, `send`, `close`. Nothing above it changes.
