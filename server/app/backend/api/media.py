@@ -143,8 +143,13 @@ async def media_ingest(websocket: WebSocket) -> None:
             # parsing the media, which is exactly what it must not do.
             text = message.get("text") or ""
             if text == "init":
+                # Discards the segment and fragments, and deliberately NOT the
+                # codec. The documented order is codec, then `init`, then the
+                # segment - so clearing it here threw away the string the
+                # station had just sent, every time, and every viewer got bytes
+                # with nothing to decode them as. A new connection still resets
+                # it (publisher_connected), which is the case that matters.
                 stream.init_segment = None
-                stream.codec = None
                 stream.recent.clear()
                 continue
             if text.startswith("{"):
@@ -153,7 +158,7 @@ async def media_ingest(websocket: WebSocket) -> None:
                 except ValueError:
                     codec = None
                 if isinstance(codec, str) and codec:
-                    stream.codec = codec
+                    await relay.set_codec(station_id, codec)
     except WebSocketDisconnect:
         pass
     except Exception:
@@ -213,7 +218,10 @@ async def media_view(websocket: WebSocket, ticket: str = Query(...)) -> None:
             chunk = await queue.get()
             if chunk is None:
                 return
-            await websocket.send_bytes(chunk)
+            if isinstance(chunk, str):
+                await websocket.send_text(chunk)
+            else:
+                await websocket.send_bytes(chunk)
 
     async def watch_for_close() -> None:
         # A viewer that closes while nothing is being sent must still be

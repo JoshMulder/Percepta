@@ -28,8 +28,10 @@ the station stops on its own rather than transmitting to nobody.
 """
 
 import asyncio
+import json
 import logging
 import uuid
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -69,7 +71,10 @@ class StationStream:
     #: produced, so it says, rather than the browser guessing.
     codec: str | None = None
     recent: list[bytes] = field(default_factory=list)
-    viewers: set["asyncio.Queue[bytes | None]"] = field(default_factory=set)
+    #: A queue carries bytes (media), str (control, e.g. the codec) or None to
+    #: close. Control has to travel the same path as media because a viewer
+    #: attaches *before* the station starts - see set_codec.
+    viewers: set["asyncio.Queue[bytes | str | None]"] = field(default_factory=set)
     #: Set when a station is actually connected and sending.
     publishing: bool = False
     started_at: datetime | None = None
@@ -146,6 +151,24 @@ class MediaRelay:
             queue.put_nowait(None)
         log.info("Media: station %s stopped publishing.", station_id)
 
+    async def set_codec(self, station_id: uuid.UUID, codec: str) -> None:
+        """Record the codec and tell everyone already waiting.
+
+        This has to fan out, not just be stored. Video is on demand, so the
+        order is always: viewer attaches, platform asks the station to start,
+        station connects and sends its codec. At attach there is nothing to
+        send - so a relay that only hands the codec over at attach time never
+        hands it over at all, and every viewer receives bytes it cannot decode.
+        """
+        stream = self._streams.get(station_id)
+        if stream is None or stream.codec == codec:
+            return
+        stream.codec = codec
+        message = json.dumps({"codec": codec})
+        for queue in list(stream.viewers):
+            with suppress(asyncio.QueueFull):
+                queue.put_nowait(message)
+
     async def publish(
         self, station_id: uuid.UUID, fragment: bytes, *, is_init: bool = False
     ) -> None:
@@ -157,6 +180,13 @@ class MediaRelay:
 
         if is_init:
             stream.init_segment = fragment
+            # Forwarded as well as kept, for the same reason as the codec: the
+            # viewers that made the station start are already attached, and
+            # without this they wait for an initialisation segment that has
+            # already been and gone.
+            for queue in list(stream.viewers):
+                with suppress(asyncio.QueueFull):
+                    queue.put_nowait(fragment)
             return
 
         stream.recent.append(fragment)
@@ -182,11 +212,11 @@ class MediaRelay:
 
     async def attach(
         self, station_id: uuid.UUID, organization_id: uuid.UUID
-    ) -> tuple[StationStream, "asyncio.Queue[bytes | None]"]:
+    ) -> tuple[StationStream, "asyncio.Queue[bytes | str | None]"]:
         stream = await self.stream(station_id, organization_id)
         # Bounded. Unbounded is a memory leak wearing a queue's clothes: a
         # viewer that stops reading would otherwise accumulate the whole stream.
-        queue: asyncio.Queue[bytes | None] = asyncio.Queue(maxsize=64)
+        queue: asyncio.Queue[bytes | str | None] = asyncio.Queue(maxsize=64)
         first = len(stream.viewers) == 0
         stream.viewers.add(queue)
         if first and self.on_demand_changed is not None:
@@ -194,7 +224,7 @@ class MediaRelay:
         return stream, queue
 
     async def detach(
-        self, station_id: uuid.UUID, queue: "asyncio.Queue[bytes | None]"
+        self, station_id: uuid.UUID, queue: "asyncio.Queue[bytes | str | None]"
     ) -> None:
         stream = self._streams.get(station_id)
         if stream is None:
