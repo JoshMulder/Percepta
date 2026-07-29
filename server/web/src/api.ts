@@ -183,6 +183,14 @@ export const api = {
       { method: "POST" },
     ),
 
+  /** Sixty seconds, single use, bound to one station. A browser cannot set
+   *  headers on a WebSocket, so this is how the media socket is authorised. */
+  streamTicket: (id: string) =>
+    request<{ ticket: string; expires_in: number; url: string }>(
+      `/api/stations/${id}/stream-ticket`,
+      { method: "POST" },
+    ),
+
   organization: () => request<OrganizationDetail>("/api/organization"),
 
   setMemberGrant: (userId: string, stationId: string, capabilities: string[]) =>

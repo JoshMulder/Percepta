@@ -493,6 +493,10 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
       <VideoPanel
         compact={small}
         frame={frame}
+        stationId={stationId}
+        // Live only on the large view. Attaching is what starts the station
+        // encoding, so this decides whether the camera runs at all.
+        live={!small && mainView === "video"}
         streaming={frame?.jpeg != null}
         canPtz={!small && has(caps, "video.ptz")}
         online={detail?.online ?? false}

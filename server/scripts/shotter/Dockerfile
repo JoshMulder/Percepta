@@ -10,5 +10,5 @@
 # pip install. Built once; screenshots are then a second or two.
 FROM mcr.microsoft.com/playwright/python:v1.61.0-noble
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-RUN pip install --no-cache-dir playwright==1.61.0
+RUN pip install --no-cache-dir playwright==1.61.0 websockets==13.1
 ENTRYPOINT ["python3"]

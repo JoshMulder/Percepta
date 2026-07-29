@@ -905,6 +905,11 @@ body {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
+  /* The six figures were sitting hard against the panel's lower edge. The row
+     above them has a dial and an icon that both carry their own visual margin,
+     so the text was the only thing touching a border and read as though it had
+     overflowed rather than been placed. */
+  padding-bottom: var(--s3);
 }
 .rose-wrap {
   display: flex;
@@ -2927,3 +2932,17 @@ body {
    one that must be told how big it is. */
 .map-canvas { width: 100%; height: 100%; }
 .maplibregl-canvas { outline: none; }
+
+/* The live element sits under the snapshot and shows through once it is
+   actually decoding. object-fit: contain for the same reason as the snapshot -
+   a security view must not be cropped to fill a panel, because the part cut off
+   is exactly the part nobody knew they were missing. */
+.video-live-el {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+}
+.video-live-el.hidden { display: none; }

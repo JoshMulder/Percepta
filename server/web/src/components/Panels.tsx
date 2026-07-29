@@ -1,6 +1,8 @@
 import { memo } from "react";
 import type { Capability, LightPayload, PowerPayload } from "../types";
+import { useRef } from "react";
 import { DemoCamera } from "./DemoCamera";
+import { useVideoStream } from "../useVideoStream";
 import type { VideoPayload } from "../types";
 import {
   BatteryChart,
@@ -26,11 +28,17 @@ function VideoPanelInner({
   compact,
   streaming,
   frame,
+  stationId,
+  live,
   canPtz,
   online,
   demo,
   lightOn,
 }: {
+  /** Which station to stream from, and whether to ask for it at all. Asking is
+   *  what starts the camera, so this is not merely a rendering choice. */
+  stationId?: string | null;
+  live?: boolean;
   compact?: boolean;
   streaming: boolean;
   /** Latest frame from the station, if any. */
@@ -43,10 +51,33 @@ function VideoPanelInner({
   demo?: boolean;
   lightOn?: boolean;
 }) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  // Only the expanded view asks for the stream. A thumbnail nobody is really
+  // watching is not worth several megabits of satellite bandwidth, and the
+  // snapshot channel already shows what the site looks like.
+  const streamState = useVideoStream(
+    videoRef,
+    stationId ?? null,
+    Boolean(live && !compact && online),
+  );
+  const showingLive = streamState === "playing";
+
   return (
     <div className="video-panel">
       <div className="video-surface">
-        {frame?.available === false ? (
+        <video
+          ref={videoRef}
+          className={`video-live-el${showingLive ? "" : " hidden"}`}
+          autoPlay
+          muted
+          playsInline
+        />
+        {showingLive ? (
+          <div className="video-live">
+            <span className="video-live-dot" />
+            live
+          </div>
+        ) : frame?.available === false ? (
           // A camera that is not fitted is not a camera that has failed, and an
           // operator does different things about each.
           <div className="video-idle">

@@ -63,6 +63,11 @@ class StationStream:
     organization_id: uuid.UUID
     #: ftyp + moov. Every viewer needs this before any fragment decodes.
     init_segment: bytes | None = None
+    #: The exact codec string, e.g. "avc1.640028". Media Source Extensions
+    #: needs it before a buffer can be created, and a wrong one fails silently -
+    #: the video simply never appears. The station knows what its encoder
+    #: produced, so it says, rather than the browser guessing.
+    codec: str | None = None
     recent: list[bytes] = field(default_factory=list)
     viewers: set["asyncio.Queue[bytes | None]"] = field(default_factory=set)
     #: Set when a station is actually connected and sending.
@@ -122,6 +127,7 @@ class MediaRelay:
         # next viewer parameters that do not match the fragments they receive,
         # which decodes as corruption rather than as an error.
         stream.init_segment = None
+        stream.codec = None
         stream.recent.clear()
         log.info("Media: station %s started publishing.", station_id)
         return stream

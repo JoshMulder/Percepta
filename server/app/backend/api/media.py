@@ -18,6 +18,7 @@ the same pinned station. There is no second authorisation model here.
 """
 
 import asyncio
+import json
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -137,12 +138,22 @@ async def media_ingest(websocket: WebSocket) -> None:
                 continue
 
             # Text frames are control. Deliberately minimal: the station says
-            # when a new encoder session begins, which is the only thing the
-            # relay cannot work out for itself.
+            # when a new encoder session begins and what its encoder produced -
+            # the two things the relay cannot work out for itself without
+            # parsing the media, which is exactly what it must not do.
             text = message.get("text") or ""
             if text == "init":
                 stream.init_segment = None
+                stream.codec = None
                 stream.recent.clear()
+                continue
+            if text.startswith("{"):
+                try:
+                    codec = json.loads(text).get("codec")
+                except ValueError:
+                    codec = None
+                if isinstance(codec, str) and codec:
+                    stream.codec = codec
     except WebSocketDisconnect:
         pass
     except Exception:
@@ -188,8 +199,14 @@ async def media_view(websocket: WebSocket, ticket: str = Query(...)) -> None:
     )
 
     async def pump() -> None:
-        # Whatever a late joiner needs to decode: the init segment first, then
-        # the most recent fragment so a picture appears without waiting.
+        # The codec first, and as text. Media Source Extensions cannot create a
+        # buffer without the exact codec string, so a viewer that receives only
+        # bytes silently decodes nothing - no error, no picture, which is
+        # exactly how this failed the first time.
+        if stream.codec:
+            await websocket.send_text(json.dumps({"codec": stream.codec}))
+        # Then whatever a late joiner needs to decode: the init segment, and the
+        # most recent fragment so a picture appears without waiting.
         for chunk in stream.snapshot_for_new_viewer():
             await websocket.send_bytes(chunk)
         while True:
