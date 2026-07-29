@@ -449,9 +449,26 @@ async def run() -> None:
         if part.strip()
     }
 
+    # Drives only stations already marked synthetic, and never writes the flag.
+    #
+    # This was the other way round - every active station except a deny-list -
+    # and it did real damage: it adopted a station created for actual hardware,
+    # revoked the enrolment code waiting for that hardware, issued and claimed
+    # its own, and took a credential. A deny-list is the wrong shape here. It
+    # fails open, so every station anyone creates from now on is hijacked by
+    # default until somebody remembers to add a UUID to a `.env` on the server,
+    # and the person creating it is usually not that somebody.
+    #
+    # The flag is set in the console, per station, by whoever knows whether a
+    # site is real. The simulator reading it and not writing it is what makes
+    # that checkbox mean something - it used to overwrite the operator's answer
+    # on every run.
     with PrivilegedSessionLocal() as db:
         rows = db.execute(
-            select(GroundStation).where(GroundStation.is_active.is_(True))
+            select(GroundStation).where(
+                GroundStation.is_active.is_(True),
+                GroundStation.is_simulated.is_(True),
+            )
         ).scalars().all()
         sims = [
             StationSim(s.id, s.organization_id, s.name, s.latitude, s.longitude)
@@ -459,21 +476,20 @@ async def run() -> None:
             if str(s.id).lower() not in excluded
         ]
         skipped = [s.name for s in rows if str(s.id).lower() in excluded]
-        # The thing producing the data is the only thing that reliably knows
-        # whether it is synthetic, so the simulator maintains the flag rather
-        # than relying on anyone to remember. Set on what it drives, cleared on
-        # what it does not - so a station handed over to real hardware stops
-        # being badged the next time this runs.
-        for row in rows:
-            row.is_simulated = str(row.id).lower() not in excluded
-        db.commit()
 
     if skipped:
         log.info("Leaving alone (SIMULATOR_EXCLUDE_STATIONS): %s", ", ".join(skipped))
 
     if not sims:
-        log.error("No active ground stations. Run seed_dev first.")
+        log.error(
+            "No stations are marked as simulated. This drives only stations "
+            "with 'This station's data is synthetic' set - tick it in Settings "
+            "> Stations, or run seed_dev to create the demo fleet."
+        )
         return
+
+    log.info("Driving %d simulated station(s): %s",
+             len(sims), ", ".join(s.name for s in sims))
 
     for sim in sims:
         if not await ensure_enrolled(sim):

@@ -119,6 +119,11 @@ def ensure_station(db, org: Organization, name, tz, lat, lon) -> GroundStation:
             latitude=lat,
             longitude=lon,
             enrolled_at=datetime.now(UTC),
+            # Set here rather than by the simulator. The simulator now drives
+            # only stations already carrying this flag and never writes it, so
+            # whoever creates a station declares what it is - and a station
+            # created for real hardware is never adopted by accident.
+            is_simulated=True,
             # Staggered so the console shows a mix of online and stale, which is
             # what a real fleet on intermittent backhaul looks like.
             last_seen_at=datetime.now(UTC) - timedelta(seconds=10),

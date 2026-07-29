@@ -45,9 +45,10 @@ class GroundStation(UUIDMixin, TimestampMixin, Base):
     # bad: badging real data as synthetic invites an operator to ignore it, and
     # not badging synthetic data invites them to believe it.
     #
-    # Maintained by whatever is producing the data - the simulator sets it on
-    # the stations it drives and clears it on the ones it does not - so it stays
-    # true without anyone remembering to change it.
+    # Declared by whoever creates the station, in the console. The simulator
+    # reads it to decide what to drive and never writes it: it used to own this
+    # field, which meant it overwrote the operator's answer on every run and
+    # adopted any station not on a deny-list, including real ones.
     is_simulated: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False
     )
