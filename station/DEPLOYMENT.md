@@ -29,10 +29,26 @@ normal.
 
 **Software**
 
-Raspberry Pi OS **Bookworm** (32-bit, armhf) or newer. Bookworm ships Python
-3.11; the agent needs 3.11 or later because it uses `datetime.UTC`. Bullseye
-ships Python 3.9 and **will not run this** — that is an OS upgrade, not a patch,
-and the installer refuses rather than half-working.
+Raspberry Pi OS **Bookworm** (12) or **Trixie** (13). The agent needs Python
+3.11 or later because it uses `datetime.UTC`: Bookworm ships 3.11, Trixie ships
+3.13, and both are fine. Bullseye ships 3.9 and **will not run this** — that is
+an OS upgrade, not a patch, and the installer refuses rather than half-working.
+
+Two things Trixie changes that are worth knowing before you start:
+
+- **`pip install` into the system Python is refused** (PEP 668,
+  `externally-managed-environment`). That is why both paths use a virtual
+  environment, and it is not a thing to work around with `--break-system-packages`.
+- **The container's Python is older than the host's.** The slim image is
+  `python:3.11-slim-bookworm` while a Trixie host runs 3.13. Both are above the
+  floor and the agent behaves the same on either, but the two deployment paths no
+  longer run the same interpreter — worth remembering when a bug appears on one
+  and not the other.
+
+Package names, which changed once and are stable now: **`rpicam-apps`** (the
+`libcamera-*` binaries were renamed to `rpicam-*` in Bookworm; both names exist
+on current images) and **`python3-picamera2`**. On Bullseye they were
+`libcamera-apps`, which is one more reason not to be on Bullseye.
 
 **From the platform admin, before you go anywhere**
 
@@ -59,6 +75,14 @@ You never type the station's UUID. It comes back in the enrolment response.
 runbook is it. Running it as a plain systemd service is fully supported and
 documented in **Appendix B**; use that if you would rather not have Docker on
 the box.
+
+> **If this station has a camera, use the systemd path (Appendix B).** The
+> container path cannot reach a CSI camera as shipped — the slim image contains
+> no libcamera, no `rpicam-apps` and no `picamera2`, so the camera is correctly
+> reported as unavailable and there is no picture. The host has all three,
+> built for its own kernel and firmware. §3 has the full reasoning, what a
+> camera-capable image would take, and why it is not the recommendation today.
+> Everything else in this runbook applies to both paths.
 
 The reason containers won is the owner's constraint, not a preference about
 packaging: *once these stations are installed they are going to be difficult to
@@ -169,6 +193,54 @@ what follows rests on it.
 
 No network at the site? `pip download -r requirements.txt -d deploy/wheels` on a
 machine that has one, copy `deploy/wheels` across, and use `--offline`.
+
+### The camera decides which path this station takes
+
+**A camera-equipped station should take the systemd path.** Not a preference —
+the container path cannot reach the camera as shipped, and the fixes are all
+box-specific in ways nobody can verify from a desk.
+
+**Why the slim image cannot see a camera.** It is `python:3.11-slim-bookworm`
+plus one pip dependency. There is no libcamera in it, no `rpicam-jpeg`, no
+`rpicam-vid`, no `picamera2`. `gsu/camera/picsi.py` needs one of the first two
+and the live stream needs `rpicam-vid`, so the camera is reported unavailable
+with *"picamera2 is not importable and no rpicam-jpeg was found"* — accurate,
+and still no picture. That is not a bug in the image; the image was sized for an
+update layer of 91 KB over a metered link, and a camera stack is 300–400 MB.
+
+**What a camera-capable image would take**, written down in
+`deploy/Dockerfile.camera` and `deploy/docker-compose.camera.yml` so the
+knowledge is not lost — **both never built and never run**:
+
+| | |
+|---|---|
+| The stack | `rpicam-apps` and `python3-picamera2` from the Raspberry Pi archive, which is not Debian proper. Build with `--build-arg SUITE=` matching the host's release |
+| udev | libcamera enumerates through udev. Without `/run/udev` mounted it finds nothing, however many device nodes are visible |
+| Device access | `/dev/video*` is major 81 and is already allowed. **`/dev/media*` and `/dev/dma_heap/*` are dynamically allocated**, so their majors are kernel-specific and cannot be written down in advance — the override widens the cgroup rule to all character devices and explains how to narrow it once you can read the real numbers off the box |
+| Version coupling | The container's libcamera talks to the host's kernel and firmware, and Raspberry Pi OS updates those together. A container pins one half of that pair while the host moves the other, and a mismatch reads as *"no cameras available"* — the same message as an unplugged ribbon |
+
+That last row is the one that makes this a recommendation rather than a fix. On
+the systemd path none of it applies: the host's own libcamera, `rpicam-apps` and
+`python3-picamera2` are built for the kernel they are running on, and they are
+updated with it.
+
+**Related, and the reason the installer changed:** on the systemd path the venv
+is now created with **`--system-site-packages`**, because `python3-picamera2` is
+a Debian package that cannot be pip-installed — it is bound to the system's
+libcamera build. Without that flag the venv cannot import it however well it is
+installed, and the driver falls back to `rpicam-jpeg`, a subprocess per frame.
+That still works; it is several times slower, and it used to be **silent**. It
+is not silent now: the camera reports which path it took and why, in
+`gsu devices`, on the setup page and in the health frame —
+
+```
+picamera2 is not importable from this virtual environment (/opt/percepta/station/.venv),
+which was created without --system-site-packages — picamera2 is a system package and
+cannot be pip-installed. Using rpicam-jpeg, a subprocess per frame.
+```
+
+If you are upgrading an install made before this change, the installer says so
+and the fix is `rm -rf /opt/percepta/station/.venv` and a re-run.
 
 ---
 
@@ -291,6 +363,11 @@ system CA bundle` instead, and that is also a PASS.
 The two FAILs are dealt with in §8 and §10. Anything under **Trust** that fails
 must be fixed here, not later.
 
+**On the container path that camera line is a `FAIL`**, reading *"picamera2 is
+not importable and no rpicam-jpeg was found"*. That is the expected answer
+there, not a fault to chase: §3 explains it and recommends the systemd path for
+a station with a camera.
+
 **Read the camera line carefully — preflight does not take a picture.** It
 reports that the driver could be built: that libcamera tooling is installed and
 this board can be asked for a frame. A ribbon that is not seated, or a camera
@@ -320,7 +397,45 @@ exactly what a remote station must not do.
 
 ## 7. Enrol
 
-The setup page binds to loopback, so from your laptop:
+### From a laptop or a phone, with no terminal
+
+This is the path an installer takes, and it is the reason the setup page exists.
+It needs the box provisioned with a setup password first — **without one the
+page will not bind anywhere but loopback**, deliberately, so that a box nobody
+gave a password to cannot end up serving an open form on a public address.
+
+On the box, once, when it is built:
+
+```bash
+sudo -u gsu /opt/percepta/station/.venv/bin/python -m gsu setup-password
+```
+
+Paste the `GSU_SETUP_PASSWORD_HASH=…` line it prints into
+`/etc/percepta/gsu.env`, set `GSU_SETUP_HOST` to the setup interface's address
+(or `0.0.0.0` if it comes from DHCP), and `systemctl restart gsu`. **Write the
+password on the box**, the way a router's is on a label. It is not the enrolment
+code.
+
+`python -m gsu preflight` reports what the page will actually do — the address,
+whether a password is set, and whether the host setting is being ignored. Run it
+before you drive out: "the page will be on loopback only" is cheap to learn at a
+desk and expensive to learn standing at an enclosure.
+
+Then, on site: join the setup network, open `http://<box>:8088`, enter the setup
+password, and the page does the rest — enrolment code, then a card per slot for
+what is fitted. The platform's address is shown but not editable; there is one
+platform and it comes from `/etc/percepta/gsu.env`.
+
+**The page closes behind you.** Thirty minutes after the last authenticated
+action on an enrolled station, the LAN socket is closed and rebound to loopback
+— the port stops answering rather than starting to refuse. To open it again,
+reboot the station, or `touch /var/lib/percepta-gsu/setup-open` over SSH. While
+the station is still *unenrolled* the window does not run down, so an installer
+is never locked out mid-job.
+
+### From a terminal, over an SSH tunnel
+
+Loopback always answers, needs no password, and is unaffected by the window:
 
 ```bash
 ssh -L 8088:127.0.0.1:8088 pi@<box>
@@ -355,9 +470,12 @@ for another is cheap and audited.
 same code. The platform re-issues rather than refusing (`contract/enrolment.md`
 §11) — the failure that matters is a technician stranded with a used code.
 
-Where the console *should* live is still an open decision (`DECISIONS.md`, open
-decision 2). It has no authentication: an SSH tunnel is the interim control, and
-that is a decision to confirm, not a design.
+Which *interface* the setup page belongs on is still an open decision
+(`DECISIONS.md`, open decision 2) — a dedicated Ethernet port and a laptop, or a
+soft-AP and a USB Wi-Fi adapter on an already-contended USB bus. What it is
+protected *by* is no longer open: a per-box password, a source-address check, a
+window that closes, and CSRF on every form (`gsu/setup_access.py`, DECISIONS
+item 41).
 
 ---
 
@@ -743,8 +861,9 @@ answer. The four you will actually see:
 | Reason | What it is |
 |---|---|
 | *"no camera fitted"* | the camera slot is empty in the inventory. Set it on the setup page |
-| libcamera's own words — *"no cameras available"* | the ribbon or the camera. `gsu camera` reproduces it in a second, and the message comes from libcamera rather than from this software |
-| *"picamera2 is not installed and no rpicam-jpeg was found"* | packages: `sudo apt install python3-picamera2 rpicam-apps` |
+| libcamera's own words — *"no cameras available"* | the ribbon or the camera. `gsu camera` reproduces it in a second, and the message comes from libcamera rather than from this software. **In a container** it is also what a missing `/run/udev` mount and a too-narrow device cgroup produce — §3 |
+| *"picamera2 is not importable and no rpicam-jpeg was found"* | packages: `sudo apt install python3-picamera2 rpicam-apps`. **On the container path this is the expected answer** and the fix is §3, not a package |
+| *"…created without --system-site-packages…"* | not a fault: there is a picture, taken the slow way. §3 has the one-line fix |
 | *"the camera is in use by the live stream"* | not a fault. One sensor, one user; snapshots resume when the viewer leaves |
 
 If `video.refused` is `true`, the broker is rejecting the video channel. That is
@@ -921,7 +1040,8 @@ box is better than relying on luck.
 
 | Port | Bound to | What |
 |---|---|---|
-| 8088 | `127.0.0.1` | the setup console. **No authentication** — reach it over an SSH tunnel |
+| 8088 | `127.0.0.1` | the setup page, over an SSH tunnel. No password: SSH already authenticated you |
+| 8088 | `$GSU_SETUP_HOST` | the setup page on the setup network — **only** if a setup password is set, **only** from a private source address, and **only** while the window is open |
 | 22 | everything | SSH. Key-only, please: this box is on the public internet |
 
 The station makes **outbound** connections only: to the broker (6380/TLS), to
@@ -935,9 +1055,32 @@ The media socket carries the same credential as the broker, verified against the
 same pinned trust, and is closed when the stream stops. There is no third secret
 and no port to open.
 
-If the setup console is ever moved off loopback, it belongs on a private setup
-network and nowhere else — it has no authentication, and physical presence is
-the only control it has (`DECISIONS.md`, open decision 2).
+If the setup page is moved off loopback it belongs on a private setup network
+and nowhere else. Four things have to be true before it is served there at all,
+and the reasoning for each is in `gsu/setup_access.py`:
+
+1. `GSU_SETUP_HOST` names something other than loopback — an edit somebody made;
+2. a setup password is configured. **Without one the host setting is ignored and
+   the page binds to loopback anyway.** There is no code path that opens this
+   listener on a routable interface without a secret in front of it;
+3. the request comes from 10/8, 172.16/12, 192.168/16 or link-local. Carrier-
+   grade NAT (100.64/10) is **not** in that list — on a Starlink site that range
+   is the carrier's shared network, not this site's LAN;
+4. the window is open: unenrolled, or within `GSU_SETUP_WINDOW_MINUTES` of the
+   last authenticated action.
+
+Every form carries a CSRF token bound to the session cookie, every response is
+`no-store` under a CSP that permits no script and no framing, and the `Host`
+header must be an address or a `.local` name — which is what stops a public page
+rebinding its own name to this box and driving the form from inside a
+technician's browser.
+
+**One caveat, and it is a real one: control 3 does not work under Docker.**
+Every request then arrives from the bridge gateway, which is inside 172.16/12,
+so the source-address check passes for everyone. On the container path the
+password and the window are the only two controls left. Publish the port to a
+specific LAN address rather than `0.0.0.0` if you use it, or use the systemd
+path, which is the recommended one for camera-equipped stations anyway.
 
 ---
 
@@ -1048,8 +1191,15 @@ noticed. On a site that is hours away, that is the risk §14 exists to remove.
 
 ### What this path is better at
 
-Two things, honestly:
+Three things, honestly:
 
+- **The camera works here and does not work in the container.** The host has
+  libcamera, `rpicam-apps` and `python3-picamera2`, all built for the kernel and
+  firmware they are running on and updated with them. The slim image has none of
+  the three, and a camera-capable image is coupled to the host in ways that
+  cannot be verified from a desk (§3). **For a station with a camera, this is the
+  path.** The installer creates the venv with `--system-site-packages` so that
+  `picamera2` — a Debian package, not a pip one — is importable.
 - **A missing device was never a problem here.** The unit has no device list to
   be wrong; the agent opens what it finds and reports what it cannot. The
   container path only matches this because its device mapping was made
@@ -1122,6 +1272,12 @@ changed twice and none of it has touched the target hardware.
   verified above ran against the synthetic camera and the synthetic encoder,
   which exercise the publisher, the muxer, the uplink and the on-demand logic —
   and none of the sensor.
+- **`Dockerfile.camera` and `docker-compose.camera.yml` have never been built
+  or started.** They are written-down knowledge, not a tested path: the Raspberry
+  Pi archive, the udev mount and the device cgroup widening are all reasoned
+  from how libcamera finds hardware. Whoever tries them first should expect the
+  `render` gid and the suite pinning to need correcting, and should read §3
+  before deciding it is worth it at all rather than using systemd.
 
 The first person with the hardware should expect the device cgroup majors and
 the `group_add` gids to need adjusting, should run `gsu-update.sh` by hand once

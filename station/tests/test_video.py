@@ -546,6 +546,49 @@ class PiCameraTests(unittest.TestCase):
         self.assertFalse(camera.describe().present)
         self.assertFalse(camera.describe().simulated, "never claims to be a simulation")
 
+    def test_it_says_which_capture_path_it_took_and_why(self):
+        # The silent failure this exists for: `picamera2` is a Debian package
+        # and a venv built without --system-site-packages cannot import it, so
+        # the station falls back to a subprocess per frame. That is several
+        # times slower and looks exactly like a slow camera rather than like a
+        # packaging choice, which sends somebody after the wrong thing.
+        camera = PiCsiCamera()
+        self.assertTrue(camera.backend_reason, "a backend with no explanation")
+        self.assertIn(camera._backend, ("picamera2", "cli", "none"))
+        if camera._backend == "cli":  # pragma: no cover - needs rpicam-apps
+            self.assertIn("subprocess per frame", camera.backend_reason)
+            self.assertIn(camera.backend_reason, camera.describe().detail)
+
+    def test_a_venv_without_system_site_packages_is_named_as_the_cause(self):
+        import sys
+        import tempfile as tf
+        from pathlib import Path as P
+
+        # Written as the two pyvenv.cfg states rather than by building two real
+        # environments: what is under test is the diagnosis, not venv itself.
+        for include, hidden in (("true", False), ("false", True)):
+            with tf.TemporaryDirectory() as directory:
+                (P(directory) / "pyvenv.cfg").write_text(
+                    f"home = /usr/bin\ninclude-system-site-packages = {include}\n"
+                )
+                prefix, base = sys.prefix, sys.base_prefix
+                sys.prefix, sys.base_prefix = directory, "/usr"
+                try:
+                    self.assertIs(PiCsiCamera._venv_hides_system_packages(), hidden,
+                                  f"include-system-site-packages = {include}")
+                finally:
+                    sys.prefix, sys.base_prefix = prefix, base
+
+    def test_an_interpreter_outside_a_venv_is_not_blamed_for_a_venv_problem(self):
+        import sys
+
+        prefix, base = sys.prefix, sys.base_prefix
+        sys.prefix = sys.base_prefix = "/usr"
+        try:
+            self.assertFalse(PiCsiCamera._venv_hides_system_packages())
+        finally:
+            sys.prefix, sys.base_prefix = prefix, base
+
     def test_construction_touches_no_hardware(self):
         # It runs inside a sensing tick, so it must not import picamera2, open a
         # camera or start a subprocess. Anything that slow belongs on the video
@@ -920,6 +963,7 @@ class OnDemandTests(AgentFixture):
         # assertions, and what is being tested is what happens to a frame, not
         # when it happens.
         source.stop()
+        self.agent.stream.uplink.close()
         refusing = Refusing()
         self.agent.stream.uplink = refusing
         for _ in range(4):
@@ -1196,6 +1240,10 @@ class MediaUplinkTests(unittest.TestCase):
         uplink = MediaUplink(stalled.url, "secret")
         self.assertTrue(uplink.open(), uplink.reason)
         self.addCleanup(uplink.close)
+        # A small send buffer, so congestion is reached in a bounded number of
+        # frames rather than depending on how much the kernel felt like
+        # buffering. Without this the test is a race against SO_SNDBUF.
+        uplink.socket._socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 8192)
         uplink.begin("avc1.420033", b"init-segment")
         # Push until the socket buffer fills and the uplink starts refusing.
         big = b"x" * 200_000

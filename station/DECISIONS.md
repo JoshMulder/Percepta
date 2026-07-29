@@ -36,11 +36,12 @@ Unanswered, and it decides two things the station cannot decide for itself:
   soft-AP or a dedicated Ethernet port. The Pi 2B has **no onboard Wi-Fi**, so a
   soft-AP means a USB Wi-Fi adapter, which means another device on the contended
   USB bus (HARDWARE.md §3). A dedicated Ethernet port and a laptop avoids that.
-- **Whether the console needs authentication.** It has none: physical presence
-  on the setup network is the control, which holds only if that network is not
-  the site's routable one. If a subcontractor installs, or if the console ends
-  up reachable from the site LAN, that assumption fails and the console needs a
-  password or a pairing step.
+  **Still open.**
+- ~~**Whether the console needs authentication.**~~ **Answered — it does, and it
+  has it.** Item 41. The old answer, "physical presence on the setup network is
+  the control", was only ever true if that network was not the site's routable
+  one, and nothing in the deployment guaranteed that. A per-box password is now
+  required before the page will bind anywhere but loopback.
 
 The console is built mobile-first (single column, large touch targets) on the
 assumption of a phone. If it is a laptop, that was harmless.
@@ -785,3 +786,103 @@ for the layer (a layer is a gzipped tar, so this is within a few percent), and
 `curl` against `registry-1.docker.io` with `-w '%{size_download}'` for the
 manifest and token. Both are in the session transcript rather than a script,
 which is a small gap — a `make measure-update` target would be better.
+
+## 41. The setup GUI is authenticated, windowed, and off by default
+
+**All of this needs review, and none of it has been exercised on a Pi.**
+
+The owner's requirement: *"the station should come up and host a web gui to
+perform the configuration. input code, select sensor types etc. the server
+address should be hardcoded in the .env as there will only ever be one."*
+
+The page already existed (`gsu/console.py`, contract/enrolment.md §5 and §7) and
+already did both jobs — code entry and per-slot device selection driven off
+`devices/registry.py`, so there is still exactly one supported-device list. What
+did not exist was any way to reach it that was both usable by an installer with
+a phone and safe on a box with a public address. It bound loopback only, had no
+authentication, ran for as long as the agent did, had no CSRF, echoed a stored
+camera password back into the HTML, and read `Content-Length` bytes off the wire
+without a bound. Those are addressed. `gsu/setup_access.py` carries the full
+reasoning; the decisions, and what would change them:
+
+**a. It binds loopback by default and always keeps loopback.** Unchanged, and
+deliberately: the SSH-tunnel path documented in DEPLOYMENT.md §7 still works,
+still needs no password — reaching loopback already required SSH, and a second
+secret in front of the first protects nothing — and `deploy/gsu-update.sh`
+keeps its `/status.json` health gate. The window does not apply to loopback.
+
+**b. A per-box password, or no LAN listener exists.** Not a check inside the
+handler: `Console._target_host()` cannot return a non-loopback address unless a
+password is configured, so a station nobody provisioned with one binds loopback
+and raises a health condition saying why. This is the answer to "the default
+must be safe when the box is on a public address" — the unsafe configuration is
+unreachable rather than discouraged.
+
+The secret is `GSU_SETUP_PASSWORD_HASH` (pbkdf2-sha256, 120 000 rounds, written
+by `python -m gsu setup-password`), with a plain `GSU_SETUP_PASSWORD` accepted
+for a bench. It is per-box and written on the box, like a router's. **It is not
+the enrolment code**: the code is single-use, issued by the platform, and cannot
+be verified offline — which is exactly when an installer needs to get in.
+
+**Needs a human:** who sets that password and where it is recorded. An image
+that ships one password for a fleet is one compromise away from every station,
+and this decision belongs with §9.2 (who installs) rather than here.
+
+**c. Private source addresses only.** Written out by hand rather than using
+`ipaddress.is_private`, because that predicate counts 100.64.0.0/10 as private
+and on a Starlink site carrier-grade NAT is the carrier's shared network, not
+this site's LAN. Using the stdlib answer would have admitted every other
+subscriber behind the same pool.
+
+**This control does not survive Docker**, and that is written into
+DEPLOYMENT.md §15 rather than left as a surprise: behind the bridge every
+request appears to come from 172.17.0.1, which is inside 172.16/12. On the
+container path the password and the window are the only two controls left.
+Another reason the systemd path is the right one for a station that serves this
+page — it was already the recommendation for camera-equipped boxes.
+
+**d. It is not a permanent service.** Once the station is enrolled, thirty
+minutes after the last authenticated action the LAN socket is *closed* and
+rebound to loopback. Closed rather than answering 403, because a port that
+answers is a port somebody enumerates. Sessions are dropped with it, so a laptop
+left on the bench does not walk back in.
+
+While the station is **unenrolled** the window does not run down. An installer
+mid-job must not be locked out, and an unenrolled station is inert: there is
+nothing on it worth reaching and an attacker who could reach it would still need
+a code the platform issued.
+
+Reopening is deliberate — reboot the station, or `touch $GSU_HOME/setup-open`
+with a shell on the box. Both need real access to the site or to SSH. Note the
+consequence: **a valid session cookie cannot reopen a closed window**, which is
+tested, because a cookie that could would be the back door in a different shape.
+
+**Needs review:** thirty minutes. Long enough for six slots and a code, short
+enough that a forgotten install does not leave a page up for a week. It is one
+environment variable and the first real install should set it from observation.
+
+**e. The platform address is read-only on the page.** As asked. It is rendered
+so an installer can confirm the box points at the right platform before they
+leave — that is worth doing, because a wrong address presents as a station with
+no signal — but there is no control that can change it. `GSU_PLATFORM_URL` and
+`GSU_BROKER_URL` stay in the environment file.
+
+**f. The rest, briefly.** CSRF token bound to the session cookie on every
+mutating POST, plus an `Origin` check; `Host` must be an IP literal or a
+`.local` name, which is what defeats DNS rebinding — the attack that otherwise
+lets a public web page drive this form from inside a technician's browser;
+request bodies bounded at 64 KB before they are read, because `Content-Length`
+is attacker-controlled and this box has 1 GB of RAM; per-peer lockout after five
+failed passwords; `no-store` and a CSP allowing no script and no framing on
+every response; and the stored camera password is never rendered back — the page
+shows *that* one is stored, and a blank field means "unchanged".
+
+**g. What is not solved: the setup page is plain HTTP.** Anyone already on the
+setup network can read the password off the wire. A certificate cannot be issued
+for a DHCP address, and a self-signed one that an installer click-throughs is
+authentication theatre rather than encryption anybody verified. The controls
+that bound this are the short window, the per-box password and the expectation
+that the setup network is a cable or a dedicated AP. **If this page ever has to
+live on a shared site LAN, this is the assumption to revisit first** — and the
+answer is probably a pinned certificate provisioned with the image, which is a
+real piece of work and was not attempted here.

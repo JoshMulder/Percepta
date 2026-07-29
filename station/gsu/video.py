@@ -271,7 +271,7 @@ class VideoPublisher:
         )
         log.error(
             "Video is refused by the broker on %s: %s. See CONTRACT-QUESTIONS.md "
-            "item 11 — the platform has to grant the channel.", topic, detail,
+            "item 12 — the platform has to grant the channel.", topic, detail,
         )
 
     @property

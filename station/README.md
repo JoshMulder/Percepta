@@ -158,7 +158,11 @@ gsu/
   stream.py      the live H.264 stream, which runs only while somebody is
                  watching and stops when the platform stops asking
   sensors/       interfaces, and simulated implementations behind them
-  console.py     the local setup and device-selection app (enrolment.md §5, §7)
+  console.py     the setup GUI: enrol, choose what is fitted, see what the box
+                 thinks it is (enrolment.md §5, §7). The whole install for
+                 somebody with a phone and no terminal
+  setup_access.py  who may reach that page, from where, and for how long — the
+                 four controls, and why each one is a default and not a setting
   enrolment.py   claim, renew with backoff, and alarm early
   clock.py       plausibility, and what is disciplining this clock
 deploy/          systemd unit, installer, environment, udev rule, and the
@@ -230,8 +234,42 @@ It exists because the platform hands out an address that may only be routable
 from inside its own network.
 
 Other environment: `GSU_HOME` (state directory), `GSU_PLATFORM_URL`,
-`GSU_SETUP_HOST`/`GSU_SETUP_PORT`/`GSU_SETUP=0`, `GSU_AIRBAND_TRAFFIC`
+`GSU_SETUP_HOST`/`GSU_SETUP_PORT`/`GSU_SETUP=0`,
+`GSU_SETUP_PASSWORD_HASH`/`GSU_SETUP_WINDOW_MINUTES`, `GSU_AIRBAND_TRAFFIC`
 (`off`/`low`/`busy`), `GSU_ENROL_TOKEN`.
+
+## The setup GUI, and what stops it being the weakest thing here
+
+A station that boots unconfigured serves a web page: enter the enrolment code,
+pick the device fitted in each slot from the same registry `gsu devices` reads,
+and read back what the box thinks it is — including *why* the camera is on the
+slow capture path, which is the question that otherwise costs an SSH session.
+The platform's address is shown and **is not editable**: there is one platform,
+it is fixed in the environment file, and an address that can be retyped on a
+roof is a station that enrols against nothing.
+
+It is also an HTML form on a box at the far end of the internet, which is the
+shape of every device that has ever been mass-compromised. So four controls
+stand in front of it, each a default rather than something to remember:
+
+- **loopback unless told otherwise** — `GSU_SETUP_HOST` still defaults to
+  `127.0.0.1`, reached over an SSH tunnel, which needs no password because SSH
+  has already authenticated the caller;
+- **a per-box password, or no LAN listener at all.** Set `GSU_SETUP_PASSWORD_HASH`
+  (`python -m gsu setup-password`) or a non-loopback `GSU_SETUP_HOST` is ignored.
+  This is structural, not a check: there is no path that binds a routable socket
+  without a secret in front of it, so forgetting one gives an unreachable page;
+- **private source addresses only**, hand-written rather than `is_private` —
+  carrier-grade NAT is *not* local on a Starlink site;
+- **a window that closes.** Once enrolled and idle, the LAN socket is closed and
+  rebound to loopback. Reopening is deliberate: reboot, or `touch
+  $GSU_HOME/setup-open`.
+
+Plus CSRF on every form, a `Host` check that defeats DNS rebinding, bounded
+request bodies, per-peer lockout, and no secret ever rendered back into the
+page. The reasoning for all of it is in `gsu/setup_access.py`; the residual risk
+— it is plain HTTP, so anyone already on the setup network can read the password
+off the wire — is stated there too rather than left to be discovered.
 
 Trust is **two roots, not one**: the broker is always pinned to the private CA
 from `broker.ca_pem` (persisted 0600, pre-provision with `GSU_CA_FILE`), and the

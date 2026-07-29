@@ -45,8 +45,9 @@ API_CA=""
 OFFLINE=0
 DEPLOY_PATH=docker
 # Python 3.11 or newer: the code uses datetime.UTC, which arrived in 3.11.
-# Raspberry Pi OS Bookworm ships 3.11.2. Bullseye ships 3.9 and will not run
-# this — that is an OS upgrade, not a patch, so it is checked loudly.
+# Raspberry Pi OS Bookworm (12) ships 3.11.2 and Trixie (13) ships 3.13; both
+# are fine. Bullseye ships 3.9 and will not run this — that is an OS upgrade,
+# not a patch, so it is checked loudly.
 PY_MIN_MAJOR=3
 PY_MIN_MINOR=11
 
@@ -55,6 +56,7 @@ SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 say()  { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 info() { printf '    %s\n' "$*"; }
 die()  { printf '\n\033[31mERROR: %s\033[0m\n\n' "$*" >&2; exit 1; }
+warn() { printf '    \033[33m%s\033[0m\n' "$*"; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -92,7 +94,8 @@ command -v python3 >/dev/null || die "python3 is not installed."
 PY_VER="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
 python3 - "$PY_MIN_MAJOR" "$PY_MIN_MINOR" <<'PY' || die \
   "Python $PY_VER is too old. The agent needs 3.11+ (it uses datetime.UTC).
-   Raspberry Pi OS Bookworm ships 3.11; Bullseye ships 3.9 and will not run this.
+   Raspberry Pi OS Bookworm ships 3.11 and Trixie ships 3.13; Bullseye ships 3.9
+   and will not run this.
    Upgrade the OS rather than trying to patch around it — an unattended box on an
    unsupported release is a second problem waiting."
 import sys
@@ -159,8 +162,25 @@ chmod +x "$PREFIX/deploy/gsu-update.sh" 2>/dev/null || true
 if [ "$DEPLOY_PATH" = "systemd" ]; then
   say "Python environment"
   if [ ! -x "$PREFIX/.venv/bin/python" ]; then
-    python3 -m venv "$PREFIX/.venv"
-    info "created $PREFIX/.venv"
+    # --system-site-packages, deliberately, and for one reason: `picamera2` is
+    # a Debian package on Raspberry Pi OS (`python3-picamera2`) and cannot be
+    # pip-installed — it is bound to the system's libcamera build. A venv
+    # without this flag cannot import it however well it is installed, and the
+    # camera driver silently falls back to a subprocess per frame, which looks
+    # exactly like a slow camera rather than like a packaging choice.
+    #
+    # What it costs: the venv also sees every other system package. That is a
+    # real trade and it is made knowingly — this box runs one application, the
+    # agent has exactly one pip dependency, and a venv's own site-packages
+    # still take precedence over the system's.
+    python3 -m venv --system-site-packages "$PREFIX/.venv"
+    info "created $PREFIX/.venv (--system-site-packages, so python3-picamera2"
+    info "is importable; see DEPLOYMENT.md §3)"
+  elif ! grep -q 'include-system-site-packages *= *true' "$PREFIX/.venv/pyvenv.cfg" 2>/dev/null; then
+    warn "$PREFIX/.venv was created without --system-site-packages, so"
+    warn "python3-picamera2 cannot be imported and the camera will use the"
+    warn "slower rpicam-jpeg path. The station reports which path it took and"
+    warn "why. To switch: rm -rf $PREFIX/.venv and re-run this installer."
   fi
   PIP_ARGS=(--disable-pip-version-check)
   if [ "$OFFLINE" -eq 1 ]; then

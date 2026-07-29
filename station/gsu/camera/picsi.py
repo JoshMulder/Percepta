@@ -12,8 +12,16 @@ ways in and this driver takes whichever is there:
                    configured once, grabbing a JPEG per frame.
     rpicam-jpeg    a subprocess per frame, writing to a file we then read. Slower
                    by a long way - a process start, camera open and AE settle
-                   every frame - but it depends on nothing but the packages a
-                   stock Bookworm image already has.
+                   every frame - but it depends on nothing but `rpicam-apps`,
+                   which a stock Bookworm or Trixie image already has.
+
+Which of the two a box gets is not left to chance and is not silent. `picamera2`
+is a Debian package (`python3-picamera2`) bound to the system's libcamera build
+and cannot be pip-installed, so a virtual environment made without
+`--system-site-packages` cannot import it however well it is installed - and the
+station then runs the slow path, which looks exactly like a slow camera.
+`backend_reason` says which path and why, and it is carried into the device
+inventory, the setup page and the health frame.
 
 Three rules the rest of the station relies on, all of them enforced here:
 
@@ -43,6 +51,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -94,11 +103,13 @@ class PiCsiCamera:
         self._backend = "picamera2" if self._picamera2_installed else (
             "cli" if self._tool else "none"
         )
+        #: Why this backend and not the faster one. Reported, never inferred:
+        #: the subprocess path is several times slower per frame, and "the
+        #: camera is slow" and "the fast path was unreachable for a packaging
+        #: reason" are the same symptom with completely different fixes.
+        self.backend_reason = self._explain_backend()
         self._camera = None            # a Picamera2, once one has been opened
-        self._reason = "" if self._backend != "none" else (
-            "no CSI camera support on this box: picamera2 is not installed and "
-            "no rpicam-jpeg was found. Install python3-picamera2 or rpicam-apps."
-        )
+        self._reason = "" if self._backend != "none" else self.backend_reason
         self._failures = 0
         self._next_attempt = 0.0
         self.frames = 0
@@ -111,7 +122,60 @@ class PiCsiCamera:
             f"gsu-camera-{os.getpid()}.jpg",
         )
 
+    def _explain_backend(self) -> str:
+        """One sentence naming the capture path and why it is that one.
+
+        The case worth catching is specific and silent: `picamera2` is a Debian
+        package on Raspberry Pi OS, so a virtual environment created **without**
+        `--system-site-packages` cannot import it however well it is installed.
+        The station then falls back to a subprocess per frame, which works — and
+        looks exactly like a slow camera rather than like a packaging choice.
+        """
+        if self._backend == "picamera2":
+            return "picamera2 is importable; using it (one process, frames in memory)"
+        if self._backend == "cli":
+            if self._venv_hides_system_packages():
+                return (
+                    f"picamera2 is not importable from this virtual environment "
+                    f"({sys.prefix}), which was created without "
+                    "--system-site-packages — picamera2 is a system package and "
+                    f"cannot be pip-installed. Using {self._tool}, a subprocess "
+                    "per frame. Recreate the venv with --system-site-packages to "
+                    "use the faster path."
+                )
+            return (
+                f"picamera2 is not installed; using {self._tool}, which is a "
+                "subprocess per frame. `apt install python3-picamera2` for the "
+                "faster path."
+            )
+        return (
+            "no CSI camera support on this box: picamera2 is not importable and "
+            "no rpicam-jpeg was found. Install python3-picamera2 or rpicam-apps."
+        )
+
+    @staticmethod
+    def _venv_hides_system_packages() -> bool:
+        """Whether this interpreter is a venv that cannot see system packages."""
+        if sys.prefix == sys.base_prefix:
+            return False
+        try:
+            with open(os.path.join(sys.prefix, "pyvenv.cfg")) as handle:
+                for line in handle:
+                    name, _, value = line.partition("=")
+                    if name.strip() == "include-system-site-packages":
+                        return value.strip().lower() != "true"
+        except OSError:
+            pass
+        return True
+
     # --- the interface --------------------------------------------------
+
+    @property
+    def backend(self) -> str:
+        """`picamera2`, `cli` or `none`. Public because the setup page renders
+        it beside `backend_reason` — the pair is how "why is the camera slow"
+        gets answered without an SSH session."""
+        return self._backend
 
     @property
     def status(self) -> str:
@@ -175,6 +239,11 @@ class PiCsiCamera:
                 )
             elif self._reason:
                 detail += f" — {self._reason}"
+            if self._backend == "cli":
+                # Said on every line that describes this camera, not once at
+                # start-up in a log nobody keeps: the slow path is a standing
+                # condition, and the reason for it is what somebody acts on.
+                detail += f" [{self.backend_reason}]"
         return Device(
             id="camera",
             kind="camera",

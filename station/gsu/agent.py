@@ -543,7 +543,7 @@ class Agent:
         if self.config.setup_enabled:
             from .console import Console
 
-            console = Console(self, self.config.setup_host, self.config.setup_port)
+            console = Console.from_config(self, self.config)
             console.start()
 
         tick = self.config.tick_seconds
@@ -704,7 +704,29 @@ class Agent:
         """
         state = self.video.stats()
         state["stream"] = self.stream.state_payload()
+        state["camera"] = self._camera_backend()
         return state
+
+    def _camera_backend(self) -> dict:
+        """Which capture path the camera is on, and why that one.
+
+        Separated out of the driver's free-text `detail` because it answers a
+        question people ask directly — "why is the camera slow" — and a setup
+        page should be able to answer it without an SSH session. The reason is
+        the driver's own (`camera/picsi.py`), never inferred here: a station
+        that guesses at this would send somebody to site for a camera fault
+        that is really a virtual environment built without
+        `--system-site-packages`.
+
+        Two fields and not three: whether the camera is simulated is already
+        reported per slot in `devices[]`, and a second copy computed a different
+        way here is how two places start disagreeing about the same station.
+        """
+        driver = self.inventory.drivers.get("camera")
+        return {
+            "backend": getattr(driver, "backend", None),
+            "backend_reason": getattr(driver, "backend_reason", ""),
+        }
 
     def unavailable_payload(self, kind: str, reports: dict | None = None) -> dict:
         """Declare a stream the station has no source for.

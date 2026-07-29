@@ -59,6 +59,30 @@ class AgentConfig:
     setup_port: int = 8088
     setup_enabled: bool = True
 
+    #: The password an installer types to reach the setup page from the LAN.
+    #: Either a plain value or, preferably, the output of
+    #: `python -m gsu setup-password` — see `gsu/setup_access.py`.
+    #:
+    #: **Without one, `setup_host` is ignored and the page binds to loopback.**
+    #: That is the whole safety property: there is no code path that opens this
+    #: listener to a routable interface without a secret in front of it, so
+    #: forgetting to set one produces an unreachable page rather than an open
+    #: one. Loopback callers never need it — they arrived over SSH, which has
+    #: already authenticated them, and a second secret in front of the first
+    #: protects nothing.
+    setup_password: str | None = None
+
+    #: How long the LAN listener stays up with no authenticated activity, after
+    #: the station is enrolled. While it is *un*enrolled the window does not run
+    #: down: an installer is still working and a box with no credential has
+    #: nothing on it worth reaching. On expiry the socket is closed and rebound
+    #: to loopback, so the port stops answering rather than answering 403.
+    #:
+    #: 0 pins it open. Supported because a bench station is a real thing, and
+    #: refused to be silent about: it is logged as a warning and rendered on the
+    #: page itself.
+    setup_window_minutes: float = 30.0
+
     #: How busy the simulated airband channel is: "off", "low" or "busy".
     #: A rural airband channel is silent the vast majority of the time and the
     #: default reflects that; "busy" is for exercising the audio path.
@@ -121,6 +145,11 @@ class AgentConfig:
             setup_host=_env("GSU_SETUP_HOST", "127.0.0.1"),
             setup_port=int(_env("GSU_SETUP_PORT", "8088")),
             setup_enabled=_env("GSU_SETUP", "1") not in ("0", "false", "no"),
+            # The hash is preferred and wins if both are set: an environment
+            # file that has been migrated to a hash but still carries the old
+            # plain line must not silently keep honouring the old line.
+            setup_password=_env("GSU_SETUP_PASSWORD_HASH") or _env("GSU_SETUP_PASSWORD"),
+            setup_window_minutes=float(_env("GSU_SETUP_WINDOW_MINUTES", "30")),
             airband_traffic=_env("GSU_AIRBAND_TRAFFIC", "low"),
             stream_sink=_env("GSU_STREAM_SINK"),
             encoder=_env("GSU_ENCODER", "auto"),
@@ -182,6 +211,15 @@ class AgentConfig:
     @property
     def lock_path(self) -> Path:
         return self.home / "agent.lock"
+
+    @property
+    def setup_reopen_path(self) -> Path:
+        # `touch` this and the setup window opens again, once. The deliberate
+        # act that stops the setup page being a permanent back door: reaching
+        # it after the window has closed needs either a shell on the box or a
+        # power cycle, and both are things only somebody with real access to
+        # this station can do.
+        return self.home / "setup-open"
 
 
 #: Strings a person or a form means as "off". `bool("false")` is `True`, which

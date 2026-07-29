@@ -9,6 +9,7 @@
     python -m gsu stream --seconds 20 # run the H.264 encoder and measure it
     python -m gsu status              # what the platform thinks of us
     python -m gsu whoami              # what this box thinks it is, offline
+    python -m gsu setup-password      # hash a setup-page password for the .env
 
 `run` is the only one a technician ever causes to happen; the rest are for
 whoever is debugging a box, and `preflight`, `devices` and `bench` are the three
@@ -400,6 +401,43 @@ def _preflight(agent, config: AgentConfig, probe: bool) -> int:
         line("PASS" if mode == 0o600 else "FAIL", f"{path.name} permissions",
              f"{oct(mode)}" + ("" if mode == 0o600 else " — should be 0600"))
 
+    # --- the setup page, which is how somebody without a terminal installs ---
+    #
+    # Here because the answer is only interesting *before* somebody drives out.
+    # "The page will be on loopback only" is cheap to learn at a desk and
+    # expensive to learn standing at an enclosure with a laptop.
+    print("\nSetup page")
+    if not config.setup_enabled:
+        line("WARN", "disabled", "GSU_SETUP=0. There is no web setup on this box, "
+                                 "and deploy/gsu-update.sh has no health endpoint "
+                                 "to gate updates on.")
+    else:
+        from .setup_access import is_loopback_host
+
+        loopback = is_loopback_host(config.setup_host)
+        has_password = bool(config.setup_password)
+        if loopback:
+            line("PASS", f"http://{config.setup_host}:{config.setup_port}",
+                 "Loopback only — reach it over an SSH tunnel. Nobody can open "
+                 "it from a laptop on site. Set GSU_SETUP_HOST and a password "
+                 "if they need to.")
+        elif not has_password:
+            line("FAIL", f"GSU_SETUP_HOST={config.setup_host} will be ignored",
+                 "No GSU_SETUP_PASSWORD_HASH, so the page binds to loopback "
+                 "instead of serving an unauthenticated form on a routable "
+                 "interface. Run `python -m gsu setup-password`.")
+        else:
+            line("PASS", f"http://{config.setup_host}:{config.setup_port}",
+                 "Password required from the local network.")
+        if has_password and not str(config.setup_password).startswith("pbkdf2_"):
+            line("WARN", "the setup password is stored in plain text",
+                 "Works, but `python -m gsu setup-password` gives a hash that "
+                 "survives the environment file being read.")
+        if not loopback and has_password and config.setup_window_minutes <= 0:
+            line("WARN", "GSU_SETUP_WINDOW_MINUTES=0",
+                 "The page will answer on the local network for as long as this "
+                 "station runs. That is a permanent unattended listener.")
+
     # --- what is plugged in ---
     print("\nSerial ports present")
     ports = list_ports()
@@ -431,11 +469,55 @@ def _preflight(agent, config: AgentConfig, probe: bool) -> int:
     return 1 if failures else 0
 
 
+def _setup_password() -> int:
+    """Turn a typed password into the line that goes in the environment file.
+
+    The setup page will accept a plain `GSU_SETUP_PASSWORD`, and on a 0640
+    root:gsu file that is not unreasonable. This exists because the hash is
+    strictly better for the same effort: it survives the environment file being
+    read — by a backup, by an image someone copies, by anyone who ends up in
+    the `gsu` group — and the page behaves identically either way.
+
+    Read with `getpass`, so it is not in a shell history or in `ps`.
+    """
+    import getpass
+
+    from .setup_access import ITERATIONS, hash_password
+
+    try:
+        password = getpass.getpass("Setup password: ")
+        again = getpass.getpass("Again: ")
+    except (EOFError, KeyboardInterrupt):
+        print("\nCancelled.")
+        return 1
+    if password != again:
+        print("They do not match. Nothing written.")
+        return 1
+    if len(password) < 10:
+        # Not a policy, a floor. The page is on a network an installer is
+        # standing on; the thing to defend against is a four-digit guess, not a
+        # cracking rig.
+        print("Use at least 10 characters. Nothing written.")
+        return 1
+    print(
+        "\nPut this in /etc/percepta/gsu.env, then restart the agent:\n\n"
+        f"GSU_SETUP_PASSWORD_HASH={hash_password(password)}\n\n"
+        f"(pbkdf2-sha256, {ITERATIONS} rounds. Remove any GSU_SETUP_PASSWORD "
+        "line: the hash wins, and a stale plain line is a second password "
+        "nobody knows is live.)\n"
+        "Write the password itself on the box. It is what an installer types "
+        "into the setup page from a laptop or a phone, and it is not the "
+        "enrolment code."
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="gsu", description=__doc__)
     parser.add_argument("command", nargs="?", default="run",
                         choices=["run", "preflight", "enrol", "status", "whoami",
-                                 "devices", "bench", "camera", "stream"])
+                                 "devices", "bench", "camera", "stream",
+                                 "setup-password"])
     parser.add_argument("--token", help="enrolment code, as issued (XXXX-XXXX-XXXX)")
     parser.add_argument("--probe", action="store_true",
                         help="preflight: open a TLS connection to the platform and "
@@ -457,6 +539,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
     _logging(args.verbose)
+
+    if args.command == "setup-password":
+        # Deliberately before an Agent exists: this command touches no state,
+        # needs no station and must work on a laptop while an image is being
+        # built, which is where the password is actually chosen.
+        return _setup_password()
 
     config = AgentConfig.from_env()
     agent = Agent(config)

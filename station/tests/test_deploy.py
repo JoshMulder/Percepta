@@ -231,11 +231,42 @@ class UnitFileTests(unittest.TestCase):
         self.assertIn("GSU_REQUIRE_TLS=1", env)
         self.assertRegex(env, r"GSU_PLATFORM_URL=https://")
         self.assertRegex(env, r"GSU_BROKER_URL=rediss://")
-        # The setup console has no authentication; it must not be shipped bound
-        # to anything routable.
+        # The setup page must not be shipped bound to anything routable. It
+        # now has authentication, but the shipped default is still the one
+        # that is safe on a box whose address is public.
         self.assertIn("GSU_SETUP_HOST=127.0.0.1", env)
         # The switch that used to be able to un-pin everything is gone.
         self.assertNotIn("GSU_TLS_TRUST", env)
+
+    def test_the_shipped_environment_carries_no_setup_password(self):
+        """An image-wide password is one password for every station.
+
+        The example file documents how to generate one and leaves it commented
+        out, so a box that has not been provisioned with its own cannot serve
+        the setup page anywhere but loopback.
+        """
+        env = (DEPLOY / "gsu.env.example").read_text()
+        live = [
+            line for line in env.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        for line in live:
+            self.assertFalse(
+                line.startswith(("GSU_SETUP_PASSWORD=", "GSU_SETUP_PASSWORD_HASH=")),
+                f"a password is live in the shipped environment file: {line}",
+            )
+        # ...but it is documented, or nobody will know it is what unlocks the
+        # page an installer is standing in front of.
+        self.assertIn("GSU_SETUP_PASSWORD_HASH", env)
+        self.assertIn("python -m gsu setup-password", env)
+
+    def test_the_shipped_setup_window_is_not_pinned_open(self):
+        # 0 means the page answers on the LAN for as long as the station runs,
+        # which is the permanent back door the design exists to refuse.
+        env = (DEPLOY / "gsu.env.example").read_text()
+        match = re.search(r"^GSU_SETUP_WINDOW_MINUTES=(\S+)", env, re.M)
+        self.assertIsNotNone(match, "the window is not set in the shipped file")
+        self.assertGreater(float(match.group(1)), 0)
 
 
 class ContainerTests(unittest.TestCase):

@@ -1,10 +1,16 @@
-"""The local console: one app for setting a box up and seeing what it is doing.
+"""The local setup GUI: one page for setting a box up and seeing what it is.
 
 `contract/enrolment.md` §5 wants a page the box serves on its own network where
 a technician enters a code and watches for a green light. §7 wants the device
 inventory — which sensors are present and how to reach them. Those are the same
 job five minutes apart, done by the same person standing in front of the same
 box, so they are one app.
+
+The owner's requirement is that this is enough on its own: a station that comes
+up unconfigured must be usable by somebody with a laptop or a phone and **no
+terminal**. Enter the code, pick what is fitted in each slot, read back what the
+box thinks it is. `python -m gsu` still does all of it for anyone who does have
+a terminal, and neither path is the special case.
 
 Three rules it is built to:
 
@@ -23,23 +29,60 @@ renders — rainfall on an instrument with no rain gauge — that is listed at
 selection time, not discovered later by an operator reading 0.0 mm during a
 downpour.
 
-No authentication, deliberately: physical presence on the setup network is the
-control, which is only true if this is not on a routable network. Where it
-belongs depends on the compute platform — an open decision, see DECISIONS.md.
+**The platform address is not a field here.** There is one platform, its address
+is fixed in the environment file, and an installer's job is to confirm the box
+is pointed at the right one — not to retype it. It is rendered read-only for
+exactly that reason: a typo in a URL somebody can edit at 3pm on a roof is a
+station that enrols against nothing and reports no error anybody sees.
+
+Who may reach this page, and for how long, is `setup_access.py` and the
+reasoning is all in that module's docstring. What this file owes it:
+
+- every response carries `Cache-Control: no-store` and a CSP that permits no
+  script, no frame and no off-box form target — the page uses no JavaScript at
+  all, so that policy costs nothing and closes most of what is left
+- every state-changing POST carries a CSRF token bound to the session cookie
+- the `Host` header must be an IP literal, `localhost` or a `.local` name, which
+  is what stops a public web page rebinding its own name to this station's
+  private address and driving this form from a technician's browser
+- request bodies are bounded before they are read: this box has 1 GB of RAM and
+  `Content-Length` is attacker-controlled
+- no secret is ever rendered back into the HTML. A stored camera password is
+  shown as the fact that one is stored, never as its value
 """
 
 from __future__ import annotations
 
 import html
+import ipaddress
 import json
 import logging
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs
+from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 from .devices import registry
+from .setup_access import COOKIE_NAME, Gate, is_loopback_host
 
 log = logging.getLogger("gsu.console")
+
+#: A setup form is a few hundred bytes. This is three orders of magnitude of
+#: headroom and still small enough that a hostile `Content-Length` cannot make
+#: a 1 GB box swap. Read in bounded chunks rather than trusting the header.
+MAX_BODY_BYTES = 64 * 1024
+
+#: How often the window is re-checked when nobody is asking. Short enough that
+#: "it closes after thirty minutes" is true to the minute, long enough to be
+#: free on a Pi 2B.
+WATCH_SECONDS = 5.0
+
+#: No script, no frames, no off-box form target. The page has no JavaScript, so
+#: the only relaxation needed is the inline stylesheet.
+CSP = (
+    "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; "
+    "form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+)
 
 STYLE = """
  body { font: 15px/1.5 system-ui, sans-serif; margin: 0; background: #10151b; color: #dfe6ee; }
@@ -79,6 +122,8 @@ STYLE = """
  code { color: #9fb4cc; }
  .slot-head { display: flex; justify-content: space-between; align-items: baseline;
               gap: 1rem; }
+ .fixed { color: #c8d4e0; font-family: ui-monospace, monospace; font-size: .9rem;
+          word-break: break-all; }
 """
 
 STATUS_PILL = {
@@ -89,65 +134,333 @@ STATUS_PILL = {
 }
 
 
+def _host_is_addressable(host_header: str | None) -> bool:
+    """Whether the `Host:` we were asked for is one this box can legitimately
+    be called by.
+
+    The attack this is for is DNS rebinding: a page on the public internet
+    resolves its own name to this station's private address and then drives
+    these forms from inside a technician's browser, with the browser's own
+    network position. It needs a *name*, because it works by changing what a
+    name resolves to. An IP literal cannot be rebound, and neither can an mDNS
+    `.local` name — those are answered on the link, not by the public DNS.
+    """
+    if not host_header:
+        return False
+    host = host_header.strip()
+    if host.startswith("["):                     # [::1]:8088
+        host = host.partition("]")[0][1:]
+    else:
+        host = host.split(":")[0]
+    host = host.lower()
+    if host in ("localhost",) or host.endswith(".local"):
+        return True
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
+
+
 class Console:
-    def __init__(self, agent, host: str = "127.0.0.1", port: int = 8088) -> None:
+    """The setup page, its socket, and the rules about when that socket exists.
+
+    The socket is not a fixed thing. `host` is what the operator asked for;
+    `bound_host` is where it actually is, which is loopback whenever the LAN
+    listener is not allowed to exist — no password configured, or the window
+    closed. Closing means closing: the port stops answering rather than starting
+    to answer 403, because a port that answers is a port somebody enumerates.
+    """
+
+    def __init__(
+        self,
+        agent,
+        host: str = "127.0.0.1",
+        port: int = 8088,
+        *,
+        password: str | None = None,
+        window_minutes: float = 30.0,
+        reopen_path: Path | None = None,
+    ) -> None:
         self.agent = agent
         self.host = host
         self.port = port
+        self.gate = Gate(
+            password=password,
+            window_minutes=window_minutes,
+            reopen_path=reopen_path,
+            enrolled=lambda: getattr(agent, "enrolment", None) is not None,
+        )
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
+        self._watcher: threading.Thread | None = None
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self.bound_host: str | None = None
+        #: Why the LAN listener is not up, when it is not. Rendered, so that a
+        #: technician who cannot reach the page from a laptop but can over SSH
+        #: is told the reason on the page they *can* reach.
+        self.demotion_reason: str = ""
         self.message: tuple[str, str] | None = None
+
+    @classmethod
+    def from_config(cls, agent, config) -> Console:
+        return cls(
+            agent, config.setup_host, config.setup_port,
+            password=config.setup_password,
+            window_minutes=config.setup_window_minutes,
+            reopen_path=config.setup_reopen_path,
+        )
 
     # --- lifecycle ------------------------------------------------------
 
+    def _target_host(self) -> tuple[str, str]:
+        """Where the listener should be right now, and why not where asked.
+
+        This is the safety property the whole design rests on: **there is no
+        return value from this function that puts a socket on a routable
+        interface without a password.** It is a function rather than a check at
+        start-up so that the window closing takes the socket away again.
+        """
+        if is_loopback_host(self.host):
+            return self.host, ""
+        if not self.gate.has_password:
+            return "127.0.0.1", (
+                f"GSU_SETUP_HOST is {self.host} but no GSU_SETUP_PASSWORD_HASH "
+                "is set, so the setup page would have been an unauthenticated "
+                "form on a routable interface. It is on loopback instead — "
+                "reach it over an SSH tunnel, or set a password and restart."
+            )
+        if not self.gate.window_open():
+            return "127.0.0.1", (
+                "The setup window has closed. Reboot the station, or touch "
+                "the setup-open file in the state directory, to open it again."
+            )
+        return self.host, ""
+
     def start(self) -> None:
+        host, reason = self._target_host()
+        self.demotion_reason = reason
+        if reason:
+            # Loud, and a health condition: a station whose setup page is not
+            # where the installer was told it would be is a site visit unless
+            # somebody is told why, and the log on a box nobody can reach is
+            # not where they will be told.
+            log.error("Setup page demoted to loopback: %s", reason)
+            self._raise_condition("setup.demoted", "warning", reason)
+        if not self._bind(host):
+            return
+        if self.gate.window_minutes <= 0 and not is_loopback_host(host):
+            log.warning(
+                "GSU_SETUP_WINDOW_MINUTES=0: the setup page on %s will stay "
+                "open for as long as this station runs.", host,
+            )
+        self._watcher = threading.Thread(
+            target=self._watch, name="gsu-console-window", daemon=True
+        )
+        self._watcher.start()
+
+    def _bind(self, host: str) -> bool:
+        if self._stop.is_set():
+            # The watcher and `stop()` can race at shutdown, and the loser must
+            # not be the one that leaves a listening socket behind.
+            return False
         console = self
 
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
+            #: A held-open connection holds a thread. On a box with 64 tasks in
+            #: its systemd TasksMax, that is a denial of service one telnet away.
+            timeout = 20
 
             def log_message(self, *args):  # noqa: A002
                 pass
 
             def do_GET(self):  # noqa: N802
-                if self.path.startswith("/status.json"):
-                    return console._send_json(self, console.agent.snapshot())
-                if self.path.startswith("/registry.json"):
-                    return console._send_json(self, console._registry_json())
-                return console._send_html(self, console.render())
+                console._handle(self, "GET")
 
             def do_POST(self):  # noqa: N802
-                length = int(self.headers.get("Content-Length") or 0)
-                form = parse_qs(self.rfile.read(length).decode())
-                try:
-                    if self.path.startswith("/device"):
-                        console._set_device(form)
-                    else:
-                        console._enrol(form)
-                except Exception as exc:  # noqa: BLE001 - shown to a person
-                    console.message = ("bad", str(exc))
-                self.send_response(303)
-                self.send_header("Location", "/")
-                self.send_header("Content-Length", "0")
-                self.end_headers()
+                console._handle(self, "POST")
 
         try:
-            self._server = ThreadingHTTPServer((self.host, self.port), Handler)
+            server = ThreadingHTTPServer((host, self.port), Handler)
         except OSError as exc:
             # A console that cannot bind must not stop the station working.
-            log.warning("Console could not start on %s:%s (%s).", self.host, self.port, exc)
-            return
+            log.warning("Console could not start on %s:%s (%s).", host, self.port, exc)
+            return False
+        server.daemon_threads = True
+        with self._lock:
+            self._server = server
+            self.bound_host = host
         self._thread = threading.Thread(
-            target=self._server.serve_forever, name="gsu-console", daemon=True
+            target=server.serve_forever, name="gsu-console", daemon=True
         )
         self._thread.start()
-        log.info("Local console at http://%s:%s", self.host, self.port)
+        log.info(
+            "Setup page at http://%s:%s%s", host, self.port,
+            "" if is_loopback_host(host) else " (password required from the LAN)",
+        )
+        return True
+
+    def _watch(self) -> None:
+        """Move the socket when the rules change.
+
+        Two transitions, and both matter. Closing takes the LAN listener away
+        when the window expires. Opening brings it back when somebody creates
+        the reopen marker — without which the marker would only take effect at
+        the next restart, and "reboot the station to reach the setup page" is
+        exactly the site visit this is all trying to avoid.
+        """
+        while not self._stop.wait(WATCH_SECONDS):
+            try:
+                target, reason = self._target_host()
+                if target == self.bound_host:
+                    self.demotion_reason = reason
+                    continue
+                log.info(
+                    "Setup listener moving from %s to %s. %s",
+                    self.bound_host, target, reason or "",
+                )
+                if target == "127.0.0.1":
+                    # Cookies do not outlive the door being shut. A laptop left
+                    # on the bench must not walk back in when it reopens.
+                    self.gate.forget_all()
+                self._shutdown_server()
+                self.demotion_reason = reason
+                self._bind(target)
+            except Exception:  # noqa: BLE001 - a watchdog that dies is silent
+                log.exception("Setup window check failed; continuing.")
+
+    def _shutdown_server(self) -> None:
+        with self._lock:
+            server, self._server = self._server, None
+            self.bound_host = None
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+            self._thread = None
 
     def stop(self) -> None:
-        if self._server is not None:
-            self._server.shutdown()
-            self._server.server_close()
-            self._server = None
+        self._stop.set()
+        self._shutdown_server()
+
+    def _raise_condition(self, ident: str, severity: str, detail: str) -> None:
+        health = getattr(self.agent, "health", None)
+        raise_condition = getattr(health, "raise_condition", None)
+        if raise_condition:
+            try:
+                raise_condition(ident, severity, detail)
+            except Exception:  # noqa: BLE001
+                pass
+
+    # --- request handling -------------------------------------------------
+
+    def _handle(self, handler, method: str) -> None:
+        """Everything that is decided before a request is looked at."""
+        path = urlsplit(handler.path).path
+
+        if not _host_is_addressable(handler.headers.get("Host")):
+            return self._deny(handler, 400, "Bad Host header.")
+
+        peer = handler.client_address[0] if handler.client_address else ""
+        decision = self.gate.authorise(peer, handler.headers.get("Cookie"))
+
+        if method == "POST" and path == "/login":
+            return self._do_login(handler, peer)
+
+        if not decision.allow:
+            if decision.login:
+                return self._send_html(
+                    handler, self._render_login(decision.reason),
+                    status=decision.status,
+                )
+            log.warning(
+                "Setup page refused a %s from %s: %s", method, peer, decision.reason
+            )
+            return self._deny(handler, decision.status, decision.reason)
+
+        session = decision.session
+        cookie = session.token if decision.set_cookie and session else None
+
+        if method == "GET":
+            if path.startswith("/status.json"):
+                return self._send_json(handler, self.agent.snapshot(), cookie)
+            if path.startswith("/registry.json"):
+                return self._send_json(handler, self._registry_json(), cookie)
+            if path in ("/", "/index.html", "/login"):
+                return self._send_html(handler, self.render(session), cookie=cookie)
+            return self._deny(handler, 404, "No such page.")
+
+        # --- POST, which changes something --------------------------------
+        if not self._same_origin(handler):
+            return self._deny(handler, 403, "Cross-origin request refused.")
+        form = self._read_form(handler)
+        if form is None:
+            return self._deny(handler, 413, "That request was too large.")
+        if not self.gate.check_csrf(session, (form.get("csrf") or [""])[0]):
+            # Almost always a stale tab rather than an attack, and the wording
+            # says so — but it is refused either way.
+            log.warning("Setup POST from %s had no valid CSRF token.", peer)
+            self.message = ("bad", "That page had gone stale. Reload and try again.")
+            return self._redirect(handler, cookie)
+        try:
+            if path.startswith("/device"):
+                self._set_device(form)
+            elif path.startswith("/enrol"):
+                self._enrol(form)
+            elif path.startswith("/logout"):
+                self.gate.forget_all()
+                self.message = ("good", "Signed out.")
+            else:
+                return self._deny(handler, 404, "No such action.")
+        except Exception as exc:  # noqa: BLE001 - shown to a person
+            self.message = ("bad", str(exc))
+        self._redirect(handler, cookie)
+
+    def _same_origin(self, handler) -> bool:
+        """Refuse a POST whose `Origin` is not us.
+
+        Browsers send `Origin` on every form POST, so a missing one is a
+        non-browser client — curl, or the update gate — and those are judged by
+        the peer address and the CSRF token instead. A *present* and mismatched
+        one is a cross-site post and there is no benign version of that.
+        """
+        origin = handler.headers.get("Origin")
+        if not origin:
+            return True
+        host = handler.headers.get("Host") or ""
+        return urlsplit(origin).netloc.lower() == host.strip().lower()
+
+    def _read_form(self, handler) -> dict | None:
+        """Read a bounded body. `Content-Length` is attacker-controlled and this
+        box has 1 GB of RAM, so the header is a claim and not a permission."""
+        try:
+            length = int(handler.headers.get("Content-Length") or 0)
+        except ValueError:
+            return None
+        if length < 0 or length > MAX_BODY_BYTES:
+            return None
+        body = handler.rfile.read(length)
+        if len(body) != length:
+            return None
+        return parse_qs(body.decode("utf-8", "replace"))
+
+    def _do_login(self, handler, peer: str) -> None:
+        if not self._same_origin(handler):
+            return self._deny(handler, 403, "Cross-origin request refused.")
+        form = self._read_form(handler)
+        if form is None:
+            return self._deny(handler, 413, "That request was too large.")
+        decision = self.gate.login(peer, (form.get("password") or [""])[0])
+        if not decision.allow:
+            # The password is never echoed, never logged and never put in a
+            # redirect. The only thing that comes back is whether it worked.
+            return self._send_html(
+                handler, self._render_login(decision.reason), status=decision.status,
+            )
+        self._redirect(handler, decision.session.token if decision.session else None)
 
     # --- actions --------------------------------------------------------
 
@@ -157,6 +470,9 @@ class Console:
             self.message = ("bad", "Enter the code from the platform.")
             return
         enrolment = self.agent.enrol(token)
+        # The code itself is not repeated back. It is single-use, but it is
+        # also a shared secret that would then be sitting in a browser's
+        # rendered page and in whatever is behind the technician on the roof.
         self.message = (
             "good",
             f"Enrolled as {enrolment.site.name}. Telemetry is on its way.",
@@ -164,15 +480,32 @@ class Console:
 
     def _set_device(self, form: dict) -> None:
         slot = (form.get("slot") or [""])[0]
+        if slot not in registry.SLOTS:
+            raise ValueError(f"{slot!r} is not a slot on this station.")
         type_id = (form.get("type_id") or [""])[0]
+        if type_id and registry.get(type_id) is None:
+            raise ValueError(f"{type_id!r} is not a device this station supports.")
         resource = (form.get("resource") or [""])[0] or None
         device = registry.get(type_id) if type_id else None
+        previous = self.agent.inventory.fitted.get(slot)
+        previous_params = dict((previous.params or {}) if previous else {})
         params: dict = {}
         if device is not None:
             for parameter in device.parameters:
                 raw = (form.get(f"p_{parameter.name}") or [""])[0]
                 if parameter.type == "bool":
                     params[parameter.name] = raw == "on"
+                elif parameter.type == "password":
+                    # Blank means "leave it as it was", because blank is what
+                    # the form always shows: the stored value is never rendered
+                    # back, so an empty box cannot be read as "clear it" without
+                    # wiping a working camera's password on every other save.
+                    if raw:
+                        params[parameter.name] = raw
+                    elif previous and previous.type_id == type_id:
+                        kept = previous_params.get(parameter.name)
+                        if kept:
+                            params[parameter.name] = kept
                 elif parameter.type == "number" and raw != "":
                     params[parameter.name] = float(raw) if "." in raw else int(raw)
                 elif raw != "":
@@ -216,24 +549,85 @@ class Console:
             ],
         }
 
-    def _send_json(self, handler, payload: dict) -> None:
+    def _headers(self, handler, status: int, kind: str, length: int,
+                 cookie: str | None) -> None:
+        handler.send_response(status)
+        handler.send_header("Content-Type", kind)
+        handler.send_header("Content-Length", str(length))
+        # A setup page is state, and every one of these responses names devices,
+        # a site and a station id. None of it belongs in a browser cache on a
+        # subcontractor's laptop.
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("X-Content-Type-Options", "nosniff")
+        handler.send_header("X-Frame-Options", "DENY")
+        handler.send_header("Referrer-Policy", "no-referrer")
+        handler.send_header("Content-Security-Policy", CSP)
+        if cookie:
+            # No `Secure`: this is plain HTTP and always will be — see
+            # setup_access.py on why a self-signed certificate here is theatre.
+            # HttpOnly and SameSite=Strict are the two that do work.
+            handler.send_header(
+                "Set-Cookie",
+                f"{COOKIE_NAME}={cookie}; Path=/; HttpOnly; SameSite=Strict",
+            )
+        handler.end_headers()
+
+    def _send_json(self, handler, payload: dict, cookie: str | None = None) -> None:
         body = json.dumps(payload, indent=2, default=str).encode()
-        handler.send_response(200)
-        handler.send_header("Content-Type", "application/json")
-        handler.send_header("Content-Length", str(len(body)))
-        handler.end_headers()
+        self._headers(handler, 200, "application/json", len(body), cookie)
         handler.wfile.write(body)
 
-    def _send_html(self, handler, text: str) -> None:
+    def _send_html(self, handler, text: str, cookie: str | None = None,
+                   status: int = 200) -> None:
         body = text.encode()
-        handler.send_response(200)
-        handler.send_header("Content-Type", "text/html; charset=utf-8")
-        handler.send_header("Content-Length", str(len(body)))
-        handler.end_headers()
+        self._headers(handler, status, "text/html; charset=utf-8", len(body), cookie)
         handler.wfile.write(body)
 
-    def render(self) -> str:
+    def _deny(self, handler, status: int, reason: str) -> None:
+        body = f"{status} {html.escape(reason)}\n".encode()
+        self._headers(handler, status, "text/plain; charset=utf-8", len(body), None)
+        handler.wfile.write(body)
+
+    def _redirect(self, handler, cookie: str | None = None) -> None:
+        handler.send_response(303)
+        handler.send_header("Location", "/")
+        handler.send_header("Content-Length", "0")
+        handler.send_header("Cache-Control", "no-store")
+        if cookie:
+            handler.send_header(
+                "Set-Cookie",
+                f"{COOKIE_NAME}={cookie}; Path=/; HttpOnly; SameSite=Strict",
+            )
+        handler.end_headers()
+
+    def _render_login(self, reason: str) -> str:
+        """Deliberately says nothing about the station.
+
+        Not the site name, not whether it is enrolled, not what is fitted.
+        Somebody who has reached this page has reached a private network and
+        nothing more, and there is no reason to confirm for them which box they
+        have found before they can prove they are meant to be here.
+        """
+        return "".join([
+            "<!doctype html><meta charset=utf-8>",
+            "<meta name=viewport content='width=device-width,initial-scale=1'>",
+            "<title>Ground station setup</title>",
+            f"<style>{STYLE}</style>",
+            "<main><h1>Ground station setup</h1>",
+            f"<div class='msg bad'>{html.escape(reason)}</div>" if reason else "",
+            "<div class=card><form method=post action='/login'>",
+            "<label for=password>Setup password</label><br>",
+            "<input id=password name=password type=password autocomplete='off' "
+            "autofocus>",
+            "<button type=submit>Sign in</button></form>",
+            "<div class=muted>It is on the label on this box, or with whoever "
+            "provisioned it. It is not the enrolment code.</div></div>",
+            "</main>",
+        ])
+
+    def render(self, session=None) -> str:
         state = self.agent.snapshot()
+        csrf = self.gate.csrf_token(session)
         out = [
             "<!doctype html><meta charset=utf-8>",
             "<meta name=viewport content='width=device-width,initial-scale=1'>",
@@ -247,14 +641,21 @@ class Console:
             out.append(f"<div class='msg {kind}'>{html.escape(text)}</div>")
             self.message = None
 
-        out.append(self._section_setup(state))
-        out.append(self._section_devices(state))
+        out.append(self._section_setup(state, csrf))
+        out.append(self._section_platform(state))
+        out.append(self._section_camera(state))
+        out.append(self._section_devices(state, csrf))
         out.append(self._section_gaps(state))
         out.append(self._section_events(state))
+        out.append(self._section_access(session, csrf))
         out.append("</main>")
         return "".join(out)
 
-    def _section_setup(self, state: dict) -> str:
+    @staticmethod
+    def _csrf_field(csrf: str) -> str:
+        return f"<input type=hidden name=csrf value='{html.escape(csrf)}'>"
+
+    def _section_setup(self, state: dict, csrf: str) -> str:
         out = []
         if state["enrolled"]:
             out.append(f"<p class=sub>{html.escape(state['station'] or '')}</p>")
@@ -262,6 +663,7 @@ class Console:
             out.append("<p class=sub>Not set up yet.</p>")
             out.append(
                 "<div class=card><form method=post action='/enrol'>"
+                + self._csrf_field(csrf) +
                 "<label for=token>Enter the code you were given</label><br>"
                 "<input id=token class=code name=token type=text autocomplete=off "
                 "placeholder='XXXX-XXXX-XXXX' autofocus>"
@@ -272,7 +674,6 @@ class Console:
         trust = security.get("trust") or {}
         clock_state = state.get("clock_source") or {}
         rows = [
-            ("Platform", state["platform"], "ok"),
             ("Enrolled", "yes" if state["enrolled"] else "not yet",
              "ok" if state["enrolled"] else "warn"),
             ("Link to the platform", "up" if state["link"] else "down",
@@ -306,6 +707,84 @@ class Console:
                     f"{html.escape(condition['detail'])}</li>"
                 )
             out.append("</ul></div>")
+        return "".join(out)
+
+    def _section_platform(self, state: dict) -> str:
+        """The addresses, read-only and said to be read-only.
+
+        There is one platform and its address is fixed in the environment file.
+        An installer's job here is to confirm the box is pointed at the right
+        one before they leave, which is a different job from being able to
+        change it — and one that is worth doing, because an address that is
+        wrong produces a station that looks like it has no signal.
+        """
+        security = state.get("security") or {}
+        rows = [
+            ("Platform API", state.get("platform") or "not set"),
+            ("Broker", security.get("broker_url")
+             or "not known until this station enrols"),
+            ("Publishing to", state.get("telemetry_topic") or "—"),
+            ("Station id", state.get("station_id") or "not enrolled"),
+        ]
+        out = ["<h2>Where this box talks</h2><div class=card>"]
+        for label, value in rows:
+            out.append(
+                f"<div class=row><span class=k>{html.escape(label)}</span>"
+                f"<span class=fixed>{html.escape(str(value))}</span></div>"
+            )
+        out.append(
+            "<div class=muted>Fixed in the station's environment file "
+            "(<code>GSU_PLATFORM_URL</code>, <code>GSU_BROKER_URL</code>) and "
+            "deliberately not editable here: there is one platform, and a URL "
+            "that can be retyped on site is a station that enrols against "
+            "nothing and reports no error anybody sees. Check it matches what "
+            "you were told, then carry on.</div></div>"
+        )
+        return "".join(out)
+
+    def _section_camera(self, state: dict) -> str:
+        """Why the camera is doing what it is doing, without an SSH session.
+
+        The specific fault this exists for: `picamera2` is a Debian package, a
+        virtual environment built without `--system-site-packages` cannot import
+        it, and the station silently falls back to one subprocess per frame.
+        That is several times slower and presents as "the camera is slow" —
+        which is a hardware conversation about a packaging mistake. The driver
+        already computes the reason; this puts it where the question is asked.
+        """
+        video = state.get("video") or {}
+        camera = video.get("camera") or {}
+        stream = video.get("stream") or {}
+        reason = camera.get("backend_reason") or ""
+        rows = [
+            ("Snapshots", "on" if video.get("enabled") else "off",
+             "ok" if video.get("enabled") else "off"),
+            ("Frame rate", f"{video.get('fps_measured', 0)} fps measured, "
+                           f"{video.get('fps_configured', 0)} configured", "ok"),
+            ("Cost on the link", f"{round((video.get('bitrate_bps') or 0) / 1000)} kbit/s, "
+                                 f"{video.get('bytes_per_frame') or 0} bytes/frame", "ok"),
+            ("Published / dropped",
+             f"{video.get('frames_published', 0)} / {video.get('frames_dropped', 0)}",
+             "ok" if not video.get("frames_dropped") else "warn"),
+            ("Live stream", stream.get("state") or "idle", "ok"),
+        ]
+        if camera.get("backend"):
+            rows.insert(0, ("Capture path", camera["backend"],
+                            "ok" if camera["backend"] == "picamera2" else "warn"))
+        out = ["<h2>Camera</h2><div class=card>"]
+        for label, value, css in rows:
+            out.append(
+                f"<div class=row><span class=k>{html.escape(label)}</span>"
+                f"<span class='{css}'>{html.escape(str(value))}</span></div>"
+            )
+        if reason:
+            css = "muted" if camera.get("backend") == "picamera2" else "warn"
+            out.append(f"<div class='{css}'>{html.escape(reason)}</div>")
+        if video.get("reason"):
+            out.append(
+                f"<div class=warn>{html.escape(str(video['reason']))}</div>"
+            )
+        out.append("</div>")
         return "".join(out)
 
     @staticmethod
@@ -360,7 +839,7 @@ class Console:
         }.get(source, source)
         return wording if state.get("rtc_present") else f"{wording} (no RTC fitted)"
 
-    def _section_devices(self, state: dict) -> str:
+    def _section_devices(self, state: dict, csrf: str) -> str:
         out = ["<h2>What is fitted</h2>"]
         if state["conflicts"]:
             out.append("<div class='msg bad'><ul>")
@@ -391,6 +870,7 @@ class Console:
                 out.append("<div class=muted>found: nothing reported yet</div>")
 
             out.append(f"<form method=post action='/device'><input type=hidden name=slot value='{slot}'>")
+            out.append(self._csrf_field(csrf))
             out.append("<div class=field><label>Device</label><select name=type_id>")
             out.append(
                 f"<option value=''{' selected' if not report['configured'] else ''}>"
@@ -419,6 +899,24 @@ class Console:
                         out.append(
                             f"<input type=checkbox id='{name}' name='{name}'{checked}>"
                         )
+                    elif parameter.type == "password":
+                        # The one field on this page whose current value is a
+                        # secret. It is never rendered — not as a value, not in
+                        # a placeholder, not in a comment. What is rendered is
+                        # whether one is stored, which is what an installer
+                        # actually needs to know.
+                        stored = bool((entry.params or {}).get(parameter.name))
+                        out.append(
+                            f"<input type=password id='{name}' name='{name}' "
+                            f"value='' autocomplete='new-password' "
+                            f"placeholder='{'unchanged' if stored else 'not set'}'>"
+                        )
+                        out.append(
+                            "<span class=muted>"
+                            + ("A password is stored. Leave blank to keep it."
+                               if stored else "No password stored.")
+                            + "</span>"
+                        )
                     elif parameter.type == "select":
                         out.append(f"<select id='{name}' name='{name}'>")
                         for choice in parameter.choices:
@@ -445,9 +943,7 @@ class Console:
                             )
                         out.append("</datalist>")
                     else:
-                        field_type = {
-                            "password": "password", "number": "number",
-                        }.get(parameter.type, "text")
+                        field_type = "number" if parameter.type == "number" else "text"
                         out.append(
                             f"<input type={field_type} id='{name}' name='{name}' "
                             f"value='{html.escape(str(value))}'>"
@@ -551,5 +1047,51 @@ class Console:
             f"{storage['recordings_mb']} MB; {storage['events']} events stored, "
             f"{storage['events_pending']} not yet sent to the platform.</div>"
         )
+        out.append("</div>")
+        return "".join(out)
+
+    def _section_access(self, session, csrf: str) -> str:
+        """What this page itself is doing, said on the page itself.
+
+        An installer needs to know the door shuts behind them, and the person
+        who has to reopen it in six months needs to know how. Both are one
+        paragraph, and neither is discoverable from anywhere else on site.
+        """
+        out = ["<h2>This setup page</h2><div class=card>"]
+        where = self.bound_host or "not listening"
+        out.append(
+            f"<div class=row><span class=k>Listening on</span>"
+            f"<span class=fixed>{html.escape(str(where))}:{self.port}</span></div>"
+        )
+        left = self.gate.seconds_left()
+        if left is None:
+            closing = (
+                "stays open while this station is unenrolled"
+                if self.gate.window_minutes > 0 else
+                "pinned open by GSU_SETUP_WINDOW_MINUTES=0"
+            )
+            css = "ok" if self.gate.window_minutes > 0 else "warn"
+        else:
+            closing = f"closes in {int(left // 60)} min"
+            css = "ok"
+        out.append(
+            f"<div class=row><span class=k>Access window</span>"
+            f"<span class='{css}'>{html.escape(closing)}</span></div>"
+        )
+        if self.demotion_reason:
+            out.append(f"<div class=warn>{html.escape(self.demotion_reason)}</div>")
+        out.append(
+            "<div class=muted>When the window closes this page stops answering "
+            "on the local network entirely — it is not a permanent service. "
+            "Reboot the station to open it again, or, with a shell on the box, "
+            "create the <code>setup-open</code> file in the state directory. "
+            "Loopback keeps working over an SSH tunnel either way.</div>"
+        )
+        if session is not None and session.scope == "local":
+            out.append(
+                "<form method=post action='/logout'>"
+                + self._csrf_field(csrf)
+                + "<button type=submit>Sign out</button></form>"
+            )
         out.append("</div>")
         return "".join(out)

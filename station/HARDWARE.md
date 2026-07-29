@@ -276,7 +276,9 @@ register of which.
 | The synthetic camera and its JPEG encoder | Run continuously. Output decoded with libjpeg (Pillow 12.3) and checked pixel for pixel |
 | The synthetic H.264 source | Run. Output decoded with ffmpeg 7.0.2 at 640×480 and 1920×1080, no errors, picture correct |
 | The on-demand stream logic | Run against the synthetic encoder end to end, including lease expiry and the ceiling. Never against `rpicam-vid` |
-| The stream uplink to the platform | **Does not exist.** `transport/stream.py` is a documented stub; the platform has not specified a wire format |
+| The stream uplink to the platform | **Verified against the running platform.** fMP4 over a WebSocket, 1080p30, 459 fragments, none dropped, played in a browser. Never over a real satellite link |
+| The camera stack in a container | **Never built, never run.** The slim image has no libcamera, so a container station has no camera at all; `deploy/Dockerfile.camera` is written-down knowledge, not a tested path. DEPLOYMENT.md §3 recommends the systemd path for camera-equipped stations |
+| `picamera2` vs `rpicam-jpeg` | Neither has met a camera. Which one a box will use is now **decided and reported** rather than discovered: the installer creates the venv with `--system-site-packages` so the fast path is reachable, and the driver states which path it took and why |
 | The systemd unit | Parses cleanly under `systemd-analyze verify`. Never started on a Pi |
 | `install.sh` | Syntax-checked and read through. **Never run end to end on a Pi** |
 | ARMv7 itself | Nothing in this repository has executed on it |
