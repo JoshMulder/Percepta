@@ -67,6 +67,9 @@
      it is drawn larger at the same viewport height, rather than the bar simply
      taking more of the screen. */
   --sidebar-base: 34rem;
+  /* The sky-state caption's height. The icon's top padding is derived from it
+     so the glyph centres on the same line as the wind dial. */
+  --sky-label-h: 1.7rem;
 
   color-scheme: dark;
 }
@@ -1035,6 +1038,17 @@ body {
   grid-template-columns: repeat(3, 1fr);
   gap: var(--s3) var(--s3);
 }
+/* Larger than the shared .stats sizing, and deliberately only here: these six
+   figures are the panel's remaining content once the dial and the sky icon
+   have taken their halves, and at the shared size they left the panel looking
+   half empty. The power panel keeps the smaller scale - it has a chart to sit
+   beside rather than space to fill. */
+.weather-stats dt {
+  font-size: 0.938rem;
+}
+.weather-stats dd {
+  font-size: 1.125rem;
+}
 /* Centred in each column, not left-aligned. The six labels are markedly
    different widths ("Temp" against "Visibility"), so hanging them off the left
    edge of three equal columns left the block looking ragged underneath a wind
@@ -1138,9 +1152,16 @@ body {
 .freq-row {
   display: flex;
   align-items: stretch;
+  justify-content: flex-start;
   gap: var(--s3);
   flex: none;
   height: 2.9rem;
+}
+/* Centred on the readout beside it. The row is the readout's height, so
+   centring in the row is centring on the bar. */
+.freq-row > .led {
+  align-self: center;
+  margin-left: var(--s2);
 }
 .step-col {
   display: flex;
@@ -1166,8 +1187,11 @@ body {
   opacity: 0.35;
   cursor: not-allowed;
 }
+/* Sized to its contents and pinned left, rather than stretching across the
+   panel. A readout that fills the width invites the eye to look for something
+   at the far end of it; the number and its unit are the whole content. */
 .freq-display {
-  flex: 1;
+  flex: none;
   display: flex;
   align-items: baseline;
   justify-content: center;
@@ -1948,19 +1972,25 @@ body {
   gap: var(--s1);
   flex: none;
   width: 10.2rem;
+  /* Space above the icon equal to the label below it, so the ICON centres on
+     the row rather than the icon-plus-label block doing so. Without it the
+     label's height pushed the glyph up and it sat 12px higher than the dial it
+     is meant to balance - the two boxes were already identical, and that offset
+     was the whole of the lopsidedness. */
+  padding-top: calc(var(--s1) + var(--sky-label-h));
   text-align: center;
 }
 .rose-readout {
   flex: 1;
 }
-/* Sized to balance the wind dial across the row rather than to a generic icon
-   scale: the two are the panel's visual anchors, one at each end, and a small
-   glyph opposite an 8.4rem dial reads as an afterthought rather than the other
-   half of a pair. Slightly under the dial's size because a filled sun carries
-   more weight than an outlined dial at the same dimension. */
+/* The same size as the wind dial, not slightly under it. The earlier reasoning
+   was that a filled sun carries more visual weight than an outlined dial at
+   equal dimensions, so it was held back - but that left the row looking
+   lopsided rather than balanced, and matching the dial is what was actually
+   wanted. The two are the panel's anchors, one at each end. */
 .sky-icon {
-  width: 6.6rem;
-  height: 6.6rem;
+  width: 10.2rem;
+  height: 10.2rem;
   color: var(--muted);
   stroke-width: 1.6;
 }
@@ -1978,6 +2008,11 @@ body {
   color: var(--dim);
 }
 .sky-state span {
+  /* Fixed height, and the padding above the icon is expressed in terms of it.
+     Guessing the label's rendered height left the glyph 4px off the dial's
+     centreline; tying the two to one variable means they cannot drift apart. */
+  height: var(--sky-label-h);
+  line-height: var(--sky-label-h);
   font-size: 0.812rem;
   color: var(--muted);
   max-width: 7rem;

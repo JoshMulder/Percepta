@@ -1,7 +1,9 @@
 import asyncio, os, sys
 from playwright.async_api import async_playwright
 BASE=os.environ.get("PERCEPTA_URL","https://192.168.2.49:8000")
-SEL=["header.topbar",".station-select",".station-switch",".station-trigger",
+import os as _os
+SEL=_os.environ.get("SELECTORS","").split(",") if _os.environ.get("SELECTORS") else [
+     "header.topbar",".station-select",".station-switch",".station-trigger",
      ".station-status",".link-state",".topbar-right",".logo","header.topbar > *"]
 async def main():
     async with async_playwright() as p:

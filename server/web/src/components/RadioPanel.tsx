@@ -319,25 +319,6 @@ function RadioPanelInner({
             aria-label="Frequency in MHz"
           />
           <span className="unit">MHz</span>
-          <span
-            className={`led${radio?.squelch_open ? " on" : ""}${
-              radio?.monitor ? " monitor" : ""
-            }`}
-            title={
-              radio?.monitor
-                ? "Monitor — squelch held open"
-                : radio?.squelch_open
-                  ? "Channel open"
-                  : "Squelched"
-            }
-            aria-label={
-              radio?.monitor
-                ? "Monitor, squelch held open"
-                : radio?.squelch_open
-                  ? "Channel open"
-                  : "Squelched"
-            }
-          />
         </div>
 
         <div className="step-col">
@@ -346,6 +327,29 @@ function RadioPanelInner({
           <button type="button" className="step" title="−25 kHz"
                   disabled={!canControl} onClick={() => step(-CHANNEL_HZ)}>▼</button>
         </div>
+
+        {/* Outside the readout rather than inside it. In the box it read as
+            part of the frequency; beside it, it is what it is - the state of
+            the channel that frequency is tuned to. */}
+        <span
+          className={`led${radio?.squelch_open ? " on" : ""}${
+            radio?.monitor ? " monitor" : ""
+          }`}
+          title={
+            radio?.monitor
+              ? "Monitor — squelch held open"
+              : radio?.squelch_open
+                ? "Channel open"
+                : "Squelched"
+          }
+          aria-label={
+            radio?.monitor
+              ? "Monitor, squelch held open"
+              : radio?.squelch_open
+                ? "Channel open"
+                : "Squelched"
+          }
+        />
       </div>
 
       <div className="presets">
