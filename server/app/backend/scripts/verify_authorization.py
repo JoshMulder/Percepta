@@ -15,8 +15,11 @@ import sys
 import uuid
 from datetime import UTC, datetime, timedelta
 
+from fastapi import HTTPException
 from sqlalchemy import text
 
+from backend.auth.dependencies import require_admin
+from backend.auth.identity import Identity
 from backend.auth.authorization import (
     assert_grantable,
     capabilities_for,
@@ -284,6 +287,51 @@ def main() -> int:
             check("a normal capability is accepted", True)
         except ValueError as exc:
             check("a normal capability is accepted", False, str(exc))
+
+        log.info("")
+        log.info("9. Organisation administration guard")
+
+        def identity(user_id, org, roles=(), *, guest=False) -> Identity:
+            return Identity(
+                user_id=user_id,
+                organization_id=org,
+                session_id=uuid.uuid4(),
+                roles=tuple(roles),
+                is_platform_admin=False,
+                is_guest=guest,
+            )
+
+        def admits(who: Identity) -> bool:
+            with PrivilegedSessionLocal() as guard_db:
+                try:
+                    require_admin(who, guard_db)
+                    return True
+                except HTTPException:
+                    return False
+
+        check(
+            "a real org admin is admitted",
+            admits(identity(U_ADMIN, ORG_A, [UserRole.ADMIN.value])),
+        )
+        check(
+            "a viewer is refused",
+            not admits(identity(U_VIEWER, ORG_A, [UserRole.VIEWER.value])),
+        )
+        # The guard reads the membership table, never identity.roles. Anything
+        # that could put a role on an identity without a membership behind it -
+        # a bug, a future code path - must not become an admin by saying so.
+        check(
+            "claimed admin roles without a membership are refused",
+            not admits(identity(U_STRANGER, ORG_A, [UserRole.ADMIN.value])),
+        )
+        # A platform admin working inside a customer org holds no membership
+        # there. `is_guest` is set on that path alone, and admits them, because
+        # refusing only made member roles and station grants unreachable - they
+        # can already grant themselves a membership from the Platform pane.
+        check(
+            "a platform admin acting as a guest is admitted",
+            admits(identity(U_STRANGER, ORG_A, [UserRole.ADMIN.value], guest=True)),
+        )
     finally:
         cleanup()
 

@@ -58,7 +58,24 @@ def require_admin(
     the caller is a member of this org and already knows it exists, so the
     enumeration risk that justifies the 404 elsewhere does not apply, and a
     truthful error is more useful.
+
+    A platform admin working inside a customer's organisation passes this, and
+    that is not a hole. `is_guest` is set on exactly one path - a member of the
+    platform organisation who has switched into an org they hold no membership
+    in - so it already means "platform administrator, acting here". Refusing
+    them buys nothing: from the Platform pane they can grant themselves a
+    membership in any organisation, or create a user who has one, and then come
+    back and pass this check honestly. All the refusal did was make customer
+    member roles and station grants unreachable, which is most of what platform
+    administration is for.
+
+    Note this does not widen what they can *see*. RLS still binds every query to
+    the organisation they switched into; god mode remains a property of the
+    active org and is set in one place, `resolve_identity`.
     """
+    if identity.is_guest:
+        return identity
+
     roles = set(
         OrganizationMembershipRepository(db).roles(
             user_id=identity.user_id, organization_id=identity.organization_id
