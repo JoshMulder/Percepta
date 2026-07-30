@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import re
 import socket
 import tempfile
 import time
@@ -904,6 +905,362 @@ class ServedPageTests(unittest.TestCase):
         _, _, body = self.page()
         self.assertNotIn("ABCD-EFGH-IJKL", body)
         self.assertIn("the platform refused", body)
+
+    # --- where the station is -------------------------------------------
+
+    def location(self, body: str, csrf: str, cookie: str):
+        """POST the location form and come back with the page it lands on."""
+        self.request("POST", "/location", f"{body}&csrf={csrf}", {"Cookie": cookie})
+        return self.request("GET", "/connection", None, {"Cookie": cookie})[1]
+
+    def test_the_connection_page_asks_for_the_position_and_says_who_owns_it(self):
+        _, _, body = self.page("/connection")
+        for name in ("latitude", "longitude", "elevation_m"):
+            self.assertIn(f"name='{name}'", body, name)
+        self.assertIn("Where this box is", body)
+        # The one line the page owes anybody who has used the platform console
+        # and seen the same two fields there.
+        self.assertIn("Set here, not on the platform", body)
+        # Unset is stated, never implied by an empty box.
+        self.assertIn("not set", body)
+
+    def test_a_position_is_saved_persisted_and_used(self):
+        token, csrf, _ = self.page("/connection")
+        body = self.location("latitude=-42.4004&longitude=173.68&elevation_m=120",
+                             csrf, token)
+        self.assertIn("Location saved", body)
+        self.assertEqual(self.agent.site.latitude, -42.4004)
+        self.assertEqual(self.agent.site.longitude, 173.68)
+        self.assertEqual(self.agent.site.elevation_m, 120.0)
+        # Site configuration, not the device inventory — the same file the rest
+        # of the site's policy lives in, and it survives a restart.
+        stored = json.loads(
+            (Path(self.directory.name) / "site-config.json").read_text()
+        )
+        self.assertEqual(stored["latitude"], -42.4004)
+        self.assertEqual(stored["elevation_m"], 120.0)
+        self.assertEqual(
+            self.agent.effective_position(), (-42.4004, 173.68, "station")
+        )
+
+    def test_garbage_in_a_coordinate_is_a_sentence_and_not_a_traceback(self):
+        token, csrf, _ = self.page("/connection")
+        body = self.location("latitude=north&longitude=173&elevation_m=", csrf, token)
+        self.assertIn("Latitude must be a number between -90 and 90.", body)
+        self.assertIn("msg bad", body)
+        self.assertIsNone(self.agent.site.latitude)
+        # Nothing half-applied: a refused save stores neither coordinate.
+        self.assertIsNone(self.agent.site.longitude)
+
+    def test_a_coordinate_outside_its_range_is_refused(self):
+        token, csrf, _ = self.page("/connection")
+        for payload, expected in (
+            ("latitude=91&longitude=0&elevation_m=", "Latitude must be between"),
+            ("latitude=0&longitude=181&elevation_m=", "Longitude must be between"),
+            ("latitude=0&longitude=0&elevation_m=nan", "Elevation must be a number"),
+            ("latitude=0&longitude=0&elevation_m=inf", "Elevation must be a number"),
+        ):
+            body = self.location(payload, csrf, token)
+            self.assertIn(expected, body, payload)
+            self.assertIsNone(self.agent.site.latitude, payload)
+
+    def test_half_a_position_is_refused_rather_than_stored(self):
+        # A latitude with no longitude is not a position, and storing one would
+        # make `effective_position` fall through to the platform's without
+        # anything saying so.
+        token, csrf, _ = self.page("/connection")
+        body = self.location("latitude=-42.4&longitude=&elevation_m=", csrf, token)
+        self.assertIn("Latitude and longitude are both needed.", body)
+        self.assertIsNone(self.agent.site.latitude)
+
+    def test_clearing_all_three_stops_the_station_asserting_a_position(self):
+        token, csrf, _ = self.page("/connection")
+        self.location("latitude=-42.4&longitude=173.7&elevation_m=10", csrf, token)
+        body = self.location("latitude=&longitude=&elevation_m=", csrf, token)
+        self.assertIn("Location cleared", body)
+        self.assertIsNone(self.agent.site.latitude)
+        self.assertIsNone(self.agent.reported_position())
+
+    def test_a_coordinate_pasted_with_a_typographic_minus_is_understood(self):
+        # What copying a coordinate off a web page actually produces. The two
+        # strings look identical in the box, so refusing it is a refusal
+        # nobody can act on.
+        token, csrf, _ = self.page("/connection")
+        body = self.location(
+            "latitude=%E2%88%9242.4004&longitude=173.68&elevation_m=", csrf, token
+        )
+        self.assertIn("Location saved", body)
+        self.assertEqual(self.agent.site.latitude, -42.4004)
+
+    def test_the_location_post_lands_back_on_connection(self):
+        token, csrf, _ = self.page("/connection")
+        response, _ = self.request(
+            "POST", "/location", f"latitude=&longitude=&elevation_m=&csrf={csrf}",
+            {"Cookie": token},
+        )
+        self.assertEqual(response.status, 303)
+        # From the fixed map, never from the request.
+        self.assertEqual(response.getheader("Location"), "/connection")
+
+    def test_a_location_post_without_a_csrf_token_changes_nothing(self):
+        token, _, _ = self.page("/connection")
+        self.request("POST", "/location",
+                     "latitude=-42.4&longitude=173.7&elevation_m=&csrf=stale",
+                     {"Cookie": token})
+        self.assertIsNone(self.agent.site.latitude)
+
+    # --- the two strips, and the one alignment --------------------------
+
+    def test_both_strips_are_pinned_and_the_slot_strip_sits_below_the_other(self):
+        """CSS, asserted because it is a correctness property and not a taste.
+
+        The failure it prevents is the slot strip pinning *over* the page
+        strip, which on a phone hides the only way off the Devices page.
+        """
+        from gsu.console import STYLE
+
+        page_strip = STYLE.split(".pagetabs {")[1].split("}")[0]
+        slot_strip = STYLE.split(".subtabs {")[1].split("}")[0]
+        for name, block in (("pagetabs", page_strip), ("subtabs", slot_strip)):
+            self.assertIn("position: sticky", block, name)
+        self.assertIn("top: 0", page_strip)
+        # The offset is the page strip's own height, and that strip is given
+        # that height rather than being allowed to size to its content.
+        self.assertIn("top: var(--nav-h)", slot_strip)
+        self.assertIn("height: var(--nav-h)", page_strip)
+        # Whichever way a browser rounds, the page strip wins the overlap.
+        self.assertGreater(
+            int(page_strip.split("z-index:")[1].split(";")[0]),
+            int(slot_strip.split("z-index:")[1].split(";")[0]),
+        )
+
+    def test_the_page_strip_is_marked_so_only_it_is_pinned_to_the_top(self):
+        _, _, body = self.page("/devices")
+        self.assertIn("<nav class='tabs pagetabs'>", body)
+        self.assertIn("<nav class='tabs subtabs'>", body)
+
+    def test_every_form_row_on_every_page_is_the_same_two_columns(self):
+        """The owner's complaint: controls started wherever their label ended.
+
+        Asserted structurally — every label/control pair on every page is a
+        `.field`, so one grid rule aligns all of them. A form that renders its
+        own row shape is the regression this catches.
+        """
+        from gsu.console import STYLE
+
+        field = STYLE.split("\n .field {")[1].split("}")[0]
+        self.assertIn("display: grid", field)
+        self.assertIn("grid-template-columns: var(--label-w)", field)
+        # And it collapses rather than overflowing on a phone.
+        self.assertIn("@media (max-width: 34rem)", STYLE)
+
+        for path in ("/connection", "/devices"):
+            _, _, body = self.page(path)
+            # No labelled control outside a .field: the enrolment box used to
+            # be a label, a <br> and an input, aligned with nothing.
+            self.assertNotIn("</label><br>", body, path)
+            self.assertIn("<div class=field>", body, path)
+
+    def test_the_save_buttons_sit_in_the_control_column(self):
+        # Left flush under indented controls is exactly the raggedness the
+        # grid was added to remove.
+        _, _, body = self.page("/devices")
+        self.assertIn("<div class=field><button type=submit>Save</button></div>", body)
+
+
+class StationPositionTests(unittest.TestCase):
+    """Who owns the station's position, and what leaves the box.
+
+    The owner's decision is that a position is set on the station and nowhere
+    else — the platform must stop offering the field (CONTRACT-QUESTIONS.md
+    16). These are the properties that decision turns into: the station's own
+    value always wins, the platform's is a labelled fallback for boxes enrolled
+    before this page had the fields, and nothing plausible is ever invented.
+    """
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.agent = Agent(AgentConfig(
+            home=Path(self.directory.name), setup_enabled=False,
+            single_instance=False,
+        ))
+        self.addCleanup(self.agent.shutdown)
+
+    def enrol_with(self, latitude, longitude):
+        """An enrolment carrying the platform's idea of where this box is."""
+        from datetime import UTC, timedelta
+
+        from gsu.credentials import Enrolment
+
+        now = datetime.now(UTC)
+        self.agent.enrolment = Enrolment.from_response({
+            "station_id": "11111111-2222-3333-4444-555555555555",
+            "credential": {
+                "type": "bearer", "secret": "s",
+                "expires_at": (now + timedelta(hours=48)).isoformat(),
+                "renew_after": (now + timedelta(hours=24)).isoformat(),
+            },
+            "broker": {
+                "url": "redis://broker:6379/0", "username": "gsu:x",
+                "telemetry_topic": "gsu/x/telemetry", "audio_topic": "gsu/x/audio",
+                "command_topic": "cmd/gsu/x",
+            },
+            "station": {
+                "name": "Test", "timezone": "Pacific/Auckland",
+                "latitude": latitude, "longitude": longitude,
+            },
+            "config_version": 3,
+        })
+
+    def test_with_nothing_set_the_station_claims_no_position_at_all(self):
+        self.assertEqual(self.agent.effective_position(), (None, None, ""))
+        self.assertIsNone(self.agent.reported_position())
+        self.assertNotIn("position", self.agent.health_payload())
+
+    def test_the_stations_own_position_beats_the_platforms(self):
+        self.enrol_with(-43.5, 172.6)
+        self.agent.set_location(-42.4004, 173.68, 120.0)
+        self.assertEqual(
+            self.agent.effective_position(), (-42.4004, 173.68, "station")
+        )
+        # And it is the station's that goes out, not the platform's echo.
+        self.assertEqual(self.agent.reported_position()["latitude"], -42.4004)
+
+    def test_the_platforms_position_is_a_labelled_fallback_only(self):
+        # A box enrolled before the setup page had these fields must not lose
+        # its range and bearing the day this ships.
+        self.enrol_with(-43.5, 172.6)
+        self.assertEqual(self.agent.effective_position(), (-43.5, 172.6, "platform"))
+        # But it is never reported back up as though somebody had confirmed it.
+        self.assertIsNone(self.agent.reported_position())
+
+    def test_a_platform_with_no_position_leaves_the_station_with_none(self):
+        self.enrol_with(None, None)
+        self.assertEqual(self.agent.effective_position(), (None, None, ""))
+
+    def test_what_is_reported_is_omitted_rather_than_defaulted(self):
+        # Never 0, 0 — an unvisited station must look unvisited on a fleet map.
+        payload = self.agent.health_payload()
+        self.assertNotIn("position", payload)
+        self.agent.set_location(-42.4004, 173.68, None)
+        position = self.agent.health_payload()["position"]
+        self.assertEqual(position["latitude"], -42.4004)
+        self.assertEqual(position["source"], "configured")
+        # Elevation is omitted when unset rather than sent as zero: this
+        # station's own rule about unsourced values (DECISIONS.md item 16).
+        self.assertNotIn("elevation_m", position)
+
+    def test_the_page_marks_the_platforms_position_as_not_its_own(self):
+        """The fallback must never read as a confirmed position.
+
+        Both pages that show it: the Summary row an installer scans before
+        leaving, and the Connection section they would fix it on.
+        """
+        console = Console(self.agent, "127.0.0.1", 0)
+        self.enrol_with(-43.5, 172.6)
+        for page in ("/", "/connection"):
+            body = console.render(None, page)
+            self.assertIn("-43.5, 172.6 — from the platform", body, page)
+        # The boxes stay empty, so the form asks rather than looking answered.
+        connection = console.render(None, "/connection")
+        boxes = dict(re.findall(r"name='(latitude|longitude)'[^>]*value='([^']*)'",
+                                connection))
+        self.assertEqual(boxes, {"latitude": "", "longitude": ""})
+        # Once the station has its own, it is stated plainly and unqualified.
+        self.agent.set_location(-42.4004, 173.68, None)
+        for page in ("/", "/connection"):
+            body = console.render(None, page)
+            self.assertIn("-42.4004, 173.68", body, page)
+            self.assertNotIn("from the platform", body, page)
+
+    def test_an_unset_position_is_a_warning_on_the_summary(self):
+        # It is a fault an installer can still fix while on site, and every
+        # range and bearing this station reports depends on it.
+        console = Console(self.agent, "127.0.0.1", 0)
+        body = console.render(None, "/")
+        self.assertIn("Location", body)
+        self.assertIn("<span class='warn'>not set</span>", body)
+
+    def test_the_position_reaches_the_drivers_that_compute_from_it(self):
+        # An installer who corrects a position expects range and bearing to
+        # change without restarting anything.
+        seen = []
+
+        class Driver:
+            def set_site(self, latitude, longitude):
+                seen.append((latitude, longitude))
+
+        self.agent.adsb = Driver()
+        self.agent.weather = Driver()
+        self.agent.set_location(-42.4004, 173.68, None)
+        self.assertEqual(seen, [(-42.4004, 173.68), (-42.4004, 173.68)])
+
+    def test_a_stored_position_survives_a_restart(self):
+        """The bug this is really for: SiteConfig.apply coerces with the type
+        of the *current* value, and for a nullable field that type is NoneType
+        while it is unset. Without the NULLABLE path, load() would drop the
+        position it had just been asked to restore."""
+        from gsu.config import SiteConfig
+
+        self.agent.set_location(-42.4004, 173.68, 120.0)
+        path = Path(self.directory.name) / "site-config.json"
+        restored = SiteConfig.load(path)
+        self.assertEqual(restored.latitude, -42.4004)
+        self.assertEqual(restored.longitude, 173.68)
+        self.assertEqual(restored.elevation_m, 120.0)
+
+    def test_config_set_can_carry_a_position_and_refuses_a_bad_one(self):
+        from gsu.config import SiteConfig
+
+        config = SiteConfig()
+        self.assertEqual(
+            sorted(config.apply({"latitude": -42.4, "longitude": 173.7})),
+            ["latitude", "longitude"],
+        )
+        # Unusable values are dropped like any other, never stored and never
+        # a traceback on the command channel.
+        self.assertEqual(config.apply({"latitude": 900}), [])
+        self.assertEqual(config.latitude, -42.4)
+        # An explicit null clears, which is how a position is retracted.
+        self.assertEqual(config.apply({"latitude": None}), ["latitude"])
+        self.assertIsNone(config.latitude)
+
+
+class CoordinateParsingTests(unittest.TestCase):
+    """The bounds, and the refusals a person has to be able to act on."""
+
+    def test_the_ranges_are_the_ones_the_page_states(self):
+        from gsu.config import parse_latitude, parse_longitude
+
+        for value in (-90, 0, 90, -42.4004):
+            self.assertEqual(parse_latitude(value), float(value))
+        for value in (-180, 0, 180, 173.68):
+            self.assertEqual(parse_longitude(value), float(value))
+        for bad in (90.1, -90.1, 1000):
+            self.assertRaises(ValueError, parse_latitude, bad)
+        for bad in (180.1, -180.1):
+            self.assertRaises(ValueError, parse_longitude, bad)
+
+    def test_nan_and_infinity_are_refused_rather_than_stored(self):
+        # Both survive float() and then silently poison every range and
+        # bearing computed from them.
+        from gsu.config import parse_latitude
+
+        for bad in ("nan", "inf", "-inf", float("nan"), float("inf")):
+            self.assertRaises(ValueError, parse_latitude, bad)
+
+    def test_the_refusal_names_the_field_and_its_range(self):
+        from gsu.config import parse_elevation_m, parse_longitude
+
+        with self.assertRaises(ValueError) as caught:
+            parse_longitude("east")
+        self.assertEqual(
+            str(caught.exception), "Longitude must be a number between -180 and 180."
+        )
+        with self.assertRaises(ValueError) as caught:
+            parse_elevation_m("120 m")
+        self.assertIn("Elevation must be a number", str(caught.exception))
 
 
 class LanPeerTests(unittest.TestCase):
