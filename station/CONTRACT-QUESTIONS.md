@@ -8,10 +8,12 @@ of a proposed change and what the station does about it.
 done and conformant. They are kept here with what shipped, because the reasoning
 is why the schema and the harness look the way they do.
 
-**Open: 4, 6, 9, 10 and 11.** The event channel (4) is the one that matters most
-now that video is closed — it is the only thing the station buffers during an
-outage with nowhere to send it afterwards. 10 is the stale TLS wording in
-`enrolment.md`; 11 is that nothing can tell a station to look for an update.
+**Open: 4, 6, 9, 10, 11, 15 and 16.** The event channel (4) is the one that
+matters most now that video is closed — it is the only thing the station buffers
+during an outage with nowhere to send it afterwards. 10 is the stale TLS wording
+in `enrolment.md`; 11 is that nothing can tell a station to look for an update.
+16 is not a question but a decision already taken and half built: position is
+set on the station and the platform has to stop offering the field.
 
 **The whole camera path closed in one pass**: 7 (the camera had nowhere to send
 anything), 12 (the broker refused the video channel), 13 (on-demand needed a
@@ -758,3 +760,112 @@ critical — a welded relay burning the battery at an unattended site), the
 amps appear in the device detail in `health.devices[]` and on the setup
 page's light tab, and the local event log records fault edges. Nothing
 invented on the wire; nothing measured kept from the operator.
+
+---
+
+## 16. A station cannot tell the platform where it is — and it is the only side that knows
+
+**Where** `schemas/telemetry.schema.json` `$defs/health`; `enrolment.md` §4
+(`station.latitude` / `station.longitude`) and §7.
+
+**This one is a decision, not a question.** The owner's instruction, verbatim:
+*"location should only come from the station, not be set on the server at
+all."* The station half is built and shipped; what follows is the specification
+the platform side is owed, written so it can be implemented without reading the
+station's code.
+
+**Why the position moved.** Two places could set it — the platform's station
+record (`server/web/src/components/SettingsStation.tsx`, which renders latitude
+and longitude as editable inputs) and, now, the station's own setup page. Two
+editable copies of one fact disagree, and this pair disagrees *invisibly*: the
+station computes `range_km` and `bearing` for every ADS-B contact from its copy,
+the console draws the map and the range rings from the platform's, and neither
+display says which number it used. An operator would see a contact reported at
+8 km drawn where 12 km is. Only one of the two copies can be entered by somebody
+standing at the site, so that is the one that lives.
+
+### What the station now sends
+
+`position`, on the health cadence rather than at enrolment, so that a position
+corrected six months after commissioning arrives without anybody re-enrolling a
+box:
+
+```jsonc
+{
+  "kind": "health",
+  // …
+  "position": {
+    "latitude": -42.4004,     // required in the object; -90..90
+    "longitude": 173.68,      // required in the object; -180..180
+    "elevation_m": 120,       // optional, metres; omitted when not set
+    "source": "configured"    // "configured" = typed by a person on site.
+                              // "gps" the day a receiver is fitted and has a
+                              // fix (enrolment.md §6 already intends one).
+                              // Treat an unrecognised value as "configured"
+                              // rather than rejecting the object.
+  }
+}
+```
+
+**The whole object is omitted when the station has no position.** Not `0, 0`,
+not a default, not the last value it held. Null island is in the Gulf of Guinea,
+and a fleet map that quietly draws every unconfigured station there looks like
+data rather than like a gap.
+
+`elevation_m` has no platform equivalent at all today. It exists because range
+to an aircraft is slant range, and the station's own height is the term nobody
+can supply remotely.
+
+### What the platform must do
+
+1. **Accept and persist `health.position`** onto the station record. Last write
+   wins — it is the station's own fact and there is nothing to reconcile it
+   against.
+2. **Stop offering latitude and longitude as editable fields.** Render what was
+   reported, with its `source`, and say where it is set. A read-only pair that
+   says "set on the station's setup page" is the whole change to that pane.
+3. **Absent stays a supported state.** It already is: `AdsbMap.tsx` returns
+   *"Station has no location set"* rather than a map when either coordinate is
+   null. Keep exactly that. Do not substitute an org centroid, a country
+   centroid or `0, 0` — a station nobody has been to must look like one.
+4. **`enrolment.md` §4's `station.latitude`/`station.longitude` stay in the
+   response.** Removing them would break stations already in the field. They
+   become an echo of what the station last reported. The station reads them
+   only as the fallback for a box enrolled before its setup page had these
+   fields, prefers its own value whenever it has one, and labels the fallback
+   as the platform's on screen so that nobody reads it as a confirmed position.
+5. **Anything the platform computes from position** — range rings, distances,
+   sorting by proximity — should use the reported position, so that it and the
+   station's own `range_km` agree by construction rather than by luck.
+
+### The one thing this cannot yet express: retraction
+
+An omitted `position` means **"this station is not telling you"**, and the
+platform should treat it as no change rather than as a clear. It has to, because
+absence is also what every station running an older agent sends.
+
+So a station that *had* a position and has had it cleared — a commissioning
+correction, or a box being moved — cannot currently make the platform forget the
+old one. The setup page is worded for exactly that limit: it says clearing
+"stops this station reporting one", not that it clears it on the platform.
+
+If that matters, the smallest thing that fixes it is an explicit null:
+
+```jsonc
+{ "kind": "health", "position": null }   // proposed: "I have no position",
+                                         // as distinct from an absent key
+```
+
+Not being sent, because a `null` where the platform expects an object is the
+kind of thing that throws on the other side, and this side does not get to
+decide that. Say the word and it is a two-line change here.
+
+### Why this is on the wire before it is in the schema
+
+`$defs/health` sets no `additionalProperties: false`, and its own description
+asks for precisely this: unknown fields there *"are expected rather than
+tolerated: a station that learns to report something new must not have to wait
+for the platform."* A health frame carrying `position` was validated against
+`telemetry.schema.json` as it stands and passes — checked, not assumed. Adding
+`position` to `properties` therefore documents a field that already conforms.
+It is not a breaking change and nothing has to land on both sides at once.

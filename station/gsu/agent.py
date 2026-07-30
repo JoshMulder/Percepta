@@ -249,11 +249,121 @@ class Agent:
 
     # --- devices --------------------------------------------------------
 
-    def device_context(self) -> dict:
+    def effective_position(self) -> tuple[float | None, float | None, str]:
+        """Where this station believes it is, and on whose word.
+
+        **The station's own configuration wins, always.** That is the owner's
+        decision and it is what makes the number mean anything: the platform's
+        copy is no longer editable there, so a position typed on the setup page
+        by somebody standing at the site is the only one anybody ever enters.
+        It is reported up in the health frame and the platform displays what it
+        is told.
+
+        The platform's value is still read, but only as the fallback for a
+        station enrolled before this page had the fields — dropping it outright
+        would silently take range and bearing away from every station already
+        in the field on the day this ships. It is labelled as the platform's
+        wherever it is shown, and the page asks for the local one.
+
+        Returns `(None, None, "")` when nobody has said. Unset is a state, and
+        it is reported as absent rather than as a plausible-looking default.
+        """
+        if self.site.latitude is not None and self.site.longitude is not None:
+            return self.site.latitude, self.site.longitude, "station"
+        site = self.enrolment.site if self.enrolment else None
+        if site and site.latitude is not None and site.longitude is not None:
+            return site.latitude, site.longitude, "platform"
+        return None, None, ""
+
+    def position_state(self) -> dict:
+        """The position, its source, and the two inputs kept apart.
+
+        Configured and effective are separate here for the same reason the
+        device report keeps intent and detection separate: the setup page has
+        to show what this station was told to be while also showing what it is
+        actually using, and merging them is how a station ends up reporting a
+        position nobody at the site ever confirmed.
+        """
+        latitude, longitude, source = self.effective_position()
         site = self.enrolment.site if self.enrolment else None
         return {
-            "latitude": site.latitude if site and site.latitude is not None else -43.5,
-            "longitude": site.longitude if site and site.longitude is not None else 172.6,
+            "source": source,
+            "latitude": latitude,
+            "longitude": longitude,
+            "elevation_m": self.site.elevation_m,
+            "station": {
+                "latitude": self.site.latitude,
+                "longitude": self.site.longitude,
+                "elevation_m": self.site.elevation_m,
+            },
+            "platform": {
+                "latitude": site.latitude if site else None,
+                "longitude": site.longitude if site else None,
+            },
+        }
+
+    def reported_position(self) -> dict | None:
+        """What goes up to the platform, or nothing.
+
+        **Only ever this station's own configuration.** Echoing the platform's
+        own value back at it as though the station had confirmed it would
+        launder a guess into a measurement, and the platform would have no way
+        to tell that nobody had ever been to the site.
+        """
+        if self.site.latitude is None or self.site.longitude is None:
+            return None
+        position = {
+            "latitude": self.site.latitude,
+            "longitude": self.site.longitude,
+            # "configured" and not "gps": nothing on this box surveys itself
+            # yet, and the platform must be able to tell a typed position from
+            # a fixed one the day a GPS is fitted (CONTRACT-QUESTIONS.md 16).
+            "source": "configured",
+        }
+        if self.site.elevation_m is not None:
+            position["elevation_m"] = self.site.elevation_m
+        return position
+
+    def apply_position(self) -> None:
+        """Push the effective position into the drivers that compute from it.
+
+        Called on attach and again whenever the setup page saves, so that an
+        installer who corrects a position sees range and bearing change without
+        restarting anything.
+        """
+        latitude, longitude, _ = self.effective_position()
+        if latitude is None or longitude is None:
+            return
+        for driver in (self.adsb, self.weather):
+            set_site = getattr(driver, "set_site", None)
+            if set_site:
+                set_site(latitude, longitude)
+
+    def set_location(self, latitude, longitude, elevation_m) -> None:
+        """Store what the setup page was given, and act on it immediately.
+
+        Values are already parsed and range-checked by the caller
+        (`config.parse_latitude` and friends); `None` for all three is a
+        deliberate clear, which is how a station wrongly positioned during
+        commissioning stops asserting a position it does not have.
+        """
+        self.site.latitude = latitude
+        self.site.longitude = longitude
+        self.site.elevation_m = elevation_m
+        self.site.save(self.config.site_config_path)
+        self.apply_position()
+
+    def device_context(self) -> dict:
+        site = self.enrolment.site if self.enrolment else None
+        latitude, longitude, _ = self.effective_position()
+        return {
+            # The last-resort pair is a *simulation* origin, not a claim about
+            # this station: it is what the synthetic ADS-B source needs to put
+            # contacts somewhere before anyone has said where here is. Nothing
+            # reported to the platform ever falls back to it — see
+            # `reported_position`, which returns nothing instead.
+            "latitude": latitude if latitude is not None else -43.5,
+            "longitude": longitude if longitude is not None else 172.6,
             "timezone": site.timezone if site else "UTC",
             # The synthetic camera writes this on its test card, so that a
             # console showing two demo stations shows which is which.
@@ -459,11 +569,11 @@ class Agent:
 
             # The site's own details are things the station needs while the
             # platform is unreachable, so they come from the stored enrolment
-            # rather than from a live call.
+            # rather than from a live call. The position does not: it is this
+            # station's own (`effective_position`), and enrolling must not
+            # overwrite what somebody set on the setup page.
+            self.apply_position()
             for driver in (self.adsb, self.weather):
-                set_site = getattr(driver, "set_site", None)
-                if set_site and enrolment.site.latitude is not None:
-                    set_site(enrolment.site.latitude, enrolment.site.longitude)
                 set_timezone = getattr(driver, "set_timezone", None)
                 if set_timezone:
                     set_timezone(enrolment.site.timezone)
@@ -1144,6 +1254,21 @@ class Agent:
                 "expires_at": credential.expires_at.isoformat(),
                 "renewal_failures": self.renewer.failures if self.renewer else 0,
             }
+        # Where this station is, when it has been told. The station is the only
+        # place a position is entered (owner's decision; the platform's field
+        # stops being editable), so this is how the platform learns it — on the
+        # health cadence rather than at enrolment, because a position corrected
+        # six months later must arrive without anybody re-enrolling a box.
+        #
+        # Not yet named in `$defs/health`; proposed as CONTRACT-QUESTIONS.md 16
+        # and sent ahead of adoption because that object's own description asks
+        # for exactly this ("unknown fields here are expected rather than
+        # tolerated: a station that learns to report something new must not
+        # have to wait for the platform"). Omitted entirely when unset — never
+        # 0, 0 — so "nobody has been to this site" stays distinguishable.
+        position = self.reported_position()
+        if position is not None:
+            payload["position"] = position
         return payload
 
     def _check_clock(self) -> None:
@@ -1238,6 +1363,7 @@ class Agent:
             "clock_source": clock.discipline().to_dict(),
             "security": self.security(),
             "serial_ports": [port.to_dict() for port in self.inventory.serial_ports()],
+            "position": self.position_state(),
             "config_version": self.site.version,
         }
 

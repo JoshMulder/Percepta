@@ -74,6 +74,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from .camera.rtsp import split_credentials
+from .config import parse_elevation_m, parse_latitude, parse_longitude
 from .devices import registry
 from .setup_access import COOKIE_NAME, Gate, is_loopback_host
 
@@ -111,7 +112,15 @@ STYLE = """
  :root { --bg:#070b0f; --panel:#121a23; --panel-2:#0c1219; --line:#22303c;
          --line-soft:#1a2531; --text:#dde6ed; --muted:#7f929f; --dim:#4f626f;
          --brand:#00a0dc; --brand-dim:#0b7ba7; --accent:#35c48a;
-         --warn:#e8b04b; --danger:#ff7a45; }
+         --warn:#e8b04b; --danger:#ff7a45;
+         /* The page strip's height, and therefore the offset the slot strip
+            pins to. One number in one place because the two must stack and
+            never overlap; .pagetabs is given this height rather than being
+            allowed to size to its links, so the offset cannot drift when a
+            fallback font renders a pixel taller. */
+         --nav-h:3.4rem;
+         /* The label column every form row shares. */
+         --label-w:9.5rem; }
  body { font: 15px/1.5 system-ui, sans-serif; margin: 0; background: var(--bg);
         color: var(--text); }
  main { max-width: 54rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
@@ -127,10 +136,14 @@ STYLE = """
  .k { color: var(--muted); }
  .ok { color: var(--accent); } .warn { color: var(--warn); } .bad { color: var(--danger); }
  .muted { color: var(--muted); font-size: .88rem; }
+ /* Controls fill their grid column up to a readable cap rather than carrying
+    a min-width: inside a fixed column a min-width is what overflows a phone,
+    and one shared width is what makes a stack of rows look aligned on the
+    right as well as the left. */
  input[type=text], input[type=password], input[type=number], select {
    font: .95rem system-ui, sans-serif; padding: .45rem .55rem; background: var(--panel-2);
    color: var(--text); border: 1px solid var(--line); border-radius: .375rem;
-   min-width: 12rem; }
+   width: 100%; max-width: 22rem; min-width: 0; box-sizing: border-box; }
  input:focus-visible, select:focus-visible { outline: 2px solid var(--brand);
    outline-offset: 1px; }
  input.code { font: 1.2rem ui-monospace, monospace; letter-spacing: .12em; width: 100%;
@@ -150,8 +163,33 @@ STYLE = """
  .pill.warn { border-color: var(--warn); background: rgba(232,176,75,.1); color: var(--warn); }
  .pill.bad { border-color: var(--danger); background: rgba(255,122,69,.1); color: var(--danger); }
  .pill.off { border-color: var(--line); background: var(--panel-2); color: var(--muted); }
- .field { display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: center;
-          margin: .5rem 0; }
+ /* One shape for every label/control row on the page. Enrolment, location and
+    all six slot forms are rendered by different code paths and each used to
+    start its control wherever its label happened to end, so a card of five
+    rows read as five unrelated things. A fixed label column is what makes
+    them one form to look at.
+    Controls are placed in column 2 explicitly rather than by flow: a row that
+    carries a hint or a datalist as well as its input would otherwise push the
+    extra into the label column. Explicit placement keeps the input beside its
+    label and drops anything further underneath it, still in column 2. */
+ .field { display: grid; grid-template-columns: var(--label-w) minmax(0, 1fr);
+          gap: .35rem 1rem; align-items: center; margin: .55rem 0; }
+ .field > label { grid-column: 1; }
+ .field > :not(label) { grid-column: 2; }
+ /* Both would otherwise be stretched to the column by the grid's default
+    justification: a Save button the full width of a card reads as a banner,
+    and a checkbox keeps its size but not its position — the 4px the UA
+    stylesheet gives it is enough to sit visibly off the line every other
+    control starts on, which is the exact complaint this rule answers. */
+ .field > button { justify-self: start; }
+ .field > input[type=checkbox] { justify-self: start; margin: 0; }
+ /* Below this the two columns cannot both hold their content — a 9.5rem label
+    beside a usable input does not fit a phone held upright — so it becomes one
+    column, where every row still starts at the same x. */
+ @media (max-width: 34rem) {
+   .field { grid-template-columns: minmax(0, 1fr); }
+   .field > label, .field > :not(label) { grid-column: 1; }
+ }
  label { color: var(--muted); font-size: .9rem; }
  ul { margin: .4rem 0 0; padding-left: 1.1rem; color: var(--text); }
  li { padding: .1rem 0; }
@@ -173,12 +211,37 @@ STYLE = """
  .tabs a.active { color: var(--brand); border-color: var(--line);
    background: rgba(0,160,220,.14); }
  .tabs a:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
+ /* Pinned. The strip is how you leave a page, and on a phone at a site the
+    reason to leave is usually something you had to scroll down to find. The
+    fixed height is load-bearing rather than cosmetic — the slot strip pins to
+    exactly this offset — so the vertical padding is dropped and the links are
+    centred in it instead. Full-bleed already (it is outside main and pads
+    itself to centre), so its own background covers the whole strip. */
+ .pagetabs { position: sticky; top: 0; z-index: 6; height: var(--nav-h);
+   box-sizing: border-box; padding-block: 0; align-items: center; }
  .slot-head { display: flex; justify-content: space-between; align-items: baseline;
               gap: 1rem; }
  /* The Devices page's slot strip: same tab language as the page strip, one
-    level down, so "which slot am I on" reads the same way as "which page". */
- .subtabs { background: transparent; border-bottom: 0;
-   padding: .25rem 0 .75rem; margin: 0; }
+    level down, so "which slot am I on" reads the same way as "which page".
+    Pinned *under* the page strip — top is that strip's own height, and a lower
+    z-index so that if a browser ever disagrees about the arithmetic the page
+    strip is the one that stays whole.
+    It sits inside main's centred column and is deliberately **not** bled out
+    to the viewport edges, which is worth saying because the opposite looks
+    like the bug. A sticky strip inside a centred column does need its
+    background to cover the full width when that background differs from the
+    page's — otherwise content scrolls visibly through the gutters. Here it is
+    var(--bg), the page's own colour, and main's gutters never have anything
+    painted in them: every child of main is exactly the column's width. So a
+    full-bleed adds nothing visible, and the ways of getting one are all worse
+    than nothing — negative margins with 100vw hand a phone a horizontal
+    scrollbar when the scrollbar is a classic one, and a spread box-shadow
+    repaints a viewport-sized layer on every scroll frame of a page whose job
+    is to work on a 900 MHz box's cheap phone. The hairline is the separation
+    instead, and it lines up with the cards. */
+ .subtabs { position: sticky; top: var(--nav-h); z-index: 5;
+   background: var(--bg); border-bottom: 1px solid var(--line-soft);
+   padding: .45rem 0; margin: 0 0 .6rem; }
  /* The datastream field: the sensor's own last lines, monospace, bounded.
     A fixed min-height so an empty field reads as "no data", not as a
     missing element. */
@@ -240,6 +303,7 @@ PAGES = {
 POST_HOME = {
     "/device": "/devices",
     "/enrol": "/connection",
+    "/location": "/connection",
     "/logout": "/",
 }
 
@@ -249,6 +313,15 @@ STATUS_PILL = {
     "configured_absent": ("bad", "configured, not detected"),
     "not_fitted": ("off", "not fitted"),
 }
+
+
+def _degrees(value: float | None) -> str:
+    """A coordinate as it was typed, not as a float prints.
+
+    `%g` keeps 173.68 as `173.68` instead of `173.68000000000001`, and drops
+    the trailing zeros that make a rounded number look like a measured one.
+    """
+    return "" if value is None else f"{value:g}"
 
 
 def _host_is_addressable(host_header: str | None) -> bool:
@@ -555,6 +628,8 @@ class Console:
                     home = f"/devices?slot={saved}"
             elif path == "/enrol":
                 self._enrol(form)
+            elif path == "/location":
+                self._set_location(form)
             else:  # /logout
                 self.gate.forget_all()
                 self.message = ("good", "Signed out.")
@@ -619,6 +694,44 @@ class Console:
         self.message = (
             "good",
             f"Enrolled as {enrolment.site.name}. Telemetry is on its way.",
+        )
+
+    def _set_location(self, form: dict) -> None:
+        """Where this station is, typed by somebody who is standing there.
+
+        This is the **only** place a position is entered. The platform holds
+        one too and used to let you edit it; the owner's decision is that it
+        must not, because two editable copies of one fact disagree and neither
+        end can see that they have. The station reports this one up in the
+        health frame and the platform displays what it is told
+        (CONTRACT-QUESTIONS.md 16).
+
+        Every refusal here is a `ValueError` carrying a sentence, which
+        `_handle` turns into the red message on the page. Nothing about a
+        mistyped coordinate should produce a traceback in a log nobody on site
+        can read — the person who can fix it is holding the phone.
+        """
+        raw = {
+            name: (form.get(name) or [""])[0].strip()
+            for name in ("latitude", "longitude", "elevation_m")
+        }
+        if not any(raw.values()):
+            # All three empty is a deliberate clear, and it has to be possible:
+            # a station commissioned at the wrong coordinates must be able to
+            # stop asserting a position rather than be stuck with a plausible
+            # wrong one, which is worse than none.
+            self.agent.set_location(None, None, None)
+            self.message = ("good", "Location cleared.")
+            return
+        if not raw["latitude"] or not raw["longitude"]:
+            raise ValueError("Latitude and longitude are both needed.")
+        latitude = parse_latitude(raw["latitude"])
+        longitude = parse_longitude(raw["longitude"])
+        elevation = parse_elevation_m(raw["elevation_m"]) if raw["elevation_m"] else None
+        self.agent.set_location(latitude, longitude, elevation)
+        self.message = (
+            "good",
+            f"Location saved: {_degrees(latitude)}, {_degrees(longitude)}.",
         )
 
     def _set_device(self, form: dict) -> str:
@@ -884,6 +997,7 @@ class Console:
 
         if page == "/connection":
             out.append(self._section_enrol(state, csrf))
+            out.append(self._section_location(state, csrf))
             out.append(self._section_platform(state))
             out.append(self._section_security(state))
             out.append(self._section_access(session, csrf))
@@ -903,7 +1017,7 @@ class Console:
 
     @staticmethod
     def _nav(page: str) -> str:
-        out = ["<nav class=tabs>"]
+        out = ["<nav class='tabs pagetabs'>"]
         for path, label in PAGES.items():
             active = " class=active" if path == page else ""
             out.append(f"<a href='{path}'{active}>{html.escape(label)}</a>")
@@ -947,6 +1061,12 @@ class Console:
             ("Station clock", state["clock"], "ok"),
             ("Clock kept by", self._clock_wording(clock_state),
              "ok" if clock_state.get("synchronised") else "warn"),
+            # Read-only here like everything else on this page — the form is on
+            # Connection. It earns a row because an unset position is a fault
+            # an installer can still fix while on site and cannot see from
+            # anywhere else: every range and bearing this station reports is
+            # computed from it.
+            ("Location", *self._position_wording(state.get("position") or {})),
         ]
         out.append("<div class=card>")
         for label, value, css in rows:
@@ -982,12 +1102,109 @@ class Console:
             "<p class=sub>Not set up yet.</p>"
             "<div class=card><form method=post action='/enrol'>"
             + self._csrf_field(csrf) +
-            "<label for=token>Enter the code you were given</label><br>"
+            # In a .field like every other row on the page, rather than the
+            # label-<br>-input it was: this is the one form an installer sees
+            # first, and it was the one that lined up with nothing.
+            "<div class=field>"
+            "<label for=token>Enter the code you were given</label>"
             "<input id=token class=code name=token type=text autocomplete=off "
             "placeholder='XXXX-XXXX-XXXX' autofocus>"
-            "<button type=submit>Set this station up</button>"
+            "</div>"
+            "<div class=field><button type=submit>Set this station up</button></div>"
             "</form></div>"
         )
+
+    def _section_location(self, state: dict, csrf: str) -> str:
+        """The station's own position, on the page beside its identity.
+
+        **Why Connection and not Summary or Devices.** Summary is deliberately
+        read-only — its docstring says every fix lives on the page whose tab
+        names the thing that is wrong — so an editable form there would break
+        the one rule that makes that page scannable. Devices is per-slot
+        hardware, and a position is not fitted to a slot. Connection is where
+        this box's identity lives: who it enrolled as, where it talks, what
+        credential it holds. Where it *is* is the same class of fact and the
+        same five minutes of an installer's time.
+
+        **Why it is editable here when the platform address next to it is
+        not.** The address is one value, fixed for the whole fleet, and
+        retyping it on a roof can only make it wrong. The position is
+        per-station and *only* knowable on site — nobody at a desk can supply
+        it, which is precisely why the owner took it off the platform.
+
+        The rendered value states its source, because a station using the
+        platform's old value and one using its own look identical otherwise,
+        and only the second is a position somebody has confirmed.
+        """
+        position = state.get("position") or {}
+        station = position.get("station") or {}
+        elevation = position.get("elevation_m")
+        rows = [
+            ("Position", *self._position_wording(position)),
+            ("Elevation",
+             f"{_degrees(elevation)} m" if elevation is not None else "not set",
+             "ok" if elevation is not None else "warn"),
+        ]
+        out = ["<h2>Where this box is</h2><div class=card>"]
+        for label, value, css in rows:
+            out.append(
+                f"<div class=row><span class=k>{html.escape(label)}</span>"
+                f"<span class='{css}'>{html.escape(str(value))}</span></div>"
+            )
+        out.append(f"<form method=post action='/location'>{self._csrf_field(csrf)}")
+        # Bounds go on the inputs as well as in the parser: the browser catches
+        # a typed 91 before it costs a round trip, and the parser catches
+        # everything else, including every client that is not a browser.
+        #
+        # `inputmode=text` against type=number on purpose. Every latitude in
+        # this hemisphere is negative and the numeric keypad iOS raises for a
+        # number input has no minus key on it — a field you cannot type the
+        # commonest value into is worse than one without a tuned keyboard.
+        fields = (
+            ("latitude", "Latitude", station.get("latitude"), -90, 90, "-90 to 90"),
+            ("longitude", "Longitude", station.get("longitude"), -180, 180,
+             "-180 to 180"),
+            ("elevation_m", "Elevation", station.get("elevation_m"), -500, 100000,
+             "metres"),
+        )
+        for name, label, value, low, high, hint in fields:
+            out.append(
+                f"<div class=field><label for='{name}'>{html.escape(label)}</label>"
+                f"<input type=number step=any min='{low}' max='{high}' "
+                f"id='{name}' name='{name}' inputmode=text "
+                f"placeholder='{html.escape(hint)}' "
+                f"value='{html.escape(_degrees(value))}'></div>"
+            )
+        out.append(
+            "<div class=field><button type=submit>Save location</button></div></form>"
+        )
+        out.append(
+            # Deliberately "stops reporting one" and not "clears it there":
+            # an omitted field cannot retract a value the platform already
+            # holds, and the page must not promise something the wire cannot
+            # do (CONTRACT-QUESTIONS.md 16, retraction).
+            "<div class=muted>Set here, not on the platform, which shows what "
+            "this station reports. Clearing all three stops this station "
+            "reporting one.</div></div>"
+        )
+        return "".join(out)
+
+    @staticmethod
+    def _position_wording(position: dict) -> tuple[str, str]:
+        """The position and how much to trust it, in one phrase.
+
+        A station using its own position and one still using the platform's
+        look identical otherwise, and only the first has been confirmed by
+        somebody who was there — so the fallback is marked, not merged.
+        """
+        where = (f"{_degrees(position.get('latitude'))}, "
+                 f"{_degrees(position.get('longitude'))}")
+        source = position.get("source") or ""
+        if source == "station":
+            return where, "ok"
+        if source == "platform":
+            return f"{where} — from the platform", "warn"
+        return "not set", "warn"
 
     def _section_security(self, state: dict) -> str:
         """Whether each link is encrypted and verified, and whether the
@@ -1316,8 +1533,10 @@ class Console:
                     + html.escape(", ".join(selected_device.absent)) + "</div>"
                 )
         # Enabled without script (degradation the design accepts); the nonce'd
-        # script disables it until a field differs from its loaded value.
-        out.append("<button type=submit>Save</button></form>")
+        # script disables it until a field differs from its loaded value. In a
+        # .field with no label so that it sits under the controls rather than
+        # under the labels — the only child of a row goes to column 2.
+        out.append("<div class=field><button type=submit>Save</button></div></form>")
         out.append("</div>")
 
         connections = {device.connection for device in registry.by_slot(slot)}

@@ -234,6 +234,60 @@ def _coerce(target: type, value: object):
     return target(value)
 
 
+def _bounded(label: str, raw: object, low: float, high: float) -> float:
+    """A number inside its range, or a ValueError somebody can read.
+
+    Shared by the setup page and by `config.set` so that a position typed on a
+    roof and one arriving over the wire are held to the same rule. The message
+    is written to be rendered: it is what the technician sees when they type a
+    degrees-minutes-seconds string into a decimal-degrees box, which is the
+    mistake this actually catches.
+    """
+    # A coordinate copied off a web page arrives with a typographic minus
+    # (U+2212) or an en dash, neither of which float() accepts. Refusing that
+    # paste is a refusal the person cannot see the cause of — the two strings
+    # look identical in the box.
+    text = str(raw).strip().replace("−", "-").replace("–", "-")
+    span = f"{low:g} and {high:g}"
+    try:
+        value = float(text)
+    except (TypeError, ValueError):
+        raise ValueError(f"{label} must be a number between {span}.") from None
+    if value != value or value in (float("inf"), float("-inf")):
+        # NaN and the infinities survive float() and then poison every range
+        # and bearing computed from them, silently.
+        raise ValueError(f"{label} must be a number between {span}.")
+    if not low <= value <= high:
+        raise ValueError(f"{label} must be between {span}.")
+    return value
+
+
+def parse_latitude(raw: object) -> float:
+    return _bounded("Latitude", raw, -90.0, 90.0)
+
+
+def parse_longitude(raw: object) -> float:
+    return _bounded("Longitude", raw, -180.0, 180.0)
+
+
+def parse_elevation_m(raw: object) -> float:
+    # Metres above the ellipsoid, bounded by the deepest mine and low earth
+    # orbit rather than by anything geodetic: the job is to reject a typed
+    # latitude or a pasted phone number, not to adjudicate a survey.
+    return _bounded("Elevation", raw, -500.0, 100_000.0)
+
+
+#: Fields that may legitimately be unset, and how to read one when it is not.
+#: `apply()` normally coerces with `type(current)`, and `NoneType("-42.4")`
+#: raises — so without this a stored position would be silently discarded by
+#: the `load()` that is supposed to restore it. Empty and null both clear.
+NULLABLE: dict[str, object] = {
+    "latitude": parse_latitude,
+    "longitude": parse_longitude,
+    "elevation_m": parse_elevation_m,
+}
+
+
 @dataclass
 class SiteConfig:
     """Versioned site policy. Persisted locally, updated by `config.set`.
@@ -244,6 +298,25 @@ class SiteConfig:
     """
 
     version: int = 0
+
+    #: Where this station is. **The station is the only source of this.** The
+    #: platform holds a position too — it arrives in the enrolment response as
+    #: `station.latitude`/`station.longitude` — but the owner's decision is that
+    #: it must not be settable there, because two editable copies of one fact
+    #: disagree and the disagreement is invisible from both ends. So this is
+    #: typed on the setup page by somebody standing at the site, reported up in
+    #: the health frame, and the platform's copy becomes a display of what was
+    #: reported. `agent.effective_position` is the precedence in code.
+    #:
+    #: Unset is a real state and is reported as absent rather than as 0, 0 —
+    #: the Gulf of Guinea is a place, and a fleet map that quietly draws every
+    #: unconfigured station there looks like data instead of a gap.
+    latitude: float | None = None
+    longitude: float | None = None
+    #: Metres. No platform equivalent at all: it exists here because range to
+    #: an aircraft is slant range and the station's own height is the term
+    #: nobody can supply remotely.
+    elevation_m: float | None = None
 
     #: Proximity alert. The station decides, because the threshold belongs with
     #: the site (contract/schemas/telemetry.schema.json, aircraft.alert).
@@ -306,10 +379,24 @@ class SiteConfig:
             if key not in known:
                 continue
             current = getattr(self, key)
-            try:
-                coerced = _coerce(type(current), value)
-            except (TypeError, ValueError):
-                continue
+            if key in NULLABLE:
+                # Nullable fields cannot go through `type(current)`: while one
+                # is unset that type is NoneType. An out-of-range value from
+                # the platform is dropped like any other unusable value —
+                # `config.set` is not a channel that reports errors, and the
+                # setup page is where a person gets told (console._location).
+                try:
+                    coerced = (
+                        None if value is None or str(value).strip() == ""
+                        else NULLABLE[key](value)
+                    )
+                except (TypeError, ValueError):
+                    continue
+            else:
+                try:
+                    coerced = _coerce(type(current), value)
+                except (TypeError, ValueError):
+                    continue
             if coerced != current:
                 setattr(self, key, coerced)
                 changed.append(key)
