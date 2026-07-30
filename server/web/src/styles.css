@@ -66,7 +66,7 @@
      the sidebar fills the viewport - so a wider bar in rem means everything in
      it is drawn larger at the same viewport height, rather than the bar simply
      taking more of the screen. */
-  --sidebar-base: 34rem;
+  --sidebar-base: 36.5rem;
   /* The sky-state caption's height. The icon's top padding is derived from it
      so the glyph centres on the same line as the wind dial. */
   --sky-label-h: 1.7rem;
@@ -361,7 +361,7 @@ body {
 }
 .card-head h3 {
   margin: 0;
-  font-size: 0.688rem;
+  font-size: 0.812rem;
   font-weight: 600;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -862,7 +862,7 @@ body {
      above them has a dial and an icon that both carry their own visual margin,
      so the text was the only thing touching a border and read as though it had
      overflowed rather than been placed. */
-  padding-bottom: var(--s3);
+  padding-bottom: var(--s2);
 }
 .rose-wrap {
   display: flex;
@@ -876,11 +876,13 @@ body {
   gap: 1.25rem;
 }
 .rose {
-  /* Grown to take up the room the radio panel released. Sized in rem, so it
-     still scales with everything else. The number between the dials carries
-     its own weight at 4.5rem, so these can be generous without demoting it. */
-  width: 10.2rem;
-  height: 10.2rem;
+  /* Sized against the readout, not grown to fill. The dial and the sky icon
+     set this panel's height, and it was the tallest in the stack with a band
+     of dead space under the row - height the power panel's figures wanted
+     more than the ornaments did. The number between them still leads at
+     4.125rem. */
+  width: 8.75rem;
+  height: 8.75rem;
   flex: none;
 }
 .rose-ring {
@@ -1917,7 +1919,7 @@ body {
   flex: none;
   /* Matches .rose - the two are the bookends of a centred row and any
      difference between them reads as the row leaning. */
-  width: 10.2rem;
+  width: 8.75rem;
   /* Space above the icon equal to the label below it, so the ICON centres on
      the row rather than the icon-plus-label block doing so. Without it the
      label's height pushed the glyph up and it sat 12px higher than the dial it
@@ -1935,8 +1937,8 @@ body {
    lopsided rather than balanced, and matching the dial is what was actually
    wanted. The two are the panel's anchors, one at each end. */
 .sky-icon {
-  width: 10.2rem;
-  height: 10.2rem;
+  width: 8.75rem;
+  height: 8.75rem;
   color: var(--muted);
   stroke-width: 1.6;
 }
@@ -2986,4 +2988,17 @@ body {
    because the panel sizes itself from the slot it lands in. */
 .video-host {
   display: contents;
+}
+
+
+/* The power figures, sized like the weather panel's rather than the shared
+   default. Battery volts, load and runtime are the numbers somebody checks
+   from across a room before deciding whether a site survives the night, and
+   they were the smallest text in the stack. The room came from the weather
+   panel's dead space; see .rose. */
+.power .stats dt {
+  font-size: 0.938rem;
+}
+.power .stats dd {
+  font-size: 1.125rem;
 }
