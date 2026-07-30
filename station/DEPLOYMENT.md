@@ -596,6 +596,46 @@ python contract/conformance/check_station.py --station <uuid>
 Streams with no driver are reported as declared-unavailable and skipped, not
 failed. A station is not failed for lacking hardware, only for pretending.
 
+### Confirming ADS-B, and reading the nulls
+
+Conformance checks that the ADS-B payload is *shaped* right. It cannot check
+that the fields are populated, because on a station with no traffic overhead
+an empty sky is a valid answer. `gsu adsb` is the check that needs an aircraft.
+
+The receiver is on a serial port, so the service has to be stopped first —
+two processes cannot read one UART, and the command refuses rather than
+competing:
+
+```bash
+sudo systemctl stop gsu
+sudo -u gsu /opt/percepta/station/.venv/bin/python -m gsu adsb --seconds 20
+sudo systemctl start gsu
+```
+
+It prints one JSON object per contact, exactly as it would be published, plus
+the receiver's own state and whether the barometric altitude correction is
+running. **Read the nulls, not the numbers.** A null is one of two things and
+they are worth telling apart:
+
+* **the aircraft's** — a validity flag the transmitting aircraft left clear.
+  `squawk`, `callsign`, `vertical_speed` and `track` are routinely null on real
+  traffic and that is correct behaviour, not a decode fault. A *zero* in one of
+  those would be the bug.
+* **this station's** — `on_ground` is null for everything except surface
+  emitter types 17, 18 and 19, because `ADSB_VEHICLE` carries no
+  airborne/surface bit (CONTRACT-QUESTIONS.md item 19). `altitude_corrected_m`
+  is null unless the correction is switched on and working, and the header line
+  says which.
+
+On live traffic, expect `icao`, `latitude`, `longitude`, `altitude`,
+`altitude_type`, `emitter_type`, `seconds_since_contact`, `source`, `range_km`
+and `bearing` populated on essentially every contact; `callsign`, `squawk`,
+`track`, `speed` and `vertical_speed` populated on most; `simulated` false; and
+`on_ground` null. An `emitter_type` of 0 is the receiver saying it was not told,
+not a failure to decode.
+
+`--out contacts.json` writes the same objects to a file to send on.
+
 ### Confirming video, which conformance does not cover
 
 Conformance checks telemetry, audio and commands. Video is a separate channel

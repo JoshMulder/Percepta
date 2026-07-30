@@ -145,10 +145,22 @@ REGISTRY: tuple[DeviceType, ...] = (
         driver="gsu.devices.pingrx:PingRxAdsb",
         parameters=MAVLINK_SERIAL_PARAMETERS,
         provides=("icao", "callsign", "latitude", "longitude", "altitude",
-                  "track", "speed", "range_km", "bearing", "alert"),
-        notes="Emits ADSB_VEHICLE. Position, altitude, heading, velocity and "
-              "callsign each carry a validity flag, which the driver honours: "
-              "an unflagged value is published as null, never as zero.",
+                  "track", "speed", "range_km", "bearing", "alert",
+                  "altitude_type", "vertical_speed", "emitter_type", "squawk",
+                  "seconds_since_contact", "simulated", "source"),
+        # ADSB_VEHICLE has no airborne/surface status field. The only ground
+        # evidence in the message is the emitter type: 17, 18 and 19 are surface
+        # categories by definition, so those contacts report true and every
+        # other contact reports null. Declared absent because that is what it
+        # looks like from the console — a field that is null for essentially all
+        # traffic — and a console should be told rather than left to infer it.
+        absent=("on_ground",),
+        notes="Emits ADSB_VEHICLE. Position, altitude, heading, velocity, "
+              "callsign, squawk and vertical velocity each carry a validity "
+              "flag, which the driver honours: an unflagged value is published "
+              "as null, never as zero. altitude_corrected_m is the station's "
+              "own barometer applied to a pressure altitude, off unless "
+              "site configuration switches it on.",
     ),
     DeviceType(
         id="rtlsdr-dump1090",
@@ -162,7 +174,13 @@ REGISTRY: tuple[DeviceType, ...] = (
             Parameter("sample_rate", "Sample rate", "number", 2_400_000, required=False),
         ),
         provides=("icao", "callsign", "latitude", "longitude", "altitude",
-                  "track", "speed", "range_km", "bearing", "alert"),
+                  "track", "speed", "range_km", "bearing", "alert",
+                  "altitude_type", "vertical_speed", "squawk", "on_ground",
+                  "seconds_since_contact", "source"),
+        # SBS output carries an on-ground flag, which the MAVLink receiver does
+        # not, and does not carry the emitter category, which it does. The two
+        # ADS-B paths genuinely source different things.
+        absent=("emitter_type", "simulated"),
         notes="Needs a tuner of its own: 1090 MHz and airband cannot share one. "
               "Driver not implemented — the station would supervise dump1090 "
               "and read its Beast/SBS output.",
@@ -175,9 +193,13 @@ REGISTRY: tuple[DeviceType, ...] = (
         driver="gsu.devices.pingrx:SimulatedPingRx",
         simulated=True,
         provides=("icao", "callsign", "latitude", "longitude", "altitude",
-                  "track", "speed", "range_km", "bearing", "alert"),
+                  "track", "speed", "range_km", "bearing", "alert",
+                  "altitude_type", "vertical_speed", "emitter_type", "squawk",
+                  "seconds_since_contact", "simulated", "source"),
+        absent=("on_ground",),
         notes="Generates real MAVLink ADSB_VEHICLE frames and decodes them "
-              "through the same parser the hardware path uses.",
+              "through the same parser the hardware path uses, across a spread "
+              "of emitter types, squawks and altitude datums.",
     ),
 
     # --- airband radio -------------------------------------------------

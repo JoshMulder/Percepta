@@ -34,6 +34,7 @@ from .camera.ownership import SensorLease
 from .commands import CommandRouter, build_handlers
 from .config import AgentConfig, SiteConfig
 from .credentials import CredentialStore, Enrolment
+from .devices.altitude import BarometricReference
 from .devices.inventory import Inventory
 from .enrolment import EnrolmentClient, Renewer
 from .health import Health
@@ -123,6 +124,15 @@ class Agent:
         # from a zombie, which is the bug it exists to make impossible. See
         # camera/ownership.py.
         self.sensor_lease = SensorLease("camera")
+        # The station's barometer, as the ADS-B driver sees it. Built here and
+        # handed over through device_context() for the same reason as the
+        # sensor lease: it outlives rediscovery. It couples two slots, so
+        # neither may own it — a weather head being swapped must not take the
+        # ADS-B altitude correction with it, and a receiver being rebuilt must
+        # not lose the current pressure.
+        self.baro = BarometricReference(
+            enabled=self.site.adsb_baro_correction, elevation_m=self.site.elevation_m
+        )
         self.build_devices()
 
         # Two consumers of the camera, and exactly one of them may hold the
@@ -386,6 +396,10 @@ class Agent:
             # who owns what — which is the right answer for a camera that
             # encodes on the far end.
             "sensor_lease": self.sensor_lease,
+            # Same signature-filtered handover as the lease above: the ADS-B
+            # drivers accept it, nothing else does, and no driver has to know
+            # the agent exists.
+            "altitude_reference": self.baro,
             "alert_range_km": self.site.alert_range_km,
             "alert_altitude_m": self.site.alert_altitude_m,
             "traffic": self.config.airband_traffic,
@@ -496,6 +510,23 @@ class Agent:
             )
         else:
             self.health.clear("telemetry.unsourced")
+
+        # An operator switched the barometric altitude correction on and it is
+        # not running. Worth saying — the whole ADS-B stream is publishing null
+        # corrections and nothing else would explain it — but `info` and not
+        # `warning`: the station is doing its job, one optional refinement is
+        # unavailable, and `Health.SUMMARY` maps info to `ok` so this cannot
+        # degrade a station over a setting. Silent while it is switched off,
+        # which is the default and not a fault.
+        correction = self.baro.state()
+        if correction["enabled"] and not correction["active"]:
+            self.health.raise_condition(
+                "adsb.altitude_correction", "info",
+                f"ADS-B barometric altitude correction is on but idle: "
+                f"{correction['reason']}. Altitudes are published as received.",
+            )
+        else:
+            self.health.clear("adsb.altitude_correction")
 
         conflicts = self.inventory.conflicts()
         if conflicts:
@@ -833,6 +864,19 @@ class Agent:
         cares whether the link is up."""
         light_load = getattr(self.light, "load_w", 0.0) if self.light else 0.0
 
+        # Re-read every tick rather than at build time: both of these move
+        # under a running station — the elevation when somebody saves the setup
+        # page, the switch when a `config.set` arrives — and a correction that
+        # kept using the previous pair would be wrong in exactly the way it is
+        # supposed to refuse to be.
+        self.baro.configure(
+            enabled=self.site.adsb_baro_correction, elevation_m=self.site.elevation_m
+        )
+        if self.weather is None:
+            # No weather slot at all, so nothing may keep feeding the last
+            # reading a departed sensor left behind.
+            self.baro.forget()
+
         reading = None
         if self.power is not None:
             reading = self.power.read(dt, extra_load_w=light_load)
@@ -908,6 +952,11 @@ class Agent:
                 self.weather.read(self.site.weather_period_s)
                 if self.weather is not None else None
             )
+            # The barometer reaches the ADS-B stream through here and nowhere
+            # else, so a pressure the console was shown and a pressure a
+            # correction was computed from are the same number. `update`
+            # ignores a None, which then ages out on its own.
+            self.baro.update(weather.pressure_hpa if weather is not None else None)
             self._publish_telemetry(
                 weather.to_payload() if weather is not None
                 else self.unavailable_payload("weather", reports)
@@ -1268,6 +1317,12 @@ class Agent:
             "unsourced_fields": self._unsourced_fields(),
             "resources": [resource.to_dict() for resource in self.inventory.resources()],
             "storage": self.store.stats(),
+            # Whether the ADS-B pressure-altitude correction is running, and if
+            # not, which of the several ways it can decline applies. A null
+            # `altitude_corrected_m` on every contact has too many possible
+            # causes — switched off, no barometer, a stale one, no elevation —
+            # for anyone to diagnose from the ADS-B stream alone.
+            "adsb_altitude_correction": self.baro.state(),
             # What video is costing, measured. It is the largest single consumer
             # on the link when it is running, and the only honest way to know
             # what a given camera and setting cost is for the box to say — see

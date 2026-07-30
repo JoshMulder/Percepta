@@ -55,8 +55,14 @@ class Sensor(Protocol):
 class Aircraft:
     """One contact, in the shape the contract wants it.
 
-    `latitude`/`longitude` are nullable because a Mode S response alone gives no
-    position, and the console draws a dot rather than inventing one.
+    **None is never zero.** `latitude`/`longitude` are nullable because a Mode S
+    response alone gives no position, and the console draws a dot rather than
+    inventing one. Every other nullable field here is nullable for the same
+    reason: the receiver attaches a validity flag to each of altitude, heading,
+    velocity, vertical velocity, callsign and squawk, and the flag is the
+    receiver telling us which of "the value is zero" and "there is no value" it
+    means. Collapsing the two loses the only copy of that distinction — squawk
+    0000 is a code, and 0 kt is an aircraft that has stopped.
     """
 
     icao: str
@@ -70,6 +76,29 @@ class Aircraft:
     speed: float | None = None
     alert: bool = False
 
+    #: `pressure` | `geometric` | None, and the pressure altitude re-referenced
+    #: to the station's own barometer when that is switched on and possible.
+    #: The corrected value is carried *beside* `altitude`, never instead of it:
+    #: what the receiver said and what it means locally are two facts, and a
+    #: console that cannot show both cannot show its working.
+    altitude_type: str | None = None
+    altitude_corrected_m: float | None = None
+
+    #: Metres per second, positive climbing.
+    vertical_speed: float | None = None
+    #: `ADSB_EMITTER_TYPE` as reported, unmapped. Naming it is the console's job.
+    emitter_type: int | None = None
+    #: Mode A as an integer, so 7700 is 7700.
+    squawk: int | None = None
+    #: `tslc`. A track still drawn at 30 seconds is a memory, not an aircraft.
+    seconds_since_contact: float | None = None
+    on_ground: bool | None = None
+    #: The receiver flagged this contact as injected. Carried so that a test
+    #: transmission can never be read as traffic.
+    simulated: bool | None = None
+    #: `adsb` (1090ES) or `uat` (978 MHz).
+    source: str | None = None
+
     def to_payload(self) -> dict:
         return {
             "icao": self.icao,
@@ -82,6 +111,23 @@ class Aircraft:
             "range_km": round(self.range_km, 2),
             "bearing": round(self.bearing % 360, 1),
             "alert": self.alert,
+            "altitude_type": self.altitude_type,
+            "altitude_corrected_m": (
+                None if self.altitude_corrected_m is None
+                else round(self.altitude_corrected_m)
+            ),
+            "vertical_speed": (
+                None if self.vertical_speed is None else round(self.vertical_speed, 1)
+            ),
+            "emitter_type": self.emitter_type,
+            "squawk": self.squawk,
+            "seconds_since_contact": (
+                None if self.seconds_since_contact is None
+                else round(self.seconds_since_contact, 1)
+            ),
+            "on_ground": self.on_ground,
+            "simulated": self.simulated,
+            "source": self.source,
         }
 
 
