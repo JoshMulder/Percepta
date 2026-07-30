@@ -17,6 +17,7 @@ import type {
   StatusPayload,
   WeatherPayload,
 } from "../types";
+import { isForSelectedStation } from "../telemetryRouting";
 import { useAudio } from "../useAudio";
 import { useFitScale } from "../useFitScale";
 import { useMediaQuery } from "../useMediaQuery";
@@ -119,6 +120,15 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
 
   const [stations, setStations] = useState<StationSummary[]>([]);
   const [stationId, setStationId] = useState<string | null>(null);
+  /** The same value, readable from the socket callback.
+   *
+   *  `handleMessage` has an empty dependency list on purpose — recreating it
+   *  re-subscribes the socket — so it cannot close over `stationId`. Written
+   *  during render rather than in an effect: an effect runs *after* paint, and
+   *  a frame arriving in that gap would be admitted against the station just
+   *  left, which is the entire bug this guards. */
+  const selectedRef = useRef<string | null>(null);
+  selectedRef.current = stationId;
   const [detail, setDetail] = useState<StationDetail | null>(null);
   const [mapConfig, setMapConfig] = useState<MapConfig | null>(null);
   const [mainView, setMainView] = useState<"adsb" | "video">("adsb");
@@ -181,6 +191,15 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
   }, []);
 
   const handleMessage = useCallback((message: ServerMessage) => {
+    // Frames for the station being left are still in flight when a switch
+    // happens, and the switch has just emptied every panel — so they land in a
+    // clean one and stick. Harmless for a stream the new station also
+    // publishes, permanent for one it does not: this is how a Pi with no
+    // weather head came to be displaying wind and pressure. See
+    // telemetryRouting.ts; a ref because this callback is deliberately stable.
+    if (!isForSelectedStation(message as { station_id?: string }, selectedRef.current)) {
+      return;
+    }
     if (message.type === "status") {
       const payload = message.payload as StatusPayload;
       if (!payload.alarm && payload.online === undefined) return;
