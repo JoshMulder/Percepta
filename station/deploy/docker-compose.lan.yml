@@ -1,0 +1,14 @@
+# Publishes the setup page on the LAN instead of loopback-only.
+#
+# An OVERLAY, off by default, because the base file's 127.0.0.1 binding is the
+# right answer for a field station and the wrong one for a bench: UI work
+# against a box on the desk should not need an SSH tunnel per page load. The
+# page still requires GSU_SETUP_PASSWORD_HASH - without one the agent demotes
+# itself to loopback inside the container and this mapping publishes a socket
+# that answers nothing useful.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.lan.yml up -d
+services:
+  gsu:
+    ports: !override
+      - "8088:8088"
