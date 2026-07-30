@@ -167,20 +167,43 @@ class SimulatedPower:
 
 
 class SimulatedFloodlight:
-    """A relay with a contactor that takes a moment.
+    """A relay with a contactor that takes a moment, and an optional current
+    sensor on the lamp circuit.
 
     The delay is not decoration: it is the difference between reporting what was
     commanded and reporting what the hardware is doing, and the console is built
     on the second (`contract/schemas/telemetry.schema.json`, light.on).
+
+    The sensor measures the *circuit*, not the relay — which is the entire
+    point of fitting one. A dead lamp draws nothing behind a closed contact;
+    a welded contact keeps drawing after the command went off. `lamp_failed`
+    and `relay_welded` exist so tests and demos can produce exactly those two
+    faults, the same way the rest of this module fakes weather nobody is
+    having; no real driver in this build can sense them yet (the gpio-relay
+    registry row says so).
     """
 
     ACTUATION_SECONDS = 0.4
     LOAD_W = 60.0
+    #: The simulated site runs a 48 V bank (`SimulatedPower`), so the lamp's
+    #: nominal draw is LOAD_W / BUS_V = 1.25 A.
+    BUS_V = 48.0
 
-    def __init__(self) -> None:
+    def __init__(self, sense_source: str = "simulated",
+                 sense_threshold_a: float = 0.2,
+                 state_source: str = "relay") -> None:
         self._on = False
         self._requested = False
         self._pending = 0.0
+        self.sense_source = str(sense_source or "none")
+        self.sense_threshold_a = float(sense_threshold_a or 0.0)
+        # Anything that is not exactly "current" reports the relay: a typo in
+        # a config file must fall back to today's behaviour, not to a mode
+        # that needs a sensor the typo may not have configured.
+        self.state_source = "current" if str(state_source) == "current" else "relay"
+        #: Injectable faults, for tests and demos.
+        self.lamp_failed = False
+        self.relay_welded = False
 
     def request(self, on: bool) -> None:
         if bool(on) != self._requested:
@@ -192,27 +215,64 @@ class SimulatedFloodlight:
             self._pending -= dt
             if self._pending <= 0:
                 self._on = self._requested
+        if self.relay_welded:
+            # A welded contact does not open, whatever was commanded.
+            self._on = True
+
+    @property
+    def commanded(self) -> bool:
+        """What was asked for — the intent half of the fault check."""
+        return self._requested
+
+    @property
+    def _drawing(self) -> bool:
+        return self._on and not self.lamp_failed
+
+    @property
+    def measured_a(self) -> float | None:
+        """Amps through the lamp circuit, or None when no sensor is fitted.
+
+        None and 0.0 are different statements — "nothing is measuring" versus
+        "measured, and nothing flows" — and the fault checks only run on the
+        second.
+        """
+        if self.sense_source in ("", "none"):
+            return None
+        return round(self.LOAD_W / self.BUS_V, 2) if self._drawing else 0.0
 
     @property
     def on(self) -> bool:
+        """The reported state: the relay's contact, or the measured current
+        when this light is configured to trust the stronger witness."""
+        measured = self.measured_a
+        if self.state_source == "current" and measured is not None:
+            return measured >= self.sense_threshold_a
         return self._on
 
     @property
     def load_w(self) -> float:
-        return self.LOAD_W if self._on else 0.0
+        return self.LOAD_W if self._drawing else 0.0
 
     def raw_sample(self) -> list[str]:
-        return [
+        line = (
             f"relay {'on' if self._on else 'off'}"
             + (", actuating" if self._pending > 0 else "")
-            + (f", {self.load_w:.0f} W" if self._on else "")
-        ]
+            + (f", {self.load_w:.0f} W" if self._drawing else "")
+        )
+        measured = self.measured_a
+        if measured is not None:
+            line += f", {measured:.2f} A measured"
+        return [line]
 
     def describe(self) -> Device:
+        measured = self.measured_a
+        detail = "simulated relay, state read back"
+        if measured is not None:
+            detail = f"simulated relay, {measured:.2f} A measured"
         return Device(
             id="light",
             kind="floodlight",
             present=True,
-            detail="simulated relay, state read back",
+            detail=detail,
             simulated=True,
         )

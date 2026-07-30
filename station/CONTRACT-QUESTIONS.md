@@ -717,3 +717,44 @@ What is convenient to produce, from the encoder outward:
 
 **Say what you want and it gets implemented behind `StreamUplink`**, which is
 one class with `open`, `send`, `close`. Nothing above it changes.
+
+---
+
+## 15. The light stream should be able to carry its measured current
+
+**Where** `schemas/telemetry.schema.json`, `$defs/light`.
+
+The station now supports a current sensor on the floodlight circuit: a
+threshold in amps above which the lamp counts as drawing, and a per-light
+setting for whether `light.on` reports the relay or the measured current.
+`on` needs no schema change either way — the schema already defines it as
+"what the hardware is actually doing, not what was last commanded", and a
+current-derived answer is a *better* reading of that sentence, not a new
+field.
+
+Two things do not fit in the schema as written, and are **not** being sent
+until they do:
+
+```jsonc
+{"kind": "light", "on": true,
+ "measured_a": 1.25,       // proposed: amps through the lamp circuit,
+                           // omitted (never zeroed) when no sensor is fitted
+ "state_source": "current" // proposed: "relay" | "current" — which witness
+                           // `on` is reporting, so a console can say so
+}
+```
+
+- `measured_a` is the console's only route to "the lamp is tired" trends and
+  to distinguishing a bright lamp from a barely-conducting one. Omitted when
+  unsourced, per this station's own rule (DECISIONS.md item 16).
+- `state_source` matters because the same `on: true` is a different strength
+  of claim from a relay coil than from a measured 1.25 A, and an operator
+  deciding whether to roll a truck deserves to know which they are reading.
+
+**Until adopted**, the measurements reach people through channels the
+contract already has: the fault checks travel as health conditions
+(`light.no_draw`, warning — lamp, fuse or wiring; `light.stuck_on`,
+critical — a welded relay burning the battery at an unattended site), the
+amps appear in the device detail in `health.devices[]` and on the setup
+page's light tab, and the local event log records fault edges. Nothing
+invented on the wire; nothing measured kept from the operator.

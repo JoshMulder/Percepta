@@ -897,3 +897,64 @@ that the setup network is a cable or a dedicated AP. **If this page ever has to
 live on a shared site LAN, this is the assumption to revisit first** — and the
 answer is probably a pinned certificate provisioned with the image, which is a
 real piece of work and was not attempted here.
+
+## 42. A pasted RTSP URL gives up its credentials rather than being refused or stored
+
+Camera vendors hand installers one line: `rtsp://user:pass@host/path`. Three
+possible fates for it in the camera form, two of them wrong:
+
+- **Store it as typed** — the address is a text field this page renders back
+  on every visit, so the password would be echoed into HTML forever. That is
+  the exact leak the password field's stored-never-rendered rule exists to
+  prevent, arriving through a different door.
+- **Refuse it** (what the driver does, and keeps doing) — correct at the
+  driver boundary, where there must be exactly one stored copy of the secret,
+  but at the form it means retyping a password on a phone on a roof.
+- **Split it** — what the form now does (`console._strip_url_credentials`,
+  `rtsp.split_credentials`): the address is stored without its userinfo, the
+  credentials move into the username/password parameters, and the save
+  message says so. Values typed into the separate fields on the same save win
+  over URL-embedded ones — the separate field is the more deliberate act —
+  and a URL-borne password replaces a stored one, because a fresh paste is
+  what the installer currently believes.
+
+The driver's refusal stays: `python -m gsu` and hand-edited inventory files do
+not pass through the form, and two copies of a secret is still one too many.
+
+## 43. The camera preview never captures; it serves the publisher's newest frame
+
+The Devices page's camera tab shows a picture (`/frame.jpg`, click to expand
+via a checkbox — no script needed) instead of capture statistics. The endpoint
+has **no capture path at all**: it reads the frame the video publisher cached,
+with its age in `X-Frame-Age` and beside the image. That is what makes it
+safe against the live stream holding an exclusive sensor — a page poll cannot
+contend for hardware it never touches; the cached frame just ages, and the
+age says so. Same gate as every page, `no-store` like every response.
+
+Consequence: the publisher now runs its capture loop before enrolment too
+(publishing still requires an identity — nothing changed on the wire). An
+unenrolled box is exactly where an installer needs to see what the camera
+sees, and the previous arrangement only started capturing after attach.
+
+## 44. Floodlight current sense: measured amps against commanded state, two volumes
+
+The light devices grew `sense_source`, `sense_threshold_a` (amps at or above
+which the lamp counts as drawing) and `state_source` (`relay`, the default and
+today's behaviour, or `current` — per light, what `light.on` reports). The
+only source honestly offerable today is a sense element on the light feed
+read through an ADC; the power monitor is deliberately not offered because it
+reports the whole system load, and inferring one lamp from a total that also
+moves with everything else is a guess wearing a number. No ADC driver exists
+yet — the simulated light carries a simulated sensor (same policy as every
+other slot) so the model and both fault paths are real and exercised.
+
+The faults are deliberately at different volumes: commanded on with no draw
+is `light.no_draw`, a **warning** (lamp, fuse, wiring — a dark site, bad but
+not compounding); commanded off and still drawing is `light.stuck_on`,
+**critical** (a welded relay burning the battery at an unattended site).
+Judged only after 3 s in the same commanded state, so a moving contactor and
+a striking lamp are never faults. The measured amps stay off the telemetry
+wire — `$defs/light` carries no such field and this station does not invent
+schema; CONTRACT-QUESTIONS.md item 15 proposes `measured_a` and
+`state_source`. Until adopted the amps travel in the device detail of the
+health frame, the light tab's datastream line, and the local event log.

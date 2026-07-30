@@ -22,6 +22,7 @@ from gsu.camera.rtsp import (
     RtspRemuxSource,
     build_url,
     redact,
+    split_credentials,
 )
 from gsu.camera.synthetic import SyntheticCamera
 
@@ -76,6 +77,57 @@ class UrlTests(unittest.TestCase):
         url = build_url("cam.local", 554, "/live", "viewer", PASSWORD)
         self.assertEqual(redact(url), "rtsp://cam.local:554/live")
         self.assertEqual(redact("rtsp://cam.local/live"), "rtsp://cam.local/live")
+
+
+class SplitCredentialTests(unittest.TestCase):
+    """The setup page's half of the bargain: a pasted URL gives up its
+    credentials to the fields that are stored once and never rendered."""
+
+    def test_a_pasted_url_gives_up_its_credentials(self):
+        cleaned, username, password = split_credentials(
+            "rtsp://admin:hunter2@cam.local:554/live?channel=1"
+        )
+        self.assertEqual(cleaned, "rtsp://cam.local:554/live?channel=1")
+        self.assertEqual(username, "admin")
+        self.assertEqual(password, "hunter2")
+        # And the driver accepts what the split produced — the round trip is
+        # the whole point.
+        self.assertEqual(
+            build_url(cleaned, username=username, password=password),
+            "rtsp://admin:hunter2@cam.local:554/live?channel=1",
+        )
+
+    def test_percent_encoding_is_undone_so_it_is_not_applied_twice(self):
+        cleaned, username, password = split_credentials(
+            "rtsp://viewer:s3cr3t%20pa%2Fss%40word@cam.local/live"
+        )
+        self.assertEqual(cleaned, "rtsp://cam.local/live")
+        self.assertEqual(password, PASSWORD)
+        # build_url re-encodes; the URL ffmpeg gets is byte-identical to the
+        # one the vendor printed.
+        self.assertIn("s3cr3t%20pa%2Fss%40word",
+                      build_url(cleaned, username=username, password=password))
+
+    def test_a_url_without_credentials_is_untouched(self):
+        address = "rtsp://cam.local:8554/live?channel=1&subtype=0"
+        self.assertEqual(split_credentials(address), (address, "", ""))
+
+    def test_a_bare_host_is_untouched(self):
+        self.assertEqual(split_credentials("192.168.1.9"), ("192.168.1.9", "", ""))
+        self.assertEqual(split_credentials(""), ("", "", ""))
+
+    def test_a_username_alone_still_moves(self):
+        cleaned, username, password = split_credentials("rtsp://admin@cam.local/1")
+        self.assertEqual((cleaned, username, password),
+                         ("rtsp://cam.local/1", "admin", ""))
+
+    def test_an_at_sign_in_the_query_is_not_read_as_credentials(self):
+        # The @ belongs to the query, not to an authority. Inventing a
+        # username out of it would corrupt the address.
+        address = "rtsp://cam.local/live?token=user@example"
+        self.assertEqual(split_credentials(address), (address, "", ""))
+        address = "rtsp://cam.local?token=user@example"
+        self.assertEqual(split_credentials(address), (address, "", ""))
 
 
 class JpegDimensionTests(unittest.TestCase):

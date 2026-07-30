@@ -146,15 +146,26 @@ def is_loopback_host(host: str | None) -> bool:
 
 
 def hash_password(password: str, iterations: int = ITERATIONS) -> str:
-    """`pbkdf2_sha256$iterations$salt$hash`, all hex.
+    """`pbkdf2_sha256:iterations:salt:hash`, all hex.
 
     Written by `python -m gsu setup-password` and pasted into the environment
     file, so that the file the installer image ships does not carry a password
     an image-wide compromise could read straight off.
+
+    Colons, not the conventional dollars, because **docker compose interpolates
+    `$VAR` inside env_file values**. A hex salt beginning with a letter is a
+    valid shell variable name, so `$b91b7ad…` expanded to nothing and the
+    container received a hash with its salt silently removed - every login
+    refused, with the file on disk perfectly correct and systemd stations
+    unaffected because systemd reads EnvironmentFile literally. It cost an
+    evening. Roughly two hex salts in five start with a letter, so it was a
+    coin-flip bug that would have looked like a bad password on a box in a
+    paddock. `$` hashes are still read (see verify_password) - old ones keep
+    working, on the path where they already did.
     """
     salt = secrets.token_bytes(16)
     digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, iterations)
-    return f"pbkdf2_sha256${iterations}${salt.hex()}${digest.hex()}"
+    return f"pbkdf2_sha256:{iterations}:{salt.hex()}:{digest.hex()}"
 
 
 def verify_password(spec: str | None, password: str) -> bool:
@@ -167,10 +178,15 @@ def verify_password(spec: str | None, password: str) -> bool:
     """
     if not spec or not password:
         return False
-    if not spec.startswith("pbkdf2_sha256$"):
+    if not spec.startswith("pbkdf2_sha256"):
+        return hmac.compare_digest(spec, password)
+    # Both separators: `:` is what we write now, `$` is what boxes provisioned
+    # before the compose-interpolation discovery still carry.
+    separator = spec[len("pbkdf2_sha256")]
+    if separator not in ":$":
         return hmac.compare_digest(spec, password)
     try:
-        _, rounds, salt_hex, expected = spec.split("$", 3)
+        _, rounds, salt_hex, expected = spec.split(separator, 3)
         digest = hashlib.pbkdf2_hmac(
             "sha256", password.encode(), bytes.fromhex(salt_hex), int(rounds)
         )

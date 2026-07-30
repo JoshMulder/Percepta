@@ -41,7 +41,8 @@ import threading
 import time
 from collections import deque
 
-from .camera import complete_jpeg, sensor_exclusive
+from . import clock
+from .camera import Frame, complete_jpeg, sensor_exclusive
 
 log = logging.getLogger("gsu.video")
 
@@ -85,6 +86,12 @@ class VideoPublisher:
         self.captured = 0
         self.last_bytes = 0
         self.last_captured_at = None
+        #: The newest complete frame, kept for the setup page's preview
+        #: (`console._send_frame`). Written by the video thread, read by the
+        #: console's — safe as a bare attribute because Frame is frozen and
+        #: the swap is a single assignment. Never cleared: a stale picture
+        #: with a stated age beats no picture, and the age says stale.
+        self.last_frame: Frame | None = None
         self.last_reason = ""
         self._refused_until = 0.0
         self._last_unavailable = 0.0
@@ -131,11 +138,14 @@ class VideoPublisher:
 
         Public so that a test — and `gsu bench` — can drive it a frame at a time
         without a thread.
+
+        Runs — and captures — with no topic too: an unenrolled station has
+        nowhere to publish, but the setup page's camera preview is exactly the
+        picture an installer needs while the box is still being pointed at
+        things. Nothing goes on the wire without an identity, same as ever.
         """
         topic = self.topic
-        if topic is None:
-            return False
-        if time.monotonic() < self._refused_until:
+        if topic is not None and time.monotonic() < self._refused_until:
             return False
 
         camera = getattr(self.agent, "camera", None)
@@ -184,7 +194,10 @@ class VideoPublisher:
 
         self.captured += 1
         self.last_captured_at = frame.captured_at
+        self.last_frame = frame
         self.last_reason = ""
+        if topic is None:
+            return False
         payload = frame.to_payload()
         # Measured from the encoded payload rather than from the JPEG: base64
         # and the JSON around it are real bytes on a metered link, and quoting
@@ -219,13 +232,17 @@ class VideoPublisher:
 
     # --- publishing -----------------------------------------------------
 
-    def _publish_unavailable(self, topic: str) -> bool:
+    def _publish_unavailable(self, topic: str | None) -> bool:
         """Say there is no picture, on a cadence, with a reason.
 
         Rate-limited separately from the frame rate: the statement is worth 90
         bytes a second at most, and a station that goes quiet instead is
-        indistinguishable from one that has died.
+        indistinguishable from one that has died. With no topic there is
+        nowhere to say it; the reason still lands in `last_reason`, which is
+        what the setup page renders.
         """
+        if topic is None:
+            return False
         now = time.monotonic()
         if now - self._last_unavailable < max(self.interval, 1.0 / UNAVAILABLE_MAX_HZ):
             return False
@@ -299,6 +316,28 @@ class VideoPublisher:
         cutoff = time.monotonic() - WINDOW_SECONDS
         while self._window and self._window[0][0] < cutoff:
             self._window.popleft()
+
+    def frame_age_s(self) -> float | None:
+        """How old the cached preview frame is, from its own `captured_at`.
+
+        The one number the preview must not lie about: while the live stream
+        holds an exclusive sensor this frame is deliberately not replaced, and
+        the age is what says so.
+        """
+        frame = self.last_frame
+        if frame is None:
+            return None
+        return max(0.0, (clock.now() - frame.captured_at).total_seconds())
+
+    def preview_state(self) -> dict:
+        """What the setup page needs to render the preview. Local console
+        only, deliberately not in `stats()`: the health frame goes over a
+        metered link and the platform has the video channel itself."""
+        state: dict = {"has_frame": self.last_frame is not None}
+        age = self.frame_age_s()
+        if age is not None:
+            state["frame_age_s"] = round(age, 1)
+        return state
 
     def stats(self) -> dict:
         """What video is actually costing, measured rather than intended.

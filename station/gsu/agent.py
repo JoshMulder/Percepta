@@ -75,6 +75,13 @@ REASON_LIMIT = 200
 #: own: nobody is there to restart anything.
 REDISCOVER_SECONDS = 30.0
 
+#: How long after the floodlight's commanded state changes before the measured
+#: current is allowed to contradict it. A contactor takes a moment to move and
+#: some lamps draw oddly while striking; judging inside that window turns
+#: every ordinary switch into a fault. Longer than any plausible actuation,
+#: shorter than anyone watching a dead lamp would wait.
+LIGHT_SETTLE_SECONDS = 3.0
+
 
 class Agent:
     def __init__(self, config: AgentConfig) -> None:
@@ -132,6 +139,13 @@ class Agent:
         # that it is still happening.
         self._alerting_icao: set[str] = set()
         self._battery_state = "ok"
+        # Floodlight fault-check state: the commanded state last seen, how
+        # long it has held (so a transition is judged only once settled), and
+        # which fault is currently declared (so events record edges, not
+        # every tick of a persisting fault).
+        self._light_commanded: bool | None = None
+        self._light_settled_s = 0.0
+        self._light_fault: str | None = None
         self._link_up: bool | None = None
         self._offline_since: float | None = None
         self._last_prune = 0.0
@@ -572,6 +586,13 @@ class Agent:
             console = Console.from_config(self, self.config)
             console.start()
 
+        # Started here as well as at attach, and idempotent in both places:
+        # before enrolment there is no topic and nothing goes on the wire,
+        # but the captures still run, which is what puts a picture on the
+        # setup page's camera preview while the box is being pointed at
+        # things. That is the moment the preview is *for*.
+        self.video.start()
+
         tick = self.config.tick_seconds
         weather_due = 0.0
         health_due = 0.0
@@ -688,6 +709,7 @@ class Agent:
 
         if self.light is not None:
             self.light.step(dt)
+        self._evaluate_light(dt)
 
         contacts = self.adsb.poll(dt) if self.adsb is not None else None
 
@@ -884,6 +906,94 @@ class Agent:
                         f"Battery {state} at {power.soc_pct:.0f}%.",
                     )
                 self._battery_state = state
+
+    def _evaluate_light(self, dt: float) -> None:
+        """Fault-check the floodlight against its measured current draw.
+
+        Only when a sensor is configured (`measured_a` is None otherwise —
+        the driver's declaration that there is nothing to disagree with).
+        Two faults, deliberately at different volumes:
+
+        - commanded on, no draw → **warning**. The lamp, its fuse or its
+          wiring: the site is dark when it was asked not to be, which matters
+          and does not compound.
+        - commanded off, still drawing → **critical**. A relay welded closed
+          is a light burning a battery at an unattended site; every hour it
+          goes unnoticed is runtime nobody gets back.
+
+        Judged only after `LIGHT_SETTLE_SECONDS` in the same commanded state.
+        Within the window nothing is raised *or cleared*: a fault that was
+        true before the switch stays declared until the new state has had its
+        chance to be measured.
+
+        The measured amps stay off the telemetry wire: `light` in
+        `contract/schemas/telemetry.schema.json` carries no such field, and
+        this station does not invent schema (CONTRACT-QUESTIONS.md item 15
+        proposes it). The amps reach people through the setup page's light
+        tab and the device detail in the health frame; the faults travel as
+        health conditions, which the contract already carries.
+        """
+        light = self.light
+        measured = getattr(light, "measured_a", None) if light is not None else None
+        if measured is None:
+            self._declare_light_fault(None, 0.0, 0.0)
+            self._light_commanded = None
+            return
+        commanded = bool(getattr(light, "commanded", light.on))
+        if commanded != self._light_commanded:
+            self._light_commanded = commanded
+            self._light_settled_s = 0.0
+        self._light_settled_s += dt
+        if self._light_settled_s < LIGHT_SETTLE_SECONDS:
+            return
+        threshold = float(getattr(light, "sense_threshold_a", 0.0) or 0.0)
+        if threshold <= 0:
+            # A zero threshold cannot distinguish anything from anything.
+            self._declare_light_fault(None, 0.0, 0.0)
+            return
+        drawing = float(measured) >= threshold
+        if commanded and not drawing:
+            self._declare_light_fault("no_draw", float(measured), threshold)
+        elif not commanded and drawing:
+            self._declare_light_fault("stuck_on", float(measured), threshold)
+        else:
+            self._declare_light_fault(None, 0.0, 0.0)
+
+    def _declare_light_fault(self, fault: str | None, measured: float,
+                             threshold: float) -> None:
+        """Raise/clear the two light conditions, and record edges as events."""
+        if fault != "no_draw":
+            self.health.clear("light.no_draw")
+        if fault != "stuck_on":
+            self.health.clear("light.stuck_on")
+        if fault == "no_draw":
+            detail = (
+                f"The floodlight is commanded on but drawing {measured:.2f} A "
+                f"(threshold {threshold:g} A). Lamp, fuse or wiring."
+            )
+            self.health.raise_condition("light.no_draw", "warning", detail)
+        elif fault == "stuck_on":
+            detail = (
+                f"The floodlight is commanded off but drawing {measured:.2f} A "
+                f"(threshold {threshold:g} A). The relay may be welded closed "
+                "— that is a light burning the battery until someone opens "
+                "the circuit."
+            )
+            self.health.raise_condition("light.stuck_on", "critical", detail)
+        if fault != self._light_fault:
+            self._light_fault = fault
+            if fault is not None:
+                self.store.record_event(
+                    f"light.{fault}",
+                    "critical" if fault == "stuck_on" else "warning",
+                    detail,
+                )
+            else:
+                self.store.record_event(
+                    "light.recovered", "info",
+                    "The floodlight's measured draw agrees with its commanded "
+                    "state again.",
+                )
 
     def security(self) -> dict:
         """How this station's link is protected, as a fact rather than a hope.
@@ -1101,7 +1211,10 @@ class Agent:
                 "auto": self.radio.auto_squelch if self.radio else False,
                 "threshold_db": round(self.radio.last_threshold_db, 1) if self.radio else None,
             },
-            "video": self.video_state(),
+            # The preview fields ride only here: the setup page needs them,
+            # the health frame pays for its bytes on a metered link and the
+            # platform has the video channel itself.
+            "video": {**self.video_state(), **self.video.preview_state()},
             "health": self.health.to_list(),
             "devices": [report.to_dict() for report in self.inventory.report()],
             "resources": [resource.to_dict() for resource in self.inventory.resources()],

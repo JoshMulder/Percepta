@@ -41,7 +41,7 @@ import logging
 import shutil
 import subprocess
 import time
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 from .. import clock
 from ..sensors import Device
@@ -104,6 +104,40 @@ def build_url(address: str, port: int = 554, rtsp_path: str = "",
         ":" + quote(password or "", safe="") if password else ""
     )
     return f"{scheme}://{auth}@{rest}"
+
+
+def split_credentials(address: str) -> tuple[str, str, str]:
+    """`(address_without_userinfo, username, password)` for a pasted URL.
+
+    Camera vendors hand installers a complete `rtsp://user:pass@host/…` line,
+    and refusing it at the form makes somebody retype a password on a phone on
+    a roof. The setup page calls this instead: the URL is stored without its
+    userinfo, and the credentials move into the fields that are stored once
+    and never rendered. Anything that is not an rtsp/rtsps URL, or carries no
+    userinfo, comes back unchanged with empty credentials.
+
+    Percent-decoded on the way out, because `build_url` re-encodes on the way
+    back in — without the decode a password with an `@` in it would gain a
+    layer of encoding on every save.
+    """
+    address = (address or "").strip()
+    if not address.lower().startswith(("rtsp://", "rtsps://")):
+        return address, "", ""
+    scheme, separator, rest = address.partition("://")
+    authority, tail = rest, ""
+    for index, character in enumerate(rest):
+        if character in "/?":
+            authority, tail = rest[:index], rest[index:]
+            break
+    userinfo, at, host = authority.rpartition("@")
+    if not at:
+        return address, "", ""
+    username, _, password = userinfo.partition(":")
+    return (
+        f"{scheme}{separator}{host}{tail}",
+        unquote(username),
+        unquote(password),
+    )
 
 
 def redact(url: str) -> str:

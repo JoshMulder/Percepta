@@ -316,9 +316,39 @@ REGISTRY: tuple[DeviceType, ...] = (
                       help="A separate input that reports the contactor's actual "
                            "state. Without one the station can only report what "
                            "it commanded, which the contract asks it not to."),
+            Parameter("sense_source", "Current sense", "select", "none",
+                      choices=("none", "adc"), required=False,
+                      help="Where a reading of the light circuit's own current "
+                           "comes from. 'adc' means a sense element on the "
+                           "light feed read through an ADC — the only honest "
+                           "source for this branch. The power slot's monitor is "
+                           "deliberately not offered: it reports the whole "
+                           "system load, and inferring one lamp from a total "
+                           "that also moves with everything else is a guess "
+                           "wearing a number. No ADC driver exists in this "
+                           "build yet; the model is here so the setting and "
+                           "the fault checks are, and the slot reports the "
+                           "driver gap as itself."),
+            Parameter("sense_threshold_a", "On above (A)", "number", 0.2,
+                      required=False,
+                      help="Measured amps at or above this count as the lamp "
+                           "drawing. Set it from the lamp's rated draw with "
+                           "headroom below for a tired driver, not at zero — "
+                           "a zero threshold reads sensor noise as a lamp."),
+            Parameter("state_source", "Report state from", "select", "relay",
+                      choices=("relay", "current"), required=False,
+                      help="What light.on reports: the relay (today's "
+                           "behaviour, the default) or the measured current. "
+                           "Current is the stronger statement — it is the "
+                           "lamp, not the coil — and needs a sense source "
+                           "configured to mean anything."),
         ),
         provides=("on",),
-        notes="Driver not implemented.",
+        notes="Driver not implemented. Current sensing is fault detection "
+              "first: commanded on with no draw is a dead lamp, fuse or "
+              "wiring; commanded off and still drawing is a welded relay "
+              "burning the battery. Both are raised as health conditions "
+              "(light.no_draw, light.stuck_on).",
     ),
     DeviceType(
         id="simulated-light",
@@ -327,6 +357,19 @@ REGISTRY: tuple[DeviceType, ...] = (
         connection="simulated",
         driver="gsu.sensors.simulated:SimulatedFloodlight",
         simulated=True,
+        parameters=(
+            Parameter("sense_source", "Current sense", "select", "simulated",
+                      choices=("none", "simulated"), required=False,
+                      help="The simulated sensor measures the simulated lamp "
+                           "circuit, so the fault paths and the current-derived "
+                           "state can be exercised with no hardware — same "
+                           "policy as every other simulated source in this "
+                           "table."),
+            Parameter("sense_threshold_a", "On above (A)", "number", 0.2,
+                      required=False),
+            Parameter("state_source", "Report state from", "select", "relay",
+                      choices=("relay", "current"), required=False),
+        ),
         provides=("on",),
     ),
 

@@ -347,6 +347,67 @@ class DroppingRatherThanQueueingTests(AgentFixture):
         self.assertEqual(self.transport.sent, [])
 
 
+class PreviewCacheTests(AgentFixture):
+    """The setup page's preview: the publisher's own newest frame, cached."""
+
+    def test_the_published_frame_is_kept_for_the_preview(self):
+        self.assertIsNone(self.video.last_frame)
+        self.assertEqual(self.video.preview_state(), {"has_frame": False})
+        self.video.cycle()
+        frame = self.video.last_frame
+        self.assertIsNotNone(frame)
+        self.assertTrue(complete_jpeg(frame.jpeg))
+        state = self.video.preview_state()
+        self.assertTrue(state["has_frame"])
+        self.assertGreaterEqual(state["frame_age_s"], 0.0)
+        self.assertGreaterEqual(self.video.frame_age_s(), 0.0)
+
+    def test_an_unenrolled_station_still_captures_for_the_preview(self):
+        # The preview exists for the installer standing at an unenrolled box.
+        # Captures run; the wire stays silent, same as every other stream.
+        self.agent.enrolment = None
+        self.assertFalse(self.video.cycle())
+        self.assertEqual(self.transport.sent, [])
+        self.assertIsNotNone(self.video.last_frame)
+        self.assertEqual(self.video.captured, 1)
+        self.assertEqual(self.video.published, 0)
+
+    def test_a_failed_capture_leaves_the_cached_frame_standing(self):
+        # A stale picture with a stated age beats no picture; the age says
+        # stale.
+        self.video.cycle()
+        kept = self.video.last_frame
+        self.agent.camera = StubCamera(None, "the camera went away")
+        self.video.cycle()
+        self.assertIs(self.video.last_frame, kept)
+
+    def test_a_stream_holding_the_sensor_does_not_disturb_the_cache(self):
+        # An exclusive sensor held by the live encoder: the publisher backs
+        # off (that behaviour has its own tests) and the preview keeps the
+        # last frame it took rather than contending for the hardware.
+        self.video.cycle()
+        kept = self.video.last_frame
+
+        class Holding:
+            state = "streaming"
+
+            def stop(self, reason=""):
+                return "stopped"
+
+            def state_payload(self):
+                return {"state": self.state}
+
+            def tick(self):
+                pass
+
+        exclusive = StubCamera(None, "busy")   # owns_sensor defaults True
+        self.agent.camera = exclusive
+        self.agent.stream = Holding()
+        self.video.cycle()
+        self.assertIs(self.video.last_frame, kept)
+        self.assertEqual(exclusive.captures, 0, "must not contend for the sensor")
+
+
 class RefusedChannelTests(AgentFixture):
     """A channel the broker will not grant is not a link that is down."""
 

@@ -46,8 +46,10 @@ reasoning is all in that module's docstring. What this file owes it:
 - every response carries `Cache-Control: no-store` and a CSP that permits no
   frame, no off-box form target and no script beyond the single inline block
   the Devices page carries under a per-response nonce. That script is
-  progressive enhancement only — live save buttons and a refreshing
-  datastream field — and every page keeps working with it blocked or absent
+  progressive enhancement only — live save buttons, a refreshing datastream
+  field, and the camera preview's re-fetch — and every page keeps working
+  with it blocked or absent (the preview's click-to-expand is a checkbox,
+  not script, for exactly that reason)
 - every state-changing POST carries a CSRF token bound to the session cookie
 - the `Host` header must be an IP literal, `localhost` or a `.local` name, which
   is what stops a public web page rebinding its own name to this station's
@@ -71,6 +73,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+from .camera.rtsp import split_credentials
 from .devices import registry
 from .setup_access import COOKIE_NAME, Gate, is_loopback_host
 
@@ -185,6 +188,21 @@ STYLE = """
    min-height: 2.4rem; white-space: pre; overflow-x: auto; }
  button:disabled { opacity: .45; cursor: default; }
  button:disabled:hover { background: var(--brand); border-color: var(--brand); }
+ /* The camera preview. Same bounded box as the datastream field; the hidden
+    checkbox is the expand state, so the zoom works with scripts blocked —
+    :checked pins the label over the whole viewport. */
+ .zoom-toggle { display: none; }
+ .preview { display: block; margin: .4rem 0 .6rem; }
+ .preview img { display: block; max-width: 100%; border: 1px solid var(--line-soft);
+   border-radius: .375rem; cursor: zoom-in; }
+ .preview > span { display: block; padding: .55rem .7rem; min-height: 1.3rem;
+   background: var(--panel-2); border: 1px solid var(--line-soft);
+   border-radius: .375rem; font-size: .8rem; }
+ .zoom-toggle:checked ~ .preview { position: fixed; inset: 0; z-index: 10;
+   margin: 0; display: grid; place-items: center; padding: 1.5rem;
+   background: rgba(7,11,15,.94); cursor: zoom-out; }
+ .zoom-toggle:checked ~ .preview img { max-width: 100%; max-height: 100%;
+   border: 0; cursor: zoom-out; }
  .fixed { color: var(--text); font-family: ui-monospace, monospace; font-size: .9rem;
           word-break: break-all; }
  /* The sign-in, shaped like the console's: a centred card under the brand
@@ -491,6 +509,8 @@ class Console:
                 return self._send_json(handler, self.agent.snapshot(), cookie)
             if path.startswith("/registry.json"):
                 return self._send_json(handler, self._registry_json(), cookie)
+            if path.startswith("/frame.jpg"):
+                return self._send_frame(handler, cookie)
             if path in ("/index.html", "/login"):
                 path = "/"
             if path in PAGES:
@@ -633,6 +653,9 @@ class Console:
                     params[parameter.name] = float(raw) if "." in raw else int(raw)
                 elif raw != "":
                     params[parameter.name] = raw
+        note = ""
+        if device is not None and device.connection == "network":
+            note = self._strip_url_credentials(form, params)
         self.agent.inventory.set_device(slot, type_id, params, resource)
         # Rebuild immediately: an installer who changes a port expects to see
         # within seconds whether the box can now talk to the thing.
@@ -643,18 +666,55 @@ class Console:
             # stream holds the sensor (agent.build_devices); say so rather
             # than reporting the old driver's state as this save's outcome.
             self.message = ("good", f"{slot}: saved. Applies when the live "
-                                    "stream stops.")
+                                    f"stream stops.{note}")
             return slot
         report = {r.slot: r for r in self.agent.inventory.report()}[slot]
         if not type_id:
             self.message = ("good", f"{slot}: nothing fitted.")
         elif report.status == "present":
-            self.message = ("good", f"{slot}: {report.label} — detected.")
+            self.message = ("good", f"{slot}: {report.label} — detected.{note}")
         else:
             self.message = (
-                "bad", f"{slot}: {report.label} saved, but not detected. {report.detail}",
+                "bad",
+                f"{slot}: {report.label} saved, but not detected. "
+                f"{report.detail}{note}",
             )
         return slot
+
+    @staticmethod
+    def _strip_url_credentials(form: dict, params: dict) -> str:
+        """A pasted `rtsp://user:pass@…` never survives to the stored address.
+
+        Camera vendors hand installers the whole line, credentials embedded,
+        and this form's address box is where it gets pasted. Refusing it makes
+        somebody retype a password on a phone on a roof; storing it as typed
+        puts a secret in a plain-text field this page renders back on every
+        visit — which is exactly the leak the password field was built never
+        to have. So the URL is split: the address is stored without its
+        userinfo, and the credentials move into the username and password
+        parameters, which are stored once and never echoed. Values typed into
+        those fields on the same save win over ones embedded in the URL — the
+        separate field is the more deliberate act — and a URL-borne password
+        replaces a stored one, because a freshly pasted URL means the paste is
+        what the installer believes.
+
+        Returns a sentence for the save message when anything moved.
+        """
+        address = str(params.get("address") or "")
+        if not address:
+            return ""
+        cleaned, username, password = split_credentials(address)
+        if cleaned == address:
+            return ""
+        params["address"] = cleaned
+        if username and not (form.get("p_username") or [""])[0]:
+            params["username"] = username
+        if password and not (form.get("p_password") or [""])[0]:
+            params["password"] = password
+        if username or password:
+            return (" The URL's credentials moved into the username and "
+                    "password fields; the URL is stored without them.")
+        return ""
 
     # --- rendering ------------------------------------------------------
 
@@ -682,10 +742,13 @@ class Console:
         }
 
     def _headers(self, handler, status: int, kind: str, length: int,
-                 cookie: str | None, nonce: str | None = None) -> None:
+                 cookie: str | None, nonce: str | None = None,
+                 extra: dict | None = None) -> None:
         handler.send_response(status)
         handler.send_header("Content-Type", kind)
         handler.send_header("Content-Length", str(length))
+        for name, value in (extra or {}).items():
+            handler.send_header(name, value)
         # A setup page is state, and every one of these responses names devices,
         # a site and a station id. None of it belongs in a browser cache on a
         # subcontractor's laptop.
@@ -714,6 +777,25 @@ class Console:
                 f"{COOKIE_NAME}={cookie}; Path=/; HttpOnly; SameSite=Strict",
             )
         handler.end_headers()
+
+    def _send_frame(self, handler, cookie: str | None) -> None:
+        """The newest frame the video publisher took, as the JPEG it is.
+
+        A reader, never a trigger: this serves the publisher's cached frame
+        and cannot start a capture, so it cannot contend for a sensor the
+        live stream holds — while the stream runs, the cached frame simply
+        ages, and the age is stated. Behind the same gate as every page, and
+        `no-store` like every response (`_headers`), because the newest frame
+        is the only one worth anything.
+        """
+        video = getattr(self.agent, "video", None)
+        frame = getattr(video, "last_frame", None)
+        if frame is None:
+            return self._deny(handler, 404, "No frame yet.")
+        age = video.frame_age_s() or 0.0
+        self._headers(handler, 200, "image/jpeg", len(frame.jpeg), cookie,
+                      extra={"X-Frame-Age": f"{age:.1f}"})
+        handler.wfile.write(frame.jpeg)
 
     def _send_json(self, handler, payload: dict, cookie: str | None = None) -> None:
         body = json.dumps(payload, indent=2, default=str).encode()
@@ -1118,15 +1200,25 @@ class Console:
         elif report["configured"]:
             out.append("<div class=muted>found: nothing reported yet</div>")
 
-        # The sensor's own last lines — empty when nothing is connected. The
-        # nonce'd script refreshes it from status.json; without script it is
-        # the state at render time, which is still the truth.
-        lines = (state.get("raw_samples") or {}).get(slot) or []
-        out.append("<div class=field><label>Data</label></div>")
-        out.append(
-            f"<pre class=raw id=raw data-slot='{slot}'>"
-            + html.escape("\n".join(lines)) + "</pre>"
-        )
+        if slot == "camera":
+            # A picture instead of the datastream lines: the camera's raw tap
+            # is capture statistics, and the question an installer is actually
+            # asking is "is it pointed at the right thing". The image is the
+            # publisher's cached frame (/frame.jpg — never a fresh capture),
+            # the nonce'd script re-fetches it, and the checkbox is the whole
+            # zoom mechanism: :checked pins the label full-screen, so
+            # expanding works with scripts blocked.
+            out.append(self._preview(state.get("video") or {}))
+        else:
+            # The sensor's own last lines — empty when nothing is connected.
+            # The nonce'd script refreshes it from status.json; without script
+            # it is the state at render time, which is still the truth.
+            lines = (state.get("raw_samples") or {}).get(slot) or []
+            out.append("<div class=field><label>Data</label></div>")
+            out.append(
+                f"<pre class=raw id=raw data-slot='{slot}'>"
+                + html.escape("\n".join(lines)) + "</pre>"
+            )
 
         out.append(
             f"<form method=post action='/device' data-device>"
@@ -1253,16 +1345,44 @@ class Console:
         return "".join(out)
 
     @staticmethod
+    def _preview(video: dict) -> str:
+        """The camera preview: latest frame, its age, click to expand."""
+        out = [
+            "<div class=field><label>Preview</label></div>",
+            "<input type=checkbox id=zoom class=zoom-toggle>",
+        ]
+        if video.get("has_frame"):
+            age = video.get("frame_age_s") or 0
+            out.append(
+                "<label for=zoom class=preview id=preview-wrap>"
+                "<img id=preview src='/frame.jpg' alt='latest camera frame'>"
+                "</label>"
+            )
+            out.append(
+                f"<div class=muted id=preview-age>frame {age:.0f} s old</div>"
+            )
+        else:
+            out.append(
+                "<label for=zoom class=preview id=preview-wrap>"
+                "<span class=muted>no frame yet</span></label>"
+            )
+            out.append("<div class=muted id=preview-age></div>")
+        return "".join(out)
+
+    @staticmethod
     def _devices_script(nonce: str) -> str:
         """The one script this app carries, admitted by a per-response nonce.
 
-        Two jobs, both progressive enhancement over a page that already works
+        Three jobs, all progressive enhancement over a page that already works
         without it: the save button goes disabled until a field differs from
-        its loaded value, and the datastream field refreshes from status.json
-        — same auth gate as every page, every 2.5 seconds, nothing off-box
-        (the CSP's connect-src enforces that). Password fields count as
-        changed when non-empty: their loaded value is never in the page to
-        compare against, by design.
+        its loaded value, and the datastream field — or, on the camera tab,
+        the frame preview and its age — refreshes from status.json, same auth
+        gate as every page, every 2.5 seconds, nothing off-box (the CSP's
+        connect-src enforces that). Password fields count as changed when
+        non-empty: their loaded value is never in the page to compare
+        against, by design. The preview image is re-fetched with a timestamp
+        query because the response is no-store and the browser still needs
+        the src to change before it asks again.
         """
         script = """
 "use strict";
@@ -1292,14 +1412,32 @@ class Console:
     })(forms[i]);
   }
   var raw = document.getElementById("raw");
-  if (raw && raw.getAttribute("data-slot")) {
+  var wrap = document.getElementById("preview-wrap");
+  if (raw || wrap) {
     var poll = function () {
       fetch("/status.json", { credentials: "same-origin" })
         .then(function (r) { return r.ok ? r.json() : null; })
         .then(function (s) {
-          if (!s || !s.raw_samples) return;
-          var lines = s.raw_samples[raw.getAttribute("data-slot")] || [];
-          raw.textContent = lines.join("\\n");
+          if (!s) return;
+          if (raw && s.raw_samples) {
+            var lines = s.raw_samples[raw.getAttribute("data-slot")] || [];
+            raw.textContent = lines.join("\\n");
+          }
+          if (wrap && s.video && s.video.has_frame) {
+            var img = document.getElementById("preview");
+            if (!img) {
+              wrap.textContent = "";
+              img = document.createElement("img");
+              img.id = "preview";
+              img.alt = "latest camera frame";
+              wrap.appendChild(img);
+            }
+            img.src = "/frame.jpg?t=" + Date.now();
+            var age = document.getElementById("preview-age");
+            if (age && typeof s.video.frame_age_s === "number") {
+              age.textContent = "frame " + Math.round(s.video.frame_age_s) + " s old";
+            }
+          }
         })
         .catch(function () {});
     };

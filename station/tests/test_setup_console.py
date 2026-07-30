@@ -436,12 +436,19 @@ class ServedPageTests(unittest.TestCase):
             for device in registry.by_slot(slot):
                 self.assertIn(f"value='{device.id}'", body, f"{slot}: {device.id}")
 
-    def test_every_slot_tab_carries_a_datastream_field(self):
+    def test_every_slot_tab_carries_its_live_element(self):
+        # The datastream field everywhere it is the sensor's own voice; on the
+        # camera tab a frame preview instead — the camera's raw tap is capture
+        # statistics, and a picture answers the question actually being asked.
         from gsu.devices import registry
 
         for slot in registry.SLOTS:
             _, body = self.request("GET", f"/devices?slot={slot}")
-            self.assertIn(f"data-slot='{slot}'", body, slot)
+            if slot == "camera":
+                self.assertIn("id=preview-wrap", body)
+                self.assertNotIn(f"data-slot='{slot}'", body)
+            else:
+                self.assertIn(f"data-slot='{slot}'", body, slot)
 
     def test_the_devices_script_is_admitted_by_the_responses_own_nonce(self):
         # One inline script, one nonce, minted per response: the header and
@@ -485,6 +492,71 @@ class ServedPageTests(unittest.TestCase):
         self.assertIn("Camera</h2>", body)
         _, body = self.request("GET", "/devices?slot=weather")
         self.assertNotIn("Camera</h2>", body)
+
+    def test_the_light_tab_offers_the_current_sense_fields(self):
+        _, body = self.request("GET", "/devices?slot=light")
+        for name in ("p_sense_source", "p_sense_threshold_a", "p_state_source"):
+            self.assertIn(name, body, name)
+        # The state source offers exactly the two witnesses there are.
+        self.assertIn(">relay</option>", body)
+        self.assertIn(">current</option>", body)
+
+    # --- the camera preview ---
+
+    def test_the_camera_tab_shows_the_preview_and_then_the_frame(self):
+        # Before anything has been captured: an empty state, not a broken
+        # image, and the CSS-only zoom mechanism is already in place.
+        _, body = self.request("GET", "/devices?slot=camera")
+        self.assertIn("no frame yet", body)
+        self.assertIn("zoom-toggle", body)
+        self.assertNotIn("src='/frame.jpg'", body)
+        # After a capture: the picture and its age.
+        self.agent.video.cycle()
+        _, body = self.request("GET", "/devices?slot=camera")
+        self.assertIn("src='/frame.jpg'", body)
+        self.assertIn("s old", body)
+        self.assertNotIn("no frame yet", body)
+        # And status.json carries what the refresher script needs.
+        _, status = self.request("GET", "/status.json")
+        video = json.loads(status)["video"]
+        self.assertTrue(video["has_frame"])
+        self.assertIsInstance(video["frame_age_s"], (int, float))
+
+    def test_the_frame_endpoint_serves_the_cached_frame_with_its_age(self):
+        response, _ = self.request("GET", "/frame.jpg")
+        self.assertEqual(response.status, 404, "no frame yet is a 404, not a page")
+        self.agent.video.cycle()
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        connection.request("GET", "/frame.jpg",
+                           headers={"Host": f"127.0.0.1:{self.port}"})
+        response = connection.getresponse()
+        data = response.read()
+        connection.close()
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.getheader("Content-Type"), "image/jpeg")
+        self.assertEqual(response.getheader("Cache-Control"), "no-store",
+                         "the newest frame is the only one worth anything")
+        self.assertGreaterEqual(float(response.getheader("X-Frame-Age")), 0.0)
+        self.assertEqual(data, self.agent.video.last_frame.jpeg)
+
+    def test_the_frame_endpoint_never_captures(self):
+        # It serves what the publisher took. A camera held by the live stream
+        # must not be touched by a page poll — so the endpoint must have no
+        # capture path at all.
+        self.agent.video.cycle()
+
+        class Exploding:
+            def capture(self):
+                raise AssertionError("the frame endpoint captured on demand")
+
+        self.agent.camera = Exploding()
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        connection.request("GET", "/frame.jpg",
+                           headers={"Host": f"127.0.0.1:{self.port}"})
+        response = connection.getresponse()
+        response.read()
+        connection.close()
+        self.assertEqual(response.status, 200)
 
     def test_the_summary_page_has_a_line_per_slot(self):
         from gsu.devices import registry
@@ -754,6 +826,76 @@ class ServedPageTests(unittest.TestCase):
         self.assertEqual(fitted.params["password"], "s3cr3t-camera-pw")
         self.assertEqual(fitted.params["address"], "192.168.1.10")
 
+    def test_a_url_pasted_with_credentials_is_split_and_never_echoed(self):
+        # Vendors hand installers the whole rtsp://user:pass@host line. The
+        # URL is stored without its userinfo and the credentials move into
+        # the fields that are stored once and never rendered — otherwise the
+        # address box, which IS echoed back, would carry the password.
+        token, csrf, _ = self.page()
+        self.request(
+            "POST", "/device",
+            "slot=camera&type_id=onvif-network-camera"
+            "&p_address=rtsp://admin:url-secret-pw@192.168.1.9/Streaming/1"
+            f"&csrf={csrf}",
+            {"Cookie": token},
+        )
+        fitted = self.agent.inventory.fitted["camera"]
+        self.assertEqual(fitted.params["address"], "rtsp://192.168.1.9/Streaming/1")
+        self.assertEqual(fitted.params["username"], "admin")
+        self.assertEqual(fitted.params["password"], "url-secret-pw")
+        _, _, body = self.page("/devices?slot=camera")
+        self.assertNotIn("url-secret-pw", body)
+        self.assertIn("value='rtsp://192.168.1.9/Streaming/1'", body)
+        self.assertIn("Stored. Blank keeps it.", body)
+        _, status = self.request("GET", "/status.json")
+        self.assertNotIn("url-secret-pw", status)
+
+    def test_the_save_message_says_the_credentials_moved(self):
+        token, csrf, _ = self.page()
+        self.request(
+            "POST", "/device",
+            "slot=camera&type_id=onvif-network-camera"
+            f"&p_address=rtsp://admin:pw@192.168.1.9/ch1&csrf={csrf}",
+            {"Cookie": token},
+        )
+        _, _, body = self.page("/devices?slot=camera")
+        self.assertIn("credentials moved into the username", body)
+
+    def test_a_typed_password_beats_the_one_in_the_url(self):
+        # Both arrived on the same save, from the same person; the separate
+        # field is the more deliberate act.
+        token, csrf, _ = self.page()
+        self.request(
+            "POST", "/device",
+            "slot=camera&type_id=onvif-network-camera"
+            "&p_address=rtsp://admin:from-the-url@192.168.1.9/ch1"
+            f"&p_password=typed-pw&csrf={csrf}",
+            {"Cookie": token},
+        )
+        fitted = self.agent.inventory.fitted["camera"]
+        self.assertEqual(fitted.params["password"], "typed-pw")
+        self.assertEqual(fitted.params["username"], "admin")
+        self.assertEqual(fitted.params["address"], "rtsp://192.168.1.9/ch1")
+
+    def test_a_freshly_pasted_url_password_replaces_a_stored_one(self):
+        token, csrf, _ = self.page()
+        self.request(
+            "POST", "/device",
+            "slot=camera&type_id=onvif-network-camera&p_address=192.168.1.9"
+            f"&p_password=old-stored-pw&csrf={csrf}",
+            {"Cookie": token},
+        )
+        token, csrf, _ = self.page()
+        self.request(
+            "POST", "/device",
+            "slot=camera&type_id=onvif-network-camera"
+            f"&p_address=rtsp://admin:new-url-pw@192.168.1.9/ch1&csrf={csrf}",
+            {"Cookie": token},
+        )
+        self.assertEqual(
+            self.agent.inventory.fitted["camera"].params["password"], "new-url-pw",
+        )
+
     def test_the_enrolment_code_is_not_echoed_back_into_the_page(self):
         token, csrf, _ = self.page()
         self.agent.enrol = mock.Mock(side_effect=RuntimeError("the platform refused"))
@@ -828,6 +970,15 @@ class LanPeerTests(unittest.TestCase):
         self.assertEqual(response.status, 401)
         self.assertNotIn("station_id", body)
 
+    def test_the_frame_is_not_viewable_without_the_password(self):
+        # The preview endpoint is a page like any other: a camera pointed at
+        # a site is exactly the thing an unauthenticated LAN peer must not see.
+        self.agent.video.cycle()
+        response, body = self.request("GET", "/frame.jpg")
+        self.assertEqual(response.status, 401)
+        self.assertNotIn("JFIF", body)
+        self.assertIn("Setup password", body)
+
     def test_a_post_is_refused_without_the_password(self):
         before = self.agent.inventory.fitted["weather"].type_id
         response, _ = self.request(
@@ -891,3 +1042,40 @@ class LanPeerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class HashSeparatorTests(unittest.TestCase):
+    """The hash must survive docker compose's env_file interpolation.
+
+    compose expands `$VAR` inside env_file values, so a `$`-separated hash
+    whose hex salt begins with a letter lost that whole segment on the way
+    into the container - the login then refused every password while the file
+    on disk was perfectly correct. Systemd stations never saw it.
+    """
+
+    def test_hash_contains_no_dollar(self):
+        from gsu.setup_access import hash_password
+        for _ in range(20):
+            self.assertNotIn("$", hash_password("correct horse battery"))
+
+    def test_new_and_legacy_hashes_both_verify(self):
+        import hashlib, secrets
+        from gsu.setup_access import ITERATIONS, hash_password, verify_password
+        password = "correct horse battery"
+        self.assertTrue(verify_password(hash_password(password), password))
+        self.assertFalse(verify_password(hash_password(password), "wrong"))
+
+        # A legacy `$` hash with a letter-leading salt: the exact shape that
+        # broke, which must still verify for boxes already carrying one.
+        salt = bytes.fromhex("b91b7ad79c5a6dfd779142e298553b35")
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, ITERATIONS)
+        legacy = f"pbkdf2_sha256${ITERATIONS}${salt.hex()}${digest.hex()}"
+        self.assertTrue(verify_password(legacy, password))
+        self.assertFalse(verify_password(legacy, "wrong"))
+
+    def test_a_salt_eaten_by_interpolation_does_not_verify(self):
+        """The corrupted value must fail closed, not match something."""
+        from gsu.setup_access import ITERATIONS, verify_password
+        mangled = f"pbkdf2_sha256${ITERATIONS}$$deadbeef"
+        self.assertFalse(verify_password(mangled, "correct horse battery"))
+        self.assertFalse(verify_password(mangled, ""))
+
