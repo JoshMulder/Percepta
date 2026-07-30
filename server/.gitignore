@@ -1,5 +1,10 @@
 .env
 .venv/
+# There is no node on the host here — the console is built, and its tests run,
+# inside a container (see web/src/emitters.test.ts). Whichever way npm is
+# invoked it writes this into the working tree, and it is already excluded from
+# the Docker build context by .dockerignore.
+web/node_modules/
 __pycache__/
 *.py[cod]
 .pytest_cache/
