@@ -564,8 +564,13 @@ class ServedPageTests(unittest.TestCase):
 
         _, body = self.request("GET", "/")
         for slot in registry.SLOTS:
-            # Named for people here too, not just on the Devices page.
-            self.assertIn(f"<span class=k>{SLOT_LABELS[slot]}</span>", body)
+            # Named for people here too, not just on the Devices page — and the
+            # name is the way to the tab that can fix it.
+            self.assertIn(
+                f"<a class=slot-link href='/devices?slot={slot}'>"
+                f"{SLOT_LABELS[slot]}</a>",
+                body,
+            )
             self.assertNotIn(f"<span class=k>{slot}</span>", body)
 
     def test_the_enrolment_field_is_there_before_the_station_is_enrolled(self):
@@ -1754,3 +1759,87 @@ class SummaryPageTests(unittest.TestCase):
         source = (Path(__file__).resolve().parents[1]
                   / "gsu" / "console.py").read_text()
         self.assertNotIn("Selection and parameters are on the", source)
+
+class DevicePickerTests(unittest.TestCase):
+    """Choosing a device re-renders the form before anything is saved.
+
+    With one form, picking a different device left the previous device's
+    parameter fields on screen — they render from the *stored* type — so Save
+    posted a serial baud to a network camera and came back with errors about
+    fields nobody had been offered. The order was wrong: you cannot fill in a
+    device's settings before the page knows which device you mean.
+    """
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.agent = Agent(AgentConfig(
+            home=Path(self.directory.name), setup_enabled=False,
+            single_instance=False,
+        ))
+        self.addCleanup(self.agent.shutdown)
+        self.console = Console(self.agent)
+
+    def section(self, slot, chosen=None):
+        return self.console._section_devices(
+            self.agent.snapshot(), "tok", slot, chosen,
+        )
+
+    def test_the_form_follows_the_choice_before_it_is_saved(self):
+        # The Airmar has a serial port and a baud; the demo weather station has
+        # neither. Choosing the demo must not leave serial fields on screen.
+        self.agent.inventory.set_device("weather", "airmar-110wx", {})
+        stored = self.section("weather")
+        self.assertIn("p_port", stored)
+        previewed = self.section("weather", "simulated-weather")
+        self.assertNotIn("p_port", previewed)
+        # And nothing was written by looking.
+        self.assertEqual(
+            self.agent.inventory.fitted["weather"].type_id, "airmar-110wx")
+
+    def test_the_previewed_device_is_what_save_will_store(self):
+        self.agent.inventory.set_device("weather", "airmar-110wx", {})
+        previewed = self.section("weather", "simulated-weather")
+        self.assertIn(
+            "<input type=hidden name=type_id value='simulated-weather'>", previewed)
+
+    def test_another_devices_stored_values_are_not_offered_as_defaults(self):
+        # A baud that belonged to the Airmar must not appear pre-filled under a
+        # device that happens to have a field of the same name.
+        self.agent.inventory.set_device(
+            "weather", "airmar-110wx", {"port": "/dev/ttyUSB9", "baud": 4800})
+        previewed = self.section("weather", "generic-nmea-weather")
+        self.assertNotIn("/dev/ttyUSB9", previewed)
+
+    def test_the_stored_values_are_kept_when_the_choice_is_the_stored_one(self):
+        self.agent.inventory.set_device(
+            "weather", "airmar-110wx", {"port": "/dev/ttyUSB9", "baud": 4800})
+        self.assertIn("/dev/ttyUSB9", self.section("weather", "airmar-110wx"))
+
+    def test_choosing_is_a_get_and_saving_is_a_post(self):
+        # Looking at a device's settings must not be something a prefetcher or
+        # a back button can write.
+        section = self.section("weather")
+        self.assertIn("<form method=get action='/devices'", section)
+        self.assertIn("<form method=post action='/device'", section)
+
+    def test_it_works_with_no_script(self):
+        # The select alone is enough only when the script is running; without
+        # it there has to be something to press.
+        self.assertIn("pick-go", self.section("weather"))
+
+    def test_a_hand_edited_type_cannot_render_a_foreign_form(self):
+        # The query is not trusted: a camera type in the weather slot, or a
+        # type this build has never heard of, falls back to what is stored.
+        self.agent.inventory.set_device("weather", "airmar-110wx", {})
+        for bogus in ("onvif-network-camera", "not-a-device", "../../etc/passwd"):
+            section = self.section("weather", bogus)
+            self.assertIn(
+                "<input type=hidden name=type_id value='airmar-110wx'>",
+                section, bogus,
+            )
+
+    def test_clearing_the_slot_is_a_real_choice(self):
+        self.agent.inventory.set_device("weather", "airmar-110wx", {})
+        section = self.section("weather", "")
+        self.assertIn("<input type=hidden name=type_id value=''>", section)

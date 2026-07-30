@@ -240,10 +240,27 @@ STYLE = """
     a heading that leaves and a bar that does not read as two separate things.
     The bar is sticky as a whole now, so --nav-h still describes exactly what
     the slot strip pins under. */
+ /* Three columns, not a flex row with an absolutely-centred name. The name
+    was positioned at 50% of the bar and the tabs were sized by their content,
+    so on a station whose name is longer than the space left beside them the
+    two overlapped — "Pi 5 Bench" printed through "Summary". A grid reserves
+    the middle column, so the name is centred *and* nothing can grow into it;
+    the outer columns are 1fr each so the centre stays centred on the bar
+    rather than on whatever is left over. */
  .topbar { position: sticky; top: 0; z-index: 6; height: var(--nav-h);
-   box-sizing: border-box; display: flex; align-items: center; gap: .6rem;
-   padding: 0 1.25rem; background: var(--panel-2);
+   box-sizing: border-box; display: grid; align-items: center;
+   grid-template-columns: 1fr auto 1fr;
+   padding: 0 0 0 1.25rem; background: var(--panel-2);
    border-bottom: 1px solid var(--line); }
+ .topbar-brand { display: flex; align-items: center; gap: .6rem; min-width: 0; }
+ /* Narrow: the two labels that are the same on every station go, and the one
+    that identifies this box stays. The mark still says what the product is. */
+ @media (max-width: 58rem) {
+   .topbar-title { display: none; }
+ }
+ @media (max-width: 44rem) {
+   .topbar-station { display: none; }
+ }
  .topbar-mark { display: block; flex: none; }
  .topbar-title { font-size: .95rem; font-weight: 600; letter-spacing: .01em;
    white-space: nowrap; }
@@ -253,20 +270,54 @@ STYLE = """
     on the *bar* and not on whatever space is left between the title and the
     tabs — those differ in width per page, which would make the name drift as
     you moved between them. */
- .topbar-station { position: absolute; left: 50%; transform: translateX(-50%);
-   color: var(--muted); font-size: .9rem; white-space: nowrap;
-   pointer-events: none; }
+ /* The middle column. Truncates rather than pushing the tabs about, because
+    the bar's height is load-bearing — the slot strip pins to it — and a name
+    that wrapped would take the strip with it. */
+ .topbar-station { color: var(--text); font-size: 1.05rem; font-weight: 600;
+   letter-spacing: .01em; white-space: nowrap; overflow: hidden;
+   text-overflow: ellipsis; padding: 0 1rem; }
  /* Last in the strip. A form, because signing out changes state. */
- .topbar-out { margin: 0 0 0 .5rem; display: flex; }
- .topbar-out button { background: none; border: 0; color: var(--muted);
-   font: inherit; padding: .35rem .55rem; cursor: pointer; border-radius: 6px; }
- .topbar-out button:hover { color: var(--danger); background: rgba(255,122,69,.1); }
+ /* Height comes from the bar, never the other way round: `align-self:
+    stretch` with a centred button means the control fills the strip without
+    contributing a millimetre to it. */
+ .topbar-out { display: flex; align-items: center; flex: none; margin: 0 0 0 .5rem; }
+ .topbar-out button { background: none; border: 1px solid transparent;
+   border-radius: .375rem; color: var(--muted); font-size: .8rem;
+   font-family: inherit; padding: .5rem .75rem; cursor: pointer;
+   white-space: nowrap; }
+ .topbar-out button:hover { color: var(--danger);
+   background: rgba(255,122,69,.1); border-color: rgba(255,122,69,.35); }
+ .topbar-out button:focus-visible { outline: 2px solid var(--danger);
+   outline-offset: -2px; }
  /* Pushed to the right of the title, and allowed to scroll on a narrow phone
     rather than wrapping the bar to two rows — a two-row bar would break the
     single --nav-h the slot strip pins to. */
- .topbar .pagetabs { position: static; height: auto; margin-left: auto;
-   border-bottom: 0; background: none; padding: 0; min-width: 0;
-   overflow-x: auto; }
+ /* The right column: tabs then the way out, ending at the same gutter every
+    other page element does. */
+ /* `min-width: max-content` so this column never shrinks below the tabs and
+    the sign-out. With three equal 1fr columns the tabs were squeezed and
+    "Logging" was clipped — a nav item you cannot read is worse than a name
+    that is a few pixels off centre, so when the bar is tight this column wins
+    and the middle one gives way. On any wide screen there is slack and the
+    name is exactly centred. */
+ .topbar-right { display: flex; align-items: center; justify-content: flex-end;
+   min-width: max-content; height: 100%;
+   padding-right: max(.75rem, calc((100vw - 54rem) / 2)); }
+ .topbar .pagetabs { position: static; height: auto; border-bottom: 0;
+   background: none; padding: 0; overflow: visible; align-items: center; }
+ /* Looks like the muted key it replaces until you point at it — a row of
+    underlined blue on the page an installer scans would read as a list of
+    warnings. */
+ .slot-link { color: var(--muted); text-decoration: none; }
+ .slot-link:hover { color: var(--brand); text-decoration: underline; }
+ .slot-link:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px;
+   border-radius: 3px; }
+ /* The picker's select and its no-script button share a row. `.pick-go` is
+    hidden by the page's script, so with script the select alone re-renders and
+    with none there is a button that does. */
+ .pick { margin: 0; }
+ .pick .field select { min-width: 0; }
+ .pick-go { margin-left: .5rem; }
  .slot-head { display: flex; justify-content: space-between; align-items: baseline;
               gap: 1rem; }
  /* The Devices page's slot strip: same tab language as the page strip, one
@@ -698,6 +749,7 @@ class Console:
                 path = "/"
             if path in PAGES:
                 slot = None
+                chosen = None
                 nonce = None
                 if path == "/devices":
                     # The one page that carries an inline script. Minted here
@@ -715,8 +767,15 @@ class Console:
                     slot = (query.get("slot") or [""])[0]
                     if slot not in registry.SLOTS:
                         slot = registry.SLOTS[0]
+                    # Present only when the device picker has been used, which
+                    # is how "show me this one's settings" is distinguished
+                    # from an ordinary visit to the tab.
+                    if "type" in query:
+                        chosen = (query.get("type") or [""])[0]
                 return self._send_html(
-                    handler, self.render(session, path, slot=slot, nonce=nonce),
+                    handler,
+                    self.render(session, path, slot=slot, nonce=nonce,
+                                chosen=chosen),
                     cookie=cookie, nonce=nonce,
                 )
             return self._deny(handler, 404, "No such page.")
@@ -1116,7 +1175,7 @@ class Console:
         ])
 
     def render(self, session=None, page: str = "/", slot: str | None = None,
-               nonce: str | None = None) -> str:
+               nonce: str | None = None, chosen: str | None = None) -> str:
         from .brand import LOGO_DATA_URI
 
         state = self.agent.snapshot()
@@ -1150,7 +1209,7 @@ class Console:
             out.append(self._section_security(state))
         elif page == "/devices":
             slot = slot if slot in registry.SLOTS else registry.SLOTS[0]
-            out.append(self._section_devices(state, csrf, slot))
+            out.append(self._section_devices(state, csrf, slot, chosen))
             if slot == "camera":
                 out.append(self._section_camera(state))
             if nonce:
@@ -1175,9 +1234,11 @@ class Console:
 
         out = [
             "<header class=topbar>",
+            "<div class=topbar-brand>",
             f"<img class=topbar-mark src='{LOGO_DATA_URI}' alt='' "
             "width=26 height=26>",
             "<span class=topbar-title>Ground station</span>",
+            "</div>",
         ]
         # Which box this is, centred, because on a bench with three of them
         # open in three tabs the tab strip looks identical on every one.
@@ -1187,12 +1248,20 @@ class Console:
             out.append(
                 f"<span class=topbar-station>{html.escape(state['station'])}</span>"
             )
-        out.append("<nav class='tabs pagetabs'>")
+        else:
+            # The middle column still has to exist, or the tabs slide into it
+            # and the bar's three parts stop lining up between pages.
+            out.append("<span class=topbar-station></span>")
+        out.append("<div class=topbar-right><nav class='tabs pagetabs'>")
         for path, label in PAGES.items():
             active = " class=active" if path == page else ""
             out.append(f"<a href='{path}'{active}>{html.escape(label)}</a>")
-        # Last in the strip, and a form rather than a link because signing out
-        # changes state — a GET that ends a session is one a prefetcher can
+        out.append("</nav>")
+        # A sibling of the tab strip, not a member of it. Inside, it inherited
+        # .tabs' vertical padding on top of its own and set the bar's height —
+        # which --nav-h has to describe exactly, because the slot strip pins to
+        # it. It is also not a page tab: it is a form, because signing out
+        # changes state and a GET that ends a session is one a prefetcher can
         # trigger.
         if session is not None and session.scope == "local":
             out.append(
@@ -1200,7 +1269,7 @@ class Console:
                 + self._csrf_field(csrf)
                 + "<button type=submit>Sign out</button></form>"
             )
-        out.append("</nav></header>")
+        out.append("</div></header>")
         return "".join(out)
 
     @staticmethod
@@ -1280,9 +1349,17 @@ class Console:
         for slot in registry.SLOTS:
             report = by_slot[slot]
             css, wording = STATUS_PILL.get(report["status"], ("off", report["status"]))
+            # The slot name links to its tab. Summary is where somebody
+            # notices a slot is wrong and Devices is the only place to fix it,
+            # so the thing they are looking at is the way there — rather than
+            # reading a row, going to Devices, and finding the slot again.
+            # Only the name is a link; the pill beside it is a status, and
+            # making a whole row clickable hides where the target is.
+            label = SLOT_LABELS.get(slot, slot.title())
             out.append(
-                "<div class=row><span class=k>"
-                f"{html.escape(SLOT_LABELS.get(slot, slot.title()))}</span>"
+                "<div class=row>"
+                f"<a class=slot-link href='/devices?slot={slot}'>"
+                f"{html.escape(label)}</a>"
                 f"<span>{html.escape(report['label'])} "
                 f"<span class='pill {css}'>{html.escape(wording)}</span></span></div>"
             )
@@ -1641,7 +1718,8 @@ class Console:
         out.append("</nav>")
         return "".join(out)
 
-    def _section_devices(self, state: dict, csrf: str, slot: str) -> str:
+    def _section_devices(self, state: dict, csrf: str, slot: str,
+                         chosen: str | None = None) -> str:
         # Rendering rule for this page, an owner requirement: labels and short
         # constraints only. Everything that used to be explained on screen —
         # why ports are assigned by-id, why a tuner serves one band, what a
@@ -1659,6 +1737,14 @@ class Console:
         report = {r["slot"]: r for r in state["devices"]}[slot]
         entry = self.agent.inventory.fitted.get(slot)
         css, wording = STATUS_PILL.get(report["status"], ("off", report["status"]))
+        # What the form is showing settings for. The query wins so the page can
+        # preview a device before it is saved; anything unrecognised falls back
+        # to what is actually stored, so a hand-edited URL cannot render a form
+        # for a device this build has never heard of.
+        chosen_id = entry.type_id if entry else ""
+        if chosen is not None and (chosen == "" or registry.get(chosen) is not None):
+            if chosen == "" or registry.get(chosen).slot == slot:
+                chosen_id = chosen
 
         out.append("<div class=card>")
         out.append(
@@ -1672,29 +1758,55 @@ class Console:
         # are still kept apart — that is what the dropdown and the pill *are* —
         # they are simply not also narrated.
 
+        # Choosing a device is a *navigation*, not a write, and it has its own
+        # form for that reason.
+        #
+        # With one form, picking a different device left the previous device's
+        # parameter fields on screen — they are rendered from the stored type —
+        # so Save posted a serial baud to an ONVIF camera and came back with
+        # errors about fields nobody had been given the chance to set. The
+        # order was wrong: you cannot fill in a device's settings before the
+        # page knows which device you mean.
+        #
+        # So the select re-renders the page for the type it names, storing
+        # nothing. The nonce'd script submits it on change; without script the
+        # button beside it does the same thing, which is why it is a real form
+        # and not an onchange handler.
         out.append(
-            f"<form method=post action='/device' data-device>"
+            f"<form method=get action='/devices' class=pick data-pick>"
             f"<input type=hidden name=slot value='{slot}'>"
         )
-        out.append(self._csrf_field(csrf))
-        out.append("<div class=field><label>Device</label><select name=type_id>")
+        out.append("<div class=field><label for=type>Device</label>"
+                   "<select id=type name=type>")
         out.append(
-            f"<option value=''{' selected' if not report['configured'] else ''}>"
+            f"<option value=''{' selected' if not chosen_id else ''}>"
             "— not fitted —</option>"
         )
         for device in registry.by_slot(slot):
-            selected = " selected" if entry and entry.type_id == device.id else ""
+            selected = " selected" if chosen_id == device.id else ""
             suffix = "" if device.driver else "  (no driver in this build)"
             out.append(
                 f"<option value='{device.id}'{selected}>"
                 f"{html.escape(device.label)}{suffix}</option>"
             )
-        out.append("</select></div>")
+        out.append(
+            "</select><button type=submit class=pick-go>Change</button></div></form>"
+        )
 
-        selected_device = registry.get(entry.type_id) if entry and entry.type_id else None
+        out.append(
+            f"<form method=post action='/device' data-device>"
+            f"<input type=hidden name=slot value='{slot}'>"
+            f"<input type=hidden name=type_id value='{html.escape(chosen_id)}'>"
+        )
+        out.append(self._csrf_field(csrf))
+
+        selected_device = registry.get(chosen_id) if chosen_id else None
         if selected_device is not None:
+            stored_params = (
+                (entry.params or {}) if entry and entry.type_id == chosen_id else {}
+            )
             for parameter in selected_device.parameters:
-                value = (entry.params or {}).get(parameter.name, parameter.default)
+                value = stored_params.get(parameter.name, parameter.default)
                 name = f"p_{parameter.name}"
                 out.append("<div class=field>")
                 out.append(
@@ -1710,7 +1822,7 @@ class Console:
                     # rendered — not as a value, not in a placeholder. What is
                     # rendered is whether one is stored, which is the fact an
                     # installer needs; blank means "keep it" (see _set_device).
-                    stored = bool((entry.params or {}).get(parameter.name))
+                    stored = bool(stored_params.get(parameter.name))
                     out.append(
                         f"<input type=password id='{name}' name='{name}' "
                         f"value='' autocomplete='new-password' "
@@ -1754,7 +1866,11 @@ class Console:
                 out.append("<div class=field><label>Receiver</label><select name=resource>")
                 out.append("<option value=''>— none assigned —</option>")
                 for resource in resources:
-                    sel = " selected" if entry and entry.resource == resource["id"] else ""
+                    sel = (
+                        " selected"
+                        if entry and entry.type_id == chosen_id
+                        and entry.resource == resource["id"] else ""
+                    )
                     label = f"{resource['model']} serial {resource['serial'] or 'unset'}"
                     out.append(
                         f"<option value='{html.escape(resource['id'])}'{sel}>"
@@ -1857,6 +1973,19 @@ class Console:
       else out.push(f.name + "=" + f.value);
     }
     return out.join("&");
+  }
+  // Picking a device re-renders the page for it. The Change button beside the
+  // select does this without script; with script the select alone is enough,
+  // so the button hides and choosing costs one interaction instead of two.
+  var pickers = document.querySelectorAll("form[data-pick]");
+  for (var p = 0; p < pickers.length; p++) {
+    (function (form) {
+      var go = form.querySelector(".pick-go");
+      var select = form.querySelector("select");
+      if (!go || !select) return;
+      go.hidden = true;
+      select.addEventListener("change", function () { form.submit(); });
+    })(pickers[p]);
   }
   var forms = document.querySelectorAll("form[data-device]");
   for (var i = 0; i < forms.length; i++) {
