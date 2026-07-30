@@ -650,3 +650,64 @@ class ClockTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DemoSensorStampTests(unittest.TestCase):
+    """Demo is a property of the sensor, not of the station.
+
+    A bench box with a live camera and a demo weather head is the normal way to
+    develop against one, and the station-wide flag this replaces had to be
+    wrong about one half of it.
+    """
+
+    def agent_with(self, **slots):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        agent = Agent(AgentConfig(
+            home=Path(directory.name), setup_enabled=False, single_instance=False,
+        ))
+        self.addCleanup(agent.shutdown)
+        for slot, type_id in slots.items():
+            agent.inventory.set_device(slot, type_id, {})
+        agent.build_devices()
+        return agent
+
+    def test_a_demo_sensors_stream_says_so(self):
+        agent = self.agent_with(weather="simulated-weather")
+        stamped = agent._stamp_simulated({"kind": "weather", "wind_kt": 4})
+        self.assertIs(stamped["simulated"], True)
+
+    def test_a_real_sensors_stream_carries_no_flag(self):
+        # Absent means real. Adding `simulated: false` everywhere would be
+        # noise on every frame from every real station.
+        agent = self.agent_with(weather="airmar-110wx")
+        stamped = agent._stamp_simulated({"kind": "weather", "wind_kt": 4})
+        self.assertNotIn("simulated", stamped)
+
+    def test_one_station_can_be_half_real(self):
+        # The whole point of moving the flag off the station.
+        agent = self.agent_with(
+            weather="simulated-weather", camera="raspberry-pi-csi",
+        )
+        self.assertIs(
+            agent._stamp_simulated({"kind": "weather"}).get("simulated"), True)
+        self.assertNotIn(
+            "simulated", agent._stamp_simulated({"kind": "video"}))
+
+    def test_it_never_overwrites_a_flag_the_payload_already_set(self):
+        # An aircraft's own `simulated` means a test target injected by a real
+        # receiver — a different statement, and not this function's to make.
+        agent = self.agent_with(adsb="uavionix-ping-rx-pro")
+        payload = {"kind": "adsb", "simulated": False, "aircraft": []}
+        self.assertIs(agent._stamp_simulated(payload)["simulated"], False)
+
+    def test_every_slot_offers_a_demo_sensor(self):
+        # An owner requirement: each slot has one in the list, so any station
+        # can be brought up end to end with no hardware at all.
+        for slot in registry.SLOTS:
+            demo = [d for d in registry.by_slot(slot) if d.simulated]
+            self.assertTrue(demo, f"{slot} has no demo sensor")
+            self.assertTrue(
+                any(d.label.startswith("Demo") for d in demo),
+                f"{slot}'s demo sensor is not labelled Demo",
+            )

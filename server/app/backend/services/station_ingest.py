@@ -338,8 +338,26 @@ class StationIngest:
         devices = payload.get("devices")
         if not isinstance(devices, list) or not devices:
             return
-        simulated = any(
-            isinstance(d, dict) and d.get("simulated") is True for d in devices
+        # Every *selected* sensor synthetic, not merely one of them.
+        #
+        # `any` was right while a station was all real or all simulated. It
+        # stopped being right once demo became a per-slot choice: a bench box
+        # with a live camera and a demo weather head is a real station being
+        # worked on, and badging the whole thing DEMO in the switcher would
+        # invite somebody to disbelieve the camera. Empty slots are not
+        # evidence either way and are ignored, so a station with one demo
+        # sensor and nothing else fitted still counts.
+        #
+        # The panels do not use this. Each one is badged from its own stream,
+        # which is the only way a half-real station can be described honestly.
+        # This is purely the chip in the station list, where there is no room
+        # for nuance and no health frame for the stations you are not watching.
+        configured = [
+            d for d in devices
+            if isinstance(d, dict) and d.get("configured") is True
+        ]
+        simulated = bool(configured) and all(
+            d.get("simulated") is True for d in configured
         )
         if self._simulated.get(station_id) == simulated:
             return

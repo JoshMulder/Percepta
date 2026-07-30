@@ -1090,7 +1090,31 @@ class Agent:
 
     def _publish_telemetry(self, payload: dict) -> bool:
         topic = self.enrolment.broker.telemetry_topic if self.enrolment else None
-        return self._publish(topic, payload)
+        return self._publish(topic, self._stamp_simulated(payload))
+
+    def _stamp_simulated(self, payload: dict) -> dict:
+        """Mark a stream whose source is a demo sensor.
+
+        **Per stream, not per station.** A station is routinely part real: a
+        bench box with a live camera and a demo weather head is the normal way
+        to develop against one, and the old station-wide `is_simulated` flag had
+        to be wrong about one half of it. Whether a reading is synthetic is a
+        property of the sensor that produced it, and this is the only place that
+        knows — the slot report says `simulated` because the driver said so.
+
+        Stamped here rather than in each payload builder so that no stream can
+        be added later and quietly forget. The flag is only ever *added*: a
+        payload that already carries one (an ADS-B contact's own `simulated`,
+        which means something different — a test target injected by a real
+        receiver) is left exactly as it is.
+        """
+        kind = payload.get("kind")
+        if not kind or "simulated" in payload:
+            return payload
+        report = self._reports().get(kind)
+        if report is None or not report.simulated:
+            return payload
+        return {**payload, "simulated": True}
 
     def _publish(self, topic: str | None, payload: dict) -> bool:
         if topic is None or self.transport is None:

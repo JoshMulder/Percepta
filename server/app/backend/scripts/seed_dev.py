@@ -38,6 +38,12 @@ log = logging.getLogger("seed")
 
 PASSWORD = "percepta-dev-2026"
 
+# Permission fixtures, not demo data. Nothing animates these any more — the
+# station simulator is gone and demo telemetry is produced by the station build,
+# by selecting a "Demo" sensor in a slot. They exist so the console can be seen
+# rendering three grant states for one user, and so an org-isolation test has a
+# station in the other tenant. Seeding is opt-in; a deployment that does not run
+# this script has no stations it did not enrol.
 STATIONS = [
     ("Kaikoura Ridge", "Pacific/Auckland", -42.4004, 173.6800),
     ("Rakaia Gorge", "Pacific/Auckland", -43.5321, 171.6900),

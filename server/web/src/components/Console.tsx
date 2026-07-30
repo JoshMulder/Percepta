@@ -162,6 +162,8 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
    *  conclusions, and this one arrives on the stream's cadence rather than
    *  waiting for a health frame. */
   const [unfitted, setUnfitted] = useState<Record<string, boolean>>({});
+  /** Streams whose own frames declare a demo sensor behind them. */
+  const [demoStreams, setDemoStreams] = useState<Record<string, boolean>>({});
   const [unavailable, setUnavailable] = useState<
     Partial<Record<StreamKind, string>>
   >({});
@@ -242,6 +244,15 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
         unavailable_reason?: string;
         unavailable_cause?: "not_fitted" | "not_detected" | "stopped";
       };
+      // A demo sensor says so on every frame it sends. Recorded per stream:
+      // one station can have a live camera and a demo weather head, and the
+      // badge belongs on the panel that is synthetic rather than on all of
+      // them.
+      const declaresDemo = (message.payload as { simulated?: boolean }).simulated;
+      if (declaresDemo !== undefined) {
+        setDemoStreams((prev) =>
+          prev[kind] === declaresDemo ? prev : { ...prev, [kind]: declaresDemo });
+      }
       setUnfitted((prev) => {
         // Only the frames that actually declare themselves say anything here.
         // An available stream clears it; anything else leaves it alone.
@@ -348,16 +359,30 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
   const simulatedDevices =
     health?.devices?.filter((d) => d.simulated).map((d) => d.slot) ?? [];
 
+  /**
+   * Whether one panel's readings are synthetic.
+   *
+   * Per stream, because a station is routinely part real — a bench box with a
+   * live camera and a demo weather head is the normal way to develop against
+   * one, and a single station-wide flag had to be wrong about one half of it.
+   *
+   * Three sources, cheapest and freshest first: the stream's own `simulated`,
+   * which arrives at the stream's cadence; the slot report in health, which is
+   * every 30 s and covers a stream that is not currently publishing; and the
+   * deployment-wide override for showing the whole platform off.
+   */
+  const isDemo = (kind: StreamKind) =>
+    me.demo_mode || demoStreams[kind] === true
+    || simulatedDevices.includes(kind);
+
   // Synthetic data is a property of the station being watched, not of the
   // deployment: a real station and a simulated one can sit side by side in the
   // same switcher. DEMO_MODE remains as a deployment-wide override for showing
   // the whole platform off, but it is no longer how this is normally decided.
-  const simulated =
-    me.demo_mode ||
-    simulatedDevices.length > 0 ||
-    (detail?.is_simulated ??
-      stations.find((s) => s.id === stationId)?.is_simulated ??
-      false);
+  // No station-wide demo flag here any more. The DEMO chip in the switcher
+  // comes from the station record, which the server now derives from what the
+  // station reports about its own sensors; everything on this page is decided
+  // per stream by isDemo, because one station can be half real.
 
   const loadStations = useCallback(() => {
     api
@@ -384,6 +409,7 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
     raisedConditions.current = new Set();
     setUnavailable({});
     setUnfitted({});
+    setDemoStreams({});
     setWeather(null);
     setPower(null);
     setRadio(null);
@@ -560,10 +586,10 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
     // sat showing dashes indefinitely and looked identical to one still
     // waiting. Reaching here means the slot is configured, so no source for it
     // is a fault: something was specified and is not delivering.
-    if (unavailable[kind] && !simulated) return "fault" as const;
+    if (unavailable[kind] && !isDemo(kind)) return "fault" as const;
 
     return panelStatus(
-      lastSeen[kind] ?? null, streamsSince, STALE_AFTER_MS[kind], simulated,
+      lastSeen[kind] ?? null, streamsSince, STALE_AFTER_MS[kind], isDemo(kind),
       fittedFor(kind),
     );
   };
@@ -619,7 +645,7 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
         streamState={streamState}
         canPtz={!small && has(caps, "video.ptz")}
         online={detail?.online ?? false}
-        demo={simulated}
+        demo={me.demo_mode || simulatedDevices.includes("camera")}
         // The synthetic scene lights up when the floodlight does, so a demo can
         // show a command reaching the hardware rather than just a state flag
         // flipping in a panel.

@@ -51,6 +51,10 @@
           "maxLength": 200,
           "description": "Short, human-readable, for an operator rather than a parser - 'no ADS-B receiver connected', 'weather station not responding'. Only meaningful when available is false."
         },
+        "simulated": {
+          "type": "boolean",
+          "description": "This stream's source is a demo sensor and its readings are synthetic. Per stream, not per station: a station is routinely part real - a bench box with a live camera and a demo weather head - and a station-wide flag had to be wrong about one half of it. Absent means real. Distinct from the per-contact simulated flag inside an aircraft, which means a test target injected by a genuine receiver."
+        },
         "unavailable_cause": {
           "enum": ["not_fitted", "not_detected", "stopped"],
           "description": "The same fact as unavailable_reason, in one word a consumer can branch on. not_fitted is a complete station with nothing selected for this slot and is not a fault; not_detected and stopped both are. Carried on the stream rather than only in health because a console that has just connected or switched station would otherwise wait a full health period - 30 seconds - to tell an empty slot from a broken sensor, and must show something in the meantime. Absent means unknown, which consumers should treat as they did before this field existed."
@@ -306,6 +310,10 @@
           "maxLength": 200,
           "description": "Short, human-readable, for an operator rather than a parser - 'no ADS-B receiver connected', 'weather station not responding'. Only meaningful when available is false."
         },
+        "simulated": {
+          "type": "boolean",
+          "description": "This stream's source is a demo sensor and its readings are synthetic. Per stream, not per station: a station is routinely part real - a bench box with a live camera and a demo weather head - and a station-wide flag had to be wrong about one half of it. Absent means real. Distinct from the per-contact simulated flag inside an aircraft, which means a test target injected by a genuine receiver."
+        },
         "unavailable_cause": {
           "enum": ["not_fitted", "not_detected", "stopped"],
           "description": "The same fact as unavailable_reason, in one word a consumer can branch on. not_fitted is a complete station with nothing selected for this slot and is not a fault; not_detected and stopped both are. Carried on the stream rather than only in health because a console that has just connected or switched station would otherwise wait a full health period - 30 seconds - to tell an empty slot from a broken sensor, and must show something in the meantime. Absent means unknown, which consumers should treat as they did before this field existed."
@@ -379,6 +387,10 @@
           "type": "string",
           "maxLength": 200,
           "description": "Short, human-readable, for an operator rather than a parser - 'no ADS-B receiver connected', 'weather station not responding'. Only meaningful when available is false."
+        },
+        "simulated": {
+          "type": "boolean",
+          "description": "This stream's source is a demo sensor and its readings are synthetic. Per stream, not per station: a station is routinely part real - a bench box with a live camera and a demo weather head - and a station-wide flag had to be wrong about one half of it. Absent means real. Distinct from the per-contact simulated flag inside an aircraft, which means a test target injected by a genuine receiver."
         },
         "unavailable_cause": {
           "enum": ["not_fitted", "not_detected", "stopped"],
@@ -483,6 +495,10 @@
           "maxLength": 200,
           "description": "Short, human-readable, for an operator rather than a parser - 'no ADS-B receiver connected', 'weather station not responding'. Only meaningful when available is false."
         },
+        "simulated": {
+          "type": "boolean",
+          "description": "This stream's source is a demo sensor and its readings are synthetic. Per stream, not per station: a station is routinely part real - a bench box with a live camera and a demo weather head - and a station-wide flag had to be wrong about one half of it. Absent means real. Distinct from the per-contact simulated flag inside an aircraft, which means a test target injected by a genuine receiver."
+        },
         "unavailable_cause": {
           "enum": ["not_fitted", "not_detected", "stopped"],
           "description": "The same fact as unavailable_reason, in one word a consumer can branch on. not_fitted is a complete station with nothing selected for this slot and is not a fault; not_detected and stopped both are. Carried on the stream rather than only in health because a console that has just connected or switched station would otherwise wait a full health period - 30 seconds - to tell an empty slot from a broken sensor, and must show something in the meantime. Absent means unknown, which consumers should treat as they did before this field existed."
@@ -539,6 +555,10 @@
           "type": "string",
           "maxLength": 200,
           "description": "Short, human-readable, for an operator rather than a parser - 'no ADS-B receiver connected', 'weather station not responding'. Only meaningful when available is false."
+        },
+        "simulated": {
+          "type": "boolean",
+          "description": "This stream's source is a demo sensor and its readings are synthetic. Per stream, not per station: a station is routinely part real - a bench box with a live camera and a demo weather head - and a station-wide flag had to be wrong about one half of it. Absent means real. Distinct from the per-contact simulated flag inside an aircraft, which means a test target injected by a genuine receiver."
         },
         "unavailable_cause": {
           "enum": ["not_fitted", "not_detected", "stopped"],

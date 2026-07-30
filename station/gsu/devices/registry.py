@@ -188,7 +188,7 @@ REGISTRY: tuple[DeviceType, ...] = (
     DeviceType(
         id="simulated-adsb",
         slot="adsb",
-        label="Simulated ADS-B (no hardware)",
+        label="Demo ADS-B receiver",
         connection="simulated",
         driver="gsu.devices.pingrx:SimulatedPingRx",
         simulated=True,
@@ -239,7 +239,7 @@ REGISTRY: tuple[DeviceType, ...] = (
     DeviceType(
         id="simulated-airband",
         slot="radio",
-        label="Simulated airband receiver (no hardware)",
+        label="Demo airband receiver",
         connection="simulated",
         driver="gsu.radio.simulated:SimulatedFrontEnd",
         simulated=True,
@@ -297,7 +297,7 @@ REGISTRY: tuple[DeviceType, ...] = (
     DeviceType(
         id="simulated-weather",
         slot="weather",
-        label="Simulated weather station, full sensor set (no hardware)",
+        label="Demo weather station",
         connection="simulated",
         driver="gsu.sensors.simulated:SimulatedWeather",
         simulated=True,
@@ -326,7 +326,7 @@ REGISTRY: tuple[DeviceType, ...] = (
     DeviceType(
         id="simulated-power",
         slot="power",
-        label="Simulated solar and battery (no hardware)",
+        label="Demo solar and battery",
         connection="simulated",
         driver="gsu.sensors.simulated:SimulatedPower",
         simulated=True,
@@ -385,7 +385,7 @@ REGISTRY: tuple[DeviceType, ...] = (
     DeviceType(
         id="simulated-light",
         slot="light",
-        label="Simulated floodlight (no hardware)",
+        label="Demo floodlight",
         connection="simulated",
         driver="gsu.sensors.simulated:SimulatedFloodlight",
         simulated=True,
@@ -441,7 +441,7 @@ REGISTRY: tuple[DeviceType, ...] = (
     DeviceType(
         id="simulated-camera",
         slot="camera",
-        label="Simulated camera, test card (no hardware)",
+        label="Demo camera (test card)",
         connection="simulated",
         driver="gsu.camera.synthetic:SyntheticCamera",
         simulated=True,
