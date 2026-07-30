@@ -137,9 +137,18 @@ class ShippedInventoryTests(unittest.TestCase):
         for report in self.agent.inventory.report():
             self.assertFalse(report.simulated, report.slot)
 
-    def test_the_driverless_devices_say_exactly_that(self):
+    def test_the_radio_now_asks_for_a_tuner_rather_than_for_software(self):
+        # This slot used to report "not supported by this software build". It
+        # has a driver now (gsu/radio/rtlsdr.py), so what it is short of is an
+        # allocation: a tuner is claimed by serial number and only the box knows
+        # its own dongle's, exactly as with the serial ports. The distinction is
+        # the whole value of the message — one is fixed by shipping code and the
+        # other by an installer clicking a dropdown.
         reports = {report.slot: report for report in self.agent.inventory.report()}
-        self.assertIn("not supported by this software build", reports["radio"].detail)
+        detail = reports["radio"].detail
+        self.assertNotIn("not supported by this software build", detail)
+        self.assertIn("rtlsdr", detail)
+        self.assertTrue(reports["radio"].driver_available)
 
     def test_the_camera_says_what_is_missing_on_this_machine(self):
         # The CSI camera has a driver now. On anything that is not a Pi it
@@ -157,8 +166,10 @@ class ShippedInventoryTests(unittest.TestCase):
         radio = [payload for payload in sent if payload["kind"] == "radio"]
         self.assertTrue(radio)
         self.assertIs(radio[0]["available"], False)
-        self.assertIn("not supported by this software build",
-                      radio[0]["unavailable_reason"])
+        # No tuner is allocated in the shipped file, so there is still no source
+        # behind this stream — but the reason is now an allocation the installer
+        # can make, not a build they cannot.
+        self.assertIn("rtlsdr", radio[0]["unavailable_reason"])
         # ...and never an empty payload that reads as "nothing on frequency".
         self.assertNotIn("squelch_open", radio[0])
 
@@ -166,10 +177,16 @@ class ShippedInventoryTests(unittest.TestCase):
         for slot in ("adsb", "weather"):
             self.assertEqual(self.agent.inventory.fitted[slot].params["port"], "")
 
-    def test_a_driverless_device_does_not_also_demand_a_tuner(self):
-        # It would be a critical condition about a receiver that could not be
-        # used if it were assigned — noise on top of the real message.
-        self.assertEqual(self.agent.inventory.conflicts(), [])
+    def test_the_only_outstanding_conflict_is_the_unassigned_tuner(self):
+        # A device with no driver must not also demand a tuner: that would be a
+        # critical condition about a receiver which could not be used even if it
+        # were assigned, which is noise on top of the real message. The radio
+        # has a driver now, so the demand is real and is the one thing left for
+        # an installer to do. Nothing else may be raised alongside it.
+        conflicts = self.agent.inventory.conflicts()
+        self.assertEqual(len(conflicts), 1, conflicts)
+        self.assertIn("radio", conflicts[0])
+        self.assertIn("rtlsdr", conflicts[0])
 
 
 class UnitFileTests(unittest.TestCase):

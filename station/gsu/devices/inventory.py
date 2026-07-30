@@ -277,6 +277,13 @@ class Inventory:
         candidates = {**context, **params}
         if source is not None:
             candidates["source"] = source
+        if device.resource:
+            # Which physical resource this slot was allocated, so a driver can
+            # open *that* one. A tuner is allocated exclusively by serial
+            # number precisely because two are distinguishable and one dongle
+            # cannot serve airband and 1090 MHz at once; a driver that opened
+            # "the first one it found" would quietly undo that.
+            candidates["resource"] = entry.resource
         try:
             driver = _instantiate(device.driver, candidates)
         except Exception as exc:  # noqa: BLE001 - reported, not raised

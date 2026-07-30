@@ -186,23 +186,33 @@ REGISTRY: tuple[DeviceType, ...] = (
         slot="radio",
         label="RTL-SDR airband receiver (108–137 MHz)",
         connection="usb-sdr",
-        driver=None,
+        driver="gsu.radio.rtlsdr:RtlSdrFrontEnd",
         resource="rtlsdr",
         parameters=(
             Parameter("gain", "Tuner gain (dB)", "number", 37.2,
                       help="Fixed, not auto: the tuner's AGC desenses near "
                            "strong transmitters badly enough that a stronger "
-                           "signal can read lower."),
-            Parameter("ppm", "Crystal correction (ppm)", "number", 0, required=False),
+                           "signal can read lower, and every squelch threshold "
+                           "here is an absolute level. The tuner snaps to its "
+                           "nearest step and the console shows which."),
+            Parameter("ppm", "Crystal correction (ppm)", "number", 0, required=False,
+                      help="A starting guess, not a setting. This tuner can "
+                           "come up mis-programmed by hundreds of ppm with no "
+                           "error reported, and a channel that is silent after "
+                           "a restart wants a power-cycle before it wants a "
+                           "number here."),
         ),
         provides=("freq_hz", "rssi_db", "noise_floor_db", "threshold_db",
                   "squelch_open", "auto_squelch", "monitor", "gain", "gains",
                   "ppm", "audio"),
         absent=("tx",),
-        notes="Receive only. Driver not implemented: it would supervise the "
-              "radio process and must stop it through that process's own "
-              "shutdown endpoint, never with a signal — a dongle killed "
-              "mid-transfer needs a physical replug.",
+        notes="Receive only. Demodulates on the station and uplinks audio only "
+              "while the squelch is open — IQ never leaves the site, which is "
+              "the whole design on a metered link. Needs numpy and the "
+              "librtlsdr shared library (`apt install librtlsdr0`); the slot "
+              "says which is missing if either is. Stopped through its own "
+              "close, never with a signal: a dongle killed mid-transfer needs "
+              "a physical replug.",
     ),
     DeviceType(
         id="simulated-airband",

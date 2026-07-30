@@ -519,3 +519,50 @@ Two costs to know before fitting one:
   setting or playback runs fast or slow. A camera not sending H.264 is
   refused with ffmpeg's own message — a Pi 2B cannot transcode and is never
   asked to.
+
+## 11. The RTL2838 wedges, and only a human can unwedge it
+
+Carried across from Remote-Radio's handover, which learned all of this the
+expensive way on **this same dongle**. None of it is a software bug and none of
+it is fixable in software, which is exactly why it belongs here.
+
+**It wedges when a process is hard-killed.** Killed mid-transfer, the tuner's
+i2c stops answering: `r82xx_init: failed`, then the device stops responding to
+USB addressing altogether and disappears from `lsusb`. **Only a physical replug
+recovers it.** A USB port reset does not, because it does not power-cycle the
+tuner — confirmed again on the Pi 5 bench box, where `USBDEVFS_RESET` and a
+full reboot both left it wedged, and raising `usb_max_current_enable` changed
+nothing because power was never the problem.
+
+**It wedges when warm.** After a long streaming session it often fails to
+reopen. Unplug, let it cool for a few minutes, replug. It runs hot to the
+touch, and Remote-Radio recommends a USB extension cable purely for airflow.
+
+**Its tuning error is set at each initialisation, not fixed.** Three inits of
+one dongle measured **+640, +24 and +599 ppm**. The tuner comes up
+mis-programmed, silently, with no error reported. A 25 kHz channel tolerates
+roughly ±100 ppm, so a bad init is not subtle: a good one sounds fine and a bad
+one is *silent*. If the frequency looks wrong, power-cycle before touching the
+ppm value — a saved ppm is a starting guess, not a setting.
+
+### What this means for an unattended station
+
+A station hours away has nobody to replug anything, so the only defence is
+never to wedge it in the first place:
+
+- The receiver is **always shut down gracefully**. `RtlSdrFrontEnd.shutdown`
+  stops the reader thread and joins it before releasing the device;
+  `Agent.stop` calls it, and SIGINT and SIGTERM are handled so that both
+  deployment paths reach it. `gsu.service` sets `TimeoutStopSec=45s` and the
+  compose service `stop_grace_period: 45s`, both far longer than a clean stop
+  needs, because the alternative to waiting is a site visit.
+- **Do not `docker kill` a station**, and do not `kill -9` the agent. `docker
+  stop` and `systemctl stop` both send SIGTERM and wait.
+- An **OOM kill** would have the same effect as a hard kill, which is one more
+  reason the 1 GB Pi 2B's memory headroom is worth watching (§1).
+- A power cut is, ironically, the safe failure: it power-cycles the tuner along
+  with everything else, which is the recovery.
+
+There is no software workaround for a dongle that has already wedged. A station
+in that state reports the radio as absent with the driver's own reason, which is
+the honest answer — the fault is real and needs hands.

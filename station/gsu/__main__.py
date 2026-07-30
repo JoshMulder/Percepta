@@ -6,6 +6,7 @@
     python -m gsu devices             # what is fitted, and what was actually found
     python -m gsu bench               # what a tick costs — run this on the target
     python -m gsu camera              # grab one snapshot and say what it cost
+    python -m gsu radio --freq 118.7  # open the dongle, listen, write a WAV
     python -m gsu stream --seconds 20 # run the H.264 encoder and measure it
     python -m gsu status              # what the platform thinks of us
     python -m gsu whoami              # what this box thinks it is, offline
@@ -238,6 +239,181 @@ def _stream(agent, config: AgentConfig, seconds: float, out: str | None,
         "\nPlay it back to prove the picture is real:\n"
         f"  ffplay {sink}     # or copy it off and open it anywhere\n"
     )
+    agent.shutdown()
+    return 0
+
+
+def _radio(agent, freq_mhz: float | None, seconds: float, out: str | None,
+           monitor: bool, gain: str | None, ppm: int | None) -> int:
+    """Prove the dongle enumerates, tunes and produces audio. Run this on the Pi.
+
+    The airband equivalent of `stream`, and for the same reason: the receiver's
+    DSP is unit-tested against synthetic IQ, but nothing in this repository can
+    tell you whether a real RTL2838 comes up on the frequency it claims. That
+    needs the hardware, and this is the shortest path to an answer that is a
+    measurement rather than an opinion.
+
+    It works whether or not a tuner has been assigned on the setup page: with no
+    allocation it opens the dongle directly and says so, because "the receiver
+    is misconfigured" and "the dongle is dead" want telling apart before
+    anything else.
+
+    Two things it produces. Per-second RSSI, noise floor, threshold and gate
+    state — which answers whether the front end is measuring sanely — and a WAV
+    file of everything the gate let through, which answers whether it is a
+    receiver. Use `--monitor` on a quiet channel to hold the gate open and
+    record the noise: hearing the band hiss is how you know the audio path is
+    real before you go looking for traffic.
+    """
+    import base64
+    import wave
+
+    print(f"\n{platform.machine()} / agent {AGENT_VERSION}\n")
+
+    print("RTL-SDR dongles on the USB bus (from sysfs, no library needed):")
+    resources = agent.inventory.resources()
+    if not resources:
+        print("  none. Nothing else here can work — check the lead, then `dmesg`.\n")
+        agent.shutdown()
+        return 1
+    for resource in resources:
+        print(f"  {resource.id:32} {resource.model}"
+              + (f"  — {resource.detail}" if resource.detail else ""))
+
+    from .radio.audio import AUDIO_RATE
+    from .radio.receiver import RadioController
+
+    controller = agent.radio
+    # A simulated front end must never answer a hardware question. It would
+    # produce a plausible WAV full of synthesised speech and a meter that moves,
+    # which is the most misleading possible outcome of a test whose entire
+    # purpose is to find out whether the dongle works.
+    simulated = controller is not None and controller.describe().simulated
+    if controller is None or simulated:
+        from .radio.rtlsdr import RtlSdrFrontEnd
+
+        why = (
+            "the configured receiver is the simulator, which cannot answer this"
+            if simulated else
+            "no receiver is configured in this box's inventory"
+            + (f" ({agent.inventory.reasons['radio']})"
+               if agent.inventory.reasons.get("radio") else "")
+        )
+        print(
+            f"\nOpening {resources[0].id} directly: {why}."
+            "\nSelect the RTL-SDR airband receiver on the setup page and assign "
+            "this dongle to it to have the station use it for real."
+        )
+        if controller is not None:
+            controller.shutdown()
+            agent.radio = None
+        front_end = RtlSdrFrontEnd(
+            gain=gain if gain is not None else 37.2,
+            ppm=ppm if ppm is not None else 0,
+            resource=resources[0].id,
+        )
+        controller = RadioController(front_end, state_path=None)
+    else:
+        if gain is not None:
+            controller.set_gain(gain)
+        if ppm is not None:
+            controller.set_ppm(ppm)
+    if freq_mhz:
+        controller.tune(int(round(freq_mhz * 1e6)))
+
+    print(f"\nWaiting for the dongle to open…")
+    opened = False
+    for _ in range(20):  # the open runs on its own thread; give it 10 s
+        controller.tick(0.5)
+        described = controller.describe()
+        if described.present:
+            opened = True
+            break
+        time.sleep(0.5)
+    if not opened:
+        print(f"  it did not open: {controller.describe().detail}\n")
+        print(
+            "  If that mentions permissions, the udev rule in "
+            "deploy/99-percepta-sdr.rules is not installed or the user is not\n"
+            "  in plugdev. If it mentions the device being busy, the kernel DVB "
+            "driver has it — blacklist dvb_usb_rtl28xxu (DEPLOYMENT.md).\n"
+        )
+        controller.shutdown()
+        agent.shutdown()
+        return 1
+
+    print(f"  {controller.describe().detail}\n")
+    if monitor:
+        controller.set_monitor(True)
+        print("MON held: the gate is forced open, so this records whatever the "
+              "receiver hears, traffic or not.\n")
+    print(f"{'time':>5}  {'rssi':>8}  {'floor':>8}  {'thresh':>8}  gate")
+
+    pcm = bytearray()
+    open_ticks = 0
+    started = time.monotonic()
+    try:
+        while time.monotonic() - started < seconds:
+            tick_started = time.monotonic()
+            payload, audio = controller.tick(1.0)
+            if audio is not None:
+                pcm += base64.b64decode(audio["pcm"])
+                open_ticks += 1
+            print(
+                f"{time.monotonic() - started:5.0f}  "
+                f"{payload['rssi_db']:7.1f}dB  {payload['noise_floor_db']:7.1f}dB  "
+                f"{payload['threshold_db']:7.1f}dB  "
+                f"{'OPEN' if payload['squelch_open'] else '····'}"
+            )
+            # An absolute deadline, the same as the agent's own loop: sleeping
+            # for a second after doing a second's work is how audio drifts.
+            delay = 1.0 - (time.monotonic() - tick_started)
+            if delay > 0:
+                time.sleep(delay)
+    except KeyboardInterrupt:
+        pass
+
+    elapsed = time.monotonic() - started
+    controller.set_monitor(False)
+    described = controller.describe()
+    controller.shutdown()
+
+    print(f"\n{elapsed:.0f}s observed, gate open for {open_ticks}s "
+          f"({open_ticks / max(elapsed, 1) * 100:.0f}% of the time)")
+    print(f"  {described.detail}")
+    if pcm:
+        sink = out or os.path.join(
+            "/dev/shm" if os.path.isdir("/dev/shm") else tempfile.gettempdir(),
+            "gsu-radio.wav",
+        )
+        with wave.open(sink, "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(AUDIO_RATE)
+            handle.writeframes(bytes(pcm))
+        seconds_of_audio = len(pcm) / 2 / AUDIO_RATE
+        print(f"  {seconds_of_audio:.1f}s of audio written to {sink}")
+        print(f"  play it:  aplay {sink}     # or copy it off and open it anywhere")
+        # What this would have cost the link, measured rather than estimated.
+        print(
+            f"  uplink:   {len(pcm) * 4 / 3 * 8 / max(seconds_of_audio, 1) / 1000:.0f} "
+            "kbit/s while the gate was open (base64 PCM16, per "
+            "contract/transport.md — Opus would be a twentieth of that)"
+        )
+        if abs(seconds_of_audio - open_ticks) > 0.05:
+            print(
+                f"\n  WRONG: {seconds_of_audio:.3f}s of audio for {open_ticks} "
+                "open ticks. Exactly one second per second is the contract, and\n"
+                "  the platform's player stutters on anything else."
+            )
+    else:
+        print(
+            "\n  No audio: the gate never opened. On airband that is the normal "
+            "state of an empty channel — re-run with --monitor to hold it open\n"
+            "  and prove the audio path, or point --freq at a busy tower "
+            "frequency and wait for an over."
+        )
+    print()
     agent.shutdown()
     return 0
 
@@ -516,7 +692,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="gsu", description=__doc__)
     parser.add_argument("command", nargs="?", default="run",
                         choices=["run", "preflight", "enrol", "status", "whoami",
-                                 "devices", "bench", "camera", "stream",
+                                 "devices", "bench", "camera", "radio", "stream",
                                  "setup-password"])
     parser.add_argument("--token", help="enrolment code, as issued (XXXX-XXXX-XXXX)")
     parser.add_argument("--probe", action="store_true",
@@ -536,6 +712,16 @@ def main(argv: list[str] | None = None) -> int:
                              "Overrides GSU_ENCODER.")
     parser.add_argument("--frames", type=int, default=5,
                         help="camera: how many snapshots to take")
+    parser.add_argument("--freq", type=float,
+                        help="radio: frequency in MHz, e.g. 118.7")
+    parser.add_argument("--monitor", action="store_true",
+                        help="radio: hold the squelch open, so a quiet channel "
+                             "still proves the audio path")
+    parser.add_argument("--gain", help="radio: tuner gain in dB, or 'auto'. "
+                                       "Drop to 1-15 for a close-range key-up "
+                                       "test or the front end compresses and a "
+                                       "flat envelope demodulates to silence.")
+    parser.add_argument("--ppm", type=int, help="radio: crystal correction")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
     _logging(args.verbose)
@@ -590,6 +776,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "camera":
         return _camera(agent, args.frames, args.size, args.out)
+
+    if args.command == "radio":
+        return _radio(agent, args.freq, args.seconds, args.out,
+                      args.monitor, args.gain, args.ppm)
 
     if args.command == "bench":
         # Run this on the target hardware. The station's own cost is only part
