@@ -1,10 +1,15 @@
-"""The local setup GUI: one page for setting a box up and seeing what it is.
+"""The local setup GUI: four small pages for setting a box up and seeing
+what it is.
 
 `contract/enrolment.md` §5 wants a page the box serves on its own network where
 a technician enters a code and watches for a green light. §7 wants the device
 inventory — which sensors are present and how to reach them. Those are the same
 job five minutes apart, done by the same person standing in front of the same
-box, so they are one app.
+box, so they are one app — split across four pages (Summary, Connection,
+Devices, Logging) because on a phone in a paddock one long page buries the
+answer under everything that is fine. Every page sits behind the same gate:
+the guards in `_handle` run before the router looks at the path, so a new page
+can never be an unauthenticated one.
 
 The owner's requirement is that this is enough on its own: a station that comes
 up unconfigured must be usable by somebody with a laptop or a phone and **no
@@ -58,6 +63,7 @@ import ipaddress
 import json
 import logging
 import threading
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -140,6 +146,23 @@ STYLE = """
  ul { margin: .4rem 0 0; padding-left: 1.1rem; color: var(--text); }
  li { padding: .1rem 0; }
  code { color: var(--muted); font-family: ui-monospace, monospace; }
+ a { color: var(--brand); }
+ /* The page strip, transcribed from the console's settings tabs (.tabs/.tab
+    in server/web/src/styles.css) with its spacing vars resolved to rem. Links
+    rather than buttons: these are four GET pages, not panels, and they must
+    work with no script. The horizontal padding centres the strip over main's
+    54rem column on anything wider than it. */
+ .tabs { display: flex; gap: .25rem; overflow-x: auto; scrollbar-width: none;
+   padding: .5rem max(.75rem, calc((100vw - 54rem) / 2));
+   background: var(--panel-2); border-bottom: 1px solid var(--line); }
+ .tabs::-webkit-scrollbar { display: none; }
+ .tabs a { flex: none; border: 1px solid transparent; border-radius: .375rem;
+   color: var(--muted); font-size: .8rem; padding: .5rem .75rem;
+   text-decoration: none; white-space: nowrap; }
+ .tabs a:hover { color: var(--text); }
+ .tabs a.active { color: var(--brand); border-color: var(--line);
+   background: rgba(0,160,220,.14); }
+ .tabs a:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
  .slot-head { display: flex; justify-content: space-between; align-items: baseline;
               gap: 1rem; }
  .fixed { color: var(--text); font-family: ui-monospace, monospace; font-size: .9rem;
@@ -161,6 +184,24 @@ STYLE = """
  .login-card button { width: 100%; margin-top: 1.125rem; padding: .55rem 1rem; }
  .login-card .muted { margin-top: .9rem; font-size: .8rem; }
 """
+
+#: The four pages, in the order the strip shows them. The path is the whole
+#: identity: the router, the nav and the post-redirects all key on it, so a
+#: page cannot be reachable without appearing in the strip or vice versa.
+PAGES = {
+    "/": "Summary",
+    "/connection": "Connection",
+    "/devices": "Devices",
+    "/logging": "Logging",
+}
+
+#: Where each POST goes home to: the page its form lives on, fixed here rather
+#: than read from the request, so there is no redirect an attacker can choose.
+POST_HOME = {
+    "/device": "/devices",
+    "/enrol": "/connection",
+    "/logout": "/",
+}
 
 STATUS_PILL = {
     "present": ("ok", "detected"),
@@ -425,13 +466,20 @@ class Console:
                 return self._send_json(handler, self.agent.snapshot(), cookie)
             if path.startswith("/registry.json"):
                 return self._send_json(handler, self._registry_json(), cookie)
-            if path in ("/", "/index.html", "/login"):
-                return self._send_html(handler, self.render(session), cookie=cookie)
+            if path in ("/index.html", "/login"):
+                path = "/"
+            if path in PAGES:
+                return self._send_html(
+                    handler, self.render(session, path), cookie=cookie
+                )
             return self._deny(handler, 404, "No such page.")
 
         # --- POST, which changes something --------------------------------
         if not self._same_origin(handler):
             return self._deny(handler, 403, "Cross-origin request refused.")
+        home = POST_HOME.get(path)
+        if home is None:
+            return self._deny(handler, 404, "No such action.")
         form = self._read_form(handler)
         if form is None:
             return self._deny(handler, 413, "That request was too large.")
@@ -440,20 +488,18 @@ class Console:
             # says so — but it is refused either way.
             log.warning("Setup POST from %s had no valid CSRF token.", peer)
             self.message = ("bad", "That page had gone stale. Reload and try again.")
-            return self._redirect(handler, cookie)
+            return self._redirect(handler, cookie, home)
         try:
-            if path.startswith("/device"):
+            if path == "/device":
                 self._set_device(form)
-            elif path.startswith("/enrol"):
+            elif path == "/enrol":
                 self._enrol(form)
-            elif path.startswith("/logout"):
+            else:  # /logout
                 self.gate.forget_all()
                 self.message = ("good", "Signed out.")
-            else:
-                return self._deny(handler, 404, "No such action.")
         except Exception as exc:  # noqa: BLE001 - shown to a person
             self.message = ("bad", str(exc))
-        self._redirect(handler, cookie)
+        self._redirect(handler, cookie, home)
 
     def _same_origin(self, handler) -> bool:
         """Refuse a POST whose `Origin` is not us.
@@ -631,9 +677,12 @@ class Console:
         self._headers(handler, status, "text/plain; charset=utf-8", len(body), None)
         handler.wfile.write(body)
 
-    def _redirect(self, handler, cookie: str | None = None) -> None:
+    def _redirect(self, handler, cookie: str | None = None,
+                  location: str = "/") -> None:
+        # Only ever one of our own page paths — see POST_HOME. Nothing from
+        # the request reaches this header.
         handler.send_response(303)
-        handler.send_header("Location", "/")
+        handler.send_header("Location", location)
         handler.send_header("Content-Length", "0")
         handler.send_header("Cache-Control", "no-store")
         if cookie:
@@ -670,14 +719,15 @@ class Console:
             "</div></div>",
         ])
 
-    def render(self, session=None) -> str:
+    def render(self, session=None, page: str = "/") -> str:
         state = self.agent.snapshot()
         csrf = self.gate.csrf_token(session)
         out = [
             "<!doctype html><meta charset=utf-8>",
             "<meta name=viewport content='width=device-width,initial-scale=1'>",
-            "<title>Ground station</title>",
+            f"<title>Ground station — {PAGES.get(page, 'Summary')}</title>",
             f"<style>{STYLE}</style>",
+            self._nav(page),
             "<main>",
             "<h1>Ground station</h1>",
         ]
@@ -686,49 +736,62 @@ class Console:
             out.append(f"<div class='msg {kind}'>{html.escape(text)}</div>")
             self.message = None
 
-        out.append(self._section_setup(state, csrf))
-        out.append(self._section_platform(state))
-        out.append(self._section_camera(state))
-        out.append(self._section_devices(state, csrf))
-        out.append(self._section_gaps(state))
-        out.append(self._section_events(state))
-        out.append(self._section_access(session, csrf))
+        if page == "/connection":
+            out.append(self._section_enrol(state, csrf))
+            out.append(self._section_platform(state))
+            out.append(self._section_security(state))
+            out.append(self._section_access(session, csrf))
+        elif page == "/devices":
+            out.append(self._section_devices(state, csrf))
+            out.append(self._section_camera(state))
+            out.append(self._section_gaps(state))
+        elif page == "/logging":
+            out.append(self._section_events(state))
+        else:
+            out.append(self._page_summary(state))
         out.append("</main>")
+        return "".join(out)
+
+    @staticmethod
+    def _nav(page: str) -> str:
+        out = ["<nav class=tabs>"]
+        for path, label in PAGES.items():
+            active = " class=active" if path == page else ""
+            out.append(f"<a href='{path}'{active}>{html.escape(label)}</a>")
+        out.append("</nav>")
         return "".join(out)
 
     @staticmethod
     def _csrf_field(csrf: str) -> str:
         return f"<input type=hidden name=csrf value='{html.escape(csrf)}'>"
 
-    def _section_setup(self, state: dict, csrf: str) -> str:
+    def _page_summary(self, state: dict) -> str:
+        """The landing page: what an installer checks before leaving site,
+        worst news first, and nothing they can edit — every fix lives on the
+        page whose tab names the thing that is wrong."""
         out = []
         if state["enrolled"]:
             out.append(f"<p class=sub>{html.escape(state['station'] or '')}</p>")
         else:
-            out.append("<p class=sub>Not set up yet.</p>")
             out.append(
-                "<div class=card><form method=post action='/enrol'>"
-                + self._csrf_field(csrf) +
-                "<label for=token>Enter the code you were given</label><br>"
-                "<input id=token class=code name=token type=text autocomplete=off "
-                "placeholder='XXXX-XXXX-XXXX' autofocus>"
-                "<button type=submit>Set this station up</button>"
-                "</form></div>"
+                "<p class=sub>Not set up yet — "
+                "<a href='/connection'>enter the enrolment code</a>.</p>"
             )
-        security = state.get("security") or {}
-        trust = security.get("trust") or {}
+        if state["health"]:
+            out.append("<div class=card><div class=k>Needs attention</div><ul>")
+            for condition in state["health"]:
+                css = "bad" if condition["severity"] == "critical" else "warn"
+                out.append(
+                    f"<li class={css}>{html.escape(condition['id'])}: "
+                    f"{html.escape(condition['detail'])}</li>"
+                )
+            out.append("</ul></div>")
         clock_state = state.get("clock_source") or {}
         rows = [
             ("Enrolled", "yes" if state["enrolled"] else "not yet",
              "ok" if state["enrolled"] else "warn"),
             ("Link to the platform", "up" if state["link"] else "down",
              "ok" if state["link"] else "bad"),
-            # Whether each link is encrypted and verified, in the same list as
-            # everything else a technician checks before leaving site. Neither
-            # is a question that should need a packet capture to answer, and
-            # they are separate rows because they have separate trust roots.
-            self._security_row(security, trust),
-            self._api_security_row(state, security),
             ("Telemetry sent", f"{state['published']} frames", "ok"),
             ("Dropped while offline", f"{state['dropped']} frames",
              "ok" if not state["dropped"] else "warn"),
@@ -743,16 +806,78 @@ class Console:
                 f"<span class='{css}'>{html.escape(str(value))}</span></div>"
             )
         out.append("</div>")
-        if state["health"]:
-            out.append("<div class=card><div class=k>Needs attention</div><ul>")
-            for condition in state["health"]:
-                css = "bad" if condition["severity"] == "critical" else "warn"
-                out.append(
-                    f"<li class={css}>{html.escape(condition['id'])}: "
-                    f"{html.escape(condition['detail'])}</li>"
-                )
-            out.append("</ul></div>")
+        # One line per slot: the same pill the Devices page shows, without the
+        # forms. Intent (the label) and fact (the pill), still never merged.
+        out.append("<h2>Slots</h2><div class=card>")
+        by_slot = {report["slot"]: report for report in state["devices"]}
+        for slot in registry.SLOTS:
+            report = by_slot[slot]
+            css, wording = STATUS_PILL.get(report["status"], ("off", report["status"]))
+            out.append(
+                f"<div class=row><span class=k>{html.escape(slot)}</span>"
+                f"<span>{html.escape(report['label'])} "
+                f"<span class='pill {css}'>{html.escape(wording)}</span></span></div>"
+            )
+        out.append(
+            "<div class=muted>Selection and parameters are on the "
+            "<a href='/devices'>Devices</a> page.</div></div>"
+        )
         return "".join(out)
+
+    def _section_enrol(self, state: dict, csrf: str) -> str:
+        if state["enrolled"]:
+            return (
+                f"<p class=sub>Enrolled as {html.escape(state['station'] or '')}.</p>"
+            )
+        return (
+            "<p class=sub>Not set up yet.</p>"
+            "<div class=card><form method=post action='/enrol'>"
+            + self._csrf_field(csrf) +
+            "<label for=token>Enter the code you were given</label><br>"
+            "<input id=token class=code name=token type=text autocomplete=off "
+            "placeholder='XXXX-XXXX-XXXX' autofocus>"
+            "<button type=submit>Set this station up</button>"
+            "</form></div>"
+        )
+
+    def _section_security(self, state: dict) -> str:
+        """Whether each link is encrypted and verified, and whether the
+        credential behind them is still good — in the same list a technician
+        checks before leaving site. Separate rows because they have separate
+        trust roots, and none of it a question that should need a packet
+        capture to answer."""
+        security = state.get("security") or {}
+        trust = security.get("trust") or {}
+        rows = [
+            self._security_row(security, trust),
+            self._api_security_row(state, security),
+            self._credential_row(),
+        ]
+        out = ["<h2>Security</h2><div class=card>"]
+        for label, value, css in rows:
+            out.append(
+                f"<div class=row><span class=k>{html.escape(label)}</span>"
+                f"<span class='{css}'>{html.escape(str(value))}</span></div>"
+            )
+        out.append("</div>")
+        return "".join(out)
+
+    def _credential_row(self) -> tuple[str, str, str]:
+        """The station's own credential, which quietly renews itself — and
+        which, when renewal is quietly failing, gives weeks of warning that
+        only counts if it is written somewhere somebody looks."""
+        enrolment = getattr(self.agent, "enrolment", None)
+        credential = getattr(enrolment, "credential", None)
+        if credential is None:
+            return ("Broker credential", "none until this station enrols", "warn")
+        when = credential.expires_at.astimezone().strftime("%Y-%m-%d %H:%M %Z")
+        if credential.expired():
+            return ("Broker credential",
+                    f"EXPIRED {when} — this station must re-enrol", "bad")
+        if credential.due_for_renewal():
+            return ("Broker credential",
+                    f"renewal due now; expires {when}", "warn")
+        return ("Broker credential", f"expires {when}, renews itself", "ok")
 
     def _section_platform(self, state: dict) -> str:
         """The addresses, read-only and said to be read-only.
@@ -1077,13 +1202,28 @@ class Console:
         return "".join(out)
 
     def _section_events(self, state: dict) -> str:
-        out = ["<h2>Recent events (kept on the box)</h2><div class=card><ul>"]
-        for event in state["events"] or []:
-            out.append(
-                f"<li><code>{html.escape(event['at'][11:19])}</code> "
-                f"{html.escape(event['kind'])} — {html.escape(event['detail'])}</li>"
+        """Read straight off the store rather than the snapshot: the snapshot
+        carries fifteen events because it also goes over the wire in
+        status.json, and this page is the one place the longer history is
+        worth its bytes. The store is built to be read from this thread —
+        see the check_same_thread note in store.py."""
+        events = self.agent.store.recent_events(100)
+        zone = datetime.now().astimezone().tzname() or "local time"
+        out = [
+            "<h2>Recent events (kept on the box)</h2><div class=card>",
+            f"<div class=muted>Newest first, at most 100. Times are the "
+            f"station's own, {html.escape(zone)}.</div><ul>",
+        ]
+        for event in events:
+            css = {"critical": "bad", "error": "bad", "warning": "warn"}.get(
+                event.severity, ""
             )
-        if not state["events"]:
+            when = event.at.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+            out.append(
+                f"<li class='{css}'><code>{when}</code> "
+                f"{html.escape(event.kind)} — {html.escape(event.detail)}</li>"
+            )
+        if not events:
             out.append("<li>nothing yet</li>")
         out.append("</ul>")
         storage = state["storage"]

@@ -15,6 +15,7 @@ import socket
 import tempfile
 import time
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
@@ -397,40 +398,61 @@ class ServedPageTests(unittest.TestCase):
         connection.close()
         return response, payload
 
-    def page(self):
-        response, body = self.request("GET", "/")
+    def page(self, path: str = "/devices"):
+        """A page and its session. /devices by default: it always carries a
+        form, so it is where a CSRF token can be scraped from."""
+        response, body = self.request("GET", path)
         cookie = response.getheader("Set-Cookie") or ""
         token = cookie.split(";")[0]
         csrf = body.split("name=csrf value='")[1].split("'")[0]
         return token, csrf, body
 
+    def every_page(self):
+        from gsu.console import PAGES
+
+        return {path: self.request("GET", path)[1] for path in PAGES}
+
     # --- what a technician on an SSH tunnel sees ---
 
-    def test_the_page_renders_and_offers_every_slot_from_the_registry(self):
+    def test_the_devices_page_offers_every_slot_from_the_registry(self):
         from gsu.devices import registry
 
-        _, _, body = self.page()
+        _, _, body = self.page("/devices")
         for slot in registry.SLOTS:
             self.assertIn(f"<strong>{slot}</strong>", body)
         # Driven from the registry, not from a second list in the template.
         for device in registry.REGISTRY:
             self.assertIn(f"value='{device.id}'", body)
 
+    def test_the_summary_page_has_a_line_per_slot(self):
+        from gsu.devices import registry
+
+        _, body = self.request("GET", "/")
+        for slot in registry.SLOTS:
+            self.assertIn(f"<span class=k>{slot}</span>", body)
+
     def test_the_enrolment_field_is_there_before_the_station_is_enrolled(self):
-        _, _, body = self.page()
+        _, body = self.request("GET", "/connection")
         self.assertIn("XXXX-XXXX-XXXX", body)
+        # And the summary page points at it rather than duplicating it.
+        _, summary = self.request("GET", "/")
+        self.assertIn("/connection", summary)
 
     def test_the_platform_address_is_shown_and_is_not_editable(self):
         """There is one platform. An installer confirms it; nobody retypes it."""
-        _, _, body = self.page()
-        self.assertIn(self.agent.config.platform_url, body)
-        self.assertIn("GSU_PLATFORM_URL", body)
-        # Every editable control on the page, by name. None of them is the
+        pages = self.every_page()
+        self.assertIn(self.agent.config.platform_url, pages["/connection"])
+        self.assertIn("GSU_PLATFORM_URL", pages["/connection"])
+        # Every editable control on every page, by name. None of them is the
         # platform or the broker address.
         import re
 
-        names = set(re.findall(r"<(?:input|select)[^>]*\bname=[\'\"]?([\w.-]+)", body))
-        self.assertTrue(names, "the page has no form controls at all")
+        names = set()
+        for body in pages.values():
+            names |= set(
+                re.findall(r"<(?:input|select)[^>]*\bname=[\'\"]?([\w.-]+)", body)
+            )
+        self.assertTrue(names, "the pages have no form controls at all")
         for forbidden in ("platform", "platform_url", "broker", "broker_url", "url"):
             self.assertNotIn(forbidden, names)
 
@@ -476,6 +498,79 @@ class ServedPageTests(unittest.TestCase):
     def test_an_unknown_path_is_a_404_and_not_the_page(self):
         response, _ = self.request("GET", "/wp-login.php")
         self.assertEqual(response.status, 404)
+
+    # --- the four pages and the router that serves them ---
+
+    def test_each_page_renders_its_own_content(self):
+        markers = {
+            "/": "Slots",
+            "/connection": "Where this box talks",
+            "/devices": "What is fitted",
+            "/logging": "Recent events",
+        }
+        for path, marker in markers.items():
+            response, body = self.request("GET", path)
+            self.assertEqual(response.status, 200, path)
+            self.assertIn(marker, body, path)
+            # The strip knows which page it is on.
+            self.assertIn(f"href='{path}' class=active", body, path)
+
+    def test_the_old_aliases_land_on_the_summary(self):
+        # /index.html and /login predate the split; a bookmark of either must
+        # keep working, and both are the summary.
+        for path in ("/index.html", "/login"):
+            response, body = self.request("GET", path)
+            self.assertEqual(response.status, 200, path)
+            self.assertIn("— Summary</title>", body, path)
+
+    def test_each_post_redirects_back_to_the_page_its_form_lives_on(self):
+        token, csrf, _ = self.page()
+        response, _ = self.request(
+            "POST", "/device", f"slot=weather&type_id=airmar-110wx&csrf={csrf}",
+            {"Cookie": token},
+        )
+        self.assertEqual(response.status, 303)
+        self.assertEqual(response.getheader("Location"), "/devices")
+        token, csrf, _ = self.page()
+        response, _ = self.request(
+            "POST", "/enrol", f"token=&csrf={csrf}", {"Cookie": token},
+        )
+        self.assertEqual(response.getheader("Location"), "/connection")
+        token, csrf, _ = self.page()
+        response, _ = self.request(
+            "POST", "/logout", f"csrf={csrf}", {"Cookie": token},
+        )
+        self.assertEqual(response.getheader("Location"), "/")
+
+    def test_a_stale_csrf_post_still_lands_back_on_the_same_page(self):
+        # The refusal and the message about it must appear where the person
+        # is, not on a page they were never reading.
+        token, _, _ = self.page()
+        response, _ = self.request(
+            "POST", "/device", "slot=weather&type_id=&csrf=stale",
+            {"Cookie": token},
+        )
+        self.assertEqual(response.status, 303)
+        self.assertEqual(response.getheader("Location"), "/devices")
+
+    def test_an_unknown_post_action_is_a_404(self):
+        token, csrf, _ = self.page()
+        response, _ = self.request(
+            "POST", "/definitely-not", f"csrf={csrf}", {"Cookie": token},
+        )
+        self.assertEqual(response.status, 404)
+
+    def test_the_logging_page_lists_events_newest_first_in_local_time(self):
+        self.agent.store.record_event("test.first", "info", "one")
+        self.agent.store.record_event("test.second", "warning", "two")
+        _, body = self.request("GET", "/logging")
+        self.assertIn("test.first", body)
+        self.assertIn("test.second", body)
+        # Newest first: the second event appears above the first.
+        self.assertLess(body.index("test.second"), body.index("test.first"))
+        # The zone the timestamps are in is named on the page.
+        zone = datetime.now().astimezone().tzname() or "local time"
+        self.assertIn(zone, body)
 
     # --- CSRF ---
 
@@ -651,13 +746,19 @@ class LanPeerTests(unittest.TestCase):
         return response, payload
 
     def test_the_login_form_is_all_an_unauthenticated_laptop_gets(self):
-        response, body = self.request("GET", "/")
-        self.assertEqual(response.status, 401)
-        self.assertIn("Setup password", body)
-        # And it says nothing about the station: not the site, not what is
-        # fitted, not whether it is enrolled.
-        for leak in ("weather", "adsb", "Enrolled", "Platform API", "broker"):
-            self.assertNotIn(leak, body, leak)
+        # Every page identically: the router grew paths and none of them may
+        # answer with content before the password has been shown.
+        from gsu.console import PAGES
+
+        for path in PAGES:
+            response, body = self.request("GET", path)
+            self.assertEqual(response.status, 401, path)
+            self.assertIn("Setup password", body, path)
+            # And it says nothing about the station: not the site, not what
+            # is fitted, not whether it is enrolled.
+            for leak in ("weather", "adsb", "Enrolled", "Platform API",
+                         "broker", "Recent events"):
+                self.assertNotIn(leak, body, f"{path} leaks {leak}")
 
     def test_status_json_is_not_readable_without_the_password(self):
         response, body = self.request("GET", "/status.json")
@@ -680,6 +781,10 @@ class LanPeerTests(unittest.TestCase):
         cookie = (response.getheader("Set-Cookie") or "").split(";")[0]
         self.assertTrue(cookie.startswith(COOKIE_NAME))
         response, body = self.request("GET", "/", headers={"Cookie": cookie})
+        self.assertEqual(response.status, 200)
+        self.assertIn("Slots", body)
+        # And the same cookie opens every other page, not just the landing one.
+        response, body = self.request("GET", "/devices", headers={"Cookie": cookie})
         self.assertEqual(response.status, 200)
         self.assertIn("What is fitted", body)
 
