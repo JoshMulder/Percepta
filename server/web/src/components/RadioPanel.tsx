@@ -113,6 +113,25 @@ function RadioPanelInner({
 }) {
   const canListen = caps.includes("radio.listen");
   const canControl = caps.includes("radio.control");
+  // Gain is behind config.write, not radio.control: it is set once for a site
+  // from its RF environment, and getting it wrong quietly degrades every
+  // listener rather than producing a symptom anybody reports. Someone allowed
+  // to tune is not automatically someone allowed to do that.
+  const canSetGain = caps.includes("config.write");
+
+  /** What the tuner offers, as the station reported it. Empty when the receiver
+   *  has no driver or no fixed steps — an RTL-SDR enumerates its own ladder and
+   *  it differs between tuner chips, so the list is never hardcoded here. */
+  const gains = radio?.gains ?? [];
+  const gain = radio?.gain;
+  /** Held while a change is in flight, so the select shows what was asked for
+   *  rather than snapping back to the old value on the next 1 Hz frame and
+   *  then forward again when the station catches up. Cleared as soon as
+   *  telemetry agrees. */
+  const [pendingGain, setPendingGain] = useState<string | null>(null);
+  useEffect(() => {
+    if (pendingGain !== null && String(gain) === pendingGain) setPendingGain(null);
+  }, [gain, pendingGain]);
 
   const [presets, setPresets] = useState<(Preset | null)[]>(() =>
     loadPresets(stationId),
@@ -493,6 +512,42 @@ function RadioPanelInner({
           aria-label="Volume"
         />
       </div>
+
+      {/* RF gain. Rendered only when the station has said what its tuner
+          offers: an empty dropdown is worse than none, and a receiver with no
+          driver reports no ladder. */}
+      {gains.length > 0 && (
+        <div className="radio-gain">
+          <label htmlFor="radio-gain">Gain</label>
+          <select
+            id="radio-gain"
+            value={pendingGain ?? String(gain ?? "auto")}
+            disabled={!canSetGain}
+            title={
+              canSetGain
+                ? "Set once for this site's RF environment"
+                : "Setting gain needs config.write"
+            }
+            onChange={(e) => {
+              const next = e.target.value;
+              setPendingGain(next);
+              api
+                .setGain(stationId, next === "auto" ? "auto" : Number(next))
+                // The station is the authority: a refusal or a dropped command
+                // just means the next frame still carries the old value, and
+                // clearing the pending value lets it show through.
+                .catch(() => setPendingGain(null));
+            }}
+          >
+            <option value="auto">Auto</option>
+            {gains.map((g) => (
+              <option key={g} value={String(g)}>
+                {g.toFixed(1)} dB
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
 
       {/*
         One status line, always present, showing whichever message matters most.

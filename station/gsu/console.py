@@ -308,6 +308,15 @@ STYLE = """
  /* Looks like the muted key it replaces until you point at it — a row of
     underlined blue on the page an installer scans would read as a list of
     warnings. */
+ /* The second click, without script: the confirm form does not exist on the
+    page until the fragment names it. Same mechanism the location dialog used,
+    for the same reason — a destructive control should take two deliberate
+    acts, and neither of them should depend on JavaScript being allowed. */
+ .confirm { display: none; }
+ .confirm:target { display: block; }
+ .btn.danger, button.danger { border-color: var(--danger); color: var(--danger);
+   background: rgba(255,122,69,.08); }
+ .btn.danger:hover, button.danger:hover { background: rgba(255,122,69,.18); }
  .slot-link { color: var(--muted); text-decoration: none; }
  .slot-link:hover { color: var(--brand); text-decoration: underline; }
  .slot-link:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px;
@@ -437,6 +446,7 @@ PAGES = {
 #: Where each POST goes home to: the page its form lives on, fixed here rather
 #: than read from the request, so there is no redirect an attacker can choose.
 POST_HOME = {
+    "/reset": "/connection",
     "/device": "/devices",
     "/enrol": "/connection",
     "/location": "/connection",
@@ -807,6 +817,8 @@ class Console:
                 self._enrol(form)
             elif path == "/location":
                 self._set_location(form)
+            elif path == "/reset":
+                self._reset(form)
             else:  # /logout
                 self.gate.forget_all()
                 self.message = ("good", "Signed out.")
@@ -929,6 +941,26 @@ class Console:
             baro_correction=correction,
         )
         self.message = ("good", "Saved.")
+
+    def _reset(self, form: dict) -> None:
+        """Return the box to how it shipped.
+
+        Two clicks rather than a typed confirmation. The owner's reasoning, and
+        it holds: this page is on the local network only, behind a password,
+        inside a time-boxed window — anybody who can see this button is already
+        standing at the hardware with the intent to reprovision it. A typed
+        station name would be ceremony aimed at a mistake that cannot easily be
+        made from here, and the thing being destroyed is a box's *configuration*,
+        not a customer's records, which live on the platform.
+
+        The second click is still required, because "everything" includes the
+        credential — and a station that has to be re-enrolled is a phone call
+        to whoever holds the codes.
+        """
+        if (form.get("confirm") or [""])[0] != "yes":
+            raise ValueError("Reset not confirmed.")
+        gone = self.agent.factory_reset()
+        self.message = ("good", "Reset. Cleared: " + ", ".join(gone) + ".")
 
     def _set_device(self, form: dict) -> str:
         slot = (form.get("slot") or [""])[0]
@@ -1207,6 +1239,7 @@ class Console:
             out.append(self._section_location(state, csrf, banner))
             out.append(self._section_platform(state))
             out.append(self._section_security(state))
+            out.append(self._section_reset(state, csrf))
         elif page == "/devices":
             slot = slot if slot in registry.SLOTS else registry.SLOTS[0]
             out.append(self._section_devices(state, csrf, slot, chosen))
@@ -1482,6 +1515,44 @@ class Console:
             # it there is not something a person at the site can act on.
             return where, "ok"
         return "not set", "warn"
+
+    def _section_reset(self, state: dict, csrf: str) -> str:
+        """The way back to a blank box.
+
+        Last on the page, after everything it clears, because it is the most
+        destructive control the station has and nothing below it should be
+        reachable by an accidental scroll-and-click.
+
+        Two clicks and no typed confirmation: this page answers only on the
+        local network, behind a password, inside a time-boxed window, so
+        anybody who can see this is at the hardware intending to reprovision
+        it. `:target` gives the second click without script — the button is a
+        link to `#reset`, and only then is there a form to submit.
+        """
+        out = [
+            "<h2>Reset</h2><div class=card>",
+            "<div class=row><span class=k>Clears</span>"
+            "<span>credential, pinned CA, devices, settings, events</span></div>",
+        ]
+        if state["enrolled"]:
+            out.append(
+                "<div class=row><span class=k>After this</span>"
+                "<span class=warn>this box needs a new enrolment code</span></div>"
+            )
+        out.append(
+            "<div class=field><a class='btn danger' href='#reset'>Reset "
+            "station</a></div>"
+        )
+        out.append(
+            "<div id=reset class=confirm>"
+            f"<form method=post action='/reset'>{self._csrf_field(csrf)}"
+            "<input type=hidden name=confirm value='yes'>"
+            "<div class=field><button type=submit class=danger>"
+            "Erase everything on this box</button>"
+            "<a class='btn quiet' href='#'>Cancel</a></div></form></div>"
+        )
+        out.append("</div>")
+        return "".join(out)
 
     def _section_security(self, state: dict) -> str:
         """Whether each link is encrypted and verified, and whether the

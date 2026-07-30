@@ -683,6 +683,69 @@ class Agent:
                 enrolment.broker.username,
             )
 
+    def factory_reset(self) -> list[str]:
+        """Return this box to the state it shipped in, and say what went.
+
+        **Everything.** Credential, pinned CA, device selections, site
+        configuration, and the local store of events and recordings. Anything
+        less leaves a box that looks reset and behaves like the site it came
+        from: an old device list makes a new owner's slots wrong, a stale
+        `site.version` makes the platform's first `config.set` a no-op, and
+        kept events are one customer's data on another customer's hardware.
+
+        The one thing not touched is the setup password, which lives in the
+        environment file rather than the state directory. It is how somebody
+        reaches this page at all, and a reset that locks the person doing it
+        out of the box is a site visit rather than a reset.
+
+        Order matters. Publishing stops first, so nothing is written back
+        underneath the deletion — the renewer in particular would happily
+        recreate a credential file moments after it was removed.
+        """
+        gone: list[str] = []
+        with self._attach_lock:
+            # Stop everything that writes before deleting anything.
+            if self.renewer is not None:
+                self.renewer.stop()
+                self.renewer = None
+            if self.transport is not None:
+                try:
+                    self.transport.close()
+                except Exception:  # noqa: BLE001 - already on the way out
+                    log.debug("Transport close failed during reset.", exc_info=True)
+                self.transport = None
+            self.router = None
+            self.enrolment = None
+            self._credential_mtime = None
+
+            self.credentials.clear()
+            gone.append("credential")
+            if self.config.ca_path.exists():
+                self.config.ca_path.unlink(missing_ok=True)
+                gone.append("pinned broker CA")
+
+            for path, label in (
+                (self.config.devices_path, "device selections"),
+                (self.config.site_config_path, "site configuration"),
+                (self.config.store_path, "events and recordings"),
+            ):
+                if path.exists():
+                    path.unlink(missing_ok=True)
+                    gone.append(label)
+
+        # Rebuild in memory so the page the operator is looking at reflects the
+        # reset immediately, rather than showing the old world until a restart.
+        self.site = SiteConfig.load(self.config.site_config_path)
+        self.baro = BarometricReference(
+            enabled=self.site.adsb_baro_correction, elevation_m=self.site.elevation_m
+        )
+        self.store = LocalStore(self.config.store_path, self.config.recordings_dir)
+        self.inventory = Inventory(self.config.devices_path)
+        self.build_devices()
+        self.health.clear_all()
+        log.warning("Factory reset: cleared %s.", ", ".join(gone))
+        return gone
+
     def reload_credential_if_changed(self) -> bool:
         """Pick up a credential this process did not issue itself.
 

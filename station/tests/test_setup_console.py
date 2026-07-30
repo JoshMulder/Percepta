@@ -1048,7 +1048,8 @@ class ServedPageTests(unittest.TestCase):
 
     def test_the_local_settings_use_the_shared_field_grid(self):
         _, _, body = self.page("/connection")
-        card = body.split("<h2>Where this box is</h2>", 1)[1]
+        # Bounded to this card: the sections below it have fields of their own.
+        card = body.split("<h2>Where this box is</h2>", 1)[1].split("<h2>", 1)[0]
         # Elevation, the correction checkbox, and the save row.
         self.assertEqual(card.count("<div class=field>"), 3)
         self.assertNotIn("grid-template-columns", card)
@@ -1843,3 +1844,99 @@ class DevicePickerTests(unittest.TestCase):
         self.agent.inventory.set_device("weather", "airmar-110wx", {})
         section = self.section("weather", "")
         self.assertIn("<input type=hidden name=type_id value=''>", section)
+
+class FactoryResetTests(unittest.TestCase):
+    """Returning a box to how it shipped.
+
+    The owner's call on ceremony, and it holds: this page answers only on the
+    local network, behind a password, inside a time-boxed window, so anybody
+    who can see the button is at the hardware intending to reprovision it. Two
+    clicks, no typed station name. What is destroyed is a box's configuration,
+    not a customer's records — those live on the platform.
+    """
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.config = AgentConfig(
+            home=Path(self.directory.name), setup_enabled=False,
+            single_instance=False,
+        )
+        self.agent = Agent(self.config)
+        self.addCleanup(self.agent.shutdown)
+        self.console = Console(self.agent)
+
+    def test_it_clears_everything_that_describes_the_old_site(self):
+        # Anything left behind makes a reset box behave like the site it came
+        # from: an old device list makes a new owner's slots wrong, and kept
+        # events are one customer's data on another's hardware.
+        self.agent.inventory.set_device("weather", "airmar-110wx", {})
+        self.agent.set_location(-42.4, 173.7, 120.0)
+        self.agent.store.record_event("test", "info", "something happened")
+
+        self.agent.factory_reset()
+
+        self.assertFalse(self.config.credential_path.exists())
+        self.assertFalse(self.config.devices_path.exists())
+        self.assertFalse(self.config.site_config_path.exists())
+        # The store is rebuilt immediately so the page still works, so what
+        # matters is that it is empty rather than that the file is gone.
+        self.assertEqual(self.agent.store.recent_events(10), [])
+
+    def test_the_reset_box_is_a_blank_box_in_memory_too(self):
+        # Not just on disk: the page the operator is looking at has to show the
+        # reset, rather than the old world until somebody restarts the service.
+        self.agent.set_location(-42.4, 173.7, 120.0)
+        self.agent.inventory.set_device("weather", "airmar-110wx", {})
+        self.agent.factory_reset()
+        self.assertIsNone(self.agent.site.latitude)
+        self.assertIsNone(self.agent.site.elevation_m)
+        self.assertIsNone(self.agent.enrolment)
+        # Back to what a box ships with, which is every slot on its Demo
+        # sensor — not empty. A reset box is a working demo station, and the
+        # important part is that it is no longer the *previous site's*
+        # selection.
+        self.assertEqual(
+            self.agent.inventory.fitted["weather"].type_id, "simulated-weather")
+
+    def test_it_says_what_it_cleared(self):
+        self.agent.inventory.set_device("weather", "airmar-110wx", {})
+        gone = self.agent.factory_reset()
+        self.assertIn("credential", gone)
+        self.assertIn("device selections", gone)
+
+    def test_it_keeps_the_setup_password(self):
+        # It lives in the environment file, not the state directory. A reset
+        # that locks the person doing it out of the box is a site visit.
+        before = self.console.gate.has_password
+        self.agent.factory_reset()
+        self.assertEqual(self.console.gate.has_password, before)
+
+    def test_conditions_about_the_old_configuration_do_not_survive(self):
+        # "No weather head" was true of a configuration that no longer exists.
+        self.agent.health.raise_condition("devices.absent", "warning", "weather")
+        self.agent.factory_reset()
+        self.assertEqual(self.agent.health.active(), [])
+
+    def test_an_unconfirmed_post_changes_nothing(self):
+        self.agent.inventory.set_device("weather", "airmar-110wx", {})
+        with self.assertRaises(ValueError):
+            self.console._reset({})
+        self.assertEqual(
+            self.agent.inventory.fitted["weather"].type_id, "airmar-110wx")
+
+    def test_the_confirmation_needs_no_script(self):
+        # :target, like every other two-step control here — the form does not
+        # exist on the page until the fragment names it.
+        section = self.console._section_reset(self.agent.snapshot(), "tok")
+        self.assertIn("href='#reset'", section)
+        self.assertIn("id=reset class=confirm", section)
+        self.assertIn(".confirm:target",
+                      (Path(__file__).resolve().parents[1]
+                       / "gsu" / "console.py").read_text())
+
+    def test_it_is_the_last_thing_on_the_page(self):
+        # Nothing below the most destructive control, so an accidental
+        # scroll-and-click cannot land past it.
+        body = self.console.render(None, "/connection")
+        self.assertGreater(body.index("<h2>Reset</h2>"), body.index("<h2>Security</h2>"))

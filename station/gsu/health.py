@@ -68,6 +68,18 @@ class Health:
         if existing is not None:
             log.info("health %s cleared after %s", id, clock.now() - existing.since)
 
+    def clear_all(self) -> None:
+        """Forget every condition. Used by a factory reset, where the
+        conditions describe a site this box is no longer at — a missing weather
+        head and an unsourced stream are true of the old configuration and
+        say nothing about the new one. The next tick re-raises whatever is
+        still true."""
+        with self._lock:
+            count = len(self._conditions)
+            self._conditions.clear()
+        if count:
+            log.info("health: %d condition(s) cleared by reset", count)
+
     def active(self) -> list[Condition]:
         with self._lock:
             return sorted(
