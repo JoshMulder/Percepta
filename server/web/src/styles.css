@@ -543,56 +543,9 @@ body {
   background: var(--danger);
 }
 
-.ptz {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0.75rem 0.25rem 0.25rem;
-}
-.ptz-pad {
-  display: grid;
-  grid-template-columns: repeat(3, 1.875rem);
-  grid-template-rows: repeat(3, 1.625rem);
-  gap: 0.188rem;
-}
-.ptz-btn {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  color: var(--muted);
-  border-radius: 0.312rem;
-  cursor: pointer;
-  font-size: 0.688rem;
-}
-.ptz-btn:hover {
-  color: var(--text);
-  border-color: #2c3d4b;
-}
-.ptz-up {
-  grid-area: 1 / 2;
-}
-.ptz-left {
-  grid-area: 2 / 1;
-}
-.ptz-home {
-  grid-area: 2 / 2;
-}
-.ptz-right {
-  grid-area: 2 / 3;
-}
-.ptz-down {
-  grid-area: 3 / 2;
-}
-.ptz-zoom {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  font-size: 0.688rem;
-  color: var(--muted);
-}
-.ptz-zoom .ptz-btn {
-  width: 1.75rem;
-  height: 1.625rem;
-}
+/* The PTZ pad was removed with the control it drove: no fitted camera has
+   a mount, and buttons that move nothing teach an operator to distrust the
+   panel. The video.ptz capability is untouched and still grantable. */
 
 /* ------------------------------------------------------------------ radio */
 

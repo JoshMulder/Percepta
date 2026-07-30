@@ -27,7 +27,6 @@ function VideoPanelInner({
   compact,
   streaming,
   frame,
-  canPtz,
   online,
   demo,
   lightOn,
@@ -42,7 +41,10 @@ function VideoPanelInner({
   streaming: boolean;
   /** Latest frame from the station, if any. */
   frame?: VideoPayload | null;
-  canPtz: boolean;
+  /** Held in the contract and still granted per station, but no longer drawn:
+   *  the pad moved nothing, because no fitted camera has a mount. It comes
+   *  back when one does, and the capability keeps meaning what it meant. */
+  canPtz?: boolean;
   online: boolean;
   /** Demo deployments render a synthetic camera view rather than an empty
    *  placeholder, so the panel shows what it is for. It is drawn, not footage:
@@ -121,32 +123,6 @@ function VideoPanelInner({
           </div>
         )}
       </div>
-      {canPtz && !compact && (
-        <div className="ptz">
-          <div className="ptz-pad">
-            <button type="button" className="ptz-btn ptz-up" aria-label="Tilt up">
-              ▲
-            </button>
-            <button type="button" className="ptz-btn ptz-left" aria-label="Pan left">
-              ◀
-            </button>
-            <button type="button" className="ptz-btn ptz-home" aria-label="Home">
-              ⌂
-            </button>
-            <button type="button" className="ptz-btn ptz-right" aria-label="Pan right">
-              ▶
-            </button>
-            <button type="button" className="ptz-btn ptz-down" aria-label="Tilt down">
-              ▼
-            </button>
-          </div>
-          <div className="ptz-zoom">
-            <button type="button" className="ptz-btn">−</button>
-            <span>zoom</span>
-            <button type="button" className="ptz-btn">+</button>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

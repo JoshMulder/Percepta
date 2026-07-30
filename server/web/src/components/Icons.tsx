@@ -243,10 +243,16 @@ export const SKY_LABEL: Record<string, string> = {
 };
 
 export function IconSettings({ className = "icon" }: Props) {
+  // Eight straight teeth and a hub, not the usual many-curved cog. These icons
+  // render at 1.15em - about 14px - with a 1.8 stroke, and at that size the
+  // intricate one collapsed into a blob: every notch smaller than the pen
+  // drawing it. Geometry this plain survives being small, which is the only
+  // size it is ever drawn at.
   return (
-    <svg className={className} viewBox="0 0 24 24" aria-hidden="true">
-      <circle cx="12" cy="12" r="3" />
-      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.14.35.4.64.73.83H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+    <svg {...base} className={className}>
+      <circle cx="12" cy="12" r="3.4" />
+      <path d="M12 6.8V4.2M12 17.2v2.6M6.8 12H4.2M17.2 12h2.6" />
+      <path d="M8.32 8.32 6.48 6.48M15.68 15.68l1.84 1.84M15.68 8.32l1.84-1.84M8.32 15.68l-1.84 1.84" />
     </svg>
   );
 }
