@@ -1561,3 +1561,66 @@ class HashSeparatorTests(unittest.TestCase):
         self.assertFalse(verify_password(mangled, "correct horse battery"))
         self.assertFalse(verify_password(mangled, ""))
 
+
+
+class HonestVerdictTests(unittest.TestCase):
+    """Facts the station does not know must not be shown as facts it does.
+
+    Every case here was found on a live station reporting a fault it had no
+    basis for. The shared shape is a three-valued world — yes, no, could not
+    find out — rendered through a two-valued `if`, so "could not find out" came
+    out looking exactly like "no". On the page an installer reads to decide
+    whether to drive to a site, that difference is the point of the page.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.source = (Path(__file__).resolve().parents[1]
+                      / "gsu" / "console.py").read_text()
+
+    def test_an_undetermined_clock_is_not_reported_as_unsynchronised(self):
+        # A container cannot see the host's timesyncd: `/run` inside it is its
+        # own tmpfs and neither chronyc nor timedatectl is in the image, so
+        # every probe returns nothing. The Pi 5's clock was correctly
+        # disciplined the whole time the page said otherwise.
+        state = {"synchronised": None, "source": "rtc-only", "rtc_present": True}
+        wording = Console._clock_wording(state)
+        self.assertIn("cannot tell", wording)
+        self.assertNotIn("not synced", wording)
+        self.assertEqual(Console._clock_class(state), "unknown")
+
+    def test_a_clock_nobody_is_keeping_is_still_a_warning(self):
+        # The fix must not go the other way and swallow the real fault.
+        state = {"synchronised": False, "source": "none", "rtc_present": False}
+        self.assertEqual(Console._clock_class(state), "warn")
+        self.assertIn("guess", Console._clock_wording(state))
+
+    def test_a_disciplined_clock_reads_as_good(self):
+        state = {"synchronised": True, "source": "ntp", "rtc_present": True}
+        self.assertEqual(Console._clock_class(state), "ok")
+        self.assertEqual(Console._clock_wording(state), "NTP")
+
+    def test_unknown_is_styled_as_a_note_not_a_fault(self):
+        # Muted, not amber. Amber on a station that is probably fine is how a
+        # page trains people to stop reading amber at all.
+        self.assertIn(".unknown { color: var(--muted); }", self.source)
+
+    def test_a_supported_camera_backend_is_not_a_fault(self):
+        # `rpicam` is the CSI camera and `ffmpeg` is a network camera. Testing
+        # for `rpicam` alone put a permanent amber on every correctly working
+        # RTSP camera — a configuration this station has because an owner asked
+        # for it. Only "no capture tool at all" is a fault.
+        self.assertIn('"warn" if camera["backend"] == "none" else "ok"',
+                      self.source)
+        self.assertNotIn('"ok" if camera.get("backend") == "rpicam" else "warn"',
+                         self.source)
+        self.assertIn(
+            '"warn" if camera.get("backend") in (None, "none") else "muted"',
+            self.source,
+        )
+
+    def test_a_held_camera_is_normal_operation(self):
+        # A held sensor is what a working live stream looks like; the lease in
+        # camera/ownership.py exists precisely so that one reader holds it.
+        self.assertNotIn('("Camera held by", holds, "warn" if holder else "ok")',
+                         self.source)

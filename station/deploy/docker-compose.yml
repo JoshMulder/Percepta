@@ -116,6 +116,22 @@ services:
       #
       # Not read-only: opening a serial port is O_RDWR.
       - /dev:/dev
+      # How the agent finds out what is disciplining the clock. Without this it
+      # cannot find out at all: `/run` inside a container is the container's own
+      # tmpfs, so timesyncd's flag file is invisible, and neither `chronyc` nor
+      # `timedatectl` is in the image — every probe in gsu/clock.py returns "no
+      # idea". On a box with a hardware RTC that unknown used to be worded as
+      # "a hardware RTC, not synced", which is a claim the station had no basis
+      # for: the container shares the host's clock, and on the Pi 5 that clock
+      # was correctly synchronised the whole time.
+      #
+      # The directory, not the flag file inside it: the file does not exist
+      # until the first sync, and Docker would create a *directory* in its place
+      # to satisfy the mount — after which timesyncd could never write the file
+      # and the station would report "running but not synchronised" for ever.
+      # Read-only because the agent reads the clock and never sets it, which is
+      # the same line ProtectClock=yes draws on the systemd path.
+      - /run/systemd/timesync:/run/systemd/timesync:ro
 
     # Visibility is not permission — the device cgroup still has to allow each
     # major, or every open() returns EPERM against a node that is plainly

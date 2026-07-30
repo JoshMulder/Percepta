@@ -342,6 +342,23 @@ class ContainerTests(unittest.TestCase):
             if line.strip() and not line.lstrip().startswith("#")
         )
 
+    def test_the_container_can_see_what_is_disciplining_the_clock(self):
+        # Without this mount `/run` inside the container is its own tmpfs, so
+        # timesyncd's flag file is invisible, and neither chronyc nor
+        # timedatectl is in the image — every probe in gsu/clock.py returns
+        # "no idea". On a box with a hardware RTC that unknown was worded as
+        # "a hardware RTC, not synced": a permanent false alarm on a station
+        # whose clock was correctly synchronised the whole time.
+        self.assertIn("/run/systemd/timesync:/run/systemd/timesync:ro",
+                      self.directives)
+
+    def test_the_clock_mount_is_the_directory_and_not_the_flag_file(self):
+        # The flag file does not exist until the first sync, and Docker creates
+        # a *directory* in place of a missing bind source. Mounting the file
+        # would leave timesyncd unable to ever write it, turning "cannot tell"
+        # into a permanent, and this time confident, "not synchronised".
+        self.assertNotIn("timesync/synchronized:", self.directives)
+
     def test_no_named_device_list_that_could_stop_the_station_starting(self):
         # THE regression this file exists to prevent. Docker refuses to start a
         # container whose mapped device is missing, so a named `devices:` list

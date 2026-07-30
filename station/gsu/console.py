@@ -136,6 +136,11 @@ STYLE = """
  .row:last-child { border-bottom: 0; }
  .k { color: var(--muted); }
  .ok { color: var(--accent); } .warn { color: var(--warn); } .bad { color: var(--danger); }
+ /* "The station could not find out", which is neither good news nor a fault.
+    It reads as muted body text on purpose: amber would put a station that is
+    probably fine on the same footing as one that is known to be broken, and
+    somebody reading this page is deciding whether to get in a vehicle. */
+ .unknown { color: var(--muted); }
  .muted { color: var(--muted); font-size: .88rem; }
  /* Controls fill their grid column up to a readable cap rather than carrying
     a min-width: inside a fixed column a min-width is what overflows a phone,
@@ -1125,7 +1130,7 @@ class Console:
              "ok" if not state["dropped"] else "warn"),
             ("Station clock", state["clock"], "ok"),
             ("Clock kept by", self._clock_wording(clock_state),
-             "ok" if clock_state.get("synchronised") else "warn"),
+             self._clock_class(clock_state)),
             # Read-only here like everything else on this page — the form is on
             # Connection. It earns a row because an unset position is a fault
             # an installer can still fix while on site and cannot see from
@@ -1439,7 +1444,12 @@ class Console:
         holds = f"{holder} for {held_for:.0f}s" if holder and held_for else (holder or "nobody")
 
         rows = [
-            ("Camera held by", holds, "warn" if holder else "ok"),
+            # Not a warning either way. A held sensor is what a working live
+            # stream looks like — the lease in camera/ownership.py exists so
+            # that one reader has it — and amber on ordinary operation is how a
+            # page teaches people to stop reading amber. The value names the
+            # holder and how long it has held; that is the diagnostic.
+            ("Camera held by", holds, "ok"),
             ("Snapshots", "removed", "off"),
             ("Preview", f"{video.get('preview_frames', 0)} frames, "
                         f"{video.get('preview_refused', 0)} refused", "ok"),
@@ -1460,8 +1470,15 @@ class Console:
                 "ok",
             ))
         if camera.get("backend"):
+            # `rpicam` is the CSI camera and `ffmpeg` is a network camera, and
+            # both are configurations this station supports on purpose — the
+            # RTSP path exists because an owner asked for it. Testing for
+            # `rpicam` alone put a permanent amber on every correctly working
+            # network camera, which is the same false alarm as the clock: a
+            # legitimate configuration rendered as a fault. Only `none` — no
+            # capture tool found at all — is one.
             rows.insert(0, ("Capture path", camera["backend"],
-                            "ok" if camera.get("backend") == "rpicam" else "warn"))
+                            "warn" if camera["backend"] == "none" else "ok"))
         out = ["<h2>Camera</h2><div class=card>"]
         for label, value, css in rows:
             out.append(
@@ -1469,7 +1486,9 @@ class Console:
                 f"<span class='{css}'>{html.escape(str(value))}</span></div>"
             )
         if reason:
-            css = "muted" if camera.get("backend") == "rpicam" else "warn"
+            # Same correction: a working camera explaining itself is a note,
+            # whichever backend is doing the working.
+            css = "warn" if camera.get("backend") in (None, "none") else "muted"
             out.append(f"<div class='{css}'>{html.escape(reason)}</div>")
         if video.get("reason"):
             out.append(
@@ -1522,13 +1541,40 @@ class Console:
 
     @staticmethod
     def _clock_wording(state: dict) -> str:
+        """What is keeping this clock, in words that do not outrun the evidence.
+
+        `rtc-only` used to read "a hardware RTC, not synced". It is reached when
+        every probe in `clock.py` came back with nothing — which is *don't
+        know*, not *not synced*, and the difference decides whether somebody
+        drives out to a site. It is also the ordinary state of a container that
+        cannot see the host's timesyncd, so the false alarm was permanent rather
+        than occasional.
+        """
         source = state.get("source", "unknown")
         wording = {
-            "gps": "GPS", "ntp": "NTP", "rtc-only": "a hardware RTC, not synced",
+            "gps": "GPS", "ntp": "NTP",
+            "rtc-only": "a hardware RTC; cannot tell what is disciplining it",
             "none": "nothing — the time is a guess",
             "unknown": "cannot tell",
         }.get(source, source)
         return wording if state.get("rtc_present") else f"{wording} (no RTC fitted)"
+
+    @staticmethod
+    def _clock_class(state: dict) -> str:
+        """`synchronised` is three-valued and must be shown that way.
+
+        True is disciplined, False is a clock nobody is keeping, and None is the
+        station admitting it could not find out. Collapsing None into the same
+        amber as False makes "I don't know" indistinguishable from "I know it is
+        wrong", on the one page an installer reads to decide whether the station
+        can be trusted.
+        """
+        synchronised = state.get("synchronised")
+        if synchronised is True:
+            return "ok"
+        if synchronised is False:
+            return "warn"
+        return "unknown"
 
     @staticmethod
     def _slot_tabs(active: str) -> str:
