@@ -13,6 +13,15 @@
 #   service that gives up after five attempts is a site visit; on a remote site
 #   the correct behaviour for a crash loop is to keep trying and keep saying so.
 #
+# That second constraint has a sharp edge, and the assertion below is what
+# blunts it. Both unit files are installed on either deployment path so that
+# switching is one systemctl command, and on the container path this one is
+# merely *disabled* — which stops it at boot and does nothing at all to stop a
+# person typing `systemctl restart gsu`. On a container box the venv this unit
+# execs does not exist, so that start fails, and "restarts for ever, no rate
+# limit" turns one keystroke into an unbounded crash loop. Found in the field at
+# 72 restarts, next to a perfectly healthy container serving the same station.
+#
 # Everything under [Service] that is not Exec* is hardening. The comments say
 # what each one buys and, where it matters, what it would break — a hardening
 # line nobody understands is a line somebody deletes at 2am.
@@ -29,6 +38,19 @@ Wants=network.target
 # enrol and raises a health condition (contract/enrolment.md §6) — and it must
 # be sensing and recording long before it knows what time it is.
 StartLimitIntervalSec=0
+
+# The interpreter this unit execs, asserted before anything is spawned. It
+# exists only on the systemd path — the container path never builds a venv — so
+# this is the question "am I the deployment path in use here?" asked in the one
+# form that cannot drift from the answer: it is character-for-character the
+# prefix of ExecStart below, and a test holds the two together.
+#
+# Assert rather than Condition on purpose. A failed condition skips the unit
+# quietly, and a station that silently does nothing when told to start is worse
+# than one that refuses out loud. A failed assertion marks the unit failed and
+# writes the missing path into the journal — and, unlike an ExecStart that dies,
+# neither form triggers Restart=, so there is no loop either way.
+AssertPathExists=/opt/percepta/station/.venv/bin/python
 
 [Service]
 Type=exec

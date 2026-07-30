@@ -382,6 +382,13 @@ fi
 # systemctl command rather than another install. **Only one is ever enabled**:
 # two agents publishing independent worlds onto one channel makes the console
 # alternate between them and looks like a platform bug.
+#
+# Disabling is not the whole of that guarantee, and used to be treated as if it
+# were. It governs boot; it says nothing about `systemctl restart gsu` typed by
+# somebody debugging a container box, which starts a unit whose interpreter is
+# not installed and — correctly, for a remote site — retries for ever. The unit
+# asserts its own interpreter for that reason; this section only has to leave
+# the state clean.
 say "Service"
 install -m 0644 "$SRC/deploy/$UNIT" "/etc/systemd/system/$UNIT"
 install -m 0644 "$SRC/deploy/gsu-update.service" /etc/systemd/system/
@@ -390,7 +397,14 @@ systemctl daemon-reload
 
 if [ "$DEPLOY_PATH" = "docker" ]; then
   systemctl disable --now "$UNIT" >/dev/null 2>&1 || true
-  info "container path: $UNIT installed but DISABLED (the alternative)."
+  # An earlier install of this script left the unit startable, so a box being
+  # re-installed may be sitting in a crash loop right now — or parked in
+  # `failed` from one. Neither should survive into the new install.
+  systemctl reset-failed "$UNIT" >/dev/null 2>&1 || true
+  info "container path: $UNIT installed but DISABLED, and inert if started"
+  info "  by hand: it asserts a venv that only the systemd path builds."
+  info "  Control the agent with docker, not systemctl:"
+  info "    sudo docker compose -f $PREFIX/deploy/docker-compose.yml restart"
 
   say "Building the image"
   if docker compose -f "$PREFIX/deploy/docker-compose.yml" build 2>&1 | tail -3; then
@@ -426,10 +440,15 @@ if [ "$DEPLOY_PATH" = "docker" ]; then
   PREFLIGHT="sudo $COMPOSE run --rm gsu preflight --probe"
   START="sudo $COMPOSE up -d"
   LOGS="sudo $COMPOSE logs -f"
+  # Named explicitly because the wrong answer is the one people already know.
+  # `systemctl restart gsu` is the reflex on a Pi, and on this path it restarts
+  # nothing while looking like it should have.
+  RESTART="sudo $COMPOSE restart"
 else
   PREFLIGHT="sudo -u $SERVICE_USER $PREFIX/.venv/bin/python -m gsu preflight --probe"
   START="sudo systemctl start $UNIT"
   LOGS="journalctl -u $UNIT -f"
+  RESTART="sudo systemctl restart $UNIT"
 fi
 
 cat <<EOF
@@ -447,6 +466,9 @@ $(printf '\033[1m==> Installed (%s path). Three things left, in order:\033[0m' "
   3. Start it, then enrol it with a code from an admin:
        $START
        $LOGS
+
+     Afterwards, this is how you restart it on this path:
+       $RESTART
 
      The setup page is on 127.0.0.1:8088, so from your laptop:
        ssh -L 8088:127.0.0.1:8088 <this-box>

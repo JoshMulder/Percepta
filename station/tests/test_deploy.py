@@ -220,6 +220,28 @@ class UnitFileTests(unittest.TestCase):
         self.assertIn("Restart=always", self.unit)
         self.assertIn("StartLimitIntervalSec=0", self.unit)
 
+    def test_it_refuses_to_start_where_it_is_not_the_deployment_path(self):
+        # Restarting for ever is right on a remote site and dangerous on a
+        # container box, where this unit's interpreter does not exist: one
+        # `systemctl restart gsu` becomes an unbounded crash loop beside a
+        # healthy container. The assertion is what makes the two compatible.
+        assertion = re.search(r"AssertPathExists=(\S+)", self.directives)
+        self.assertIsNotNone(assertion, "the unit must assert its own venv")
+        exec_start = re.search(r"ExecStart=(\S+)", self.unit).group(1)
+        # Not merely present — asserting the wrong path would be worse than
+        # asserting nothing, because it would refuse on the systemd path too.
+        self.assertEqual(assertion.group(1), exec_start)
+
+    def test_a_failed_start_on_the_container_path_cannot_loop(self):
+        # Assert, not Condition: a condition skips quietly, and a station that
+        # does nothing when told to start hides the mistake instead of naming
+        # it. Neither triggers Restart=, which is the property that matters.
+        self.assertNotIn("ConditionPathExists=/opt/percepta/station/.venv",
+                         self.directives)
+        # And the installer must not leave a box that is already looping, or
+        # already failed from one, in that state across a re-install.
+        self.assertIn("systemctl reset-failed", self.install)
+
     def test_the_hardening_the_brief_asked_for_is_present(self):
         for directive in ("NoNewPrivileges=yes", "PrivateTmp=yes",
                           "ProtectSystem=strict", "User=gsu", "ProtectHome=yes",
