@@ -14,3 +14,53 @@ redis>=5.0
 
 # Development only: the offline schema tests read contract/schemas/ directly.
 jsonschema>=4.0    # tests
+
+# --------------------------------------------------------------------------
+# Optional, and only for a station with a real RTL-SDR airband receiver fitted.
+# Deliberately NOT installed by default — uncomment, or:
+#
+#   .venv/bin/pip install numpy
+#
+# numpy>=1.24
+#
+# Why it is optional rather than a dependency
+#
+# The receiver has to mix, filter and decimate 240 000 complex samples a second.
+# That is around six million multiply-accumulates per second in the cheapest
+# arrangement that works (gsu/radio/am.py explains the arithmetic), and CPython
+# is one to two orders of magnitude short of it. There is no version of this
+# that runs in pure Python, so the choice is numpy or no hardware receiver —
+# not numpy or a slower receiver.
+#
+# The cost, honestly
+#
+# On the Pi 5 (aarch64) there is nothing to think about: PyPI ships manylinux
+# aarch64 wheels and `pip install numpy` takes seconds.
+#
+# On the Pi 2B (ARMv7) there is. PyPI publishes no armv7l wheels for numpy. On
+# Raspberry Pi OS, pip is preconfigured to use piwheels, which has prebuilt ARM
+# wheels, so it still installs from a binary — but that is a property of that
+# image, not of pip, and on any other armhf base it falls back to building from
+# source: a BLAS toolchain and the better part of an hour. `apt install
+# python3-numpy` with a venv made `--system-site-packages` is the reliable route
+# there, the same shape of answer as picamera2 in gsu/camera/picsi.py.
+#
+# Why that does not spoil the property this file exists to protect
+#
+# The station still boots, enrols, senses and publishes with redis alone. numpy
+# is imported lazily and only by the RTL-SDR driver; a box without it reports
+# "numpy is not installed" against the radio slot and carries on, exactly as a
+# box with no dongle plugged in does. So the one-dependency guarantee holds for
+# every station that has not been fitted with a receiver, and the cost is paid
+# only where the capability is wanted.
+#
+# scipy is NOT needed and should not be added. Remote-Radio's DSP used
+# `scipy.signal.firwin` and `lfilter`; both are reimplemented in
+# gsu/radio/am.py, which is some thirty lines against a large compiled
+# dependency that has no armv7 story at all.
+#
+# The RTL-SDR driver also needs the librtlsdr shared library, which is not a pip
+# package: `sudo apt install librtlsdr0` (and `rtl-sdr` for the command-line
+# tools worth having when a dongle misbehaves). It is GPL-2.0 and deliberately
+# not vendored — see the licence note at the top of gsu/radio/rtl2832.py, which
+# is a decision for DECISIONS.md before this ships as an appliance image.

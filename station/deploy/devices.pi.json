@@ -9,14 +9,17 @@
     "camera that has failed and a camera that was never fitted look identical",
     "in a database and completely different at the site.",
     "",
-    "One of the four devices below has no driver in this build. That is",
-    "deliberate and is reported as 'not supported by this software build' —",
-    "its telemetry stream is published as available:false with that reason,",
-    "on the normal cadence, rather than being faked or going quiet.",
+    "All four devices below have a driver in this build. Where a slot cannot",
+    "yet produce readings it says why on its own telemetry stream, published",
+    "as available:false on the normal cadence rather than faked or gone quiet.",
     "",
     "The serial ports are EMPTY and have to be set on the setup page, because",
     "only the box knows its own /dev/serial/by-id/ names. Anything else would",
-    "be a guess that works until the first reboot swaps the two adapters over."
+    "be a guess that works until the first reboot swaps the two adapters over.",
+    "",
+    "The radio's tuner allocation is EMPTY for the same reason: a dongle is",
+    "claimed by serial number, one band at a time, and only the box knows the",
+    "serial of the one plugged into it. Assign it on the setup page."
   ],
 
   "fitted": {
@@ -43,7 +46,7 @@
     },
 
     "radio": {
-      "_comment": "RTL2838 on airband. No driver in this build: the radio stream reports available:false with 'not supported by this software build'. Selected anyway so the platform and the console can see that the hardware is fitted and what is missing is software.",
+      "_comment": "RTL2838 on airband, driven by gsu/radio/rtlsdr.py. Demodulates on the station: audio goes up only while the squelch is open and IQ never leaves the site, which is the point on a metered link. Needs numpy and librtlsdr0 installed (see requirements.txt) and needs its tuner ASSIGNED on the setup page - resource is null here because only the box knows its dongle's serial. Gain is fixed at 37.2 dB and not auto: the tuner AGC desenses near strong transmitters, and every squelch threshold in this receiver is an absolute level. ppm 0 is a starting guess - this tuner can come up mis-programmed by hundreds of ppm with no error reported, so a channel that is silent after a restart wants a power-cycle before it wants a number here.",
       "type_id": "rtlsdr-airband",
       "params": {
         "gain": 37.2,

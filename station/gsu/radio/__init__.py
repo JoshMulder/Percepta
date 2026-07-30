@@ -1,5 +1,16 @@
 """The airband receiver: measurement, the squelch gate, and the audio uplink.
 
+Two front ends, one controller. `simulated.SimulatedFrontEnd` synthesises a
+spectrum; `rtlsdr.RtlSdrFrontEnd` drives a real RTL2832U through `rtl2832.py`
+and demodulates it with `am.py`. Everything that decides whether anyone *hears*
+anything is in `receiver.RadioController`, above both of them, so the gate
+cannot behave one way on the bench and another in the field.
+
+**Demodulation happens here, at the station.** Audio goes up; IQ does not. A
+240 ksps IQ stream is around 4 Mbit/s and the audio it reduces to is 384 kbit/s
+before compression and nothing at all while the squelch is shut. On a metered
+satellite link that is not an optimisation, it is the design.
+
 Three things in here are load-bearing rather than incidental:
 
 **The noise floor is measured outside the channel** (`contract/README.md` rule
