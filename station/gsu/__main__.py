@@ -189,6 +189,76 @@ def _camera(agent, frames: int, size: str | None, out: str | None) -> int:
     return 0
 
 
+def _adsb(agent, seconds: float, out: str | None) -> int:
+    """Dump decoded contacts, every field, exactly as they would be published.
+
+    The point of this command is the *nulls*. A receiver on a bench with one
+    aircraft overhead will populate almost everything; a field that comes back
+    null here is either a validity flag the transmitting aircraft left clear or
+    a field this station cannot source, and the difference is what somebody
+    standing next to the hardware needs to see. So it prints the payload
+    verbatim rather than a tidied summary, and states the correction's status
+    alongside — a null `altitude_corrected_m` on every line has four possible
+    causes and only one of them is about the aircraft.
+    """
+    import json
+
+    if _refuse_while_the_service_runs(agent, "gsu adsb"):
+        return 1
+    if agent.adsb is None:
+        print("\nNo ADS-B receiver fitted, so there is nothing to decode.\n")
+        agent.shutdown()
+        return 1
+
+    print(f"\nListening for {max(1.0, seconds):.0f} s...")
+    deadline = time.monotonic() + max(1.0, seconds)
+    contacts: list = []
+    while time.monotonic() < deadline:
+        # The whole tick, not just the receiver: the barometer reaches the
+        # correction through the weather slot, and polling the receiver alone
+        # would report the correction as idle on a station where it works.
+        agent.step(1.0, weather_due=True)
+        contacts = agent.adsb.poll(1.0) or contacts
+        time.sleep(0.5)
+
+    # Everything below is reported *after* listening. A receiver that has been
+    # constructed and not yet read from reports itself absent, and a header
+    # printed up front would say so on a station that is working perfectly.
+    print(f"\n{agent.adsb.describe().detail}")
+    correction = agent.baro.state()
+    print(
+        "  altitude correction: "
+        + ("active" if correction["active"]
+           else f"idle — {correction['reason']}")
+    )
+    if correction["active"]:
+        print(
+            f"    {correction['station_pressure_hpa']} hPa measured at "
+            f"{correction['station_elevation_m']} m -> "
+            f"{correction['sea_level_pressure_hpa']} hPa at sea level"
+        )
+    print()
+
+    payloads = [contact.to_payload() for contact in contacts]
+    for payload in payloads:
+        print(json.dumps(payload, sort_keys=True))
+    print(f"\n  {len(payloads)} contact(s) with a decoded position.")
+    if agent.adsb.positionless:
+        print(
+            f"  {agent.adsb.positionless} heard without one, not published — "
+            "range and bearing are required and cannot be invented."
+        )
+    for line in agent.adsb.raw_sample():
+        print(f"  {line}")
+    if out:
+        with open(out, "w") as handle:
+            json.dump(payloads, handle, indent=2, sort_keys=True)
+        print(f"  written to {out}")
+    print()
+    agent.shutdown()
+    return 0
+
+
 def _stream(agent, config: AgentConfig, seconds: float, out: str | None,
             size: str | None, fps: float | None, bitrate: int | None) -> int:
     """Run the live encoder for a few seconds and say exactly what it produced.
@@ -738,16 +808,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("command", nargs="?", default="run",
                         choices=["run", "preflight", "enrol", "status", "whoami",
                                  "devices", "bench", "camera", "radio", "stream",
-                                 "setup-password"])
+                                 "adsb", "setup-password"])
     parser.add_argument("--token", help="enrolment code, as issued (XXXX-XXXX-XXXX)")
     parser.add_argument("--probe", action="store_true",
                         help="preflight: open a TLS connection to the platform and "
                              "the broker and verify their certificates. Sends no "
                              "credential and no token.")
     parser.add_argument("--seconds", type=float, default=20.0,
-                        help="stream: how long to encode for")
+                        help="stream: how long to encode for. adsb: how long to "
+                             "listen before dumping the contact table")
     parser.add_argument("--out", help="stream: where to write the fragmented MP4 "
-                                      "(default /dev/shm/gsu-stream.mp4)")
+                                      "(default /dev/shm/gsu-stream.mp4). "
+                                      "adsb: where to write the contacts as JSON")
     parser.add_argument("--size", help="stream/camera: WxH, e.g. 1920x1080")
     parser.add_argument("--fps", type=float, help="stream: frames per second")
     parser.add_argument("--bitrate", type=int, help="stream: kbit/s target")
@@ -821,6 +893,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "camera":
         return _camera(agent, args.frames, args.size, args.out)
+
+    if args.command == "adsb":
+        return _adsb(agent, args.seconds, args.out)
 
     if args.command == "radio":
         return _radio(agent, args.freq, args.seconds, args.out,

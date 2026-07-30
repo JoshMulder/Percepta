@@ -18,7 +18,9 @@ is sometimes `hvc1.…`, and a browser that cannot decode HEVC shows black
 without raising anything. 17 is that this station no longer publishes
 `gsu/{station_id}/video` at all. 18 is not a question but a decision already
 taken and built on both sides: position is set on the station, and the platform
-has stopped offering the field.
+has stopped offering the field. **19 needs no schema change**: it records the
+two ADS-B datapoints the aircraft object cannot hold, now that it carries
+everything else the receiver reports.
 
 **The whole camera path closed in one pass**: 7 (the camera had nowhere to send
 anything), 12 (the broker refused the video channel), 13 (on-demand needed a
@@ -1106,3 +1108,79 @@ for the platform."* A health frame carrying `position` was validated against
 `telemetry.schema.json` as it stands and passes — checked, not assumed. Adding
 `position` to `properties` therefore documents a field that already conforms.
 It is not a breaking change and nothing has to land on both sides at once.
+
+## 19. Two ADS-B datapoints the aircraft object cannot hold as it stands
+
+The aircraft object now carries everything the receiver reports, which was the
+owner's instruction and is implemented: emitter type, squawk, altitude datum,
+vertical speed, `tslc`, the simulated flag and the source band all reach the
+wire, and each honours its validity flag as a null rather than a zero. Two
+things did not fit, and both are small.
+
+### `on_ground` is answerable for three emitter types and no others
+
+`ADSB_VEHICLE` has **no airborne/surface status field**. There is no bit in the
+message for it. The only ground evidence it carries is `ADSB_EMITTER_TYPE`: 17
+(emergency surface vehicle), 18 (service surface vehicle) and 19 (point
+obstacle) are surface categories by definition, and the station reports `true`
+for those.
+
+Every other contact reports `null`, and will keep reporting `null`. The
+alternative is to infer it — "the altitude is above the station, so it is
+airborne" — and the contact that inference gets wrong is an aircraft holding on
+a taxiway at an aerodrome below the station, which is the one contact where
+being on the ground is the interesting fact. So it is not inferred.
+
+Nothing needs to change in the schema; `boolean | null` is already the right
+type and the description already says "Null when unknown". This is a note that
+**a console rendering a ground/air indicator from this field will see null for
+essentially all traffic from a MAVLink receiver**, and should render "unknown"
+rather than "airborne". It is declared in `devices/registry.py` as an `absent`
+field for that entry so it also arrives in `unsourced_fields`.
+
+A dump1090/SBS receiver is the other way round: SBS output has a real on-ground
+flag and no emitter category. If that driver is ever written, the same station
+will source the two fields from opposite ends.
+
+### `ADSB_FLAGS_BARO_VALID` has nowhere to go
+
+The receiver sends a ninth validity flag, `ADSB_FLAGS_BARO_VALID` (256), which
+is a second and independent statement about the altitude alongside
+`altitude_type`. It is decoded (`mavlink.AdsbVehicle.baro_valid`) and reaches
+the setup page's datastream line, and stops there — the contract has no field
+for it.
+
+It is not obviously worth one. `altitude_type: "pressure"` is what the
+correction is gated on, per the schema's own wording, and that is the right
+gate. But it is the single datapoint the receiver provides that the station
+still drops on the floor, and "all datapoints provided" was the instruction, so
+it is recorded here rather than silently discarded.
+
+If it is wanted:
+
+```jsonc
+{ "baro_valid": true }   // proposed: the receiver's own confidence in the
+                         // barometric altitude, distinct from its datum
+```
+
+### A naming trap worth writing down
+
+MAVLink names `ADSB_ALTITUDE_TYPE` entry 0 `ADSB_ALTITUDE_TYPE_PRESSURE_QNH`,
+and its description says "using QNH reference". That is a misnomer in the
+message definition. ADS-B airborne position messages carry barometric altitude
+against the **standard 1013.25 hPa datum** (DO-260B), not against a local QNH.
+The schema's own wording — *"`pressure` is referenced to 1013.25 hPa"* — is the
+correct one, and the station's correction works from 1013.25 accordingly.
+Anyone reading the MAVLink XML and concluding the altitude is already
+QNH-referenced would conclude there is nothing to correct.
+
+### And one field the receiver does not provide at all
+
+`altitude_corrected_m` is not a receiver datapoint. It is computed on the
+station from the Airmar's barometer and the station's configured elevation
+(`gsu/devices/altitude.py`), is off unless site configuration switches it on,
+and is null whenever the station cannot compute it honestly — no barometer, a
+reading older than five minutes, an unset elevation, or an altitude that is
+already geometric. Which of those applies is reported in the health frame as
+`adsb_altitude_correction`, because a null on every contact otherwise has four
+indistinguishable causes.

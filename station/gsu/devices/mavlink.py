@@ -27,6 +27,18 @@ vehicle with the coordinates flag clear, and the contract has nullable
 `latitude`/`longitude` for exactly that. Emitting a zero there would place the
 aircraft in the Gulf of Guinea; emitting a stale one is worse, because it looks
 right.
+
+The same rule reaches the fields that are not numbers. A squawk of 0000 is a
+code an aircraft can actually be assigned; "the receiver did not report a
+squawk" is not. Both become the integer zero if the flag is ignored, and the
+console cannot tell them apart afterwards, so an unflagged squawk is None here
+and null on the wire. Callsign, heading, velocity and vertical velocity are the
+same argument with different units.
+
+**Everything in the message is decoded**, not merely the fields that had a home
+when this was written: emitter type, altitude datum, time since last contact,
+the simulated and UAT-source flags. A datapoint the receiver paid for and the
+station threw away is a datapoint nobody knows is missing.
 """
 
 from __future__ import annotations
@@ -57,6 +69,29 @@ FLAG_SIMULATED = 64
 FLAG_VERTICAL_VELOCITY_VALID = 128
 FLAG_BARO_VALID = 256
 FLAG_SOURCE_UAT = 32768
+
+#: `ADSB_ALTITUDE_TYPE`. Two entries and no invalid sentinel, so anything else
+#: is a receiver saying something this build does not understand, and is
+#: reported as "did not say" rather than guessed at.
+#:
+#: MAVLink names entry 0 `PRESSURE_QNH`, which is a misnomer worth knowing
+#: about: ADS-B airborne position messages carry barometric altitude referenced
+#: to the standard 1013.25 hPa datum (DO-260B), not to a local QNH. The
+#: contract calls it `pressure` for that reason, and `devices/altitude.py`
+#: corrects from 1013.25 accordingly.
+ALTITUDE_TYPE_PRESSURE = 0
+ALTITUDE_TYPE_GEOMETRIC = 1
+ALTITUDE_TYPES = {ALTITUDE_TYPE_PRESSURE: "pressure", ALTITUDE_TYPE_GEOMETRIC: "geometric"}
+
+#: `ADSB_EMITTER_TYPE` values that are, by their own definition, on the
+#: surface: two classes of airport ground vehicle and a fixed obstacle.
+#:
+#: This is the *only* on-ground evidence `ADSB_VEHICLE` carries. The message has
+#: no airborne/surface status field, so every other emitter type yields `None`
+#: - unknown - and never `False`. Inferring "airborne" from a non-zero altitude
+#: would be an invention, and an aircraft holding on a taxiway would be the case
+#: it got wrong.
+SURFACE_EMITTER_TYPES = frozenset({17, 18, 19})
 
 #: The `invalid=` sentinels the message definition carries per field.
 INVALID_I32 = 0x7FFFFFFF
@@ -111,7 +146,34 @@ class AdsbVehicle:
     squawk: int | None
     tslc_s: int
     simulated: bool
-    altitude_is_barometric: bool
+
+    #: `pressure` | `geometric` | None. Which datum `altitude_m` is in, and
+    #: therefore whether it can be corrected against the station's barometer.
+    altitude_type: str | None = None
+
+    #: `ADSB_EMITTER_TYPE`, unmapped. 0 is a real value meaning "no
+    #: information", which is why this is not nullable: the receiver always
+    #: sends a byte, and naming it is a display decision made elsewhere.
+    emitter_type: int = 0
+
+    #: True only for the surface emitter categories; None everywhere else,
+    #: because the message carries no airborne/surface bit. Never False.
+    on_ground: bool | None = None
+
+    #: `adsb` (1090ES) or `uat` (978 MHz), from `ADSB_FLAGS_SOURCE_UAT`. The
+    #: flag names one band, so its absence names the other.
+    source: str = "adsb"
+
+    #: `ADSB_FLAGS_BARO_VALID`. Decoded because the receiver sends it, and it
+    #: is a second, independent statement about the altitude alongside
+    #: `altitude_type`. **The contract has no field for it** - see the report
+    #: in CONTRACT-QUESTIONS.md - so it reaches the setup page's datastream
+    #: line and nothing else today.
+    baro_valid: bool = False
+
+    #: The raw `flags` word. Kept so a decode can be argued about against a
+    #: capture without re-deriving which bits were set.
+    flags: int = 0
 
 
 def decode_adsb_vehicle(payload: bytes) -> AdsbVehicle:
@@ -121,7 +183,7 @@ def decode_adsb_vehicle(payload: bytes) -> AdsbVehicle:
         payload = payload + bytes(ADSB_VEHICLE_LEN - len(payload))
     (
         icao, lat_e7, lon_e7, altitude_mm, heading_cdeg, hor_cms, ver_cms,
-        flags, squawk, altitude_type, callsign_raw, _emitter_type, tslc,
+        flags, squawk, altitude_type_raw, callsign_raw, emitter_type, tslc,
     ) = struct.unpack("<IiiiHHhHHB9sBB", payload[:ADSB_VEHICLE_LEN])
 
     valid_coords = bool(flags & FLAG_VALID_COORDS)
@@ -158,6 +220,13 @@ def decode_adsb_vehicle(payload: bytes) -> AdsbVehicle:
         text = callsign_raw.split(b"\x00", 1)[0].decode("ascii", "ignore").strip()
         callsign = text or None
 
+    # The datum is only a fact about an altitude that exists. Reporting
+    # "pressure" for a contact whose altitude flag is clear would offer the
+    # correction machinery something to bite on that is not there.
+    altitude_type = (
+        ALTITUDE_TYPES.get(altitude_type_raw) if altitude_m is not None else None
+    )
+
     return AdsbVehicle(
         icao=f"{icao & 0xFFFFFF:06X}",
         latitude=latitude,
@@ -170,7 +239,12 @@ def decode_adsb_vehicle(payload: bytes) -> AdsbVehicle:
         squawk=squawk if valid_squawk else None,
         tslc_s=tslc,
         simulated=bool(flags & FLAG_SIMULATED),
-        altitude_is_barometric=altitude_type == 0,
+        altitude_type=altitude_type,
+        emitter_type=emitter_type,
+        on_ground=True if emitter_type in SURFACE_EMITTER_TYPES else None,
+        source="uat" if flags & FLAG_SOURCE_UAT else "adsb",
+        baro_valid=bool(flags & FLAG_BARO_VALID),
+        flags=flags,
     )
 
 

@@ -323,6 +323,17 @@ class SiteConfig:
     alert_range_km: float = 12.0
     alert_altitude_m: float = 1500.0
 
+    #: Publish `altitude_corrected_m` beside every pressure altitude, computed
+    #: from the station's own barometer (`devices/altitude.py`).
+    #:
+    #: **Off by default, and an opt-in rather than a default-on with an escape
+    #: hatch.** It applies one sensor's reading to another sensor's data, and it
+    #: needs `elevation_m` to be right as well as the barometer — three
+    #: assumptions an operator should accept deliberately. Switched on without a
+    #: working barometer or without an elevation it publishes nulls and says why
+    #: in health telemetry; it never falls back to an approximation.
+    adsb_baro_correction: bool = False
+
     low_battery_pct: float = 20.0
     critical_battery_pct: float = 10.0
     #: Duty cycling: the floodlight is the first load shed, and it is shed by
