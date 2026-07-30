@@ -154,7 +154,8 @@ gsu/
                  the H.264 encoders — hardware and software, probed not assumed
   media/         fragmented MP4, muxed here, and a WebSocket client written out
                  rather than depended on
-  video.py       snapshots: one complete JPEG at a low rate, on its own thread
+  video.py       the setup page's camera preview: one frame, on demand, and
+                 published nowhere at all
   stream.py      the live H.264 stream, which runs only while somebody is
                  watching and stops when the platform stops asking
   sensors/       interfaces, and simulated implementations behind them
@@ -183,33 +184,41 @@ GSU_BROKER_URL=redis://127.0.0.1:6380/0 .venv/bin/python -m gsu run
 .venv/bin/python -m gsu preflight  # everything that must be true before it works
 .venv/bin/python -m gsu devices    # what is fitted, and what was found
 .venv/bin/python -m gsu bench      # what a tick costs — run this on the Pi
-.venv/bin/python -m gsu camera     # one snapshot, and what it costs on the link
+.venv/bin/python -m gsu camera     # take a few frames, and what each one costs
 .venv/bin/python -m gsu stream --seconds 30   # run the H.264 encoder, measure it
 .venv/bin/python -m unittest discover -s tests -t . -q
 ```
 
-## Video, which is two different things
+## Video, which is one thing and one owner
 
-**Snapshots** — `gsu/{station_id}/video`, one complete JPEG per message, 640x480
-at 2 fps by default. Cheap enough to leave running, survives a link too poor for
-anything else, and it is what a console shows when nobody is watching live. A
-station with no camera publishes `available: false` with a reason rather than
-going quiet.
-
-**The live stream** — H.264 1080p30, an order of magnitude more expensive, and
-therefore **off until the platform asks**. `video.start` carries a lease and the
+**The live stream is the only video this station sends.** H.264 or HEVC,
+1080p30, and **off until the platform asks**. `video.start` carries a lease and the
 stream stops when the platform stops renewing it, because the failure to design
 for is a console closing while the station keeps paying for a picture nobody can
 see. Which encoder does the work — a hardware block or x264 on the CPU — is
 probed at start-up and reported in telemetry, so moving between boards is a
 setting rather than a rewrite.
 
-Both halves are live and verified against the running platform: snapshots on
-`gsu/{station_id}/video`, and the stream as **fragmented MP4 over a WebSocket**
-to `wss://…/media/ingest`, authenticated with the same credential as the broker
-and opened only while streaming. The station muxes the fMP4 itself, so all three
-encoders — hardware, software and synthetic — produce identical container
-output. Measured at 1080p30: 459 fragments, none dropped (HARDWARE.md §9).
+It is verified against the running platform as **fragmented MP4 over a
+WebSocket** to `wss://…/media/ingest`, authenticated with the same credential as
+the broker and opened only while streaming. The station muxes the fMP4 itself,
+so all three encoders — hardware, software and synthetic — produce identical
+container output. Measured at 1080p30: 459 fragments, none dropped
+(HARDWARE.md §9).
+
+**There used to be a second half: a snapshot channel on
+`gsu/{station_id}/video`, one JPEG at 2 fps.** It is gone. Two readers of one
+CSI sensor was the cause of a camera wedge that survived four fixes, and
+removing one reader deletes the class of bug rather than narrowing it —
+DECISIONS.md item 45 for the reasoning, CONTRACT-QUESTIONS.md item 17 for what
+the platform stops receiving. The setup page keeps a preview, taken on demand
+while somebody is looking and sent nowhere.
+
+**Who owns the camera is now an explicit, reported thing.**
+`gsu/camera/ownership.py` hands the sensor to one named holder at a time, and
+`video.sensor` in the health frame says who has it. A camera that is *busy* and
+a camera that is *broken* had looked identical from the platform for the whole
+life of that bug.
 
 `gsu camera` and `gsu stream` need no platform, no network and no enrolment,
 which is the point of them: they are how the first person with a Pi finds out

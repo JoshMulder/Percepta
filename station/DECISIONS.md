@@ -958,3 +958,148 @@ wire — `$defs/light` carries no such field and this station does not invent
 schema; CONTRACT-QUESTIONS.md item 15 proposes `measured_a` and
 `state_source`. Until adopted the amps travel in the device detail of the
 health frame, the light tab's datastream line, and the local event log.
+
+## 45. One owner for the sensor, stated and enforced — and one reader removed
+
+The camera wedge outlived four fixes. Each was correct about the case it named:
+a lock over the driver's open/capture/close; a relinquishing `close()` before
+the stream starts; a terminal `retire()` so a replaced driver never reopens; a
+2.5-second drain to outlast an in-flight capture. The Pi 2B still came up with
+`Camera in Acquired state trying acquire()`, a 38-second stream delivering zero
+frames, and no recovery short of a reboot.
+
+The reason they could not converge is that **none of them was a statement of
+who owns the sensor.** They were an accumulating set of places that tried to be
+polite about a shared device, and politeness has no closure property: every fix
+narrowed one window and left the next one to be discovered on hardware.
+
+Three changes, in the order they matter.
+
+**The snapshot channel is gone, and that is the fix rather than a
+simplification made alongside it.** Two readers of one sensor was the whole
+source of contention; removing one deletes the class of bug instead of
+narrowing it. It also removes a diagnostic ambiguity the owner named directly —
+*"so i can tell what is camera not working rather than actually just
+snapshots"* — because a black console had two indistinguishable causes and now
+has one. What the platform stops receiving is written up in
+CONTRACT-QUESTIONS.md item 17. The setup page keeps its preview, sourced on
+demand: `/status.json` is the signal that somebody is looking, and a station
+with nobody on the setup page opens its camera **exactly never**, which leaves
+the live stream as the sole consumer on an unattended box.
+
+**There is no libcamera inside this process any more.** `picamera2` existed for
+one reason — a subprocess per frame could not sustain 2 fps on a Pi 2B — and
+that reason left with the channel. It was also the only thing that could
+produce the reported error: `Camera in Acquired state trying acquire()` comes
+from `libcamera::Camera::acquire`, and only a process that already holds the
+camera in its own `CameraManager` can reach it. The leak had a specific,
+reachable path that no amount of `close()`/`retire()` discipline could cover:
+`Picamera2()` acquires in its constructor, and a `configure()` or `start()`
+that raised afterwards dropped the half-built object with the acquisition still
+in it and `self._camera` still `None` — nothing to close, nothing referencing
+it, unrecoverable for the life of the run. Worse, the driver's own handler read
+that *permanent* failure as "the camera is merely busy" and retried it every
+five seconds for ever. Deleting the backend makes the error unreachable by
+construction; a subprocess per frame is entirely affordable at one frame when a
+human looks.
+
+**Ownership is a lease with a token** (`gsu/camera/ownership.py`). Named, so
+telemetry and the setup page can say *who* has the camera — `video.sensor` in
+the health frame, which is the question all four previous fixes were circling
+and none could answer. Token-based, not a flag, because the failure that
+started this was a driver instance nobody referenced any more still acting on a
+sensor its replacement had been given: under a boolean, that instance's release
+frees its successor's hold and the two run concurrently, which is the bug
+wearing the fix as a disguise. A stale token's release is refused and logged.
+The 2.5-second drain is gone with it — waiting on the lease waits exactly as
+long as the holder takes and no time at all in the normal case.
+
+Two holes the lease is structurally unable to close, both closed elsewhere and
+both worth naming because they are the ones that survive a service restart:
+
+- **A second process.** `gsu camera` or `gsu stream` while the service is up is
+  two programs opening one ribbon with nothing in between. The lease is
+  in-process state and cannot see it. Those commands now take the station's
+  file lock and refuse with the fix in the message.
+- **An orphaned encoder.** `_pump` respawns `rpicam-vid` itself after a lost
+  acquisition race, and there was a window between the retry wait returning and
+  the `Popen` after it. A `stop()` landing inside it reaped the old process and
+  the pump then created a new `--timeout 0` encoder that nothing referenced and
+  nothing would ever kill — reparented to init, outside the service's control
+  group, holding the camera across restarts. Spawning is now atomic against
+  stopping. This is the only mechanism found that explains "it did not clear on
+  a service restart", and it is the one a purely in-process model would have
+  missed.
+
+What is deliberately *not* claimed: `retire()` is kept, but it is no longer
+load-bearing — there is no lazily-reopened handle left to leak, and it now only
+stops an already-dispatched capture from spending a lease its successor is
+waiting for. Keeping it costs a flag and closes a small window; removing it
+would have been a third change to the same code in a week.
+
+## 46. The stream's facts are read from the stream, per stream
+
+Three numbers describing the live video — codec, frame rate, picture size —
+were each taken from somewhere other than the bitstream, and each went stale
+independently. All three were measured wrong on one bench camera in one
+evening, and all three fail *silently*: ffmpeg copies happily, MSE accepts the
+source buffer, and what an operator sees is a degraded picture, which is what a
+failing camera looks like.
+
+- **Codec.** `RtspCamera._codec` was probed once and cached for the life of the
+  driver. A camera whose encoder is changed in its own web UI — a checkbox, and
+  it happened twice — leaves the station announcing `hvc1.1.6.L153.a0` over
+  H.264 bytes, with H.265 NAL rules applied to them.
+- **Frame rate.** `StreamSession.settings()` runs *before* `_build_source()`,
+  and it read `camera.stream_fps` — which at that moment still held the value
+  seeded from a stored `fps` param, because the probe that corrects it runs
+  inside `stream_source()`. A stored 30 against a camera sending 25 clocked the
+  muxer 20% fast: the timeline advanced faster than frames arrived, which is
+  stutter and catch-up. Only on the first stream after a restart, because every
+  later one reused the cached probe — which is what made it look intermittent.
+- **Dimensions.** The H.264 sample entry took its size from the station's
+  configured resolution. Under a 1080p site policy in front of a 4K camera that
+  writes 1920x1080 into a container carrying 3840x2160 pictures. HEVC had been
+  fixed to read its SPS and H.264 was explicitly flagged and left.
+
+The rule now: **nothing about a stream may be cached across streams or seeded
+from stored configuration.** The probe is redone on every `video.start`; the
+rate travels on the *source* and reaches the muxer directly, so the clock
+cannot be built before the source is known; and both codecs read their picture
+size out of the sequence parameter set. `settings()` is now what its name says
+— instructions to an encoder, which a remux path has none of — rather than a
+description of a stream.
+
+The stale `fps` param got a structural answer rather than a migration.
+`Inventory._instantiate` filters stored params by **constructor signature**,
+not by what the registry declares, so a field removed from the registry goes on
+being honoured for as long as the driver will accept it. Removing the argument
+is what actually retires the setting: a field that cannot be passed cannot be
+stale.
+
+And the probe is no longer trusted, only *checked*. `sniff_codec` reads the
+codec off the NAL headers, consulting no configuration, and a session whose
+bytes disagree with its container is stopped with a reason rather than streamed
+as something that says one thing and carries another. That is what makes "hvc1
+announced for H.264 bytes" impossible by construction rather than by
+remembering to invalidate a cache — and it is also the mid-stream detector: a
+codec changed underneath a running session is caught at the next keyframe.
+
+Two things it deliberately does not do. It reads **only parameter sets**: slice
+headers alias badly between the codecs — H.264's non-IDR `0x41` and IDR `0x45`
+read as HEVC types 32 and 34, VPS and PPS — and the first version of the
+function did exactly that and declared every H.264 stream to be H.265 on its
+second frame. The unit suite caught it before the hardware did. And it
+**restarts rather than re-negotiates**: the muxer's clock, its parameter sets
+and the platform's init segment all belong to the old codec, and the platform's
+viewer cannot swap a `MediaSource` codec mid-session either.
+
+Not built, and recorded rather than quietly skipped: **composition time
+offsets**. The muxer writes a flat presentation timeline and this was the
+standing first suspect for the stutter. It was measured and ruled out — the
+bench camera reports `has_b_frames=0` and delivered 21 I and 328 P frames over
+five seconds. The gap is real and remains unreachable from any hardware in
+front of us: rpicam-vid and the synthetic source emit no B-frames by
+construction, this camera emits none by configuration. Building a fix with no
+failing case to prove it is how the flat timeline came to be written in the
+first place.

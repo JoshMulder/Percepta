@@ -277,14 +277,14 @@ survived contact with hardware is itself information.
 | The NMEA decoder | **Fed by a real Airmar 110WX**, publishing real weather. MAVLink remains synthetic-only |
 | The serial layer beneath them (`serialio.py`) | **Has opened a real UART** — the Airmar's — and runs it continuously |
 | RTL-SDR airband | No driver. Reports `not supported by this software build` |
-| Pi camera, snapshots (`camera/picsi.py`) | **Run against the real ov5647.** The picamera2 path carries the live 2 fps snapshot channel; the same path also ran inside the camera container |
+| Pi camera, stills (`camera/picsi.py`) | **Was run against the real ov5647 via picamera2** — that backend has since been removed, and the driver now captures through `rpicam-jpeg`. The subprocess path *has* run on this hardware (it was the fallback all along) but has never been the production path, and the preview's on-demand cadence has not been exercised on a real sensor. **Re-verify on the Pi 2B**; DECISIONS.md item 45 says why the change was made anyway |
 | Pi camera, H.264 (`camera/h264.py`) | **Run against the hardware encoder.** The Pi 2B presents `/dev/video11`; `GSU_ENCODER=auto` chose it; 804 KB of 1080p30 H.264 in a 3-second test |
 | The synthetic camera and its JPEG encoder | Run continuously. Output decoded with libjpeg (Pillow 12.3) and checked pixel for pixel |
 | The synthetic H.264 source | Run. Output decoded with ffmpeg 7.0.2 at 640×480 and 1920×1080, no errors, picture correct |
-| The on-demand stream logic | Run end to end against the synthetic encoder **and against `rpicam-vid` on the real camera**, including the sensor handover the synthetic rig could never show (the fixes are pinned in `tests/test_video.py`, `StartupContentionTests`) |
+| The on-demand stream logic | Run end to end against the synthetic encoder **and against `rpicam-vid` on the real camera**, including the sensor handover the synthetic rig could never show. The handover has since been rebuilt on an explicit lease (`camera/ownership.py`) and **that rebuild has not met hardware** — it is pinned by `tests/test_ownership.py` and `tests/test_video.py` only |
 | The stream uplink to the platform | Verified against the running platform with the synthetic source (1080p30, 459 fragments, none dropped) and **from the real station with the real encoder: live stream end to end in a real browser, 208 fragments, `avc1.640028`.** Never over a real satellite link |
-| The camera stack in a container | **Built (271 MB) and run on the Pi.** It enumerates the ov5647 and captures snapshots under exactly the overlay's constraints — and `rpicam-vid` takes a bus error in the encoder path (Debian armhf userland against a Raspbian host) and dies before one frame. Camera stations therefore run systemd; DEPLOYMENT.md §3 has the account and the route past it |
-| `picamera2` vs `rpicam-jpeg` | Decided, reported, and now **measured**: picamera2 is the path in production on both host and container. The driver still states which path it took and why |
+| The camera stack in a container | **Built (271 MB) and run on the Pi.** It enumerates the ov5647 and captured stills *via picamera2* under exactly the overlay's constraints — and `rpicam-vid` takes a bus error in the encoder path (Debian armhf userland against a Raspbian host) and dies before one frame. Now that capture is `rpicam-jpeg`, whether the container has any working camera at all is **open**: the bus error was in the encoder path, which a still does not use, but nobody has run it. `deploy/Dockerfile.camera` carries the one command that settles it. Camera stations run systemd regardless; DEPLOYMENT.md §3 has the account |
+| `picamera2` vs `rpicam-jpeg` | **Settled by removing the choice.** picamera2 was the only thing putting a libcamera `CameraManager` inside the agent's process, which is the only way to reach `Camera in Acquired state trying acquire()` — unrecoverable for the life of a run. There is one capture path and it is a subprocess |
 | The systemd unit | **Runs the live station** — after its `DeviceAllow` list gained `char-video4linux`, `char-media` and `char-dma_heap`, the three entries libcamera actually opens. An allow-list with the camera missing reads as "no cameras available" from a service whose own user can see the camera from a shell |
 | `install.sh` | **Run end to end on the Pi.** It surfaced the uid mismatch between the host account and the image, now pinned to one number (10001) on both paths |
 | ARMv7 itself | **The whole station runs on it** |
@@ -333,14 +333,18 @@ An `available: false` frame is about 90 bytes and is rate-limited to 1 Hz, so a
 station with no camera costs **0.7 kbit/s** to keep saying so. That is the price
 of not going quiet, and it is the right price.
 
-**The Pi now runs this, and the prediction that mattered held.** The table
-above remains x86 numbers for the *synthetic* encoder — but the real station
-does not use that path at all, exactly as predicted: picamera2 produces the
-JPEG in hardware and the station only base64-encodes it, and the live 2 fps
-channel runs on the Pi 2B without the CPU cost the synthetic arithmetic
-feared. The station's own measured figures are in every health frame
-(`health.video.bytes_per_frame`, `bitrate_bps`), which is the number to plan
-any further site with.
+**Superseded: there is no snapshot channel to cost.** The periodic JPEG
+channel was removed (CONTRACT-QUESTIONS.md item 17), so a station's standing
+video cost is now zero until somebody starts a live stream. The arithmetic
+above is kept because it is the reason the channel was affordable in the first
+place, and because it is what to redo if a `video.snapshot` command is ever
+built.
+
+The `available: false` figure above is also superseded: nothing is published on
+that channel at all now, not even the statement. A camera that is absent or
+busy is reported in the health frame's device inventory and in
+`health.video.sensor`, which cost nothing extra because that frame was already
+being sent.
 
 ---
 

@@ -1,37 +1,56 @@
-"""Publishing video, which is the heaviest thing this station will ever send.
+"""The setup page's camera preview — and no snapshot channel at all any more.
 
-`gsu/{station_id}/video`, one complete JPEG per message, per
-`contract/schemas/video.schema.json`. Four decisions are worth having in one
-place, because each of them is a rule the rest of the code assumes.
+This file used to be `VideoPublisher`: a thread capturing a JPEG twice a second
+for ever and publishing it to `gsu/{station_id}/video`. That channel is gone.
+It is worth being precise about why, because it was removed as a *fix*, not as
+a feature cut.
 
-**It runs on its own thread, not in the sensing tick.** A capture can take a
-second — a subprocess start, a camera open, auto-exposure settling — and the
-sensing loop has a squelch to run at 1 Hz. Video is also the one stream whose
-cadence is not a multiple of the tick, so it would need its own clock even if
-capture were instant.
+**Two readers of one sensor was the whole bug.** The CSI camera is a single
+device with a single owner. The snapshot loop and the live encoder were both
+trying to be that owner, and every attempt to make them share — a lock in the
+driver, a relinquish before the stream starts, a terminal `retire()` on
+rediscovery, a 2.5-second sleep to outlast an in-flight capture — was correct
+about the case it named and silent about the next one. The station still wedged
+with `Camera in Acquired state trying acquire()` and a stream delivering zero
+frames. Removing one of the two readers does not narrow that class of bug; it
+deletes it.
 
-**Nothing is ever queued.** A frame that cannot be sent now is dropped, exactly
-as telemetry is: on a link that comes back after two minutes, a two-minute-old
-picture of a site is worse than no picture, because it is presented as the view.
-`contract/transport.md` — favour dropping data over queueing it.
+**And it was hiding the fault it was supposed to reveal.** In the owner's
+words: *"lets just disable all snapshot functionality for now so i can tell
+what is camera not working rather than actually just snapshots"*. A black
+console meant either a dead camera or a snapshot path losing a race with the
+live stream, and those look identical from the far end. With no snapshot path
+there is one answer.
 
-**A stream with no camera says so, on a cadence, and never goes quiet.** Same
-rule as telemetry. The unavailable frame is sent at most once a second, which is
-telemetry's own cadence for the same statement, and no faster than the video
-frame rate: at ninety bytes it is nothing next to a frame, and a console that
-stops hearing anything cannot tell "no camera" from "station gone".
+What is left is a **preview**, and the differences from a publisher are the
+design:
 
-**The station measures what it costs and reports it.** Bytes per frame and the
-resulting bitrate are measured from the encoded payload, over a rolling minute,
-and carried in the health frame and on the local console. On a metered link the
-figure that matters is the one from the hardware that is actually fitted, and
-that is a number nobody has until the box is on the hill — so the box states it.
+**It publishes nothing.** No topic, no broker, no bytes on a metered link. The
+platform has the media channel for live video; a second, worse copy of the same
+picture at 2 fps was never worth what it cost.
 
-On-demand publishing is the right end state and is not built: see
-CONTRACT-QUESTIONS.md item 13. Until the platform can ask, this publishes
-continuously at a low rate, and `video_enabled` in the site configuration is the
-one lever the platform has — `config.set` turns it off, which is the honest
-manual version of what should be automatic.
+**It captures only while somebody is looking.** The setup page polls
+`/status.json` every 2.5 seconds, and that poll is the demand signal —
+`preview_state()` marks the preview wanted for a few seconds, and the thread
+captures only inside that window. A station with nobody on the setup page opens
+its camera exactly never, which leaves the live stream as the sole consumer of
+the sensor on an unattended box. That is the strongest statement this file can
+make about ownership, and it is made by not running rather than by being
+careful.
+
+**It never fights for the sensor.** The capture goes through the driver, and
+the driver takes the lease (`camera/ownership.py`). While the live stream holds
+the sensor, the preview simply does not get it — the cached frame ages, the age
+is stated, and `/frame.jpg` keeps serving the newest picture there is with an
+honest `X-Frame-Age`. That is the contract the console renders, unchanged.
+
+**A frame the preview could not take is not a camera fault.** Contention is
+reported as contention, naming the holder. Only a capture that was attempted
+and failed counts against the camera.
+
+The class is still reached as `agent.video` because `gsu/console.py` reads it
+under that name and is owned elsewhere; `agent.preview` is the name it should
+have once that file is next touched.
 """
 
 from __future__ import annotations
@@ -39,62 +58,55 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from collections import deque
 
 from . import clock
-from .camera import Frame, complete_jpeg, sensor_exclusive
+from .camera import Frame, complete_jpeg
 
 log = logging.getLogger("gsu.video")
 
-#: Frame-rate bounds. The upper one is not a capability claim — it is a guard
-#: against a configuration typo turning a metered link into a fire hose.
-MIN_FPS = 0.05
-MAX_FPS = 10.0
+#: How long one `/status.json` poll keeps the preview warm. Comfortably longer
+#: than the console's 2.5-second poll, so a page left open never flickers
+#: between wanted and not, and short enough that closing the laptop lid stops
+#: the camera being opened within a few seconds.
+DEMAND_WINDOW_S = 10.0
 
-#: The slowest an `available: false` frame is sent, and the fastest. Bounded on
-#: both sides: often enough that the console knows the station is alive, rarely
-#: enough that saying "no camera" is never a bandwidth decision.
-UNAVAILABLE_MAX_HZ = 1.0
+#: The fastest the preview will take a frame, however often it is asked. The
+#: console polls at 2.5 s; this is the floor under that, and under anything
+#: else that starts calling `preview_state()`.
+MIN_INTERVAL_S = 2.0
 
-#: How long the measured bitrate looks back.
-WINDOW_SECONDS = 60.0
-
-#: How long to wait before retrying a topic the broker refused. Long, because
-#: the fix is a change on the platform, and short enough that nobody has to
-#: restart a station on a hillside once it lands.
-REFUSAL_RETRY_SECONDS = 300.0
+#: How often the thread wakes to see whether a frame is wanted. Cheap — it is
+#: a clock comparison — and it sets how quickly a preview appears after the
+#: setup page is first opened.
+POLL_S = 0.5
 
 
-class VideoPublisher:
-    """Captures frames and publishes them, on its own schedule.
+class CameraPreview:
+    """The newest frame the station has, taken on demand and published nowhere.
 
-    Takes the agent rather than a pile of callbacks because everything it needs
-    — the camera, the site configuration, the transport, the health register —
-    is something the agent already owns and may replace underneath it: a camera
-    is rebuilt when a device is rediscovered, and the transport is rebuilt on
-    every re-attach. Reading them through the agent each cycle is what makes
-    those replacements invisible here.
+    Takes the agent rather than a camera because the camera is something the
+    agent owns and may replace underneath it: a driver is rebuilt when a device
+    is rediscovered. Reading it through the agent each cycle is what makes that
+    replacement invisible here.
     """
 
     def __init__(self, agent) -> None:
         self.agent = agent
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self._window: deque[tuple[float, int]] = deque()
-        self.published = 0
-        self.dropped = 0
+        #: Monotonic time until which somebody is considered to be watching.
+        self._wanted_until = 0.0
+        self._last_attempt = 0.0
         self.captured = 0
-        self.last_bytes = 0
-        self.last_captured_at = None
-        #: The newest complete frame, kept for the setup page's preview
-        #: (`console._send_frame`). Written by the video thread, read by the
-        #: console's — safe as a bare attribute because Frame is frozen and
-        #: the swap is a single assignment. Never cleared: a stale picture
-        #: with a stated age beats no picture, and the age says stale.
+        self.refused = 0
+        self.failed = 0
+        #: The newest complete frame, for `/frame.jpg` (`console._send_frame`).
+        #: Written by the preview thread, read by the console's — safe as a
+        #: bare attribute because Frame is frozen and the swap is a single
+        #: assignment. Never cleared on a failure: a stale picture with a
+        #: stated age beats no picture, and the age says stale.
         self.last_frame: Frame | None = None
         self.last_reason = ""
-        self._refused_until = 0.0
-        self._last_unavailable = 0.0
 
     # --- lifecycle ------------------------------------------------------
 
@@ -102,7 +114,9 @@ class VideoPublisher:
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop.clear()
-        self._thread = threading.Thread(target=self._run, name="gsu-video", daemon=True)
+        self._thread = threading.Thread(
+            target=self._run, name="gsu-preview", daemon=True,
+        )
         self._thread.start()
 
     def stop(self) -> None:
@@ -115,214 +129,100 @@ class VideoPublisher:
 
     def _run(self) -> None:
         log.info(
-            "Video publisher started: %s at %.2f fps to %s.",
-            "enabled" if self.agent.site.video_enabled else "disabled by configuration",
-            1 / self.interval, self.topic or "(not enrolled)",
+            "Camera preview ready: no snapshot channel, frames taken only while "
+            "the setup page is open."
         )
         while not self._stop.is_set():
-            started = time.monotonic()
             try:
-                self.cycle()
-            except Exception:  # noqa: BLE001 - a dead thread is a dead camera
-                log.exception("Video cycle failed; continuing.")
-            delay = self.interval - (time.monotonic() - started)
-            self._stop.wait(max(0.0, delay))
+                if self.wanted:
+                    self.cycle()
+            except Exception:  # noqa: BLE001 - a dead thread is a dead preview
+                log.exception("Preview cycle failed; continuing.")
+            self._stop.wait(POLL_S)
 
     @property
-    def interval(self) -> float:
-        fps = min(MAX_FPS, max(MIN_FPS, float(self.agent.site.video_fps or 2.0)))
-        return 1.0 / fps
+    def wanted(self) -> bool:
+        """Whether anybody has asked for a picture recently enough to matter,
+        and whether enough time has passed since the last attempt."""
+        now = time.monotonic()
+        return (
+            now < self._wanted_until
+            and now - self._last_attempt >= MIN_INTERVAL_S
+        )
+
+    def request(self) -> None:
+        """Somebody is looking. Keeps the preview warm for `DEMAND_WINDOW_S`.
+
+        Called from `preview_state()`, which runs on the console's HTTP thread
+        — so it does no work beyond writing a float. The capture itself belongs
+        to the preview thread, because an 8-second `rpicam-jpeg` timeout inside
+        a status poll would hang the setup page it is meant to serve.
+        """
+        self._wanted_until = time.monotonic() + DEMAND_WINDOW_S
 
     def cycle(self) -> bool:
-        """One capture-and-publish. True if a frame went out.
+        """One capture attempt. True if a new frame was taken.
 
-        Public so that a test — and `gsu bench` — can drive it a frame at a time
-        without a thread.
-
-        Runs — and captures — with no topic too: an unenrolled station has
-        nowhere to publish, but the setup page's camera preview is exactly the
-        picture an installer needs while the box is still being pointed at
-        things. Nothing goes on the wire without an identity, same as ever.
+        Public so that a test — and the setup page's first render — can drive
+        it once without a thread. Runs with no enrolment and no topic: nothing
+        goes on the wire from here at all, which is the point.
         """
-        topic = self.topic
-        if topic is not None and time.monotonic() < self._refused_until:
-            return False
-
+        self._last_attempt = time.monotonic()
         camera = getattr(self.agent, "camera", None)
-        if camera is None or not self.agent.site.video_enabled:
-            return self._publish_unavailable(topic)
-        if self._stream_has_the_camera(camera):
-            # One sensor, one user. While `rpicam-vid` holds the CSI camera a
-            # snapshot capture fails with a device-busy, which would be reported
-            # as a broken camera when in fact it is a working one being used for
-            # something better. Say which.
-            #
-            # And RELINQUISH, not just skip. A capture that raced the stream's
-            # own close can have reopened picamera2 a moment ago, and a skipped
-            # tick leaves that hold in place while the encoder burns through
-            # every acquire retry against it. close() is serialized with
-            # capture in the driver and does nothing when nothing is open, so
-            # this costs one lock acquisition on the ticks that matter and
-            # nothing on the rest.
-            if hasattr(camera, "close"):
-                camera.close()
+        if camera is None:
             self.last_reason = (
-                "the camera is in use by the live stream; snapshots resume when "
-                "it stops"
+                self.agent.inventory.reasons.get("camera") or "no camera fitted"
             )
-            return self._publish_unavailable(topic)
-
-        frame = camera.capture()
-        if frame is None or not complete_jpeg(frame.jpeg):
-            # Checked here as well as in the driver, deliberately. Every driver
-            # is supposed to refuse a partial frame and the two in this build
-            # do — but this is the last point before it goes on the wire, and
-            # "half a picture of a site" is the one failure the contract calls
-            # out by name. A future driver that forgets cannot cause it.
-            if frame is not None:
-                self.last_reason = (
-                    f"the camera returned {len(frame.jpeg)} bytes that are not a "
-                    "complete JPEG; the frame was dropped rather than published"
-                )
-                log.warning("%s", self.last_reason)
-            else:
-                self.last_reason = (
-                    getattr(camera, "unavailable_reason", "")
-                    or "the camera returned no frame"
-                )
-            return self._publish_unavailable(topic)
-
-        self.captured += 1
-        self.last_captured_at = frame.captured_at
-        self.last_frame = frame
-        self.last_reason = ""
-        if topic is None:
             return False
-        payload = frame.to_payload()
-        # Measured from the encoded payload rather than from the JPEG: base64
-        # and the JSON around it are real bytes on a metered link, and quoting
-        # the JPEG size alone would understate the cost by a third.
-        size = len(payload["jpeg"]) + 160
-        self.last_bytes = size
-        if self._send(topic, payload):
-            self.published += 1
-            self._window.append((time.monotonic(), size))
-            self._trim()
-            return True
-        self.dropped += 1
-        return False
-
-    def _stream_has_the_camera(self, camera) -> bool:
-        """Whether the live encoder is holding the hardware.
-
-        Only where the two paths share one physical sensor: the synthetic
-        source is a drawing routine and two of them can run at once, and a
-        network camera serves snapshots and stream simultaneously from its own
-        encoder. One predicate (camera.sensor_exclusive) decides, shared with
-        the stream's own start path.
-        """
-        stream = getattr(self.agent, "stream", None)
-        # "starting" counts as held: the encoder is about to open the sensor
-        # and a snapshot dispatched in that window would win the race and kill
-        # the stream at birth. On a Pi 2B a snapshot subprocess runs for the
-        # best part of a second, so at 2 fps that window is most of the time.
-        if stream is None or stream.state not in ("streaming", "starting"):
-            return False
-        return sensor_exclusive(camera)
-
-    # --- publishing -----------------------------------------------------
-
-    def _publish_unavailable(self, topic: str | None) -> bool:
-        """Say there is no picture, on a cadence, with a reason.
-
-        Rate-limited separately from the frame rate: the statement is worth 90
-        bytes a second at most, and a station that goes quiet instead is
-        indistinguishable from one that has died. With no topic there is
-        nowhere to say it; the reason still lands in `last_reason`, which is
-        what the setup page renders.
-        """
-        if topic is None:
-            return False
-        now = time.monotonic()
-        if now - self._last_unavailable < max(self.interval, 1.0 / UNAVAILABLE_MAX_HZ):
-            return False
-        self._last_unavailable = now
-        self._send(topic, self.unavailable_payload())
-        return False
-
-    def unavailable_payload(self) -> dict:
-        """`available: false`, and why, in an operator's words.
-
-        The driver's own reason wins when it has one — "rpicam-jpeg failed: no
-        cameras available" tells somebody what to do, where "camera not
-        detected" only tells them something is wrong. The inventory's reason is
-        the fallback, and it is the right one when nothing is fitted at all.
-        """
-        camera = getattr(self.agent, "camera", None)
-        if camera is not None and not self.agent.site.video_enabled:
-            reason = (
+        if not self.agent.site.video_enabled:
+            self.last_reason = (
                 f"video is switched off in this station's configuration "
                 f"(version {self.agent.site.version})"
             )
-        else:
-            reason = self.last_reason or (
-                getattr(camera, "unavailable_reason", "") if camera is not None else ""
+            return False
+
+        frame = camera.capture()
+        if frame is None:
+            # Two very different situations with one shape, and the driver has
+            # already told them apart: contention names its holder, a fault
+            # names the fault. Neither is invented here.
+            self.last_reason = (
+                getattr(camera, "unavailable_reason", "")
+                or "the camera returned no frame"
             )
-        payload = self.agent.unavailable_payload("video")
-        if reason:
-            payload["unavailable_reason"] = reason[:200]
-        return payload
+            if "in use by" in self.last_reason:
+                self.refused += 1
+            else:
+                self.failed += 1
+            return False
+        if not complete_jpeg(frame.jpeg):
+            # Checked here as well as in the driver, deliberately. Every driver
+            # is supposed to refuse a partial frame and the ones in this build
+            # do — but this is the last point before a picture is shown to
+            # somebody, and "half a picture of a site" is the one failure the
+            # contract calls out by name. A future driver that forgets cannot
+            # cause it.
+            self.failed += 1
+            self.last_reason = (
+                f"the camera returned {len(frame.jpeg)} bytes that are not a "
+                "complete JPEG; the frame was dropped rather than shown"
+            )
+            log.warning("%s", self.last_reason)
+            return False
 
-    def _send(self, topic: str, payload: dict) -> bool:
-        if self.agent._publish(topic, payload):
-            return True
-        self._check_refused(topic)
-        return False
+        self.captured += 1
+        self.last_frame = frame
+        self.last_reason = ""
+        return True
 
-    def _check_refused(self, topic: str) -> None:
-        """Tell a refused channel from a link that is merely down.
-
-        They look identical from a failed publish and are completely different
-        faults: one is weather, the other is a station publishing into a channel
-        its broker principal was never granted. The second cannot fix itself and
-        needs a named change on the platform, so it is said in those terms.
-        """
-        transport = self.agent.transport
-        detail = (getattr(transport, "refusals", None) or {}).get(topic)
-        if not detail:
-            return
-        self._refused_until = time.monotonic() + REFUSAL_RETRY_SECONDS
-        self.agent.health.raise_condition(
-            "video.topic_refused", "warning",
-            f"The broker refused {topic} ({detail}). This station's principal is "
-            "granted telemetry, audio and commands only, so video cannot be "
-            "published until the video channel is added to the broker ACL and "
-            "the enrolment response carries a video topic. Retrying every "
-            f"{REFUSAL_RETRY_SECONDS / 60:.0f} minutes; nothing else is affected.",
-        )
-        log.error(
-            "Video is refused by the broker on %s: %s. See CONTRACT-QUESTIONS.md "
-            "item 12 — the platform has to grant the channel.", topic, detail,
-        )
-
-    @property
-    def topic(self) -> str | None:
-        enrolment = self.agent.enrolment
-        return enrolment.broker.resolve_video_topic() if enrolment else None
-
-    # --- what it cost ---------------------------------------------------
-
-    def _trim(self) -> None:
-        cutoff = time.monotonic() - WINDOW_SECONDS
-        while self._window and self._window[0][0] < cutoff:
-            self._window.popleft()
+    # --- what the console reads -----------------------------------------
 
     def frame_age_s(self) -> float | None:
-        """How old the cached preview frame is, from its own `captured_at`.
+        """How old the cached frame is, from its own `captured_at`.
 
         The one number the preview must not lie about: while the live stream
-        holds an exclusive sensor this frame is deliberately not replaced, and
-        the age is what says so.
+        holds the sensor this frame is deliberately not replaced, and the age
+        is what says so.
         """
         frame = self.last_frame
         if frame is None:
@@ -330,38 +230,40 @@ class VideoPublisher:
         return max(0.0, (clock.now() - frame.captured_at).total_seconds())
 
     def preview_state(self) -> dict:
-        """What the setup page needs to render the preview. Local console
-        only, deliberately not in `stats()`: the health frame goes over a
-        metered link and the platform has the video channel itself."""
+        """What the setup page needs to render the preview — and the demand
+        signal that makes a frame exist at all.
+
+        Local console only, deliberately not in the health frame: the health
+        frame goes over a metered link and the platform has the media channel.
+        """
+        self.request()
         state: dict = {"has_frame": self.last_frame is not None}
         age = self.frame_age_s()
         if age is not None:
             state["frame_age_s"] = round(age, 1)
+        if self.last_reason:
+            state["reason"] = self.last_reason
         return state
 
     def stats(self) -> dict:
-        """What video is actually costing, measured rather than intended.
-
-        Carried in the health frame and rendered on the setup page, because "how
-        much of the link is the camera using" is the first question anyone asks
-        about a metered site and the last one a log file answers.
-        """
-        self._trim()
-        total = sum(size for _, size in self._window)
-        span = WINDOW_SECONDS
-        if len(self._window) > 1:
-            span = max(1.0, self._window[-1][0] - self._window[0][0])
+        """What the preview is doing. Costs nothing on the link by
+        construction, so there is no bitrate here to report — that number was
+        the snapshot channel's, and the snapshot channel is gone."""
         return {
-            "enabled": bool(self.agent.site.video_enabled),
-            "fps_configured": round(1 / self.interval, 2),
-            "fps_measured": round(len(self._window) / span, 2) if self._window else 0.0,
-            "frames_published": self.published,
-            "frames_dropped": self.dropped,
-            "bytes_per_frame": self.last_bytes,
-            # Bits per second on the wire, over the last minute of frames that
-            # actually left the box.
-            "bitrate_bps": round(total * 8 / span) if self._window else 0,
-            "captured_at": self.last_captured_at.isoformat() if self.last_captured_at else None,
-            "refused": time.monotonic() < self._refused_until,
+            # Named so that a reader of the health frame cannot mistake this
+            # for the old snapshot channel merely being idle.
+            "snapshots": False,
+            "snapshots_removed": (
+                "the periodic JPEG channel was removed: two readers of one "
+                "sensor was the cause of the camera wedge, and live video is "
+                "the media channel's job"
+            ),
+            "preview_frames": self.captured,
+            "preview_refused": self.refused,
+            "preview_failed": self.failed,
+            "watching": time.monotonic() < self._wanted_until,
+            "captured_at": (
+                self.last_frame.captured_at.isoformat() if self.last_frame else None
+            ),
             "reason": self.last_reason,
         }

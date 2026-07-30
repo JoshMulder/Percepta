@@ -2,17 +2,20 @@
 
 The wedge this file guards against, from the first real station's journal:
 rediscovery rebuilt the camera slot while the video thread held the old driver
-mid-capture. The rebuild closed the old instance, but close() is a relinquish —
+mid-capture. The rebuild closed the old instance, but close() was a relinquish —
 the in-flight capture reopened picamera2 on an object nothing referenced any
 more, and that acquisition outlived every later rebuild. The box churned
 `Camera in Running state trying acquire()` until somebody restarted it.
 
-Two properties close it, and each is tested on its own:
+Three properties close it now, and each is tested on its own:
 
-* a replaced driver is *retired* — terminal, serialized with capture, never
-  reopens — and retirement happens before the replacement is built;
+* there is no long-lived camera handle to leak at all — the in-process
+  libcamera backend is gone, and with it the only thing that can produce
+  `Camera in Acquired state trying acquire()`;
+* ownership is a lease with a token, so a stale driver cannot release the hold
+  its successor was granted — the failure a boolean flag could not refuse;
 * the camera slot is not rebuilt at all while the live stream holds the
-  sensor, because a snapshot failing under the encoder's hold is contention,
+  sensor, because a capture failing under the encoder's hold is contention,
   not a broken camera.
 """
 
@@ -111,61 +114,100 @@ class RebuildOrderTests(unittest.TestCase):
 
 
 class RetiredCameraTests(unittest.TestCase):
-    """retire() is terminal; close() stays a relinquish. Both on the real
-    driver class, with the picamera2 open recorded rather than performed."""
+    """retire() is terminal, and there is no longer a handle to leak.
 
-    def camera(self) -> tuple[PiCsiCamera, list]:
-        opens: list = []
-        driver = PiCsiCamera()
-        driver._backend = "picamera2"          # force the fast path
+    These used to exercise a `close()`/`retire()` distinction over a
+    long-lived picamera2 object: `close()` relinquished and the next capture
+    reopened, `retire()` was terminal. That distinction was the previous fix
+    and it was not sufficient, because the object it guarded could leak its
+    acquisition without either verb ever being called — a `Picamera2()` that
+    raised after acquiring left nothing for `close()` to close.
 
-        class FakePicamera2:
-            def capture_file(self, buffer, format):
-                # A recognisable complete JPEG.
-                buffer.write(b"\xff\xd8" + b"\x00" * 200 + b"\xff\xd9")
+    There is no such object any more (`camera/picsi.py`). Every capture is a
+    subprocess that owns the sensor for its own lifetime and nothing between
+    them, so what is worth testing is different: that a capture holds the
+    lease and gives it back, that a retired driver stops, and that a stale
+    driver cannot interfere with its successor.
+    """
 
-            def stop(self):
-                pass
+    def camera(self, lease=None) -> tuple[PiCsiCamera, list]:
+        """The real driver, with only the subprocess replaced."""
+        calls: list = []
+        driver = PiCsiCamera(sensor_lease=lease) if lease else PiCsiCamera()
+        driver._backend = "rpicam"
+        driver._tool = "rpicam-jpeg"
 
-            def close(self):
-                pass
+        def fake_capture():
+            calls.append(driver.sensor_lease.holder)
+            return b"\xff\xd8" + b"\x00" * 200 + b"\xff\xd9"
 
-        def fake_open():
-            opens.append(1)
-            return FakePicamera2()
+        driver._capture_cli = fake_capture
+        return driver, calls
 
-        driver._open_picamera2 = fake_open
-        return driver, opens
+    def test_the_driver_has_no_in_process_libcamera_backend_at_all(self):
+        """The wedge was `Camera in Acquired state trying acquire()`, which
+        only a process that acquires twice can produce. This station now
+        contains no libcamera: the only backends are a subprocess and none."""
+        self.assertIn(PiCsiCamera().backend, ("rpicam", "none"))
+        self.assertFalse(hasattr(PiCsiCamera, "_open_picamera2"))
+        self.assertFalse(hasattr(PiCsiCamera(), "_camera"))
 
-    def test_close_alone_lets_the_next_capture_reopen(self):
-        # The relinquish semantics the stream path depends on: this is the
-        # *documented* behaviour, and it is exactly why rediscovery needs the
-        # stronger verb.
-        driver, opens = self.camera()
+    def test_a_capture_holds_the_sensor_and_gives_it_back(self):
+        driver, calls = self.camera()
         self.assertIsNotNone(driver.capture())
-        self.assertEqual(len(opens), 1)
-        driver.close()
-        self.assertIsNotNone(driver.capture())
-        self.assertEqual(len(opens), 2, "close() then capture must reopen")
+        self.assertEqual(calls, ["the camera preview"],
+                         "the subprocess ran without the lease held")
+        self.assertTrue(driver.sensor_lease.free,
+                        "the lease was not released after the capture")
 
-    def test_a_retired_driver_never_reopens(self):
-        driver, opens = self.camera()
+    def test_a_capture_is_refused_while_something_else_holds_the_sensor(self):
+        driver, calls = self.camera()
+        token = driver.sensor_lease.acquire("the live stream")
+        self.assertIsNone(driver.capture())
+        self.assertEqual(calls, [], "the camera was opened under another holder")
+        # Contention, named — not a camera fault. The distinction is the whole
+        # reason a black preview used to be undiagnosable.
+        self.assertIn("the live stream", driver.unavailable_reason)
+        self.assertEqual(driver._failures, 0, "contention was counted as a fault")
+        driver.sensor_lease.release(token)
+        self.assertIsNotNone(driver.capture())
+
+    def test_a_retired_driver_never_captures_again(self):
+        driver, calls = self.camera()
         self.assertIsNotNone(driver.capture())
         driver.retire()
         self.assertIsNone(driver.capture())
         self.assertIsNone(driver.capture())
-        self.assertEqual(len(opens), 1, "a retired driver reopened the sensor")
+        self.assertEqual(len(calls), 1, "a retired driver opened the sensor")
         self.assertIn("replaced", driver.unavailable_reason)
 
-    def test_retire_closes_whatever_was_open(self):
-        closed: list = []
-        driver, _ = self.camera()
-        frame = driver.capture()
-        self.assertIsNotNone(frame)
-        driver._camera.close = lambda: closed.append(1)
-        driver.retire()
-        self.assertTrue(closed, "retire() left the sensor held")
-        self.assertIsNone(driver._camera)
+    def test_a_retired_driver_cannot_free_its_successors_hold(self):
+        """The zombie release, which a boolean lock could not have refused.
+
+        Rediscovery builds the replacement while the outgoing driver may still
+        be one line into a capture. Under a plain flag the old instance's
+        release frees the *new* one's hold and the two then run at once — the
+        bug wearing the fix as a disguise.
+        """
+        from gsu.camera.ownership import SensorLease
+
+        lease = SensorLease("camera")
+        old, _ = self.camera(lease)
+        new, calls = self.camera(lease)
+
+        stale = lease.acquire("the outgoing driver")
+        old.retire()
+        successor = lease.acquire("the live stream")
+        self.assertIsNone(successor, "the lease was handed out twice")
+
+        lease.release(stale)
+        successor = lease.acquire("the live stream")
+        self.assertIsNotNone(successor)
+        # The stale token is now worthless and must stay worthless.
+        self.assertFalse(lease.release(stale))
+        self.assertEqual(lease.holder, "the live stream")
+        self.assertIsNone(new.capture(), "the successor's hold was broken")
+        self.assertEqual(calls, [])
 
 
 class MidStreamTests(unittest.TestCase):

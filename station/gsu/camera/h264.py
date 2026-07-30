@@ -35,6 +35,7 @@ import time
 from dataclasses import dataclass, field
 
 from .. import clock
+from .bitstream import Bits, BitstreamError, unescape
 
 log = logging.getLogger("gsu.h264")
 
@@ -199,6 +200,219 @@ def split_annexb(data: bytes) -> list[bytes]:
     if start is not None:
         units.append(data[start:])
     return [unit for unit in units if unit]
+
+
+#: Profiles whose sequence parameter set carries the chroma format, bit depths
+#: and scaling lists before the picture size — 7.3.2.1.1. High (100) is what
+#: every camera the station has met actually sends, and reading a High SPS with
+#: the Baseline syntax lands the width about forty bits early.
+_EXTENDED_PROFILES = frozenset(
+    {100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135}
+)
+
+
+@dataclass(frozen=True)
+class H264Sps:
+    """The few fields of an H.264 SPS the container needs.
+
+    Nothing here is decoded and nothing is re-encoded — this reads three
+    numbers out of the bitstream so that the MP4 around it describes the
+    pictures inside it. It exists because the alternative was worse and was
+    what shipped: the sample entry took its dimensions from the *station's
+    configured size*, so a 4K camera under a 1080p site policy wrote 1920x1080
+    into the container for a 3840x2160 stream. HEVC was fixed to read the SPS
+    and H.264 was explicitly left, which is the gap this closes.
+    """
+
+    profile_idc: int
+    constraint_flags: int
+    level_idc: int
+    width: int
+    height: int
+
+    def codec_string(self) -> str:
+        """`avc1.PPCCLL` — RFC 6381, and the string MSE is given up front.
+
+        Built from the parsed fields rather than from three raw bytes at fixed
+        offsets. The bytes happen to be at fixed offsets and the old function
+        that read them there is still correct; this way there is one source for
+        the codec string and the dimensions, which cannot drift apart.
+        """
+        return (
+            f"avc1.{self.profile_idc:02x}{self.constraint_flags:02x}"
+            f"{self.level_idc:02x}"
+        )
+
+
+def parse_sps(nal: bytes) -> H264Sps | None:
+    """An H.264 sequence parameter set, or None with a line in the log.
+
+    None rather than an exception: a parameter set that will not read is a
+    stream this station cannot describe to a browser, and the caller's job is
+    to refuse the stream visibly rather than to handle an error mid-frame.
+    """
+    try:
+        return _parse_sps(unescape(nal))
+    except (BitstreamError, IndexError, ValueError) as exc:
+        log.warning("An H.264 sequence parameter set could not be read: %s", exc)
+        return None
+
+
+def _parse_sps(rbsp: bytes) -> H264Sps:
+    """ISO/IEC 14496-10 §7.3.2.1.1, as far as `frame_cropping_flag`.
+
+    Everything before the picture size is *skipped exactly* rather than
+    guessed past. That is the whole difficulty: the fields are Exp-Golomb, so
+    they have no fixed width, and one bit of drift produces a width and height
+    that are wrong but entirely plausible — 1088 instead of 1080, or 512
+    instead of 3840 — with no error anywhere.
+    """
+    if len(rbsp) < 4:
+        raise BitstreamError("too short to be a sequence parameter set")
+    bits = Bits(rbsp[1:])                    # past the one-byte NAL header
+    profile_idc = bits.u(8)
+    constraint_flags = bits.u(8)             # constraint_set0..5 + 2 reserved
+    level_idc = bits.u(8)
+    bits.ue()                                # seq_parameter_set_id
+
+    chroma_format_idc = 1                    # 4:2:0 unless the SPS says otherwise
+    separate_colour_plane = 0
+    if profile_idc in _EXTENDED_PROFILES:
+        chroma_format_idc = bits.ue()
+        if chroma_format_idc == 3:
+            separate_colour_plane = bits.u(1)
+        bits.ue()                            # bit_depth_luma_minus8
+        bits.ue()                            # bit_depth_chroma_minus8
+        bits.u(1)                            # qpprime_y_zero_transform_bypass
+        if bits.u(1):                        # seq_scaling_matrix_present_flag
+            count = 8 if chroma_format_idc != 3 else 12
+            for index in range(count):
+                if bits.u(1):                # seq_scaling_list_present_flag[i]
+                    _skip_scaling_list(bits, 16 if index < 6 else 64)
+
+    bits.ue()                                # log2_max_frame_num_minus4
+    pic_order_cnt_type = bits.ue()
+    if pic_order_cnt_type == 0:
+        bits.ue()                            # log2_max_pic_order_cnt_lsb_minus4
+    elif pic_order_cnt_type == 1:
+        bits.u(1)                            # delta_pic_order_always_zero_flag
+        bits.se()                            # offset_for_non_ref_pic
+        bits.se()                            # offset_for_top_to_bottom_field
+        for _ in range(bits.ue()):           # num_ref_frames_in_pic_order_cnt_cycle
+            bits.se()                        # offset_for_ref_frame[i]
+
+    bits.ue()                                # max_num_ref_frames
+    bits.u(1)                                # gaps_in_frame_num_value_allowed
+    width_mbs = bits.ue() + 1
+    height_map_units = bits.ue() + 1
+    frame_mbs_only = bits.u(1)
+    if not frame_mbs_only:
+        bits.u(1)                            # mb_adaptive_frame_field_flag
+    bits.u(1)                                # direct_8x8_inference_flag
+
+    crop_left = crop_right = crop_top = crop_bottom = 0
+    if bits.u(1):                            # frame_cropping_flag
+        crop_left = bits.ue()
+        crop_right = bits.ue()
+        crop_top = bits.ue()
+        crop_bottom = bits.ue()
+
+    # 7-13 and 7-14. The crop is counted in chroma samples, not pixels, so the
+    # units depend on the chroma format — and on whether the picture is coded
+    # in frames or fields. 1080p is the case that makes this matter: it is
+    # coded as 68 macroblocks of 16 lines, which is 1088, and the last 8 lines
+    # are cropped away. A reader that ignores cropping reports every 1080p
+    # camera as 1088 and writes that into the container.
+    chroma_array_type = 0 if separate_colour_plane else chroma_format_idc
+    if chroma_array_type == 0:
+        crop_unit_x, crop_unit_y = 1, 2 - frame_mbs_only
+    else:
+        sub_width = 2 if chroma_format_idc in (1, 2) else 1
+        sub_height = 2 if chroma_format_idc == 1 else 1
+        crop_unit_x = sub_width
+        crop_unit_y = sub_height * (2 - frame_mbs_only)
+
+    width = width_mbs * 16 - crop_unit_x * (crop_left + crop_right)
+    height = ((2 - frame_mbs_only) * height_map_units * 16
+              - crop_unit_y * (crop_top + crop_bottom))
+    if width <= 0 or height <= 0:
+        raise BitstreamError(f"implausible picture size {width}x{height}")
+    return H264Sps(
+        profile_idc=profile_idc,
+        constraint_flags=constraint_flags,
+        level_idc=level_idc,
+        width=width,
+        height=height,
+    )
+
+
+def _skip_scaling_list(bits: Bits, size: int) -> None:
+    """Step over one scaling list. Skipped, but skipped exactly — §7.3.2.1.1.1.
+
+    `delta_scale` is signed Exp-Golomb and the list ends early once the running
+    scale reaches zero, so it cannot be jumped by a byte count.
+    """
+    last = 8
+    next_scale = 8
+    for _ in range(size):
+        if next_scale != 0:
+            next_scale = (last + bits.se() + 256) % 256
+            if next_scale == 0:
+                return
+        last = next_scale if next_scale != 0 else last
+
+
+def sniff_codec(nals: list[bytes]) -> str | None:
+    """Which codec these NAL units are, read from the bytes themselves.
+
+    The point of this is that it consults **no configuration and no probe**.
+    The station chooses a NAL grammar and an ffmpeg muxer from an `ffprobe`
+    result taken before the session started, and when that answer is stale the
+    failure is silent in the worst way available: `-c copy` pours the bytes,
+    ffmpeg exits zero, and the browser is handed a codec string that does not
+    describe what is inside. A camera whose encoder is changed in its own web
+    UI produces exactly this, and it produced it twice in one evening.
+
+    **Only parameter sets, and only unambiguous ones.** Slice NAL headers alias
+    badly between the two codecs and the naive test is wrong in the worst
+    direction — it reports HEVC for ordinary H.264. An H.264 non-IDR slice is
+    `0x41` and an IDR is `0x45`; read with HEVC's rule those are types 32 and
+    34, which are VPS and PPS. A sniffer that accepted them would declare every
+    H.264 stream in this codebase to be H.265 on its second frame.
+
+    What is actually safe:
+
+        H.264   SPS is type 7 and PPS is type 8 in the low five bits — 0x67,
+                0x47, 0x27 and 0x68, 0x48, 0x28. Read as HEVC those are types
+                51 and 52, which are reserved and never sent.
+        HEVC    VPS/SPS/PPS are types 32/33/34 in bits 1-6 of a two-byte
+                header, with `nuh_layer_id` zero, so the byte is exactly 0x40,
+                0x42 or 0x44 — **even**, which is what excludes H.264's 0x41
+                and 0x45. Read as H.264 those are types 0, 2 and 4:
+                unspecified, and two data partition kinds that exist only in
+                the Extended profile and are emitted by nothing in this
+                pipeline. The second header byte is checked too, because
+                `nuh_temporal_id_plus1` is at least 1 in every real HEVC NAL.
+
+    Anything else returns None rather than a guess. That means the answer
+    arrives with a keyframe rather than with every frame — parameter sets are
+    inline at each one — so a codec that changes underneath a running session
+    is caught within one keyframe interval, which on these cameras is about two
+    seconds. Guessing from a slice to catch it sooner is how this function was
+    wrong the first time.
+    """
+    for nal in nals:
+        if not nal or nal[0] & 0x80:         # forbidden_zero_bit set: not a NAL
+            continue
+        if (nal[0] & 0x1F) in (7, 8) and (nal[0] & 0x60):
+            return "h264"
+        if (
+            len(nal) >= 2
+            and nal[0] in (0x40, 0x42, 0x44)
+            and nal[1] & 0x07                # nuh_temporal_id_plus1 >= 1
+        ):
+            return "hevc"
+    return None
 
 
 class AnnexBReader:
@@ -394,6 +608,14 @@ class ProcessEncoder:
     #: is H.264 by construction; the RTSP remux source overrides it per
     #: instance, because what a network camera sends is the camera's decision.
     nal_rules = H264
+    #: The rate this source actually delivers, when it knows better than the
+    #: settings it was handed. None here and for every encoder in this file:
+    #: `rpicam-vid` is *told* the frame rate, so `settings.fps` is the truth by
+    #: construction. A remux source is not told anything — it copies whatever
+    #: the camera sends — and overrides this with what it measured. The stream
+    #: session builds the muxer's clock from it, and that ordering is the
+    #: whole point: the clock cannot be built before the source is known.
+    stream_fps: float | None = None
 
     def __init__(self, settings: StreamSettings | None = None) -> None:
         self.settings = settings or StreamSettings()
@@ -401,6 +623,10 @@ class ProcessEncoder:
         self._process: subprocess.Popen | None = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
+        #: Serialises spawning against stopping, so that no process can be
+        #: created after `stop()` has decided the session is over. See `_spawn`
+        #: for the orphaned `rpicam-vid` this prevents.
+        self._spawn_lock = threading.Lock()
         self._reader = AnnexBReader(self.nal_rules)
         self._on_unit = None
         self.started_at: float | None = None
@@ -462,6 +688,37 @@ class ProcessEncoder:
             return True
         return self._process is not None and self._process.poll() is None
 
+    def _spawn(self) -> bool:
+        """Start one encoder process — unless this session has been stopped.
+
+        Atomic against `stop()`, and that is the entire reason it exists. The
+        pump respawns the process itself after a lost acquisition race, and
+        there was a window between `self._stop.wait(...)` returning False and
+        the `Popen` that followed it. A `stop()` landing inside that window
+        terminated the *old* process, nulled the attribute, joined a thread
+        that was already on its way out — and the pump then spawned a brand-new
+        `rpicam-vid --timeout 0` that nothing held a reference to and nothing
+        would ever kill. Orphaned, it is reparented to init and holds the
+        camera for ever: the one failure mode in this file that **survives a
+        restart of the service**, because the process is no longer in the
+        service's control group.
+
+        `stop()` sets the flag under this same lock, so once it returns no
+        process can come into existence.
+        """
+        with self._spawn_lock:
+            if self._stop.is_set():
+                return False
+            try:
+                self._process = subprocess.Popen(
+                    self.command(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+            except OSError as exc:
+                self.reason = f"{self.tool} could not be started: {exc}"[:200]
+                log.error("%s", self.reason)
+                return False
+            return True
+
     def start(self, on_unit) -> bool:
         """Start encoding, delivering each access unit to `on_unit`."""
         if self.tool is None:
@@ -470,13 +727,7 @@ class ProcessEncoder:
             return True
         self._stop.clear()
         self._on_unit = on_unit
-        try:
-            self._process = subprocess.Popen(
-                self.command(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            )
-        except OSError as exc:
-            self.reason = f"{self.tool} could not be started: {exc}"[:200]
-            log.error("%s", self.reason)
+        if not self._spawn():
             return False
         self.started_at = time.monotonic()
         self.frames = 0
@@ -493,23 +744,38 @@ class ProcessEncoder:
 
         A camera process left running holds the sensor and the encoder, and the
         next start fails with a device-busy that reads like broken hardware.
+
+        The flag is set **under the spawn lock**, which is what makes this
+        exhaustive rather than merely likely: `_spawn` refuses once the flag is
+        set, so the moment this line returns there is no process in flight and
+        none can be created. Before that, the pump could spawn an orphan into
+        the gap and leave `rpicam-vid` holding the camera past the end of the
+        process — see `_spawn`.
         """
-        self._stop.set()
-        process, self._process = self._process, None
-        if process is not None and process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=3.0)
-            except subprocess.TimeoutExpired:
-                log.warning("%s did not exit; killing it.", self.tool)
-                process.kill()
-                try:
-                    process.wait(timeout=2.0)
-                except subprocess.TimeoutExpired:  # pragma: no cover - defensive
-                    log.error("%s could not be killed.", self.tool)
+        with self._spawn_lock:
+            self._stop.set()
+            process, self._process = self._process, None
+        self._reap(process)
         thread, self._thread = self._thread, None
         if thread is not None:
             thread.join(timeout=3.0)
+
+    def _reap(self, process) -> None:
+        """Terminate, then kill, and always wait. A camera process that is
+        signalled but never waited for is a zombie that still shows in the
+        process table and tells nobody anything useful."""
+        if process is None or process.poll() is not None:
+            return
+        process.terminate()
+        try:
+            process.wait(timeout=3.0)
+        except subprocess.TimeoutExpired:
+            log.warning("%s did not exit; killing it.", self.tool)
+            process.kill()
+            try:
+                process.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:  # pragma: no cover - defensive
+                log.error("%s could not be killed.", self.tool)
 
     #: How many times a brand-new encoder process is respawned when the camera
     #: refuses to be acquired, and how long to wait between tries. The snapshot

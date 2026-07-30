@@ -46,7 +46,8 @@ from __future__ import annotations
 
 import logging
 
-from ..camera.h264 import H264, NalRules, split_annexb
+from ..camera.h264 import H264, H264Sps, NalRules, split_annexb
+from ..camera.h264 import parse_sps as parse_h264_sps
 from ..camera.hevc import HEVC, SequenceParameterSet, parse_sps
 
 log = logging.getLogger("gsu.media")
@@ -288,21 +289,28 @@ class Fmp4Muxer:
     predates HEVC has to say so; `HEVC` from `gsu/camera/hevc.py` for a camera
     that streams H.265, which the station remuxes and never transcodes.
 
-    **Known limitation: no composition time offsets.** Every sample is written
-    with presentation time equal to decode time and a fixed duration, because
-    Annex B carries no timestamps — `-c copy` into the raw `h264`/`hevc` muxer
-    discards the RTP ones, and recovering them would mean parsing slice headers
-    for the picture order count and the whole reference-picture-set machinery
-    behind it. On a stream with B-frames the pictures still come out in the
-    right order (a decoder reorders from the POC in the bitstream, not from the
-    container) but the timeline is flat, and a strict downstream muxer drops
-    the last picture of the stream. Measured on both codecs; it is a property of
-    this file rather than of HEVC, and it was simply never reachable before,
-    because rpicam-vid and the synthetic source emit no B-frames. A network
-    camera may, and HEVC cameras usually do. It costs a couple of frames of
-    presentation offset on a live view and nothing else — but a camera set to a
-    low-latency profile avoids it entirely, which is the cheaper fix if it ever
-    turns out to matter.
+    **Known limitation, and NOT the cause of any stutter observed so far: no
+    composition time offsets.** Every sample is written with presentation time
+    equal to decode time and a fixed duration, because Annex B carries no
+    timestamps — `-c copy` into the raw `h264`/`hevc` muxer discards the RTP
+    ones, and recovering them would mean parsing slice headers for the picture
+    order count and the whole reference-picture-set machinery behind it. On a
+    stream with B-frames the pictures still come out in the right order (a
+    decoder reorders from the POC in the bitstream, not from the container) but
+    the timeline is flat, and a strict downstream muxer drops the last picture.
+
+    This was the standing first suspect for the live view stuttering on the
+    HEVC camera, and it was **measured and ruled out**: the bench camera at
+    1920x1080 reports `has_b_frames=0` and delivered 21 I and 328 P frames over
+    five seconds with no B-frame at all. The stutter was the muxer's clock
+    being built from a stale configured frame rate instead of the stream's own
+    — see `StreamSession.start`. So this remains a real gap and remains
+    unreachable from the hardware in front of us: rpicam-vid and the synthetic
+    source emit no B-frames by construction, and this camera emits none by
+    configuration. A different camera, or this one on a different profile,
+    would reach it. Worth building when something actually sends a B-frame, and
+    worth not building before then — a fix with no failing case to prove it is
+    how the flat timeline got written this way in the first place.
     """
 
     def __init__(self, width: int, height: int, fps: float = 30.0,
@@ -315,10 +323,17 @@ class Fmp4Muxer:
         self.vps: bytes | None = None
         self.sps: bytes | None = None
         self.pps: bytes | None = None
-        #: The SPS, read. HEVC only: `hvcC` and the codec string are both built
-        #: out of fields inside it, so it is parsed once when it arrives rather
-        #: than twice on every session.
+        #: The HEVC SPS, read. `hvcC` and the codec string are both built out of
+        #: fields inside it, so it is parsed once when it arrives rather than
+        #: twice on every session.
         self.parsed: SequenceParameterSet | None = None
+        #: The H.264 SPS, read, for the picture size and the codec string.
+        #: Added late and deliberately: this muxer took the H.264 sample entry's
+        #: dimensions from the size the *station* was configured for, which on a
+        #: 4K camera under a 1080p site policy writes 1920x1080 into a container
+        #: full of 3840x2160 pictures. HEVC was fixed to read its SPS and H.264
+        #: was flagged rather than fixed; this is the fix.
+        self.h264: H264Sps | None = None
         #: Why there is no init segment, when there is a parameter set but it
         #: could not be used. Surfaced by `gsu/stream.py` — the alternative is a
         #: stream that reports healthy and shows black.
@@ -337,24 +352,42 @@ class Fmp4Muxer:
             return False
         return self.rules is not HEVC or self.parsed is not None
 
+    @property
+    def picture_width(self) -> int:
+        """The width of the pictures actually arriving, from their own sequence
+        parameter set — falling back to the configured size only before one has
+        been seen. Both codecs, one rule: the container describes the stream,
+        never the station's intentions about it."""
+        for parsed in (self.parsed, self.h264):
+            if parsed is not None and parsed.width:
+                return parsed.width
+        return self.width
+
+    @property
+    def picture_height(self) -> int:
+        for parsed in (self.parsed, self.h264):
+            if parsed is not None and parsed.height:
+                return parsed.height
+        return self.height
+
     def init_segment(self) -> bytes | None:
         if not self.ready:
             return None
-        width, height = self.width, self.height
-        if self.parsed is not None and self.parsed.width and self.parsed.height:
-            # The stream's own size, not the one this station asked for. On the
-            # remux path they are different things: the settings are what the
-            # site's policy allows, and the picture is whatever the network
-            # camera was already configured to send — 4K, on the first one.
-            width, height = self.parsed.width, self.parsed.height
         return init_segment(
-            self.sps, self.pps, width, height, self.timescale,
-            vps=self.vps, parsed=self.parsed, rules=self.rules,
+            self.sps, self.pps, self.picture_width, self.picture_height,
+            self.timescale, vps=self.vps, parsed=self.parsed, rules=self.rules,
         )
 
     def codec(self) -> str:
         if self.rules is HEVC:
             return self.parsed.codec_string() if self.parsed else ""
+        # From the parsed SPS when there is one, so the codec string and the
+        # dimensions cannot come from two different readings of the same bytes.
+        # `codec_string()` remains the fallback and remains correct — profile,
+        # constraints and level are at fixed offsets — but it is the answer
+        # only until the SPS has been read properly.
+        if self.h264 is not None:
+            return self.h264.codec_string()
         return codec_string(self.sps or b"")
 
     def _remember(self, kind: int, nal: bytes) -> bool:
@@ -378,12 +411,34 @@ class Fmp4Muxer:
                 "there is no way to tell a browser what to decode. The stream is "
                 "stopped rather than sent as a picture nothing can play."
             )
+        elif slot == "sps":
+            # H.264. Unlike the HEVC case this is not fatal when it fails: the
+            # codec string can still be read from three bytes at fixed offsets,
+            # and the dimensions fall back to the configured size — which is
+            # what every H.264 stream did until now. So it is a degradation
+            # that is *said*, rather than a refusal.
+            self.h264 = parse_h264_sps(nal)
+            if self.h264 is None:
+                log.warning(
+                    "The H.264 sequence parameter set could not be read; the "
+                    "container will carry this station's configured size "
+                    "(%dx%d) rather than the stream's own.",
+                    self.width, self.height,
+                )
         return had
 
     # --- frames ----------------------------------------------------------
 
-    def feed(self, unit) -> tuple[bytes | None, bool, bool]:
+    def feed(self, unit, nals: list[bytes] | None = None
+             ) -> tuple[bytes | None, bool, bool]:
         """One access unit → `(fragment, keyframe, parameters_changed)`.
+
+        `nals` lets a caller that has already split the access unit hand the
+        result in rather than have it done twice. That is not a micro-
+        optimisation: `split_annexb` is a Python loop over every byte of the
+        frame, and on a 4K stream at 25 fps a second pass is tens of
+        milliseconds per frame on a Pi 2B — enough to matter on the one board
+        this has to run on. `gsu/stream.py` splits once and passes it here.
 
         `parameters_changed` is true when this frame carried a sequence
         parameter set different from the one in the current init segment — a
@@ -399,7 +454,7 @@ class Fmp4Muxer:
         changed = False
         payload: list[bytes] = []
         keyframe = False
-        for nal in split_annexb(unit.data):
+        for nal in (split_annexb(unit.data) if nals is None else nals):
             kind = rules.nal_type(nal)
             if kind in rules.parameter_sets:
                 # Stripped from the sample, not merely skipped: they live in the

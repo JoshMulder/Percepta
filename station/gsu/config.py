@@ -267,17 +267,20 @@ class SiteConfig:
     weather_period_s: float = 5.0
     health_period_s: float = 30.0
 
-    #: Video, which is the heaviest thing this station sends and therefore the
-    #: setting most worth being able to change from a desk. Two fields and not
-    #: five on purpose: resolution and quality describe the *camera* and live
-    #: with the device (`devices/registry.py`), while rate and whether to send
-    #: at all are *bandwidth policy* and belong to the site — which is to say,
-    #: to whoever is paying for the satellite link.
+    #: `video_enabled` is the platform's one lever on the camera: it switches
+    #: the setup page's preview off, and with it every capture this station
+    #: makes outside a live stream. It is honoured because a `config.set` that
+    #: silently did nothing would be worse than a setting that was never
+    #: offered.
     #:
-    #: 2 fps at 640x480 is roughly half a megabit per second sustained
-    #: (`contract/schemas/video.schema.json`), so this default is already a
-    #: significant share of a metered link. Turning it down, or off, is a
-    #: `config.set` away and needs nobody on site.
+    #: `video_fps` is **retained and inert.** It set the rate of the periodic
+    #: snapshot channel, which was removed — two readers of one sensor was the
+    #: camera wedge, and the platform has the media channel for live video
+    #: (CONTRACT-QUESTIONS.md item 17). It is still parsed and still stored so
+    #: that a `config.set` from a platform that predates the removal is a
+    #: no-op rather than an error, and so a site file written before it does
+    #: not fail to load. Nothing reads it. Deleting it is a contract
+    #: conversation, not a tidy-up.
     video_enabled: bool = True
     video_fps: float = 2.0
 

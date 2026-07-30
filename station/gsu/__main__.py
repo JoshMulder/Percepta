@@ -94,18 +94,52 @@ def _bench(agent) -> int:
     return 0
 
 
-def _camera(agent, frames: int, size: str | None, out: str | None) -> int:
-    """Take a few snapshots and say what each one costs on the link.
+def _refuse_while_the_service_runs(agent, command: str) -> bool:
+    """Stop a CLI command from becoming a second opener of one sensor.
 
-    The other half of `stream`: this is the cheap path — one complete JPEG at a
-    low rate — and the number it prints is the one to plan a metered link with,
-    because it is measured from the payload that is actually published rather
-    than from the JPEG inside it.
+    The sensor lease in `camera/ownership.py` makes ownership unambiguous
+    *within* the station process. It cannot see another process at all, and
+    `gsu camera` or `gsu stream` on a box where the service is up is exactly
+    that: two independent programs opening one CSI ribbon, with nothing in
+    between them. On the hardware this produces a `rpicam-vid` that fails to
+    acquire and a stream that runs for its whole lease delivering zero frames —
+    which is precisely the symptom that has been read as a camera fault twice.
+
+    Refused with the fix in the message rather than a return code, because the
+    person running this is debugging a camera and needs to know that the tool
+    they reached for is the thing in the way.
     """
+    if not agent.another_agent_is_running():
+        return False
+    print(
+        f"\nThe station service is running, so `{command}` would be a second "
+        f"program opening the same camera.\n"
+        f"The two cannot share it: one of them gets the sensor and the other "
+        f"reports a fault that\nlooks like broken hardware.\n\n"
+        f"  sudo systemctl stop percepta-station    # then run this again\n\n"
+        f"Or read the running station instead, which needs nothing stopped — the "
+        f"setup page's\ncamera tab shows the live preview and the capture path, "
+        f"and the health frame carries\n`video.sensor`, which names whatever is "
+        f"holding the camera right now.\n",
+        file=sys.stderr,
+    )
+    agent.shutdown()
+    return True
+
+
+def _camera(agent, frames: int, size: str | None, out: str | None) -> int:
+    """Take a few frames and say what each one cost to take.
+
+    The other half of `stream`: one complete JPEG at a time, which is what the
+    setup page's preview does. Nothing here is published — the periodic
+    snapshot channel was removed — so the numbers are capture cost, not link
+    cost.
+    """
+    if _refuse_while_the_service_runs(agent, "gsu camera"):
+        return 1
     camera = agent.camera
     if camera is None:
-        print("\nNo camera fitted. The video channel is publishing "
-              "available: false, which is the correct thing for it to say.\n")
+        print("\nNo camera fitted, so there is nothing to capture.\n")
         agent.shutdown()
         return 1
     if size:
@@ -127,25 +161,24 @@ def _camera(agent, frames: int, size: str | None, out: str | None) -> int:
         if frame is None:
             print(f"  {index + 1}: no frame — {camera.unavailable_reason}")
             continue
-        payload = len(frame.to_payload()["jpeg"]) + 160
-        sizes.append(payload)
+        sizes.append(len(frame.jpeg))
         last = frame
         from .camera import iso
 
-        # The same spelling of the timestamp that goes on the wire, so what a
-        # technician reads here and what the platform receives are comparable
-        # without anybody converting anything.
         print(f"  {index + 1}: {len(frame.jpeg) / 1024:6.1f} kB JPEG, "
-              f"{payload / 1024:6.1f} kB published, {elapsed:6.1f} ms, "
+              f"{frame.width}x{frame.height}, {elapsed:6.1f} ms, "
               f"captured {iso(frame.captured_at)}")
     if not sizes:
         print("\nNothing was captured. The reason above is the whole diagnosis.\n")
         agent.shutdown()
         return 1
     mean = sum(sizes) / len(sizes)
-    fps = agent.site.video_fps
-    print(f"\n  {mean / 1024:.1f} kB per published frame; at {fps:g} fps that is "
-          f"{mean * 8 * fps / 1000:.0f} kbit/s sustained on the uplink.")
+    # No sustained figure any more, and its absence is the point: these frames
+    # are not published anywhere. The number that mattered on a metered link
+    # was the snapshot channel's, and that channel is gone — what costs
+    # bandwidth now is the live stream, which `gsu stream` measures.
+    print(f"\n  {mean / 1024:.1f} kB per frame, mean over {len(sizes)} frame(s). "
+          f"Nothing was published: these are preview captures.")
     if out and last is not None:
         with open(out, "wb") as handle:
             handle.write(last.jpeg)
@@ -165,11 +198,15 @@ def _stream(agent, config: AgentConfig, seconds: float, out: str | None,
     sustains 1080p30 on a Pi 2B — with frames, bytes and a file that can be
     played, rather than with arithmetic from a different machine.
 
-    It needs no platform, no network and no enrolment.
+    It needs no platform, no network and no enrolment. It does need the camera
+    to itself — see `_refuse_while_the_service_runs`.
     """
     import dataclasses
 
     from .camera.h264 import StreamSettings
+
+    if _refuse_while_the_service_runs(agent, "gsu stream"):
+        return 1
 
     sink = out or os.path.join(
         "/dev/shm" if os.path.isdir("/dev/shm") else tempfile.gettempdir(),

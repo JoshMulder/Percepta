@@ -44,7 +44,14 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from .bitstream import Bits, BitstreamError, unescape
 from .h264 import NalRules
+
+__all__ = [  # noqa: RUF022 - grouped by what they are, not alphabetically
+    "Bits", "BitstreamError", "unescape",
+    "HEVC", "ProfileTierLevel", "SequenceParameterSet",
+    "codec_string", "parse_sps", "read_profile_tier_level",
+]
 
 log = logging.getLogger("gsu.hevc")
 
@@ -115,67 +122,10 @@ HEVC = NalRules(
 # --- reading a bitstream --------------------------------------------------
 
 
-class BitstreamError(ValueError):
-    """The bytes ran out, or said something impossible. Never raised upward."""
-
-
-def unescape(data: bytes) -> bytes:
-    """Remove emulation prevention bytes: `00 00 03` → `00 00`.
-
-    The exact inverse of `h264_synthetic.rbsp_to_ebsp`, and not optional here:
-    a real SPS is full of them. The 4K camera's is
-    `… 01 60 00 00 03 00 90 00 00 03 …`, and parsing that without stripping the
-    0x03s reads the profile compatibility flags four bytes out of alignment —
-    which produces a codec string that is wrong in a way no decoder reports.
-    """
-    out = bytearray()
-    zeros = 0
-    for byte in data:
-        if zeros >= 2 and byte == 0x03:
-            zeros = 0
-            continue
-        out.append(byte)
-        zeros = zeros + 1 if byte == 0 else 0
-    return bytes(out)
-
-
-class Bits:
-    """Big-endian bit reader over an RBSP, with the Exp-Golomb it is written in.
-
-    Held as one integer rather than a byte cursor: an SPS is a few dozen bytes,
-    it is read once per encoder session, and shifting a big integer keeps the
-    bit twiddling out of the way of the parsing it exists to serve.
-    """
-
-    def __init__(self, data: bytes) -> None:
-        self._whole = int.from_bytes(data, "big") if data else 0
-        self._end = len(data) * 8
-        self._bit = 0
-
-    def u(self, count: int) -> int:
-        """`count` bits, unsigned."""
-        if count <= 0:
-            return 0
-        if self._bit + count > self._end:
-            raise BitstreamError(
-                f"the parameter set ended {self._bit + count - self._end} bits early"
-            )
-        shift = self._end - self._bit - count
-        self._bit += count
-        return (self._whole >> shift) & ((1 << count) - 1)
-
-    def ue(self) -> int:
-        """Unsigned Exp-Golomb, which most of the syntax is written in."""
-        zeros = 0
-        while self.u(1) == 0:
-            zeros += 1
-            if zeros > 32:
-                # Not a length: a run this long means the read is misaligned,
-                # and continuing would produce a plausible-looking number.
-                raise BitstreamError("a run of zero bits too long to be a value")
-        if zeros == 0:
-            return 0
-        return (1 << zeros) - 1 + self.u(zeros)
+# `BitstreamError`, `unescape` and `Bits` moved to `bitstream.py` when the
+# H.264 sequence parameter set had to be read too — `h264.py` cannot import
+# from this file, because this file imports `NalRules` from it. Re-exported
+# here so that every existing importer, and every test, keeps working.
 
 
 # --- profile, tier and level ----------------------------------------------

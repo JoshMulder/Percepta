@@ -38,7 +38,10 @@ import time
 
 from . import clock
 from .camera import sensor_exclusive
-from .camera.h264 import H264, StreamSettings, choose_encoder, probe_encoders
+from .camera.h264 import (
+    H264, StreamSettings, choose_encoder, probe_encoders, sniff_codec,
+    split_annexb,
+)
 from .media.fmp4 import Fmp4Muxer
 from .transport.stream import build_uplink, media_url
 
@@ -50,6 +53,15 @@ log = logging.getLogger("gsu.stream")
 MIN_LEASE_S = 5.0
 MAX_LEASE_S = 300.0
 DEFAULT_LEASE_S = 30.0
+
+#: How long a starting stream waits for the sensor before giving up and naming
+#: whoever has it. This replaced a flat `time.sleep(2.5)` that ran on every
+#: start whether or not anything else held the camera: the sleep was tuned to
+#: outlast the slowest snapshot this hardware had produced, which is a guess
+#: about somebody else's subprocess. Waiting on the lease waits exactly as long
+#: as the holder actually takes, and no time at all in the normal case where
+#: nobody is holding it.
+SENSOR_WAIT_S = 10.0
 
 
 class StreamSession:
@@ -72,6 +84,19 @@ class StreamSession:
         self.encoder_choice = ""
         self.muxer: Fmp4Muxer | None = None
         self.codec = ""
+        #: The sensor lease token, while this session owns the camera. None for
+        #: a network camera, which has no local sensor to own.
+        self._sensor_token: str | None = None
+        #: The rate the muxer's clock is actually paced to, and where that
+        #: number came from. Reported, because a stream paced wrong looks like
+        #: a stuttering camera and nothing in the telemetry used to say
+        #: otherwise.
+        self.paced_fps = 0.0
+        self.pacing_source = ""
+        #: Set by the encoder thread when the bytes arriving are not the codec
+        #: this session was built for; acted on by `tick()`, which is the only
+        #: thread that may stop a stream. See `_codec_agrees`.
+        self._codec_mismatch = ""
         self._session_open = False
         self._last_frame_at: float | None = None
 
@@ -130,35 +155,36 @@ class StreamSession:
             self.uplink = None
             return self.reason
 
-        # The snapshot path must let go of the sensor before the encoder can
-        # take it, and there are two different holds to break. Under picamera2
-        # the camera is one long-lived object held between snapshots - the very
-        # thing that makes that path fast - so it is closed here and reopens
-        # lazily on the first snapshot after the stream ends. Under the cli
-        # backend each snapshot is a subprocess that owns the sensor for the
-        # best part of a second on this hardware, so at 2 fps the sensor is
-        # busy more often than not: "starting" makes the publisher hold off
-        # dispatching another (video.py, _stream_has_the_camera), and the
-        # retries below outlast the one already in flight. Neither hold was
-        # visible on a box where the camera is synthetic, which is every box
-        # this ran on before a real one.
-        # Only where snapshots and the encoder share one physical sensor — a
-        # network camera serves both readers at once, and the synthetic pair
-        # can run together. One predicate decides, shared with video.py.
+        # Take the sensor, by name, and hold it for the session. This replaced
+        # a `camera.close()` followed by `time.sleep(2.5)` — a relinquish that
+        # asked the other reader nicely, and then a fixed wait tuned to outlast
+        # its slowest subprocess. Both were guesses about somebody else's
+        # timing, and neither could say who actually had the camera when the
+        # guess was wrong. The lease waits exactly as long as the holder takes,
+        # returns immediately when nobody holds it, and names the holder when
+        # it gives up. See camera/ownership.py.
+        #
+        # Only where the two paths share one physical sensor: a network camera
+        # serves any number of readers from its own encoder, and the synthetic
+        # source is a drawing routine. One predicate decides, shared with
+        # video.py.
         self.state = "starting"
         camera = getattr(self.agent, "camera", None)
-        if sensor_exclusive(camera) and hasattr(camera, "close"):
-            camera.close()
-            # And wait out the capture already running. close() frees the
-            # picamera2 hold, but a cli snapshot is a subprocess that owns the
-            # sensor until it finishes, and it cannot be signalled - only
-            # outlasted. The encoder spawns cleanly either way and dies
-            # asynchronously when acquisition fails, which is why retrying the
-            # spawn never helped. Two and a half seconds covers the slowest
-            # capture this hardware has produced; a sensor-exclusive camera is
-            # the only case that needs it, and the platform's viewer is
-            # already seconds of tickets and websockets away from instant.
-            time.sleep(2.5)
+        if sensor_exclusive(camera):
+            token = self.agent.sensor_lease.acquire("the live stream", SENSOR_WAIT_S)
+            if token is None:
+                self.state = "unavailable"
+                self.reason = (
+                    f"the camera is held by "
+                    f"{self.agent.sensor_lease.holder or 'something else'} and did "
+                    f"not come free within {SENSOR_WAIT_S:.0f}s, so the stream was "
+                    f"not started. Nothing is broken; try again."
+                )[:200]
+                log.warning("%s", self.reason)
+                uplink.close()
+                self.uplink = None
+                return self.reason
+            self._sensor_token = token
 
         self.frames = 0
         self.bytes_out = 0
@@ -166,14 +192,30 @@ class StreamSession:
         self._last_frame_at = None
         self._session_open = False
         self.codec = ""
-        # One muxer per session. It holds the parameter sets and the decode
-        # clock, so a new stream starts at zero rather than continuing a
-        # timeline the platform has already forgotten. It is also told which
-        # codec's access units to expect, by the source that produces them —
-        # the two rpicam encoders and the synthetic one are H.264 by
-        # construction, and a network camera is whatever it was configured for.
+        self._codec_mismatch = ""
+        # One muxer per session, built AFTER the source and paced from it. That
+        # ordering is the fix for a real fault, not a tidy-up: `settings()`
+        # reads the site's configured frame rate, `_build_source()` is what
+        # probes the camera for the rate it is actually sending at, and
+        # building the clock from `settings` therefore used the stale figure on
+        # the first stream after every restart. A muxer clocked at 30 against a
+        # camera sending 25 advances its timeline 20% faster than frames
+        # arrive, which a viewer shows as stutter and catch-up — and which
+        # looked intermittent, because every later stream reused the cached
+        # probe and was right.
+        #
+        # It is also told which codec's access units to expect, by the source
+        # that produces them: the two rpicam encoders and the synthetic one are
+        # H.264 by construction, and a network camera is whatever it was
+        # configured for when the session started.
+        self.paced_fps = float(getattr(source, "stream_fps", None) or settings.fps)
+        self.pacing_source = (
+            "measured from the camera's own stream"
+            if getattr(source, "stream_fps", None)
+            else "this station's configured rate — the source did not state one"
+        )
         self.muxer = Fmp4Muxer(
-            settings.width, settings.height, settings.fps,
+            settings.width, settings.height, self.paced_fps,
             rules=getattr(source, "nal_rules", H264),
         )
 
@@ -188,6 +230,11 @@ class StreamSession:
             self.reason = source.reason or "the encoder would not start"
             uplink.close()
             self.uplink = None
+            # Given back on the way out. A start that failed holding the sensor
+            # would lock every later attempt out of a camera nothing is using,
+            # which is the wedge this whole change exists to end — arriving by
+            # the front door this time.
+            self._release_sensor()
             return self.reason
 
         self.source = source
@@ -226,6 +273,11 @@ class StreamSession:
         self.expires_at = None
         if self.state != "streaming":
             self.state = "idle"
+            # Released even on this path. A start that got as far as taking the
+            # sensor and then failed leaves `state` at "unavailable", and a
+            # `video.stop` arriving afterwards is the one thing that will ever
+            # tidy up after it.
+            self._release_sensor()
             return "not streaming"
         source, self.source = self.source, None
         uplink, self.uplink = self.uplink, None
@@ -233,6 +285,11 @@ class StreamSession:
         self._session_open = False
         if source is not None:
             source.stop()
+        # After source.stop(), never before: stop() does not return until the
+        # encoder process is dead and waited for, and giving the sensor back
+        # while `rpicam-vid` still had it would hand the next reader a camera
+        # the lease says is free and the kernel says is not.
+        self._release_sensor()
         if uplink is not None:
             # Closed here, not left open between sessions: an idle socket to the
             # platform is a thing somebody has to reason about, and this one
@@ -260,6 +317,15 @@ class StreamSession:
         """
         if self.state != "streaming":
             return
+        if self._codec_mismatch:
+            # The bitstream disagreed with the container. Noticed on the
+            # encoder's thread, stopped here — see `_codec_agrees`.
+            reason, self._codec_mismatch = self._codec_mismatch, ""
+            self.reason = reason
+            log.error("%s", reason)
+            self.stop(reason)
+            self.state = "unavailable"
+            return
         now = time.monotonic()
         if self.expires_at is not None and now > self.expires_at:
             self.stop(
@@ -276,7 +342,64 @@ class StreamSession:
             self.stop(self.reason)
             self.state = "unavailable"
 
+    # --- ownership --------------------------------------------------------
+
+    def _release_sensor(self) -> None:
+        """Give the camera back, if this session had it. Safe to call twice.
+
+        The token is cleared before the release so that a second call cannot
+        release a lease some *later* session has since been granted — the same
+        stale-holder mistake the lease itself refuses, caught one level up
+        where it is cheaper to reason about.
+        """
+        token, self._sensor_token = self._sensor_token, None
+        if token is not None:
+            self.agent.sensor_lease.release(token)
+
     # --- the frames -----------------------------------------------------
+
+    def _codec_agrees(self, nals: list[bytes], muxer) -> bool:
+        """Are these bytes the codec this session was built for?
+
+        The container's codec is chosen before a single byte arrives — from an
+        `ffprobe` run at start-up, which picks the ffmpeg muxer and the NAL
+        grammar together. When that answer is wrong the failure is silent and
+        total: `-c copy` pours the bytes, ffmpeg exits zero, the browser is
+        handed a codec string that does not describe them, and what an operator
+        sees is a degraded picture rather than an error. A station announced
+        `hvc1.1.6.L153.a0` over H.264 bytes for a whole session after somebody
+        changed the encoder in the camera's own web interface.
+
+        So the probe is not trusted — it is *checked*, against the bitstream,
+        on every access unit. `sniff_codec` reads nothing but NAL headers, so
+        this costs a couple of byte comparisons per frame and needs no
+        configuration to be right.
+
+        A disagreement ends the session rather than trying to rebuild it in
+        place. The muxer's decode clock, its parameter sets and the platform's
+        init segment all belong to the old codec, and the platform's viewer
+        cannot swap a `MediaSource` codec mid-session either — so the honest
+        move is to end this stream with a reason and let the next `video.start`
+        probe again and build a session that matches.
+
+        It is *recorded* here and acted on in `tick()`, not stopped from this
+        thread. This runs on the encoder's own pump thread, and `stop()` joins
+        that thread — calling it from here is a thread joining itself, which
+        raises rather than stopping anything. `tick()` runs on the sensing loop
+        and is already where every not-told-to-stop stop happens.
+        """
+        arrived = sniff_codec(nals)
+        expected = muxer.rules.name
+        if arrived is None or arrived == expected:
+            return True
+        self._codec_mismatch = (
+            f"the camera is sending {arrived.upper()} and this session was built "
+            f"for {expected.upper()}. The encoder was changed underneath the "
+            f"stream; it is being stopped rather than sent as a container that "
+            f"says one thing and carries another. Starting it again reads the "
+            f"camera afresh."
+        )[:200]
+        return False
 
     def _on_unit(self, unit) -> None:
         """One access unit, from the encoder's own thread.
@@ -293,8 +416,15 @@ class StreamSession:
         uplink, muxer = self.uplink, self.muxer
         if uplink is None or muxer is None:
             return
+        # Split once, used twice. `split_annexb` walks every byte of the frame
+        # in Python; on a 4K stream that is tens of milliseconds per frame on a
+        # Pi 2B, and doing it again for the codec check would have been a real
+        # cost for a check that is otherwise a few byte comparisons.
+        nals = split_annexb(unit.data)
+        if not self._codec_agrees(nals, muxer):
+            return
 
-        fragment, keyframe, changed = muxer.feed(unit)
+        fragment, keyframe, changed = muxer.feed(unit, nals)
         if changed or not self._session_open:
             # A new encoder session: parameters that no longer match decode as
             # corruption rather than as an error, so the platform is told to
@@ -346,8 +476,8 @@ class StreamSession:
             return SyntheticH264Source(settings, station_name=name)
         if camera is None:
             self.reason = (
-                "no camera fitted, so there is nothing to stream. The video "
-                "channel is publishing available: false for the same reason."
+                "no camera fitted, so there is nothing to stream. The setup "
+                "page's preview is blank for the same reason."
             )
             return None
         # A camera that brings its own stream brings it whole: an RTSP camera
@@ -379,6 +509,16 @@ class StreamSession:
         The platform may ask for less than the site allows — a thumbnail viewer
         does not need 1080p — and may not ask for more. Bandwidth policy belongs
         to whoever pays for the link, not to whoever opened a console.
+
+        **These are instructions to an encoder, not a description of a stream.**
+        The distinction was not made before and it cost a real fault. This used
+        to reach into the camera for `stream_fps` and use it here — but for a
+        remux source there is no encoder to instruct, the numbers are the
+        camera's own, and reading them at *this* point in the start sequence
+        read them before anything had probed the camera. The stream's real rate
+        now travels on the source (`source.stream_fps`) and reaches the muxer
+        directly, which is the only consumer that ever needed it. What is left
+        here is site policy, which is what it always should have been.
         """
         request = request or {}
         site = self.agent.site
@@ -390,13 +530,6 @@ class StreamSession:
             int(request.get("bitrate_kbps", site.stream_bitrate_kbps)),
         )
         camera = getattr(self.agent, "camera", None)
-        # A remux source runs at the camera's own configured rate — the
-        # station copies what arrives and cannot change it. The muxer's clock
-        # is built from this figure, and pacing it to anything else plays the
-        # stream fast or slow at the far end.
-        camera_fps = getattr(camera, "stream_fps", None)
-        if camera_fps:
-            fps = float(camera_fps)
         return StreamSettings(
             width=max(160, width - width % 16 if width % 16 else width),
             height=max(120, height),
@@ -431,9 +564,25 @@ class StreamSession:
             "dropped": self.dropped,
             "bitrate_bps": round(self.bytes_out * 8 / elapsed) if elapsed else 0,
             "fps_measured": round(self.frames / elapsed, 1) if elapsed else 0.0,
+            # What this station *asked* for. On a remux source it is asking
+            # nobody anything — the camera decided all of it before the station
+            # connected — so `delivered` below is the one to read, and the two
+            # being different is information rather than a fault.
             "requested": {
                 "width": settings.width, "height": settings.height,
                 "fps": settings.fps, "bitrate_kbps": settings.bitrate_kbps,
+            },
+            # What is actually in the container, read from the bitstream. The
+            # three fields here were each wrong in a different way on a real
+            # camera — a stale codec cache, a frame rate seeded from a removed
+            # configuration field, and dimensions taken from site policy rather
+            # than from the sequence parameter set — and each failed silently,
+            # so each is now reported next to what was requested.
+            "delivered": {
+                "width": self.muxer.picture_width if self.muxer else 0,
+                "height": self.muxer.picture_height if self.muxer else 0,
+                "fps": round(self.paced_fps, 3),
+                "fps_source": self.pacing_source,
             },
             "uplink": self.uplink.describe() if self.uplink else
                       build_uplink(self.agent.config, self.agent.enrolment).describe(),

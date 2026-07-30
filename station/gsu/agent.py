@@ -30,6 +30,7 @@ import time
 from datetime import UTC, datetime
 
 from . import AGENT_VERSION, clock, tls
+from .camera.ownership import SensorLease
 from .commands import CommandRouter, build_handlers
 from .config import AgentConfig, SiteConfig
 from .credentials import CredentialStore, Enrolment
@@ -40,7 +41,7 @@ from .radio.receiver import RadioController
 from .store import LocalStore
 from .stream import StreamSession
 from .transport import Transport, build_transport, redact_url
-from .video import VideoPublisher
+from .video import CameraPreview
 
 log = logging.getLogger("gsu.agent")
 
@@ -115,19 +116,30 @@ class Agent:
         self.camera = None
         self.radio: RadioController | None = None
         self._last_discovery = 0.0
+        # Who owns the camera, for the life of this process. Built before the
+        # devices are, handed to every camera driver through device_context(),
+        # and deliberately NOT rebuilt by rediscovery: an arbiter that is
+        # replaced along with the thing it arbitrates cannot tell a successor
+        # from a zombie, which is the bug it exists to make impossible. See
+        # camera/ownership.py.
+        self.sensor_lease = SensorLease("camera")
         self.build_devices()
 
-        # Two separate things, both video and neither the other:
+        # Two consumers of the camera, and exactly one of them may hold the
+        # sensor at a time — the lease above decides, not a convention:
         #
-        #   video    snapshots — one complete JPEG at a low rate on the video
-        #            channel, cheap enough to leave running, and what a console
-        #            shows when nobody is watching live.
-        #   stream   H.264 1080p30, hardware-encoded, several Mbit/s, started
-        #            only while somebody is actually watching.
+        #   video    the setup page's preview. Captures a single frame, on
+        #            demand, only while somebody has the page open, and
+        #            publishes nothing anywhere. It is called `video` because
+        #            gsu/console.py reads it under that name.
+        #   stream   H.264/HEVC, several Mbit/s, started only while somebody is
+        #            actually watching, and the only consumer on an unattended
+        #            box.
         #
-        # Both run off the sensing loop. The first has its own thread; the
-        # second is driven by the encoder's.
-        self.video = VideoPublisher(self)
+        # The periodic snapshot channel that used to live here is gone: two
+        # readers of one sensor was the camera wedge, and the platform has the
+        # media channel for live video. See gsu/video.py.
+        self.video = CameraPreview(self)
         self.stream = StreamSession(self)
 
         self._attach_lock = threading.Lock()
@@ -258,6 +270,12 @@ class Agent:
             # The synthetic camera writes this on its test card, so that a
             # console showing two demo stations shows which is which.
             "station_name": site.name if site else "",
+            # Handed to whichever camera driver is built. `_instantiate`
+            # filters by constructor signature, so a driver that owns no local
+            # sensor (the RTSP one) simply does not accept it and never asks
+            # who owns what — which is the right answer for a camera that
+            # encodes on the far end.
+            "sensor_lease": self.sensor_lease,
             "alert_range_km": self.site.alert_range_km,
             "alert_altitude_m": self.site.alert_altitude_m,
             "traffic": self.config.airband_traffic,
@@ -270,19 +288,22 @@ class Agent:
 
         Two rules here, both bought with a wedged station:
 
-        **The outgoing driver is retired, not merely closed.** close() on the
-        camera is a relinquish — the next capture reopens the sensor — and the
-        video thread can be holding the old instance mid-cycle while this
-        method runs. A close alone loses that race: the abandoned instance
-        reopens picamera2 *after* its replacement is built, and the acquisition
-        leaks for the life of the process because nothing references the
-        instance any more. retire() is terminal and serialized with capture.
+        **The outgoing driver is retired, not merely closed.** A retired driver
+        never captures again. This used to be load-bearing against a much
+        nastier failure — the old driver held a live picamera2 handle and
+        reopened it lazily, so an abandoned instance could reacquire the sensor
+        *after* its replacement was built and leak the acquisition for the life
+        of the process. That handle is gone (see camera/picsi.py), and the
+        sensor lease now refuses a stale holder's release outright, so retiring
+        is no longer the only thing standing between the station and a wedge.
+        It is kept because a capture already in flight on the outgoing instance
+        should not spend a lease its successor is waiting for.
 
         **The camera slot is not touched while the live stream has the
         sensor.** A rebuild mid-stream is guaranteed contention — and worse,
-        the trigger is circular: snapshots fail *because* the encoder holds
-        the sensor, the slot reports failed, and rediscovery then treats the
-        one working consumer of the camera as a broken camera. The slot is
+        the trigger used to be circular: snapshots failed *because* the encoder
+        held the sensor, the slot reported failed, and rediscovery then treated
+        the one working consumer of the camera as a broken camera. The slot is
         rebuilt on the first pass after the stream ends.
         """
         context = self.device_context()
@@ -310,9 +331,12 @@ class Agent:
             RadioController(front_end, state_path=self.config.receiver_state_path)
             if front_end is not None else None
         )
-        # Constructed here and read from the video thread. Constructing it must
-        # stay cheap for that reason — `camera/picsi.py` opens nothing and runs
-        # no subprocess until the first capture, which happens off this loop.
+        # Constructed here and read from the preview thread. Constructing it
+        # must stay cheap for that reason — `camera/picsi.py` opens nothing and
+        # runs no subprocess until the first capture, which happens off this
+        # loop. The context carries the sensor lease, so the new driver
+        # contends with the outgoing one through the same arbiter rather than
+        # through luck.
         if not keep_camera:
             self.camera = self.inventory.build("camera", context)
             # Forget the outgoing camera's last picture. The preview keeps a
@@ -322,9 +346,9 @@ class Agent:
             # shows the OLD camera's view under the NEW camera's name, which
             # is how somebody points a station at an RTSP URL, sees the
             # previous sensor's test card, and concludes it worked.
-            publisher = getattr(self, "video", None)
-            if publisher is not None:
-                publisher.last_frame = None
+            preview = getattr(self, "video", None)
+            if preview is not None:
+                preview.last_frame = None
 
         self._log_unconfigured = True
 
@@ -473,9 +497,10 @@ class Agent:
 
             self._credential_mtime = self.credentials.mtime()
 
-            # Now there is somewhere to publish frames to. Idempotent, so a
-            # re-attach after a renewal or a re-enrolment does not restart it.
-            self.video.start()
+            # Nothing to start here any more. The preview publishes nothing, so
+            # enrolment is not what makes it useful — it is started once in
+            # run(), before enrolment, which is when an installer is pointing
+            # the camera at things and most needs to see the picture.
 
             if self.renewer is not None:
                 self.renewer.stop()
@@ -596,11 +621,11 @@ class Agent:
             console = Console.from_config(self, self.config)
             console.start()
 
-        # Started here as well as at attach, and idempotent in both places:
-        # before enrolment there is no topic and nothing goes on the wire,
-        # but the captures still run, which is what puts a picture on the
-        # setup page's camera preview while the box is being pointed at
-        # things. That is the moment the preview is *for*.
+        # The one place the preview is started, enrolled or not: it publishes
+        # nothing, so there is nothing for an identity to gate. Starting the
+        # thread costs nothing while nobody is watching — it takes a frame only
+        # inside the demand window that `/status.json` opens, which is exactly
+        # the moment an installer is pointing the box at things.
         self.video.start()
 
         tick = self.config.tick_seconds
@@ -787,16 +812,22 @@ class Agent:
         self._update_link_state()
 
     def video_state(self) -> dict:
-        """Both video paths in one place, because they are one question.
+        """What the camera is doing, in one place.
 
-        "What is the camera costing me" has two answers on this station — the
-        snapshot channel, which runs continuously at a low rate, and the live
-        stream, which runs only while somebody is watching — and an operator
-        looking at a metered link needs both together.
+        "What is the camera costing me" used to have two answers — a snapshot
+        channel running continuously at a low rate, and a live stream running
+        only while somebody watched. It now has one: the stream. The snapshot
+        channel is gone, and `snapshots: false` says so out loud rather than
+        leaving a console to infer it from a bitrate of zero, which is also
+        what a broken camera looks like.
+
+        `sensor` is new and is the answer to the question the last three fixes
+        were all circling: who is holding the camera right now.
         """
         state = self.video.stats()
         state["stream"] = self.stream.state_payload()
         state["camera"] = self._camera_backend()
+        state["sensor"] = self.sensor_lease.state()
         return state
 
     def _camera_backend(self) -> dict:
@@ -1263,6 +1294,35 @@ class Agent:
         self._lock_handle.write(str(time.time()))
         self._lock_handle.flush()
         return True
+
+    def another_agent_is_running(self) -> bool:
+        """Whether a station service already holds this home's lock.
+
+        For the CLI commands that touch hardware. The sensor lease
+        (`camera/ownership.py`) arbitrates within one process and cannot see
+        across processes at all — so `gsu camera` run on a box where the
+        service is up is two independent openers of one sensor, with nothing
+        in between them. That is the one contention path the lease is
+        structurally unable to close, and it is closed here instead.
+
+        Read-only: this takes the lock and gives it straight back, so asking
+        the question does not answer it differently for the next asker.
+        """
+        if not self.config.single_instance:
+            return False
+        import fcntl
+
+        try:
+            with open(self.config.lock_path, "a") as handle:
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    return True
+                fcntl.flock(handle, fcntl.LOCK_UN)
+        except OSError:
+            # No lock file, or nowhere to put one. Nothing is running.
+            return False
+        return False
 
     def _install_signals(self) -> None:
         def handle(signum, _frame):

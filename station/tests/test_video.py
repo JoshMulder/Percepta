@@ -40,7 +40,7 @@ from gsu.camera.synthetic import SyntheticCamera
 from gsu.config import AgentConfig, SiteConfig
 from gsu.credentials import Broker
 from gsu.devices import registry
-from gsu.video import VideoPublisher
+from gsu.video import CameraPreview  # noqa: F401 - imported to pin the name
 
 SCHEMAS = Path(__file__).resolve().parent.parent.parent / "contract" / "schemas"
 VIDEO = Draft202012Validator(json.loads((SCHEMAS / "video.schema.json").read_text()))
@@ -166,81 +166,83 @@ def _enrolment():
 # --- the payload ---------------------------------------------------------
 
 
-class PayloadTests(AgentFixture):
-    def test_a_frame_matches_the_schema(self):
-        self.assertTrue(self.video.cycle(), "a fitted simulated camera should publish")
-        payload = self.published()[0]
-        errors = sorted(VIDEO.iter_errors(payload), key=str)
-        self.assertFalse(errors, [error.message for error in errors])
-        self.assertEqual(payload["kind"], "video")
-        self.assertEqual(payload["format"], "mjpeg")
-        self.assertEqual((payload["width"], payload["height"]), (640, 480))
+class ChannelRemovedTests(AgentFixture):
+    """`gsu/{station_id}/video` is not published at all any more.
 
-    def test_it_goes_to_the_video_channel_and_nowhere_else(self):
-        self.video.cycle()
-        topic, _ = self.transport.sent[0]
-        self.assertEqual(topic, f"gsu/{STATION}/video")
+    The schema is still loaded above and still validated against in this file,
+    because the *contract* has not been withdrawn — the station has stopped
+    producing the channel and the platform has to be told what it will stop
+    receiving. These tests pin "stopped": a channel that quietly comes back is
+    a channel that puts a second reader on the sensor again, which is the
+    entire fault this removal exists to close.
+    """
 
-    def test_the_sensing_tick_never_publishes_video(self):
-        # Video is on its own thread and its own cadence. If a `video` payload
-        # ever appears in the telemetry stream it fails the telemetry schema,
-        # which has no such kind, and the platform drops it.
-        sent: list[dict] = []
-        self.agent._publish = lambda topic, payload: sent.append(payload) or True
+    def test_a_preview_capture_publishes_nothing_anywhere(self):
+        self.assertTrue(self.video.cycle(), "a fitted simulated camera captures")
+        self.assertEqual(self.transport.sent, [],
+                         "the preview put something on the wire")
+
+    def test_no_path_through_the_agent_emits_a_video_payload(self):
+        sent: list[tuple] = []
+        self.agent._publish = lambda topic, payload: sent.append((topic, payload)) or True
         for _ in range(3):
             self.agent.step(1.0, weather_due=True, health_due=True)
-        self.assertFalse([p for p in sent if p.get("kind") == "video"])
+            self.video.cycle()
+        self.assertFalse([p for _, p in sent if p.get("kind") == "video"])
+        self.assertFalse([t for t, _ in sent if t and t.endswith("/video")])
 
-    def test_health_reports_what_video_costs(self):
+    def test_the_health_frame_says_the_channel_is_gone_rather_than_idle(self):
+        # Zero frames and zero bitrate is also what a broken camera looks like.
+        # A console must be able to tell "this station does not do snapshots"
+        # from "this station's snapshots have stopped working".
         for _ in range(3):
             self.video.cycle()
         stats = self.agent.health_payload()["video"]
-        self.assertEqual(stats["frames_published"], 3)
-        self.assertGreater(stats["bytes_per_frame"], 1000)
-        self.assertGreater(stats["bitrate_bps"], 0)
+        self.assertIs(stats["snapshots"], False)
+        self.assertIn("removed", stats["snapshots_removed"])
+        self.assertEqual(stats["preview_frames"], 3)
+
+    def test_the_health_frame_says_who_holds_the_camera(self):
+        # The question all three previous fixes were circling and none of them
+        # could answer from telemetry.
+        state = self.agent.health_payload()["video"]["sensor"]
+        self.assertIsNone(state["holder"])
+        token = self.agent.sensor_lease.acquire("the live stream")
+        self.assertEqual(
+            self.agent.health_payload()["video"]["sensor"]["holder"],
+            "the live stream",
+        )
+        self.agent.sensor_lease.release(token)
 
 
-class AvailabilityTests(AgentFixture):
-    """`available: false` is a statement, and it has to keep being made."""
+class PreviewReasonTests(AgentFixture):
+    """No picture is a statement, and it has to say which kind of no picture."""
 
-    def test_no_camera_fitted_says_so_rather_than_going_quiet(self):
+    def test_no_camera_fitted_says_so(self):
         self.agent.camera = None
-        self.video.cycle()
-        payload = self.published()[0]
-        self.assertFalse(VIDEO.is_valid(payload) is False, "must satisfy the schema")
-        self.assertIs(payload["available"], False)
-        self.assertIn("camera", payload["unavailable_reason"])
-        self.assertNotIn("jpeg", payload)
+        self.assertFalse(self.video.cycle())
+        self.assertTrue(self.video.last_reason)
+        self.assertIn("camera", self.video.last_reason)
 
     def test_a_camera_that_will_not_answer_gives_its_own_reason(self):
         self.agent.camera = StubCamera(None, "rpicam-jpeg failed: no cameras available")
-        self.video.cycle()
-        payload = self.published()[0]
-        self.assertIs(payload["available"], False)
-        self.assertIn("no cameras available", payload["unavailable_reason"])
-        errors = sorted(VIDEO.iter_errors(payload), key=str)
-        self.assertFalse(errors, [error.message for error in errors])
+        self.assertFalse(self.video.cycle())
+        self.assertIn("no cameras available", self.video.last_reason)
+        self.assertEqual(self.video.failed, 1)
+        self.assertEqual(self.video.refused, 0)
 
-    def test_it_keeps_saying_it_but_not_at_the_frame_rate(self):
-        # Repeating "no camera" 2 000 times an hour is not a bandwidth decision
-        # anyone should have to defend; going quiet is indistinguishable from a
-        # dead station. Rate-limited to telemetry's own cadence, and it must
-        # never stop.
-        self.agent.camera = None
-        self.video._last_unavailable = 0.0
-        self.video.cycle()
-        self.video.cycle()
-        self.assertEqual(len(self.published()), 1)
-        self.video._last_unavailable -= 2.0
-        self.video.cycle()
-        self.assertEqual(len(self.published()), 2)
+    def test_contention_is_counted_apart_from_failure(self):
+        # The distinction the owner asked for in as many words: "so i can tell
+        # what is camera not working rather than actually just snapshots".
+        self.agent.camera = StubCamera(None, "the camera is in use by the live stream")
+        self.assertFalse(self.video.cycle())
+        self.assertEqual(self.video.refused, 1)
+        self.assertEqual(self.video.failed, 0, "contention counted as a fault")
 
     def test_video_switched_off_is_reported_as_a_reason_not_as_silence(self):
         self.agent.site.video_enabled = False
-        self.video.cycle()
-        payload = self.published()[0]
-        self.assertIs(payload["available"], False)
-        self.assertIn("switched off", payload["unavailable_reason"])
+        self.assertFalse(self.video.cycle())
+        self.assertIn("switched off", self.video.last_reason)
 
     def test_an_unsourced_camera_shows_up_where_the_console_looks_for_it(self):
         self.agent.inventory.set_device("camera", "")
@@ -252,17 +254,19 @@ class AvailabilityTests(AgentFixture):
 class CompletenessTests(AgentFixture):
     """A partial frame is dropped. This is the rule with the sharpest edge."""
 
-    def test_a_truncated_frame_is_never_published(self):
+    def test_a_truncated_frame_is_never_shown(self):
         whole = SyntheticCamera().capture()
         cut = Frame(jpeg=whole.jpeg[: len(whole.jpeg) // 2], width=whole.width,
                     height=whole.height, captured_at=whole.captured_at)
         self.agent.camera = StubCamera(cut)
-        # The driver is what refuses; the publisher must not paper over a driver
-        # that does not, so the check is asserted at both ends.
+        # The driver is what refuses; the preview must not paper over a driver
+        # that does not, so the check is asserted at both ends. The rule
+        # outlived the channel it was written for — half a picture of a site is
+        # no better on a setup page than it was on a console.
         self.assertFalse(complete_jpeg(cut.jpeg))
-        self.video.cycle()
-        for payload in self.published():
-            self.assertNotIn("jpeg", payload)
+        self.assertFalse(self.video.cycle())
+        self.assertIsNone(self.video.last_frame)
+        self.assertIn("not a complete JPEG", self.video.last_reason)
 
     def test_completeness_is_about_both_ends(self):
         whole = SyntheticCamera().capture().jpeg
@@ -277,17 +281,20 @@ class CompletenessTests(AgentFixture):
 class CapturedAtTests(AgentFixture):
     """The age of the picture, which is the thing an operator assumes."""
 
-    def test_it_is_the_capture_and_not_the_publish(self):
+    def test_it_is_the_shutter_and_not_the_fetch(self):
+        # It used to be "not the publish". There is nothing to publish now, and
+        # the rule matters more rather than less: `/frame.jpg` serves a cached
+        # frame with an `X-Frame-Age` header computed from this timestamp, and
+        # while the live stream holds the sensor that frame is deliberately not
+        # replaced. The age is the only thing saying so.
         camera = SyntheticCamera()
         frame = camera.capture()
         self.agent.camera = StubCamera(frame)
         time.sleep(0.05)
         self.video.cycle()
-        payload = self.published()[0]
-        self.assertEqual(payload["captured_at"],
-                         frame.captured_at.isoformat().replace("+00:00", "Z"))
-        self.assertLess(datetime.fromisoformat(payload["captured_at"].replace("Z", "+00:00")),
-                        datetime.now(UTC))
+        self.assertIs(self.video.last_frame, frame)
+        self.assertEqual(self.video.last_frame.captured_at, frame.captured_at)
+        self.assertGreater(self.video.frame_age_s(), 0.04)
 
     def test_the_picture_agrees_with_the_field(self):
         # The synthetic camera draws the same instant it stamps, so a console
@@ -325,34 +332,12 @@ def _rendered_text(canvas, text: str) -> str:
     return ""
 
 
-class DroppingRatherThanQueueingTests(AgentFixture):
-    """`contract/transport.md`: favour dropping data over queueing it."""
-
-    def test_frames_that_cannot_be_sent_are_gone(self):
-        self.transport.ok = False
-        for _ in range(4):
-            self.video.cycle()
-        self.assertEqual(self.video.published, 0)
-        self.assertEqual(self.video.dropped, 4)
-        self.transport.ok = True
-        self.video.cycle()
-        # One frame, not five: nothing was held back waiting for the link.
-        self.assertEqual(len(self.published()), 1)
-        self.assertEqual(self.video.published, 1)
-
-    def test_a_station_with_no_identity_publishes_nothing_anywhere(self):
-        self.agent.enrolment = None
-        self.assertIsNone(self.video.topic)
-        self.assertFalse(self.video.cycle())
-        self.assertEqual(self.transport.sent, [])
-
-
 class PreviewCacheTests(AgentFixture):
-    """The setup page's preview: the publisher's own newest frame, cached."""
+    """The setup page's preview: one frame, on demand, cached and aged."""
 
-    def test_the_published_frame_is_kept_for_the_preview(self):
+    def test_a_captured_frame_is_kept_and_its_age_is_reported(self):
         self.assertIsNone(self.video.last_frame)
-        self.assertEqual(self.video.preview_state(), {"has_frame": False})
+        self.assertEqual(self.video.preview_state()["has_frame"], False)
         self.video.cycle()
         frame = self.video.last_frame
         self.assertIsNotNone(frame)
@@ -363,14 +348,35 @@ class PreviewCacheTests(AgentFixture):
         self.assertGreaterEqual(self.video.frame_age_s(), 0.0)
 
     def test_an_unenrolled_station_still_captures_for_the_preview(self):
-        # The preview exists for the installer standing at an unenrolled box.
-        # Captures run; the wire stays silent, same as every other stream.
+        # The preview exists for the installer standing at an unenrolled box,
+        # and it needs no identity because it sends nothing anywhere.
         self.agent.enrolment = None
-        self.assertFalse(self.video.cycle())
+        self.assertTrue(self.video.cycle())
         self.assertEqual(self.transport.sent, [])
         self.assertIsNotNone(self.video.last_frame)
         self.assertEqual(self.video.captured, 1)
-        self.assertEqual(self.video.published, 0)
+
+    def test_nothing_is_captured_until_somebody_asks(self):
+        """The strongest statement this design makes about ownership.
+
+        On a box with nobody on the setup page the camera is opened exactly
+        never, which leaves the live stream as the only consumer of the sensor.
+        That is what makes the contention structural rather than managed.
+        """
+        self.assertFalse(self.video.wanted, "wanted before anybody asked")
+        self.video.preview_state()               # what /status.json does
+        self.assertTrue(self.video.wanted)
+        self.video.cycle()
+        # And having just captured, it will not capture again immediately
+        # however often it is asked.
+        self.video.preview_state()
+        self.assertFalse(self.video.wanted, "the refresh floor was not applied")
+
+    def test_demand_expires_so_a_closed_laptop_stops_the_camera(self):
+        self.video.preview_state()
+        self.assertTrue(self.video.wanted)
+        self.video._wanted_until -= 999
+        self.assertFalse(self.video.wanted)
 
     def test_a_failed_capture_leaves_the_cached_frame_standing(self):
         # A stale picture with a stated age beats no picture; the age says
@@ -382,44 +388,34 @@ class PreviewCacheTests(AgentFixture):
         self.assertIs(self.video.last_frame, kept)
 
     def test_a_stream_holding_the_sensor_does_not_disturb_the_cache(self):
-        # An exclusive sensor held by the live encoder: the publisher backs
-        # off (that behaviour has its own tests) and the preview keeps the
-        # last frame it took rather than contending for the hardware.
+        """The driver refuses, the cache stands, and the age tells the truth.
+
+        Note what is *not* here any more: the preview no longer consults the
+        stream's state to decide whether to try. It simply asks the driver, and
+        the driver asks the lease. One arbiter, consulted by everybody, rather
+        than two code paths agreeing to keep out of each other's way.
+        """
         self.video.cycle()
         kept = self.video.last_frame
 
-        class Holding:
-            state = "streaming"
-
-            def stop(self, reason=""):
-                return "stopped"
-
-            def state_payload(self):
-                return {"state": self.state}
-
-            def tick(self):
-                pass
-
         exclusive = StubCamera(None, "busy")   # owns_sensor defaults True
         self.agent.camera = exclusive
-        self.agent.stream = Holding()
+        token = self.agent.sensor_lease.acquire("the live stream")
+        self.assertIsNotNone(token)
         self.video.cycle()
         self.assertIs(self.video.last_frame, kept)
-        self.assertEqual(exclusive.captures, 0, "must not contend for the sensor")
+        self.agent.sensor_lease.release(token)
 
 
 class RefusedChannelTests(AgentFixture):
-    """A channel the broker will not grant is not a link that is down."""
+    """A channel the broker will not grant is not a link that is down.
 
-    def test_it_is_reported_as_itself_and_backed_off(self):
-        self.transport.refuse = f"gsu/{STATION}/video"
-        self.video.cycle()
-        conditions = {c["id"]: c for c in self.agent.health.to_list()}
-        self.assertIn("video.topic_refused", conditions)
-        self.assertIn("ACL", conditions["video.topic_refused"]["detail"])
-        # Backed off rather than retried twice a second for a week.
-        self.assertFalse(self.video.cycle())
-        self.assertTrue(self.video.stats()["refused"])
+    The station no longer publishes video, so there is no longer a video
+    channel for a broker to refuse — but this transport behaviour is not about
+    video and was only ever tested through it. Keeping it: the regression it
+    guards (one ungranted topic closing the whole client) would take telemetry
+    down, and telemetry has not gone anywhere.
+    """
 
     def test_a_refused_publish_does_not_take_the_uplink_down(self):
         # The regression this exists for: a NOPERM used to be handled as a
@@ -603,57 +599,49 @@ class PiCameraTests(unittest.TestCase):
             self.skipTest("this machine has a libcamera stack")
         self.assertEqual(camera.status, "absent")
         self.assertIsNone(camera.capture())
-        self.assertIn("picamera2", camera.unavailable_reason)
+        self.assertIn("rpicam", camera.unavailable_reason)
         self.assertFalse(camera.describe().present)
         self.assertFalse(camera.describe().simulated, "never claims to be a simulation")
 
     def test_it_says_which_capture_path_it_took_and_why(self):
-        # The silent failure this exists for: `picamera2` is a Debian package
-        # and a venv built without --system-site-packages cannot import it, so
-        # the station falls back to a subprocess per frame. That is several
-        # times slower and looks exactly like a slow camera rather than like a
-        # packaging choice, which sends somebody after the wrong thing.
+        # One path now, and the sentence says what it costs. The two-path
+        # explanation this used to carry — picamera2 versus a subprocess, and
+        # the venv packaging trap that silently chose between them — went with
+        # the backend it described.
         camera = PiCsiCamera()
         self.assertTrue(camera.backend_reason, "a backend with no explanation")
-        self.assertIn(camera._backend, ("picamera2", "cli", "none"))
-        if camera._backend == "cli":  # pragma: no cover - needs rpicam-apps
+        self.assertIn(camera._backend, ("rpicam", "none"))
+        if camera._backend == "rpicam":  # pragma: no cover - needs rpicam-apps
             self.assertIn("subprocess per frame", camera.backend_reason)
-            self.assertIn(camera.backend_reason, camera.describe().detail)
 
-    def test_a_venv_without_system_site_packages_is_named_as_the_cause(self):
-        import sys
-        import tempfile as tf
-        from pathlib import Path as P
+    def test_the_only_libcamera_in_this_process_is_a_subprocess(self):
+        """What actually closes the wedge, asserted as a property of the code.
 
-        # Written as the two pyvenv.cfg states rather than by building two real
-        # environments: what is under test is the diagnosis, not venv itself.
-        for include, hidden in (("true", False), ("false", True)):
-            with tf.TemporaryDirectory() as directory:
-                (P(directory) / "pyvenv.cfg").write_text(
-                    f"home = /usr/bin\ninclude-system-site-packages = {include}\n"
-                )
-                prefix, base = sys.prefix, sys.base_prefix
-                sys.prefix, sys.base_prefix = directory, "/usr"
-                try:
-                    self.assertIs(PiCsiCamera._venv_hides_system_packages(), hidden,
-                                  f"include-system-site-packages = {include}")
-                finally:
-                    sys.prefix, sys.base_prefix = prefix, base
-
-    def test_an_interpreter_outside_a_venv_is_not_blamed_for_a_venv_problem(self):
+        `Camera in Acquired state trying acquire()` comes from libcamera's own
+        `Camera::acquire`, and it can only be reached by a process that already
+        holds the camera in its own `CameraManager`. This station no longer has
+        one: `picamera2` is not imported anywhere, under any condition, so the
+        error is unreachable rather than defended against.
+        """
+        import subprocess as sp
         import sys
 
-        prefix, base = sys.prefix, sys.base_prefix
-        sys.prefix = sys.base_prefix = "/usr"
-        try:
-            self.assertFalse(PiCsiCamera._venv_hides_system_packages())
-        finally:
-            sys.prefix, sys.base_prefix = prefix, base
+        source = Path(__file__).resolve().parent.parent / "gsu"
+        # An import statement, not prose: the history of why this backend went
+        # away is worth keeping in the comments, and grepping for the word
+        # alone would forbid explaining the fix in the file that made it.
+        offenders = sp.run(
+            ["grep", "-rnE", r"^\s*(import|from)\s+picamera2", "--include=*.py",
+             str(source)],
+            capture_output=True, text=True, check=False,
+        ).stdout.splitlines()
+        self.assertEqual(offenders, [], "picamera2 is imported somewhere")
+        self.assertNotIn("picamera2", sys.modules)
 
     def test_construction_touches_no_hardware(self):
-        # It runs inside a sensing tick, so it must not import picamera2, open a
-        # camera or start a subprocess. Anything that slow belongs on the video
-        # thread, where a second of latency costs a frame instead of the loop.
+        # It runs inside a sensing tick, so it must not open a camera or start
+        # a subprocess. Anything that slow belongs on the preview thread, where
+        # a second of latency costs a frame instead of the loop.
         started = time.monotonic()
         PiCsiCamera(resolution="1280x720", quality=80, rotation=180)
         self.assertLess(time.monotonic() - started, 0.5)
@@ -670,6 +658,11 @@ class SiteConfigTests(unittest.TestCase):
     """Bandwidth policy is the platform's to change, and it must land."""
 
     def test_the_platform_can_turn_video_down_or_off(self):
+        # `video_fps` is retained and inert: it set the rate of a channel that
+        # no longer exists. It still parses and still round-trips, because a
+        # `config.set` carrying it from a platform that has not been updated
+        # must not become an error — and because a station that silently
+        # dropped a field it once honoured is worse than one that keeps it.
         site = SiteConfig()
         self.assertTrue(site.video_enabled)
         self.assertEqual(site.video_fps, 2.0)
@@ -688,24 +681,45 @@ class SiteConfigTests(unittest.TestCase):
         site.apply({"video_enabled": "true"})
         self.assertTrue(site.video_enabled)
 
-    def test_the_frame_rate_is_bounded_whatever_it_is_told(self):
-        agent = _publisher_with_fps(1000.0)
-        self.assertGreaterEqual(agent.interval, 1 / 10.0)
-        self.assertLessEqual(_publisher_with_fps(0.0001).interval, 1 / 0.05)
+    def test_video_enabled_still_switches_the_preview_off(self):
+        """`video_fps` no longer drives anything and `video_enabled` still does.
 
-
-def _publisher_with_fps(fps: float) -> VideoPublisher:
-    class Stub:
+        The frame-rate lever belonged to a channel that published continuously
+        and does not exist any more; the preview's rate is set by whether
+        anybody is looking. The on/off switch is kept because it is the
+        platform's one way to say "do not use this camera", and a station that
+        quietly ignored a `config.set` would be worse than one that never
+        offered the setting.
+        """
         site = SiteConfig()
-        enrolment = None
-        transport = None
-
-    stub = Stub()
-    stub.site.video_fps = fps
-    return VideoPublisher(stub)
+        self.assertTrue(site.video_enabled)
+        site.apply({"video_enabled": False}, version=9)
+        self.assertFalse(site.video_enabled)
 
 
 # --- the live stream -----------------------------------------------------
+
+
+class _InstantSource:
+    """An encoder that starts and stops without a thread or a subprocess.
+
+    Enough of `ProcessEncoder`'s surface for `StreamSession` to drive it, and
+    none of the machinery: these tests are about who owns the camera and when,
+    not about `rpicam-vid`.
+    """
+
+    running = True
+    reason = ""
+    keyframes = 0
+    name = "stub"
+    kind = "stub encoder"
+    stream_fps = None
+
+    def start(self, on_unit) -> bool:
+        return True
+
+    def stop(self) -> None:
+        pass
 
 
 class H264BitstreamTests(unittest.TestCase):
@@ -816,6 +830,158 @@ class H264BitstreamTests(unittest.TestCase):
         self.assertEqual(b"".join(u.data for u in recovered), stream)
         self.assertEqual([u.keyframe for u in recovered],
                          [u.keyframe for u in self.units])
+
+
+def _high_profile_sps(width: int, height: int, *, scaling: bool = False,
+                      level: int = 51) -> bytes:
+    """A High-profile SPS of a given size, built here rather than captured.
+
+    Real cameras send High (profile_idc 100), and High is where the SPS grows
+    the chroma format, the bit depths and the optional scaling lists *in front
+    of* the picture size. That is the part a Baseline-only reader walks straight
+    past, landing the width about forty bits early — a wrong number that looks
+    entirely plausible. The synthetic source only emits Baseline, so a High SPS
+    has to be written to test against; it is written with the same `BitWriter`
+    that produces the streams ffmpeg has already validated elsewhere in this
+    suite.
+    """
+    from gsu.camera.h264_synthetic import MB, BitWriter, nal
+
+    mb_width = (width + MB - 1) // MB
+    mb_height = (height + MB - 1) // MB
+    writer = BitWriter()
+    writer.u(100, 8)                    # profile_idc: High
+    writer.u(0, 8)                      # constraint flags
+    writer.u(level, 8)
+    writer.ue(0)                        # seq_parameter_set_id
+    writer.ue(1)                        # chroma_format_idc: 4:2:0
+    writer.ue(0)                        # bit_depth_luma_minus8
+    writer.ue(0)                        # bit_depth_chroma_minus8
+    writer.u(0, 1)                      # qpprime_y_zero_transform_bypass_flag
+    writer.u(1 if scaling else 0, 1)    # seq_scaling_matrix_present_flag
+    if scaling:
+        for index in range(8):
+            # Half present, half absent, and the present ones are real lists
+            # that end early on a zero delta — which is the case a byte-count
+            # skip gets wrong.
+            present = index % 2 == 0
+            writer.u(1 if present else 0, 1)
+            if present:
+                writer.se(-8)           # next_scale becomes 0: the list ends
+    writer.ue(0)                        # log2_max_frame_num_minus4
+    writer.ue(0)                        # pic_order_cnt_type 0 …
+    writer.ue(0)                        # … log2_max_pic_order_cnt_lsb_minus4
+    writer.ue(1)                        # max_num_ref_frames
+    writer.u(0, 1)                      # gaps_in_frame_num_value_allowed_flag
+    writer.ue(mb_width - 1)
+    writer.ue(mb_height - 1)
+    writer.u(1, 1)                      # frame_mbs_only_flag
+    writer.u(1, 1)                      # direct_8x8_inference_flag
+    crop_right = (mb_width * MB - width) // 2
+    crop_bottom = (mb_height * MB - height) // 2
+    if crop_right or crop_bottom:
+        writer.u(1, 1)                  # frame_cropping_flag
+        writer.ue(0)
+        writer.ue(crop_right)
+        writer.ue(0)
+        writer.ue(crop_bottom)
+    else:
+        writer.u(0, 1)
+    writer.u(0, 1)                      # vui_parameters_present_flag
+    return nal(7, 3, writer.trailing())
+
+
+class H264SequenceParameterSetTests(unittest.TestCase):
+    """The picture size, read from the stream instead of from the settings.
+
+    The fault: the H.264 sample entry took its dimensions from the size this
+    *station* was configured for. On a 4K camera under a 1080p site policy that
+    writes 1920x1080 into a container carrying 3840x2160 pictures. HEVC was
+    fixed to read its SPS and H.264 was explicitly flagged and left; this is
+    the flag being cleared.
+    """
+
+    def parsed(self, nal_bytes: bytes):
+        from gsu.camera.h264 import parse_sps, split_annexb
+
+        return parse_sps(split_annexb(nal_bytes)[0])
+
+    def test_baseline_sizes_round_trip_through_the_reader(self):
+        from gsu.camera.h264_synthetic import sps
+
+        for width, height in ((320, 240), (640, 480), (1280, 720),
+                              (1920, 1080), (3840, 2160), (1918, 1078)):
+            read = self.parsed(sps(width, height))
+            self.assertIsNotNone(read, f"{width}x{height} would not parse")
+            self.assertEqual((read.width, read.height), (width, height))
+
+    def test_high_profile_sizes_round_trip_too(self):
+        # The profile every real camera actually sends, and the one whose extra
+        # fields sit in front of the size.
+        for width, height in ((1920, 1080), (3840, 2160), (704, 576)):
+            read = self.parsed(_high_profile_sps(width, height))
+            self.assertIsNotNone(read, f"{width}x{height} would not parse")
+            self.assertEqual((read.width, read.height), (width, height))
+
+    def test_scaling_lists_are_stepped_over_exactly(self):
+        # A scaling list is signed Exp-Golomb and ends early on a zero scale,
+        # so it cannot be skipped by counting bytes. One bit of drift here puts
+        # the width somewhere else entirely.
+        read = self.parsed(_high_profile_sps(3840, 2160, scaling=True))
+        self.assertIsNotNone(read)
+        self.assertEqual((read.width, read.height), (3840, 2160))
+
+    def test_the_codec_string_matches_the_profile_and_level(self):
+        read = self.parsed(_high_profile_sps(3840, 2160, level=0x33))
+        self.assertEqual(read.codec_string(), "avc1.640033")
+
+    def test_rubbish_is_refused_rather_than_guessed_at(self):
+        from gsu.camera.h264 import parse_sps
+
+        self.assertIsNone(parse_sps(b""))
+        self.assertIsNone(parse_sps(b"\x67"))
+        # High profile, and then it stops: the extended fields the profile
+        # promises are not there, so the read runs off the end rather than
+        # inventing a size out of whatever follows.
+        self.assertIsNone(parse_sps(b"\x67\x64\x00\x33"))
+
+    def test_the_container_carries_the_streams_size_not_the_stations(self):
+        """The whole point, at the level it actually went wrong."""
+        from gsu.camera.h264_synthetic import pps
+        from gsu.media.fmp4 import Fmp4Muxer
+
+        # A station under a 1080p policy, in front of a 4K camera.
+        muxer = Fmp4Muxer(1920, 1080, 25.0)
+        muxer._remember(7, _high_profile_sps(3840, 2160, level=0x33)[4:])
+        muxer._remember(8, pps()[4:])
+
+        self.assertEqual((muxer.picture_width, muxer.picture_height), (3840, 2160))
+        self.assertEqual(muxer.codec(), "avc1.640033")
+        segment = muxer.init_segment()
+        self.assertIsNotNone(segment)
+        # The dimensions in the visual sample entry, big-endian: past the
+        # fourcc, six reserved bytes, data_reference_index and sixteen more of
+        # pre_defined/reserved. Located from `stsd` rather than by searching
+        # the whole segment, because `avc1` is also an `ftyp` brand.
+        index = segment.index(b"avc1", segment.index(b"stsd"))
+        width = int.from_bytes(segment[index + 28:index + 30], "big")
+        height = int.from_bytes(segment[index + 30:index + 32], "big")
+        self.assertEqual((width, height), (3840, 2160))
+
+    def test_an_unreadable_sps_falls_back_and_says_so(self):
+        # Degraded, not refused: the codec string is still readable from three
+        # bytes at fixed offsets, and the configured size is what every H.264
+        # stream used until now.
+        from gsu.camera.h264_synthetic import pps
+        from gsu.media.fmp4 import Fmp4Muxer
+
+        muxer = Fmp4Muxer(1920, 1080, 25.0)
+        with self.assertLogs("gsu.media", level="WARNING"):
+            muxer._remember(7, b"\x67\x64\x00\x33")
+        muxer._remember(8, pps()[4:])
+        self.assertIsNone(muxer.h264)
+        self.assertEqual((muxer.picture_width, muxer.picture_height), (1920, 1080))
+        self.assertTrue(muxer.codec().startswith("avc1."))
 
 
 class EncoderTests(unittest.TestCase):
@@ -1069,24 +1235,46 @@ class OnDemandTests(AgentFixture):
         uplink = build_uplink(Nowhere(), None)
         self.assertIn("no media URL", uplink.describe())
 
-    def test_a_real_camera_cannot_do_both_at_once_and_says_so(self):
-        # One sensor, one user: while rpicam-vid holds the CSI camera a snapshot
-        # fails with a device-busy, which would be published as a broken camera.
+    def test_a_real_camera_is_taken_by_the_stream_for_the_whole_session(self):
+        # One sensor, one owner. The stream holds the lease from before the
+        # encoder spawns until after it has been waited for, and the preview is
+        # refused by the driver rather than by a state check somewhere else.
         camera = StubCamera(SyntheticCamera().capture())
         camera.describe = _real_device
         self.agent.camera = camera
-        self.agent.stream.state = "streaming"
-        self.video.cycle()
-        payload = self.published()[0]
-        self.assertIs(payload["available"], False)
-        self.assertIn("live stream", payload["unavailable_reason"])
+        self.agent.stream._build_source = lambda settings: _InstantSource()
+        self.agent.stream.start({})
+        self.assertEqual(self.agent.sensor_lease.holder, "the live stream")
+        self.agent.stream.stop("test")
+        self.assertTrue(self.agent.sensor_lease.free,
+                        "the stream kept the camera after stopping")
 
-    def test_the_synthetic_camera_does_both_because_it_is_not_hardware(self):
-        # The configuration the platform tests against: losing snapshots there
-        # would be an artefact of the test rig rather than of the design.
-        self.agent.stream.state = "streaming"
+    def test_the_synthetic_camera_is_never_leased_because_it_is_not_hardware(self):
+        # The configuration the platform tests against. Two drawing routines
+        # can run at once, so arbitrating between them would be an artefact of
+        # the fix rather than of the hardware.
+        self.agent.stream._build_source = lambda settings: _InstantSource()
+        self.agent.stream.start({})
+        self.assertTrue(self.agent.sensor_lease.free)
         self.assertTrue(self.video.cycle())
-        self.assertIn("jpeg", self.published()[0])
+        self.agent.stream.stop("test")
+
+    def test_a_stream_that_cannot_get_the_camera_names_the_holder(self):
+        camera = StubCamera(SyntheticCamera().capture())
+        camera.describe = _real_device
+        self.agent.camera = camera
+        self.agent.stream._build_source = lambda settings: _InstantSource()
+        held = self.agent.sensor_lease.acquire("the camera preview")
+        import gsu.stream as stream_module
+
+        self.addCleanup(setattr, stream_module, "SENSOR_WAIT_S",
+                        stream_module.SENSOR_WAIT_S)
+        stream_module.SENSOR_WAIT_S = 0.01
+        effect = self.agent.stream.start({})
+        self.assertEqual(self.agent.stream.state, "unavailable")
+        self.assertIn("the camera preview", effect)
+        self.assertIn("Nothing is broken", self.agent.stream.reason)
+        self.agent.sensor_lease.release(held)
 
     def test_shutdown_stops_the_encoder(self):
         # A `rpicam-vid` left running holds the sensor, and the next start fails
@@ -1095,6 +1283,119 @@ class OnDemandTests(AgentFixture):
         source = self.agent.stream.source
         self.agent.stream.stop("test")
         self.assertFalse(source.running)
+
+
+class CodecMismatchTests(AgentFixture):
+    """A container that says one thing and carries another must stop.
+
+    The failure this closes, measured on the bench: the owner changed the
+    camera's encoder from H.265 to H.264 in its own web interface while a
+    stream was running. The station's `ffprobe` answer was cached for the life
+    of the driver, so it went on announcing `hvc1.1.6.L153.a0` and applying
+    H.265 NAL rules to H.264 bytes — for the whole session, with ffmpeg exiting
+    zero and no error anywhere. What the operator saw was a degraded picture,
+    which is the same thing a failing camera looks like.
+
+    Two halves: the probe is redone per session, and the answer is then checked
+    against the bitstream rather than trusted.
+    """
+
+    def hevc_keyframe(self):
+        from gsu.camera.h264 import AccessUnit
+
+        # A VPS, an SPS and a PPS in Annex B — HEVC's, unmistakably.
+        data = (b"\x00\x00\x00\x01\x40\x01\x0c\x01"
+                b"\x00\x00\x00\x01\x42\x01\x01\x01"
+                b"\x00\x00\x00\x01\x44\x01\xc1\x72")
+        return AccessUnit(data=data, captured_at=None, keyframe=True)
+
+    def test_hevc_bytes_in_an_h264_session_stop_it_with_a_reason(self):
+        self.agent.stream._build_source = lambda settings: _InstantSource()
+        self.agent.stream.start({})
+        self.assertEqual(self.agent.stream.state, "streaming")
+
+        self.agent.stream._on_unit(self.hevc_keyframe())
+
+        # Recorded on the encoder's thread, not acted on there: stop() joins
+        # that thread, and a thread cannot join itself.
+        self.assertTrue(self.agent.stream._codec_mismatch)
+        self.assertEqual(self.agent.stream.state, "streaming")
+
+        self.agent.stream.tick()
+        self.assertEqual(self.agent.stream.state, "unavailable")
+        self.assertIn("HEVC", self.agent.stream.reason)
+        self.assertIn("H264", self.agent.stream.reason)
+
+    def test_nothing_of_the_wrong_codec_is_ever_muxed(self):
+        self.agent.stream._build_source = lambda settings: _InstantSource()
+        self.agent.stream.start({})
+        muxer = self.agent.stream.muxer
+        self.agent.stream._on_unit(self.hevc_keyframe())
+        # The muxer never saw it: no parameter set was stored, so no init
+        # segment describing H.265 as H.264 can ever have been sent.
+        self.assertIsNone(muxer.sps)
+        self.assertFalse(muxer.ready)
+        self.assertEqual(self.agent.stream.codec, "")
+
+    def test_matching_bytes_pass_straight_through(self):
+        from gsu.camera.h264 import StreamSettings
+        from gsu.camera.h264_synthetic import SyntheticH264Source
+
+        self.agent.stream._build_source = lambda settings: _InstantSource()
+        self.agent.stream.start({})
+        source = SyntheticH264Source(StreamSettings(width=320, height=240, fps=10))
+        for _ in range(4):
+            self.agent.stream._on_unit(source.frame())
+        self.assertEqual(self.agent.stream._codec_mismatch, "")
+        self.assertTrue(self.agent.stream.codec.startswith("avc1."))
+
+    def test_the_probe_is_redone_for_every_session(self):
+        """A codec cached for the life of the driver is a codec that goes
+        stale the moment somebody touches the camera."""
+        from unittest import mock
+
+        from gsu.camera.rtsp import RtspCamera
+
+        with mock.patch("gsu.camera.rtsp.shutil.which", return_value="/usr/bin/ffmpeg"):
+            camera = RtspCamera(address="192.168.2.138")
+        asked: list = []
+
+        def probe(refresh=False):
+            asked.append(refresh)
+            return "h264"
+
+        camera.probe_codec = probe
+        self.agent.camera = camera
+        for _ in range(3):
+            camera.stream_source(self.agent.stream.settings())
+        self.assertEqual(asked, [True, True, True],
+                         "the stream path reused a cached codec")
+
+
+class StreamPacingTests(AgentFixture):
+    """What the muxer's clock is set to, and where the number came from."""
+
+    def test_the_clock_follows_the_source_and_is_reported(self):
+        class Source(_InstantSource):
+            stream_fps = 25.0
+
+        self.agent.site.stream_fps = 30
+        self.agent.stream._build_source = lambda settings: Source()
+        self.agent.stream.start({})
+        self.assertEqual(self.agent.stream.paced_fps, 25.0)
+        self.assertIn("measured", self.agent.stream.pacing_source)
+        # 90 kHz over 25 fps. At 30 it would be 3000, and the timeline would
+        # run 20 per cent fast against a camera sending 25.
+        self.assertEqual(self.agent.stream.muxer.sample_duration, 3600)
+        delivered = self.agent.stream.state_payload()["delivered"]
+        self.assertEqual(delivered["fps"], 25.0)
+
+    def test_a_source_that_states_no_rate_falls_back_and_says_which(self):
+        self.agent.site.stream_fps = 10
+        self.agent.stream._build_source = lambda settings: _InstantSource()
+        self.agent.stream.start({})
+        self.assertEqual(self.agent.stream.paced_fps, 10.0)
+        self.assertIn("configured", self.agent.stream.pacing_source)
 
 
 class StartupContentionTests(AgentFixture):
@@ -1134,72 +1435,50 @@ class StartupContentionTests(AgentFixture):
         self.agent.camera = camera
         return camera
 
-    def _instant_source(self, order: list | None = None, closed: list | None = None):
-        """An encoder that spawns without a thread, recording when it did."""
+    def _instant_source(self, holders: list | None = None):
+        """An encoder that spawns without a thread, recording who owned the
+        sensor at the moment it spawned."""
+        lease = self.agent.sensor_lease
 
-        class Source:
-            running = True
-            reason = ""
-            keyframes = 0
-            name = "stub"
-
+        class Source(_InstantSource):
             def start(self, on_unit) -> bool:
-                if order is not None:
-                    order.append(("spawn", bool(closed)))
+                if holders is not None:
+                    holders.append(lease.holder)
                 return True
-
-            def stop(self) -> None:
-                pass
 
         self.agent.stream._build_source = lambda settings: Source()
 
-    def test_starting_pauses_the_snapshot_publisher(self):
-        # Under the cli backend a snapshot is a subprocess that owns the sensor
-        # for the best part of a second; one dispatched while the encoder is
-        # spawning wins the race and kills the stream at birth. "starting"
-        # must read as "the stream has the camera" — before the first frame.
-        camera = self._real_camera()
-        self.agent.stream.state = "starting"
-        self.video.cycle()
-        payload = self.published()[0]
-        self.assertIs(payload["available"], False)
-        self.assertIn("live stream", payload["unavailable_reason"])
-        # The point is not the payload; it is that no capture was dispatched.
-        self.assertEqual(camera.captures, 0)
+    def test_a_real_camera_is_owned_before_the_encoder_spawns(self):
+        """Ordering is still the fix; the mechanism is no longer a guess.
 
-    def test_starting_does_not_pause_the_synthetic_camera(self):
-        # The synthetic camera is a drawing routine: two can run at once, and
-        # the platform's test rig relies on that. Pausing it would be an
-        # artefact of the fix, not of the hardware.
-        self.agent.stream.state = "starting"
-        self.assertTrue(self.video.cycle())
-        self.assertIn("jpeg", self.published()[0])
-
-    def test_the_drain_wait_is_only_for_real_cameras(self):
-        # 2.5 s exists to outlast an in-flight snapshot subprocess, which only
-        # a real camera can have. On the synthetic path it would slow every
-        # start on the platform's test rig for a hold that cannot exist.
-        slept = self._fake_time()
+        This used to assert a `close()` followed by a fixed 2.5-second sleep,
+        both of them before the spawn. The close asked the other reader nicely
+        and the sleep was tuned to outlast its slowest subprocess — a guess
+        about somebody else's timing, made on every start whether or not
+        anything was holding the camera. What has to be true is simpler and is
+        what is asserted now: the encoder does not spawn until this session
+        owns the sensor.
+        """
+        self._real_camera()
+        holders: list = []
+        self._instant_source(holders=holders)
         self.agent.stream.start({})
         self.agent.stream.stop("test")
-        self.assertNotIn(2.5, slept)
+        self.assertEqual(holders, ["the live stream"],
+                         "the encoder spawned without owning the camera")
 
-    def test_a_real_camera_is_closed_and_drained_before_the_encoder_spawns(self):
-        # Ordering is the fix: picamera2's long-lived hold is released, the
-        # in-flight cli capture is outlasted, and only then does the encoder
-        # spawn. A spawn before the close reintroduces the device-busy that
-        # reads like broken hardware.
-        camera = self._real_camera()
-        closed: list[bool] = []
-        camera.close = lambda: closed.append(True)
-        order: list = []
-        self._instant_source(order=order, closed=closed)
+    def test_no_start_pays_a_fixed_wait_for_a_hold_that_is_not_there(self):
+        # The old drain slept 2.5 s on every start with a real camera. Waiting
+        # on the lease costs nothing when nobody is holding it, which is the
+        # normal case now that the preview only runs while somebody looks.
+        self._real_camera()
+        self._instant_source()
         slept = self._fake_time()
+        started = time.monotonic()
         self.agent.stream.start({})
         self.agent.stream.stop("test")
-        self.assertEqual(order, [("spawn", True)], "the encoder spawned before "
-                         "the snapshot path had let go of the sensor")
-        self.assertIn(2.5, slept)
+        self.assertEqual(slept, [], "a start still sleeps on a fixed timer")
+        self.assertLess(time.monotonic() - started, 1.0)
 
     def test_start_survives_the_monitor_stopping_the_stream_at_birth(self):
         # The field failure: the encoder spawns cleanly, dies within a second,

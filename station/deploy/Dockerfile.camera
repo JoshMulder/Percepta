@@ -11,7 +11,7 @@
 # OS 13 (Trixie), armhf, ov5647 on the ribbon. The image builds at 271 MB.
 # What it measured, which is the whole story of this file:
 #
-#   * The sensor **enumerates** and picamera2 **captures snapshots**, under
+#   * The sensor **enumerates** and picamera2 **captured snapshots**, under
 #     exactly docker-compose.camera.yml's constraints — the udev mount, the
 #     widened device cgroup and the render gid were each necessary, and
 #     together sufficient.
@@ -22,12 +22,30 @@
 #     is this image's userland: not the kernel, not device access, not the
 #     compose overlay.
 #
-# **So a camera-equipped station uses the systemd path.** The host has
-# libcamera, `rpicam-apps` and `python3-picamera2` built for its own kernel and
-# firmware. This file remains the container path's route to *snapshots*, and
-# the starting point for whoever attempts the route past the bus error — a
-# Raspbian-based image; DEPLOYMENT.md §3 writes up the two ways to build one
-# and what each costs.
+# **So a camera-equipped station uses the systemd path**, and that was already
+# true before the change below.
+#
+# ---------------------------------------------------------------------------
+# **OPEN, AND NOT YET MEASURED.** The station no longer uses picamera2 at all
+# (gsu/camera/picsi.py: it was the only thing putting a libcamera
+# `CameraManager` inside the agent's process, and a leaked acquisition in there
+# is unrecoverable for the life of the run). Capture is now `rpicam-jpeg`.
+#
+# That means **the one camera function this image was demonstrated to perform
+# is now performed by a different binary, and that binary's sibling
+# `rpicam-vid` is the one that bus-errors here.** Whether `rpicam-jpeg` shares
+# the fault is unknown: the bus error was in the *encoder* path, which a still
+# capture does not use, so it may well be fine — but nobody has run it. Until
+# somebody does, this image should be assumed to have no working camera.
+#
+# One command settles it, on the Pi 2B, with the camera attached:
+#
+#   docker run --rm <the compose overlay's device flags> percepta/gsu-camera:… \
+#     rpicam-jpeg --nopreview --timeout 300 --output /dev/shm/probe.jpg
+#
+# A file with a JPEG in it means the container path keeps a preview. A bus
+# error means it has none, and the systemd path is the only camera route —
+# which is what DEPLOYMENT.md §3 already recommends for other reasons.
 #
 # Three couplings, the first now demonstrated rather than predicted:
 #
@@ -75,7 +93,6 @@ https://archive.raspberrypi.com/debian/ ${SUITE} main" \
         python3 \
         python3-redis \
         rpicam-apps \
-        python3-picamera2 \
         libcamera-ipa \
         libcamera-tools \
         ffmpeg; \
@@ -97,8 +114,14 @@ PY
 # Prove the camera stack is actually in the image. This checks packaging, not
 # hardware — `rpicam-hello --list-cameras` needs a camera and cannot run at
 # build time — but a missing binary is worth failing the build for.
-RUN command -v rpicam-jpeg && command -v rpicam-vid \
- && python3 -c "import picamera2; print('picamera2', picamera2.__name__)"
+#
+# `python3-picamera2` is deliberately no longer installed or checked. The
+# station does not import it and must not be able to: it is the only way a
+# libcamera `CameraManager` gets inside the agent's own process, and an
+# acquisition leaked in there cannot be released for the life of the run. See
+# gsu/camera/picsi.py. Capture is `rpicam-jpeg`, one subprocess per frame,
+# which is what these two lines now check for.
+RUN command -v rpicam-jpeg && command -v rpicam-vid
 
 # Same uid/gid as the slim image, so a bind-mounted state directory keeps
 # working if a station is moved between the two.

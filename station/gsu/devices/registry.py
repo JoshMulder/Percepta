@@ -383,10 +383,11 @@ REGISTRY: tuple[DeviceType, ...] = (
         parameters=(
             Parameter("resolution", "Resolution", "select", "640x480",
                       choices=("640x480", "1280x720", "1920x1080"), required=False,
-                      help="640x480 by default, and not because the camera "
-                           "cannot do better: at 2 fps it is already around half "
-                           "a megabit per second on a metered satellite link. "
-                           "HARDWARE.md §8 has the measured cost of each."),
+                      help="The size of the setup page's preview frame. It "
+                           "costs no bandwidth — nothing is published — so "
+                           "pick whatever is easiest to aim the camera by. "
+                           "The live stream's size is separate and is set by "
+                           "the site's policy."),
             Parameter("quality", "JPEG quality", "number", 75, required=False,
                       help="1-100, as libjpeg means it. Below about 50 the "
                            "picture is visibly blocked; above about 85 the file "
@@ -399,10 +400,11 @@ REGISTRY: tuple[DeviceType, ...] = (
         ),
         provides=("video",),
         notes="No address and no credentials: it is a ribbon cable, not a "
-              "network device. Bookworm, so libcamera: the driver uses "
-              "picamera2 if it imports and rpicam-jpeg if it does not. Motion "
-              "JPEG rather than H.264 — the reasoning is in "
-              "contract/schemas/video.schema.json.",
+              "network device. Bookworm, so libcamera: the driver captures "
+              "through rpicam-jpeg, one subprocess per frame, and holds the "
+              "sensor only while a frame is being taken. Live video is the "
+              "stream's job; this camera's stills exist for the setup page's "
+              "preview and go nowhere else.",
     ),
     DeviceType(
         id="simulated-camera",

@@ -1,45 +1,56 @@
 """The Raspberry Pi camera on the CSI ribbon, under libcamera.
 
-**Now run against hardware.** This driver met its first real camera — an ov5647
-on a Pi 2B (Raspbian 13, armhf) — in July 2026, and the picamera2 path carries
-the live station's 2 fps snapshot channel today. HARDWARE.md §7 is the register
-of what is measured and what still is not. It remains written to fail in ways
-somebody can diagnose from a log line rather than to look convincing, which is
-how every fault the hardware surfaced was found.
+**This driver no longer opens libcamera inside the station's own process, and
+that is the whole fix rather than a detail of it.**
 
-Bookworm dropped the old `raspistill`/MMAL stack for libcamera, so there are two
-ways in and this driver takes whichever is there:
+The history is worth keeping, because the shape of the bug outlived three
+correct-looking fixes. The driver used to have two backends: `picamera2`, a
+Python API holding one long-lived camera object, and `rpicam-jpeg`, a
+subprocess per frame. picamera2 existed for speed — it was the only way to make
+a 2 fps snapshot channel affordable on a Pi 2B. It also put a `libcamera`
+`CameraManager` inside this process, and that is the one thing that can produce
+the error that took the station off the air:
 
-    picamera2      the Python API, if it imports. One long-lived camera object,
-                   configured once, grabbing a JPEG per frame.
-    rpicam-jpeg    a subprocess per frame, writing to a file we then read. Slower
-                   by a long way - a process start, camera open and AE settle
-                   every frame - but it depends on nothing but `rpicam-apps`,
-                   which a stock Bookworm or Trixie image already has.
+    Camera in Acquired state trying acquire()
 
-Which of the two a box gets is not left to chance and is not silent. `picamera2`
-is a Debian package (`python3-picamera2`) bound to the system's libcamera build
-and cannot be pip-installed, so a virtual environment made without
-`--system-site-packages` cannot import it however well it is installed - and the
-station then runs the slow path, which looks exactly like a slow camera.
-`backend_reason` says which path and why, and it is carried into the device
-inventory, the setup page and the health frame.
+That message is emitted when *a single process* acquires the same camera twice.
+It is unrecoverable for the life of that process, because the leaked
+acquisition belongs to a manager singleton with no Python object left to close
+it. The leak had a specific, reachable path: `Picamera2()` acquires the sensor
+in its constructor, and if the `configure()` or `start()` that followed raised,
+the half-built object was dropped on the floor with the acquisition still in
+it — `self._camera` was never assigned, so neither `close()` nor `retire()` had
+anything to close. Every later open then failed the same way, for ever, and the
+driver's handler read that permanent failure as "the camera is merely busy" and
+retried it every five seconds until somebody rebooted the box.
 
-Three rules the rest of the station relies on, all of them enforced here:
+The snapshot channel that justified picamera2 has been removed
+(`gsu/video.py`). What is left is one frame at a time, on demand, only while
+somebody has the setup page open — and at that rate a subprocess is entirely
+affordable. So there is one backend, it is `rpicam-jpeg`, and this process
+contains no libcamera at all. The error above is now unreachable by
+construction rather than defended against.
 
-**Nothing blocks the sensing loop.** Every camera operation happens on the video
-thread. The constructor does only cheap checks - no import of picamera2, no
-subprocess - because it runs inside a tick.
+**Ownership is explicit.** Every capture holds the sensor lease
+(`camera/ownership.py`) for exactly as long as the subprocess runs, and takes
+it by name so that a log line and the setup page can say who has the camera.
+The live stream holds the same lease for the length of a session. Two readers
+of one sensor cannot overlap, and the one that loses says who won rather than
+reporting a broken camera.
 
-**A frame is complete or it is absent.** The subprocess path reads the file only
-after the process has exited cleanly, and both paths go through
-`complete_jpeg()`. A capture that timed out, half-wrote, or returned a truncated
-buffer produces `None` and a sentence, never a partial picture.
+Three rules the rest of the station still relies on:
+
+**Nothing blocks the sensing loop.** Every camera operation happens on the
+preview thread or the stream's. The constructor does only cheap checks — no
+subprocess — because it runs inside a tick.
+
+**A frame is complete or it is absent.** The file is read only after the
+process has exited cleanly, and the result goes through `complete_jpeg()`. A
+capture that timed out, half-wrote, or returned a truncated buffer produces
+`None` and a sentence, never a partial picture.
 
 **`captured_at` is the shutter, not the send.** Taken immediately after the
-capture call returns and carried on the frame from there. It is the closest this
-software can get to the exposure without the camera telling it - which picamera2
-can, in request metadata, and which is worth revisiting on hardware.
+capture call returns and carried on the frame from there.
 
 A camera that is not answering backs off rather than being retried at the frame
 rate: on a box nobody is standing next to, a failing subprocess twice a second
@@ -48,12 +59,10 @@ for a week is its own fault.
 
 from __future__ import annotations
 
-import importlib.util
 import logging
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -61,6 +70,7 @@ import time
 from .. import clock
 from ..sensors import Device
 from . import Frame, complete_jpeg, parse_resolution
+from .ownership import SensorLease
 
 log = logging.getLogger("gsu.camera")
 
@@ -84,9 +94,21 @@ RETRY_SECONDS = 10.0
 #: Failures in a row before the slot is reported as failed rather than silent.
 FAILURES_BEFORE_FAILED = 3
 
+#: How long a capture waits for the sensor before giving up and naming the
+#: holder. Deliberately short: the preview must never queue behind a live
+#: stream and then fire the instant it ends, which is the race that used to
+#: kill the next stream at birth. Long enough only to absorb the overlap
+#: between two captures that were dispatched close together.
+LEASE_WAIT_S = 0.5
+
 
 class PiCsiCamera:
-    """A CSI camera, captured one still at a time."""
+    """A CSI camera, captured one still at a time, through a subprocess."""
+
+    #: One ribbon, one owner at a time. Read by `camera.sensor_exclusive()`,
+    #: which is what the preview and the stream both consult before assuming
+    #: they may open anything.
+    owns_sensor = True
 
     def __init__(
         self,
@@ -94,6 +116,7 @@ class PiCsiCamera:
         quality: int = 75,
         rotation: int = 0,
         camera_num: int = 0,
+        sensor_lease: SensorLease | None = None,
     ) -> None:
         self.width, self.height = parse_resolution(resolution)
         self.quality = max(1, min(100, int(quality or 75)))
@@ -101,90 +124,58 @@ class PiCsiCamera:
         self.camera_num = int(camera_num or 0)
 
         # Cheap checks only: this constructor runs inside a sensing tick.
-        self._picamera2_installed = importlib.util.find_spec("picamera2") is not None
         self._tool = next((tool for tool in CLI_TOOLS if shutil.which(tool)), None)
-        self._backend = "picamera2" if self._picamera2_installed else (
-            "cli" if self._tool else "none"
-        )
-        #: Why this backend and not the faster one. Reported, never inferred:
-        #: the subprocess path is several times slower per frame, and "the
-        #: camera is slow" and "the fast path was unreachable for a packaging
-        #: reason" are the same symptom with completely different fixes.
+        self._backend = "rpicam" if self._tool else "none"
+        #: Which capture path and why. One path now, so this says what it is
+        #: and what it costs rather than which of two was picked — but it is
+        #: still reported rather than inferred, because "the camera is slow"
+        #: and "the camera is being shared" are different conversations.
         self.backend_reason = self._explain_backend()
-        self._camera = None            # a Picamera2, once one has been opened
         self._reason = "" if self._backend != "none" else self.backend_reason
-        # One lock over open, capture and close. The publisher thread captures,
-        # the commands thread closes when a stream starts, and unserialized
-        # they double-opened picamera2 - the second __init__ found the sensor
-        # held BY ITS OWN SIBLING, died half-built, and leaked the acquisition
-        # for the life of the process. The original "no locking, runs inside a
-        # tick" comment was written when there was one consumer; there are two.
-        self._io_lock = threading.Lock()
+        #: The arbiter, shared with the live stream and with whatever driver
+        #: replaces this one. Owned by the agent so that it outlives any single
+        #: driver instance — see camera/ownership.py. A private one when
+        #: constructed standalone (tests, `gsu camera`), so the code path is
+        #: the same either way and there is no "no lease" branch to get wrong.
+        self.sensor_lease = sensor_lease or SensorLease("camera")
+        #: Guards the driver's own bookkeeping only. The *sensor* is guarded by
+        #: the lease; this is here so two threads cannot corrupt the failure
+        #: counters and the retire flag while doing so.
+        self._state_lock = threading.Lock()
+        self._retired = False
         self._failures = 0
         self._next_attempt = 0.0
         self.frames = 0
         self.last_bytes = 0
         self.last_capture_ms = 0.0
-        # Scratch file for the command-line path. /dev/shm keeps a frame twice a
-        # second off the SD card, which is the part of a Pi that wears out.
+        # Scratch file for the capture. /dev/shm keeps frames off the SD card,
+        # which is the part of a Pi that wears out. The pid is in the name so
+        # that a stray CLI process cannot overwrite the service's frame.
         self._scratch = os.path.join(
             "/dev/shm" if os.path.isdir("/dev/shm") else tempfile.gettempdir(),
             f"gsu-camera-{os.getpid()}.jpg",
         )
 
     def _explain_backend(self) -> str:
-        """One sentence naming the capture path and why it is that one.
-
-        The case worth catching is specific and silent: `picamera2` is a Debian
-        package on Raspberry Pi OS, so a virtual environment created **without**
-        `--system-site-packages` cannot import it however well it is installed.
-        The station then falls back to a subprocess per frame, which works — and
-        looks exactly like a slow camera rather than like a packaging choice.
-        """
-        if self._backend == "picamera2":
-            return "picamera2 is importable; using it (one process, frames in memory)"
-        if self._backend == "cli":
-            if self._venv_hides_system_packages():
-                return (
-                    f"picamera2 is not importable from this virtual environment "
-                    f"({sys.prefix}), which was created without "
-                    "--system-site-packages — picamera2 is a system package and "
-                    f"cannot be pip-installed. Using {self._tool}, a subprocess "
-                    "per frame. Recreate the venv with --system-site-packages to "
-                    "use the faster path."
-                )
+        """One sentence naming the capture path and what it costs."""
+        if self._backend == "rpicam":
             return (
-                f"picamera2 is not installed; using {self._tool}, which is a "
-                "subprocess per frame. `apt install python3-picamera2` for the "
-                "faster path."
+                f"{self._tool}, one subprocess per frame. The camera is opened "
+                "only for the moment a frame is taken and is never held between "
+                "them, which is what lets the live stream have it without a "
+                "fight."
             )
         return (
-            "no CSI camera support on this box: picamera2 is not importable and "
-            "no rpicam-jpeg was found. Install python3-picamera2 or rpicam-apps."
+            "no CSI camera support on this box: no rpicam-jpeg was found. "
+            "`apt install rpicam-apps`."
         )
-
-    @staticmethod
-    def _venv_hides_system_packages() -> bool:
-        """Whether this interpreter is a venv that cannot see system packages."""
-        if sys.prefix == sys.base_prefix:
-            return False
-        try:
-            with open(os.path.join(sys.prefix, "pyvenv.cfg")) as handle:
-                for line in handle:
-                    name, _, value = line.partition("=")
-                    if name.strip() == "include-system-site-packages":
-                        return value.strip().lower() != "true"
-        except OSError:
-            pass
-        return True
 
     # --- the interface --------------------------------------------------
 
     @property
     def backend(self) -> str:
-        """`picamera2`, `cli` or `none`. Public because the setup page renders
-        it beside `backend_reason` — the pair is how "why is the camera slow"
-        gets answered without an SSH session."""
+        """`rpicam` or `none`. Public because the setup page renders it beside
+        `backend_reason`."""
         return self._backend
 
     @property
@@ -200,34 +191,44 @@ class PiCsiCamera:
         return self._reason
 
     def capture(self) -> Frame | None:
-        with self._io_lock:
-            return self._capture_locked()
+        """One frame, if this driver may have the sensor right now.
 
-    def _capture_locked(self) -> Frame | None:
-        if self._retired:
-            # Replaced during rediscovery. Refusing here is what stops a
-            # capture that raced the replacement from reopening the sensor on
-            # an instance nobody references any more — see retire().
-            self._reason = "this camera driver was replaced; not reopening"
-            return None
-        if self._backend == "none":
-            return None
-        if time.monotonic() < self._next_attempt:
-            # Backing off. The reason from the last failure is still the truth,
-            # and the station keeps publishing it rather than going quiet.
-            return None
+        The lease is taken for the length of the subprocess and released
+        whatever happens. A refusal is not a failure and is deliberately not
+        counted as one: the camera is working, somebody else is using it, and
+        counting that as a fault is what drove the first station's rediscovery
+        into rebuilding a healthy camera in a loop.
+        """
+        with self._state_lock:
+            if self._retired:
+                # Replaced during rediscovery. The successor owns the sensor,
+                # and a capture that raced the replacement must not open it.
+                self._reason = "this camera driver was replaced; not reopening"
+                return None
+            if self._backend == "none":
+                return None
+            if time.monotonic() < self._next_attempt:
+                # Backing off. The reason from the last failure is still the
+                # truth, and the station keeps reporting it rather than going
+                # quiet.
+                return None
 
+        token = self.sensor_lease.acquire("the camera preview", LEASE_WAIT_S)
+        if token is None:
+            self._reason = (
+                f"the camera is in use by "
+                f"{self.sensor_lease.holder or 'something else'}"
+            )
+            return None
+        try:
+            return self._capture_held()
+        finally:
+            self.sensor_lease.release(token)
+
+    def _capture_held(self) -> Frame | None:
+        """One capture, with the sensor already owned by this call."""
         started = time.monotonic()
-        data = None
-        if self._backend == "picamera2":
-            data = self._capture_picamera2()
-            if data is None and self._backend == "cli":
-                # picamera2 disqualified itself mid-capture; try the fallback in
-                # the same tick rather than losing a frame to the switch.
-                data = self._capture_cli()
-        else:
-            data = self._capture_cli()
-
+        data = self._capture_cli()
         at = clock.now()
         if not complete_jpeg(data):
             if data is not None and not self._reason:
@@ -237,11 +238,12 @@ class PiCsiCamera:
                 )
             return self._failed(self._reason or "the camera returned no frame")
 
-        self._failures = 0
-        self._reason = ""
-        self.frames += 1
-        self.last_bytes = len(data)
-        self.last_capture_ms = (time.monotonic() - started) * 1000
+        with self._state_lock:
+            self._failures = 0
+            self._reason = ""
+            self.frames += 1
+            self.last_bytes = len(data)
+            self.last_capture_ms = (time.monotonic() - started) * 1000
         return Frame(jpeg=data, width=self.width, height=self.height, captured_at=at)
 
     def raw_sample(self) -> list[str]:
@@ -251,7 +253,8 @@ class PiCsiCamera:
             return []
         return [
             f"frame {self.frames}: {self.last_bytes / 1024:.1f} kB, "
-            f"{self.last_capture_ms:.0f} ms via {self._backend}"
+            f"{self.last_capture_ms:.0f} ms via {self._backend} "
+            f"(sensor {self.sensor_lease.describe()})"
         ]
 
     def describe(self) -> Device:
@@ -259,7 +262,7 @@ class PiCsiCamera:
             detail = self._reason
         else:
             detail = (
-                f"Pi CSI camera via {self._backend}, {self.width}x{self.height}, "
+                f"Pi CSI camera via {self._tool}, {self.width}x{self.height}, "
                 f"quality {self.quality}"
             )
             if self.frames:
@@ -269,11 +272,6 @@ class PiCsiCamera:
                 )
             elif self._reason:
                 detail += f" — {self._reason}"
-            if self._backend == "cli":
-                # Said on every line that describes this camera, not once at
-                # start-up in a log nobody keeps: the slow path is a standing
-                # condition, and the reason for it is what somebody acts on.
-                detail += f" [{self.backend_reason}]"
         return Device(
             id="camera",
             kind="camera",
@@ -283,156 +281,30 @@ class PiCsiCamera:
         )
 
     def close(self) -> None:
-        with self._io_lock:
-            self._close_locked()
+        """Nothing is held between captures, so this has nothing to release.
+
+        Kept because the `Camera` protocol has it and the agent's shutdown
+        calls it. It is deliberately **not** a relinquish any more: there is no
+        long-lived handle to relinquish, which is precisely why the
+        relinquish-versus-terminal distinction that the previous two fixes
+        turned on no longer has anything to be ambiguous about. A caller that
+        wants this driver to stop using the sensor for good calls `retire()`.
+        """
+        return None
 
     def retire(self) -> None:
-        """close(), and never open again. For the driver being replaced.
+        """Never capture again. For the driver being replaced.
 
-        close() alone is a *relinquish* — the stream path uses it to borrow the
-        sensor, and the next capture reopens picamera2. That is exactly wrong
-        for device rediscovery: the publisher thread can be one line into a
-        capture on this instance when the agent rebuilds the slot, and a
-        relinquished instance then reopens the sensor AFTER its replacement was
-        built — an acquisition nothing will ever release, because nothing holds
-        a reference to this object any more. That zombie hold is what kept the
-        first real station churning `acquire()` every retry until a restart.
-        Serialized on the same lock as capture, so once this returns there is
-        no capture in flight and none can start.
+        Still terminal, and still the thing rediscovery calls — but it now
+        closes a much smaller hole. There is no lazily-reopened handle to leak,
+        so a retired instance cannot reacquire the sensor behind its
+        successor's back; the flag exists to stop a capture that was already
+        dispatched from spending a lease the successor is waiting for.
         """
-        with self._io_lock:
+        with self._state_lock:
             self._retired = True
-            self._close_locked()
 
-    def _close_locked(self) -> None:
-        camera, self._camera = self._camera, None
-        if camera is not None:
-            for method in ("stop", "close"):
-                try:
-                    getattr(camera, method)()
-                except Exception:  # noqa: BLE001 - shutting down, say so and go on
-                    # Loud, and remembered. A close that failed can leave
-                    # picamera2's camera manager holding the sensor in Running
-                    # state, and the next Picamera2() then dies half-built and
-                    # LEAKS the acquisition - after which nothing in this
-                    # process, snapshots or encoder, can ever take the camera
-                    # again. That wedge took the first real station off the
-                    # air until a restart. Once a close has failed, picamera2
-                    # is not trusted again this run; the cli path costs a
-                    # subprocess per frame and cannot poison the manager.
-                    log.warning("Camera %s() failed during shutdown; not "
-                                "trusting picamera2 again this run.",
-                                method, exc_info=True)
-                    self._close_failed = True
-        try:
-            os.unlink(self._scratch)
-        except OSError:
-            pass
-
-    # --- backends -------------------------------------------------------
-
-    #: Set when a picamera2 close() ever fails. From then on the cli path is
-    #: used unconditionally - see close() for the wedge this prevents.
-    _close_failed = False
-
-    #: Set by retire(). A retired driver never captures and never reopens:
-    #: it has been replaced, and the sensor belongs to its successor.
-    _retired = False
-
-    #: Monotonic time before which picamera2 must not be reopened. A failed
-    #: open is retried, but not at the snapshot rate: hammering a busy sensor
-    #: at 2 Hz is how the fatal half-open happens in the first place.
-    _reopen_after = 0.0
-
-    def _capture_picamera2(self) -> bytes | None:
-        """One JPEG through the Python API.
-
-        The camera object is opened once and kept: opening it costs the best
-        part of a second, and doing that per frame would put the frame rate out
-        of reach before anything else did.
-        """
-        if self._close_failed:
-            return self._capture_cli()
-        if self._camera is None and time.monotonic() < self._reopen_after:
-            return None
-        try:
-            if self._camera is None:
-                self._camera = self._open_picamera2()
-            import io
-
-            buffer = io.BytesIO()
-            self._camera.capture_file(buffer, format="jpeg")
-            return buffer.getvalue()
-        except Exception as exc:  # noqa: BLE001 - reported, never raised upward
-            text = str(exc).lower()
-            if self._camera is None and (
-                "running state" in text or "busy" in text
-                or "did not complete" in text or "allocator" in text
-            ):
-                # The sensor is merely held - by the encoder winding down, or
-                # by a subprocess finishing. That is weather, not a fault:
-                # falling back to cli here would silently abandon the fast
-                # path forever over a two-second contention. Wait it out and
-                # try again, but not at the snapshot rate.
-                self._reopen_after = time.monotonic() + 5.0
-                log.info("picamera2 could not open (camera busy); retrying "
-                         "in 5s without changing backend.")
-                return None
-            self._drop_picamera2(exc)
-            return None
-
-    def _open_picamera2(self):
-        from picamera2 import Picamera2  # noqa: PLC0415 - deliberately lazy
-
-        camera = Picamera2(self.camera_num)
-        options = {"quality": self.quality}
-        config = {"main": {"size": (self.width, self.height)}}
-        if self.rotation == 180:
-            try:
-                from libcamera import Transform  # noqa: PLC0415
-
-                config["transform"] = Transform(hflip=1, vflip=1)
-            except Exception:  # noqa: BLE001
-                log.warning(
-                    "libcamera.Transform is unavailable; the camera will not be "
-                    "rotated. Mount the camera the right way up or use the "
-                    "command-line path."
-                )
-        camera.configure(camera.create_video_configuration(**config))
-        camera.options.update(options)
-        camera.start()
-        log.info(
-            "Pi camera open via picamera2 at %dx%d, quality %d.",
-            self.width, self.height, self.quality,
-        )
-        return camera
-
-    def _drop_picamera2(self, exc: Exception) -> None:
-        """Give up on picamera2 and use the command-line tool instead.
-
-        The likeliest cause on a stock image is a missing dependency of
-        `capture_file` rather than a missing camera, and the two need different
-        answers from whoever reads this. Both are stated.
-        """
-        camera, self._camera = self._camera, None
-        if camera is not None:
-            try:
-                camera.close()
-            except Exception:  # noqa: BLE001
-                pass
-        if self._tool:
-            self._backend = "cli"
-            self._reason = f"picamera2 failed ({exc}); using {self._tool} instead"
-            log.warning(
-                "picamera2 could not capture (%s). Falling back to %s, which is "
-                "slower per frame. If the camera itself is missing, %s will fail "
-                "too and say so.", exc, self._tool, self._tool,
-            )
-        else:
-            self._reason = (
-                f"picamera2 failed ({exc}) and no rpicam-jpeg is installed to "
-                "fall back to"
-            )[:200]
+    # --- the backend ------------------------------------------------------
 
     def _capture_cli(self) -> bytes | None:
         """One JPEG through `rpicam-jpeg`, via a file rather than a pipe.
@@ -492,13 +364,15 @@ class PiCsiCamera:
     # --- failure ---------------------------------------------------------
 
     def _failed(self, reason: str) -> None:
-        self._failures += 1
-        self._reason = reason[:200]
-        self._next_attempt = time.monotonic() + RETRY_SECONDS
-        if self._failures == FAILURES_BEFORE_FAILED:
+        with self._state_lock:
+            self._failures += 1
+            self._reason = reason[:200]
+            self._next_attempt = time.monotonic() + RETRY_SECONDS
+            failures = self._failures
+        if failures == FAILURES_BEFORE_FAILED:
             log.error(
                 "The camera has failed %d captures in a row: %s. Retrying every "
-                "%.0fs; video is being published as unavailable meanwhile.",
-                self._failures, self._reason, RETRY_SECONDS,
+                "%.0fs; the preview reports it as unavailable meanwhile.",
+                failures, self._reason, RETRY_SECONDS,
             )
         return None

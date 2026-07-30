@@ -17,9 +17,12 @@ and most easily assumes.
 
 Two implementations behind one interface, exactly as `sensors/` does it:
 
-    picsi.py       the real CSI camera. picamera2 if it imports, rpicam-jpeg if
-                   it does not. Carries the live station's snapshots since the
-                   first real camera — see HARDWARE.md §7
+    picsi.py       the real CSI camera, through `rpicam-jpeg` — a subprocess
+                   per frame, and no libcamera inside this process. There used
+                   to be a second, faster backend holding a camera object open
+                   between frames; it was the only thing that could wedge the
+                   sensor for the life of a run, and the 2 fps channel that
+                   justified it is gone. See HARDWARE.md §7
     synthetic.py   a generated test card, which says SYNTHETIC on its face
 
 and `jpeg.py`, a small baseline JPEG writer that exists **only** for the

@@ -357,10 +357,51 @@ class StreamSeamTests(unittest.TestCase):
         self.assertIsNone(source)
         self.assertIn("ffmpeg", session.reason)
 
-    def test_the_muxer_clock_is_paced_to_the_cameras_own_rate(self):
-        camera = fitted_camera(fps=25)
+    def test_the_muxer_clock_is_paced_to_the_probed_rate_not_the_stored_one(self):
+        """The first stream after any restart used to run 20 per cent fast.
+
+        `settings()` is called before `_build_source()`, and it used to read
+        `camera.stream_fps` — which at that moment still held the value seeded
+        from a stored `fps` param, because the probe that corrects it runs
+        inside `stream_source()`. A stored 30 against a camera sending 25 built
+        the muxer's clock at 30, so the timeline advanced faster than frames
+        arrived: stutter and catch-up. Only on the first stream, because every
+        later one reused the cached probe — which is what made it look
+        intermittent and restart-linked.
+        """
+        camera = fitted_camera()
         session = self.agent_with(camera).stream
-        self.assertEqual(session.settings().fps, 25)
+        session.agent.site.stream_fps = 30
+
+        def probe(refresh=False):
+            camera.stream_fps = 25.0        # what stream_source() learns
+            return "h264"
+
+        camera.probe_codec = probe
+        source = session._build_source(session.settings())
+        # The rate travels on the source, which is built after the probe.
+        self.assertEqual(source.stream_fps, 25.0)
+        # And site policy is left alone: it is what the station would ask an
+        # encoder for, and there is no encoder to ask on a remux path.
+        self.assertEqual(session.settings().fps, 30)
+
+    def test_a_leftover_fps_param_cannot_reach_the_driver_at_all(self):
+        """`50a4d85` removed the registry field; boxes still carry the value.
+
+        The inventory filters stored params by *constructor signature*, not by
+        what the registry currently declares — so a field removed from the
+        registry goes on being honoured for as long as the driver will accept
+        it. Removing the argument is what actually retires the setting.
+        """
+        from gsu.devices.inventory import _instantiate
+
+        with mock.patch("gsu.camera.rtsp.shutil.which",
+                        return_value="/usr/bin/ffmpeg"):
+            camera = _instantiate(
+                "gsu.camera.rtsp:RtspCamera",
+                {"address": "192.168.1.9", "fps": 30, "transport": "tcp"},
+            )
+        self.assertIsNone(camera.stream_fps)
 
     def test_a_network_camera_is_not_sensor_exclusive(self):
         self.assertFalse(sensor_exclusive(fitted_camera()))
@@ -371,13 +412,18 @@ class StreamSeamTests(unittest.TestCase):
 
         self.assertTrue(sensor_exclusive(PiCsiCamera()))
 
-    def test_snapshots_keep_running_while_a_network_camera_streams(self):
-        from gsu.video import VideoPublisher
+    def test_the_preview_keeps_working_while_a_network_camera_streams(self):
+        """No lease is taken for a camera that owns no local sensor.
 
+        Both of this station's paths are readers of a stream the camera
+        already serves, so there is nothing to arbitrate — and the preview
+        must never be told the camera is busy on account of a contention that
+        cannot happen.
+        """
         agent = self.agent_with(fitted_camera())
         agent.stream.state = "streaming"
-        publisher = VideoPublisher(agent)
-        self.assertFalse(publisher._stream_has_the_camera(agent.camera))
+        self.assertFalse(sensor_exclusive(agent.camera))
+        self.assertTrue(agent.sensor_lease.free)
         agent.stream.state = "idle"
 
 

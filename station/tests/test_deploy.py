@@ -146,9 +146,14 @@ class ShippedInventoryTests(unittest.TestCase):
         # reports what is absent rather than "unsupported": the distinction is
         # the whole point of the message, because one of them is fixed by
         # installing a package and the other cannot be fixed at all.
+        #
+        # It names one package and not two. `python3-picamera2` used to be the
+        # faster of two capture paths and is no longer used at all — it was the
+        # only thing putting libcamera inside this process, which is the only
+        # thing that can wedge a camera for the life of a run.
         detail = {r.slot: r for r in self.agent.inventory.report()}["camera"].detail
-        self.assertIn("picamera2", detail)
         self.assertIn("rpicam", detail)
+        self.assertNotIn("picamera2", detail)
 
     def test_the_streams_with_no_driver_are_declared_unavailable(self):
         sent: list[dict] = []

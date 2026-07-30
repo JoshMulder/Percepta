@@ -47,8 +47,17 @@ Two things Trixie changes that are worth knowing before you start:
 
 Package names, which changed once and are stable now: **`rpicam-apps`** (the
 `libcamera-*` binaries were renamed to `rpicam-*` in Bookworm; both names exist
-on current images) and **`python3-picamera2`**. On Bullseye they were
-`libcamera-apps`, which is one more reason not to be on Bullseye.
+on current images). On Bullseye they were `libcamera-apps`, which is one more
+reason not to be on Bullseye.
+
+**`python3-picamera2` is no longer needed and should not be relied on.** The
+station used to prefer it — it was the only way to make a 2 fps snapshot
+channel affordable on a Pi 2B — and it was also the only thing that put a
+libcamera `CameraManager` inside the agent's own process, where a leaked
+acquisition cannot be released for the life of the run. The snapshot channel is
+gone (CONTRACT-QUESTIONS.md item 17) and capture is `rpicam-jpeg`, one
+subprocess per frame. Installing picamera2 does no harm; the station will not
+import it.
 
 One more, only for a **network (RTSP) camera**: **`ffmpeg`**. It is what the
 station reads an RTSP camera with — one decoded frame per snapshot, and the
@@ -213,11 +222,10 @@ the live stream verified end to end in a real browser), while **the camera
 container gets snapshots but not the stream**.
 
 **Why the slim image cannot see a camera.** It is `python:3.11-slim-bookworm`
-plus one pip dependency. There is no libcamera in it, no `rpicam-jpeg`, no
-`rpicam-vid`, no `picamera2`. `gsu/camera/picsi.py` needs one of the first two
-and the live stream needs `rpicam-vid`, so the camera is reported unavailable
-with *"picamera2 is not importable and no rpicam-jpeg was found"* — accurate,
-and still no picture. That is not a bug in the image; the image was sized for an
+plus one pip dependency. There is no libcamera in it, no `rpicam-jpeg` and no
+`rpicam-vid`. `gsu/camera/picsi.py` needs the first and the live stream needs
+the second, so the camera is reported unavailable with *"no CSI camera support
+on this box: no rpicam-jpeg was found"* — accurate, and still no picture. That is not a bug in the image; the image was sized for an
 update layer of 91 KB over a metered link, and a camera stack is hundreds of
 megabytes.
 
@@ -228,15 +236,14 @@ built and run on the Pi 2B (the image builds at 271 MB):
 | | Measured |
 |---|---|
 | Sensor enumeration | **Works.** The ov5647 enumerates inside the container — under exactly the overlay's constraints: `/run/udev` mounted read-only, the device cgroup widened to all character devices, the `render` gid added. Every one of those was needed |
-| Snapshots | **Work.** picamera2 inside the container captures frames from the real sensor |
+| Stills | **Was working, now unverified.** picamera2 inside the container captured frames from the real sensor — but the station no longer uses picamera2, and capture is now `rpicam-jpeg`, whose sibling `rpicam-vid` is the binary that bus-errors in this image. The bus error was in the *encoder* path, which a still capture does not use, so it may well be fine. Nobody has run it. `deploy/Dockerfile.camera` carries the one command that settles it |
 | The live stream | **Fails.** `rpicam-vid` takes a **bus error in the encoder path** and dies before producing one frame — Debian armhf userland running against a Raspbian host. It spawns cleanly and dies asynchronously, so retrying the spawn never helps (`gsu/stream.py` says the same thing in code). The identical command on the host encodes 1080p30 through `/dev/video11`, so the fault is the image's userland — not the kernel, not device access, not the overlay |
-| The stack | `rpicam-apps` and `python3-picamera2` from the Raspberry Pi archive, which is not Debian proper. Build with `--build-arg SUITE=` matching the host's release. The archive keyring is vendored at `deploy/raspberrypi-archive-keyring.pgp` — the key on the website carries a SHA-1 binding signature that Trixie's Sequoia policy rejects outright, so fetching it at build time reads as an unsigned repository |
+| The stack | `rpicam-apps` from the Raspberry Pi archive, which is not Debian proper (`python3-picamera2` was dropped from the image along with the station's use of it). Build with `--build-arg SUITE=` matching the host's release. The archive keyring is vendored at `deploy/raspberrypi-archive-keyring.pgp` — the key on the website carries a SHA-1 binding signature that Trixie's Sequoia policy rejects outright, so fetching it at build time reads as an unsigned repository |
 
 **Conclusion, as deployed: camera stations run systemd; the container path is
 fine for everything else.** On the systemd path the coupling that produced the
-bus error does not exist — the host's own libcamera, `rpicam-apps` and
-`python3-picamera2` are built for the kernel they are running on, and they are
-updated with it.
+bus error does not exist — the host's own libcamera and `rpicam-apps` are
+built for the kernel they are running on, and they are updated with it.
 
 **The route past the bus error is a Raspbian-based image, and it has not been
 attempted.** There is no official Raspbian Trixie Docker base image, so the
@@ -262,23 +269,14 @@ Either route keeps the overlay unchanged — udev, the cgroup widening and the
 camera image does. Until a second camera station makes that maintenance worth
 buying, the answer stays systemd.
 
-**Related, and the reason the installer changed:** on the systemd path the venv
-is now created with **`--system-site-packages`**, because `python3-picamera2` is
-a Debian package that cannot be pip-installed — it is bound to the system's
-libcamera build. Without that flag the venv cannot import it however well it is
-installed, and the driver falls back to `rpicam-jpeg`, a subprocess per frame.
-That still works; it is several times slower, and it used to be **silent**. It
-is not silent now: the camera reports which path it took and why, in
-`gsu devices`, on the setup page and in the health frame —
-
-```
-picamera2 is not importable from this virtual environment (/opt/percepta/station/.venv),
-which was created without --system-site-packages — picamera2 is a system package and
-cannot be pip-installed. Using rpicam-jpeg, a subprocess per frame.
-```
-
-If you are upgrading an install made before this change, the installer says so
-and the fix is `rm -rf /opt/percepta/station/.venv` and a re-run.
+**Superseded:** the installer creates the venv with `--system-site-packages`,
+and that used to matter a great deal — `python3-picamera2` is a Debian package
+bound to the system's libcamera build, so a venv without the flag could not
+import it and the driver silently fell back to a subprocess per frame. **The
+station no longer imports picamera2 at all**, so the flag no longer changes
+what the camera does. It is kept because other system packages may want it and
+because changing the installer to save a flag is not worth a re-run on every
+box. Nothing is lost by leaving an existing install alone.
 
 ---
 
@@ -392,7 +390,7 @@ Devices
   FAIL  adsb: uAvionix ping RX Pro …: no serial port set for this device
   FAIL  radio: RTL-SDR airband …: not supported by this software build
   PASS  camera: Raspberry Pi camera (CSI ribbon)
-          Pi CSI camera via picamera2, 640x480, quality 75
+          Pi CSI camera via rpicam-jpeg, 640x480, quality 75
 ```
 
 Once the proxy is in front of the API, the second line reads `platform API:
@@ -401,9 +399,9 @@ system CA bundle` instead, and that is also a PASS.
 The two FAILs are dealt with in §8 and §10. Anything under **Trust** that fails
 must be fixed here, not later.
 
-**In the slim container that camera line is a `FAIL`**, reading *"picamera2 is
-not importable and no rpicam-jpeg was found"*. That is the expected answer
-there, not a fault to chase. In the camera image it is a `PASS` — and the live
+**In the slim container that camera line is a `FAIL`**, reading *"no CSI
+camera support on this box: no rpicam-jpeg was found"*. That is the expected
+answer there, not a fault to chase. In the camera image it is a `PASS` — and the live
 stream still is not (§3, the bus error). A station with a camera runs systemd.
 
 **Read the camera line carefully — preflight does not take a picture.** It
@@ -412,8 +410,10 @@ this board can be asked for a frame. A ribbon that is not seated, or a camera
 that is not there, still shows `PASS` here and only settles at the first
 capture, after which the slot reports `configured_absent` with libcamera's own
 message. **`gsu camera` is what proves a picture** (§9), and it takes about a
-second. On a box with neither `picamera2` nor `rpicam-jpeg` installed the line
-is a `FAIL` naming both.
+second — but only with the service stopped: it opens the same sensor, and it
+refuses rather than fighting the running station for it.
+
+On a box with no `rpicam-jpeg` installed the line is a `FAIL` naming it.
 
 ---
 
@@ -617,21 +617,27 @@ sudo docker compose -f deploy/docker-compose.yml run --rm gsu camera --frames 3 
 ```
 
 ```
-armv7l / Pi CSI camera via picamera2, 640x480, quality 75
+armv7l / Pi CSI camera via rpicam-jpeg, 640x480, quality 75
 
-  1:   38.4 kB JPEG,   51.4 kB published,   184.2 ms, captured 2026-07-29T…Z
-  2:   38.1 kB JPEG,   51.0 kB published,   171.5 ms, captured …
-  3:   38.6 kB JPEG,   51.7 kB published,   169.8 ms, captured …
+  1:   38.4 kB JPEG, 640x480,   184.2 ms, captured 2026-07-29T…Z
+  2:   38.1 kB JPEG, 640x480,   171.5 ms, captured …
+  3:   38.6 kB JPEG, 640x480,   169.8 ms, captured …
 
-  51.4 kB per published frame; at 2 fps that is 842 kbit/s sustained on the uplink.
+  38.4 kB per frame, mean over 3 frame(s). Nothing was published: these are
+  preview captures.
 ```
+
+There is no sustained-bitrate line any more, and its absence is the point:
+these frames go nowhere. The periodic snapshot channel was removed
+(CONTRACT-QUESTIONS.md item 17), so what costs bandwidth is the live stream,
+which `gsu stream` measures.
 
 That last line is the one to read before you leave: it is measured from this
 camera at this setting, not estimated. Copy `/tmp/frame.jpg` off and look at it —
 a picture of the site means the ribbon, the sensor and the encoder are all
 right. **No frame** prints libcamera's own message, which is the diagnosis:
-*"no cameras available"* is a ribbon or a camera, *"picamera2 is not installed
-and no rpicam-jpeg was found"* is a package.
+*"no cameras available"* is a ribbon or a camera, *"no rpicam-jpeg was found"*
+is a package, and *"the camera is in use by …"* names whatever else has it.
 
 **2. Does the live encoder keep up?** Still no platform needed. This one must
 run on the host — inside the container `rpicam-vid` takes a bus error before
@@ -716,9 +722,9 @@ station (a Pi 2B with an ov5647, live as of July 2026):
 
 | | |
 |---|---|
-| Snapshots | `gsu/{station_id}/video`, one complete JPEG per message, 640×480 at 2 fps by default. `contract/schemas/video.schema.json`. Live from the real sensor, via `picamera2` |
+| Stills | **No longer published anywhere.** The `gsu/{station_id}/video` channel was removed — two readers of one sensor was the camera wedge (DECISIONS.md item 45, CONTRACT-QUESTIONS.md item 17). What remains is the setup page's preview: one frame, taken only while somebody has the page open, served at `/frame.jpg` and sent nowhere |
 | Live video | H.264, fragmented MP4 over a WebSocket to the platform, started only while somebody is watching. 1080p30 through the Pi's hardware encode block (`/dev/video11`, chosen by `GSU_ENCODER=auto`), decoded in a real browser |
-| Driver | `gsu/camera/picsi.py` for stills — `picamera2` if it imports, `rpicam-jpeg` if it does not. `gsu/camera/h264.py` for the stream — a hardware encode block, or libav/x264, probed at start-up |
+| Driver | `gsu/camera/picsi.py` for stills — `rpicam-jpeg`, one subprocess per frame, holding the sensor only while a frame is taken. `gsu/camera/h264.py` for the stream — a hardware encode block, or libav/x264, probed at start-up. Who owns the sensor at any moment is `gsu/camera/ownership.py`, and it is reported as `video.sensor` in the health frame |
 | No camera fitted | `available: false` with a reason, on a cadence. Never silence, never a black frame |
 
 **What the first camera taught it** — five fixes (the sensor contention counts
@@ -730,11 +736,11 @@ HARDWARE.md §7 has the register):
   (`char-video4linux`, `char-media`, `char-dma_heap`) — an allow-list with the
   camera missing reads as *"no cameras available"* from a service whose own
   user can see the camera perfectly well from a shell.
-- The snapshot path held the sensor against the encoder, both directions:
-  picamera2's long-lived hold is now closed before the encoder starts, a
-  "starting" state pauses the publisher, and a bounded wait outlasts a cli
-  capture already in flight — which can only be outlasted, because the encoder
-  spawns cleanly and dies *asynchronously* on acquisition failure.
+- The snapshot path held the sensor against the encoder, both directions. Four
+  fixes were made for this and none of them closed it; it was finally closed by
+  **removing the second reader** and giving the sensor a single named owner —
+  DECISIONS.md item 45 is the whole account, and it is worth reading before
+  touching anything in this area.
 - `stream.start` read state the monitor thread could null mid-start, turning a
   dead encoder into an `AttributeError` on top of a dead stream.
 - The camera image's keyring fetch fell foul of Trixie's Sequoia policy (§3).
@@ -914,9 +920,9 @@ answer. The four you will actually see:
 |---|---|
 | *"no camera fitted"* | the camera slot is empty in the inventory. Set it on the setup page |
 | libcamera's own words — *"no cameras available"* | the ribbon or the camera. `gsu camera` reproduces it in a second, and the message comes from libcamera rather than from this software. **In a container** it is also what a missing `/run/udev` mount and a too-narrow device cgroup produce — §3 |
-| *"picamera2 is not importable and no rpicam-jpeg was found"* | packages: `sudo apt install python3-picamera2 rpicam-apps`. **On the container path this is the expected answer** and the fix is §3, not a package |
-| *"…created without --system-site-packages…"* | not a fault: there is a picture, taken the slow way. §3 has the one-line fix |
-| *"the camera is in use by the live stream"* | not a fault. One sensor, one user; snapshots resume when the viewer leaves |
+| *"no CSI camera support on this box: no rpicam-jpeg was found"* | packages: `sudo apt install rpicam-apps`. **On the slim container path this is the expected answer** and the fix is §3, not a package |
+| *"the camera is in use by the live stream"* | not a fault. One sensor, one owner; the preview resumes when the viewer leaves, and `video.sensor.holder` in the health frame says who has it right now |
+| *"the camera is held by … and did not come free within 10s"* | a stream that could not start because something else had the sensor. Also not a fault, and it names the holder. If the holder is never `null`, something is not releasing — that is a bug, and `video.sensor.held_for_s` is the evidence |
 
 If `video.refused` is `true`, the broker is rejecting the video channel. That is
 an ACL on the platform, not a fault on the box — the station retries every five
@@ -1246,14 +1252,13 @@ noticed. On a site that is hours away, that is the risk §14 exists to remove.
 Three things, honestly:
 
 - **The camera works fully here and only partly in the container — measured,
-  not reasoned (§3).** The host has libcamera, `rpicam-apps` and
-  `python3-picamera2`, all built for the kernel and firmware they are running
-  on and updated with them; on the first real Pi this path ran 1080p30 through
-  the hardware encoder end to end. The camera image enumerates the sensor and
-  captures snapshots, but `rpicam-vid` dies with a bus error before its first
-  frame. **For a station with a camera, this is the path.** The installer
-  creates the venv with `--system-site-packages` so that `picamera2` — a
-  Debian package, not a pip one — is importable.
+  not reasoned (§3).** The host has libcamera and `rpicam-apps` built for the
+  kernel and firmware they are running on and updated with them; on the first
+  real Pi this path ran 1080p30 through the hardware encoder end to end. The
+  camera image enumerates the sensor, but `rpicam-vid` dies with a bus error
+  before its first frame, and whether `rpicam-jpeg` shares the fault is now an
+  open question rather than a settled one — see §3. **For a station with a
+  camera, this is the path.**
 - **A missing device was never a problem here.** The unit has no device list to
   be wrong; the agent opens what it finds and reports what it cannot. The
   container path only matches this because its device mapping was made

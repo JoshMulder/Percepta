@@ -7,11 +7,18 @@ station never decodes for the live stream and never re-encodes anything; a Pi
 2B cannot transcode and must never be asked to. Two paths, both ffmpeg
 subprocesses:
 
-    snapshot   one JPEG per capture: connect, decode one frame, encode one
+    preview    one JPEG per capture: connect, decode one frame, encode one
                JPEG, exit. This *does* decode — it is the only place a decoder
-               runs, it is bounded to a single frame at the snapshot cadence,
-               and its cost is why the frame rate lever (`video_fps`) matters
-               more on this camera than on the CSI one.
+               runs — and it is bounded to a single frame, taken only while
+               somebody has the setup page open. It used to run twice a second
+               for ever, to feed a snapshot channel that no longer exists; at
+               the current rate its cost is not worth a lever.
+
+               This is also, literally, "a single ffmpeg frame pulled from the
+               same source": the URL it reads is the one the live stream
+               remuxes. Two readers of a network camera do not contend — the
+               camera encodes for itself and serves both — which is why
+               `owns_sensor` is False here and why this path needs no lease.
     stream     remux without re-encode (`-c copy`): the camera's own H.264 or
                HEVC copied into Annex B on stdout, cut into access units by the
                same reader as every other encoder, muxed into the same fMP4.
@@ -179,16 +186,24 @@ class RtspCamera:
         username: str = "",
         password: str = "",
         transport: str = "tcp",
-        fps: float = 15.0,
     ) -> None:
         # Raises on a credentialled URL — the inventory records the sentence
         # as the slot's reason, which is where an installer will read it.
         self._url = build_url(address, port, rtsp_path, username, password)
         self.transport = "udp" if str(transport).lower() == "udp" else "tcp"
-        #: The camera's own configured frame rate. The station cannot change
-        #: it — remux copies what arrives — so the muxer's clock is paced to
-        #: this, and a wrong value here plays the stream fast or slow.
-        self.stream_fps = max(1.0, float(fps or 15.0))
+        #: The camera's own configured frame rate, or None until the stream has
+        #: been probed. **Never seeded from configuration**, and the absence of
+        #: an `fps` constructor argument is the enforcement rather than a
+        #: convention: `50a4d85` removed the field from the registry, but boxes
+        #: provisioned before that still carry `fps: 30` in devices.json, and
+        #: `Inventory._instantiate` filters stored params by *constructor
+        #: signature*, not by what the registry currently declares. So a
+        #: parameter that no longer exists went on being honoured, seeded the
+        #: muxer's clock at 30 against a camera sending 25, and made the first
+        #: stream after every restart run its timeline 20% fast — which is what
+        #: a viewer shows as stutter and catch-up. A field that cannot be
+        #: passed cannot be stale.
+        self.stream_fps: float | None = None
 
         self._ffmpeg = shutil.which("ffmpeg")
         self.backend = "ffmpeg" if self._ffmpeg else "none"
@@ -276,18 +291,24 @@ class RtspCamera:
         return Frame(jpeg=done.stdout, width=dims[0], height=dims[1],
                      captured_at=at)
 
-    def refresh_stream_facts(self) -> None:
-        """Learn the codec and frame rate from the camera itself, once."""
-        self.probe_codec()
-
     def stream_source(self, settings: StreamSettings):
         """The live path: this camera's own H.264 or HEVC, remuxed. None with
         the reason in `unavailable_reason` when there is nothing to remux
-        with."""
+        with.
+
+        **Probed fresh every session, not once per driver.** The codec and the
+        frame rate are the camera's to change, and a technician who switches it
+        from H.264 to H.265 does not restart this station afterwards. A value
+        cached for the life of the driver would then pick the wrong NAL grammar
+        and the wrong ffmpeg muxer — which fails silently, as an MSE source
+        buffer that accepts everything and decodes nothing. One ffprobe against
+        a camera the station is about to open an ffmpeg session to anyway is
+        not a cost worth being clever about.
+        """
         if self._ffmpeg is None:
             self._reason = NO_FFMPEG
             return None
-        codec = self.probe_codec()
+        codec = self.probe_codec(refresh=True)
         if codec and codec not in STREAM_CODECS:
             # Still a refusal, and for the reason the refusal was written: the
             # station remuxes and cannot transcode, so a codec it does not carry
@@ -307,20 +328,28 @@ class RtspCamera:
             )
             return None
         return RtspRemuxSource(settings, url=self._url, transport=self.transport,
-                               codec=codec or "h264")
+                               codec=codec or "h264", stream_fps=self.stream_fps)
 
-    def probe_codec(self) -> str | None:
-        """The stream's video codec, via ffprobe, cached for the session.
+    def probe_codec(self, refresh: bool = False) -> str | None:
+        """The stream's video codec, via ffprobe.
 
         None when it cannot be determined - an unreachable camera is already
-        reported by the snapshot path, and refusing a stream because a probe
+        reported by the capture path, and refusing a stream because a probe
         timed out would turn a network blip into a configuration error.
+
+        `refresh` re-asks rather than using what is cached. The cache exists so
+        that `describe()` and telemetry can say what the camera streams without
+        a subprocess each time; the stream path passes `refresh=True` because
+        it is about to act on the answer.
         """
-        if self._codec is not None:
+        if self._codec is not None and not refresh:
             return self._codec or None
         probe = shutil.which("ffprobe")
         if not probe:
-            return None
+            # No prober on this box. Whatever is already known is better than
+            # nothing — and on a refresh, forgetting it would silently
+            # downgrade a known HEVC camera to the h264 default.
+            return self._codec or None
         try:
             result = subprocess.run(
                 [probe, "-v", "error", "-rtsp_transport", self.transport,
@@ -330,7 +359,11 @@ class RtspCamera:
                 capture_output=True, text=True, timeout=15,
             )
         except (OSError, subprocess.SubprocessError):
-            return None
+            # A refresh that could not reach the camera keeps what it knew.
+            # Forgetting here would downgrade a known HEVC camera to the
+            # h264 default on one dropped packet, which is the silent-black
+            # failure this probe exists to prevent.
+            return self._codec or None
         lines = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
         self._codec = lines[0] if lines else ""
         # ffprobe reports the rate as a rational, "25/1". Taken from the stream
@@ -339,14 +372,25 @@ class RtspCamera:
         # disagrees plays the result fast or slow at the far end for no reason
         # anybody could see. A wrong default of 15 or 30 against a real 25 was
         # what made the field worth removing.
+        rate = 0.0
         if len(lines) > 1 and "/" in lines[1]:
             numerator, _, denominator = lines[1].partition("/")
             try:
                 rate = float(numerator) / float(denominator)
             except (ValueError, ZeroDivisionError):
                 rate = 0.0
-            if 1.0 <= rate <= 120.0:
-                self.stream_fps = rate
+        if 1.0 <= rate <= 120.0:
+            self.stream_fps = rate
+        else:
+            # Left as None rather than guessed. The caller paces the muxer from
+            # the site's configured rate instead and says so, which is a stated
+            # fallback rather than a number that looks measured and is not.
+            self.stream_fps = None
+            log.warning(
+                "ffprobe gave no usable frame rate for %s (avg_frame_rate %r); "
+                "the muxer clock will fall back to the configured rate.",
+                redact(self._url), lines[1] if len(lines) > 1 else "",
+            )
         return self._codec or None
 
     def raw_sample(self) -> list[str]:
@@ -419,7 +463,8 @@ class RtspRemuxSource(ProcessEncoder):
     name = "rtsp-remux"
 
     def __init__(self, settings: StreamSettings | None = None, *,
-                 url: str, transport: str = "tcp", codec: str = "h264") -> None:
+                 url: str, transport: str = "tcp", codec: str = "h264",
+                 stream_fps: float | None = None) -> None:
         # Before super().__init__, which builds the first access-unit reader
         # and needs to be told which grammar it is reading.
         self.codec = codec if codec in STREAM_CODECS else "h264"
@@ -427,6 +472,14 @@ class RtspRemuxSource(ProcessEncoder):
         super().__init__(settings)
         self.url = url
         self.transport = transport
+        #: The rate the camera is actually sending at, measured by ffprobe on
+        #: the way in. The muxer's clock is built from this and not from
+        #: `settings.fps`: the station copies what arrives and cannot change
+        #: the rate, so a timeline paced to the site's *policy* rather than to
+        #: the stream runs fast or slow at the far end. None when the probe
+        #: could not tell, and the caller then falls back to the configured
+        #: rate and says which it used.
+        self.stream_fps = stream_fps
         self.kind = (
             f"RTSP remux of the camera's {self.codec.upper()}, no re-encode "
             f"(ffmpeg -c copy)"

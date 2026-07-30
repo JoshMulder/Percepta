@@ -881,3 +881,118 @@ sending an honest codec string, which is now the thing it is most careful
 about: an HEVC sequence parameter set that will not parse stops the stream with
 a reason rather than being guessed at, precisely because a guess here is
 invisible.
+
+---
+
+## 17. The station has stopped publishing `gsu/{station_id}/video`
+
+**Raised by the station, and already implemented on this side.** This is not a
+question about whether it is allowed; it is a statement of what the platform
+will stop receiving, with the reasoning, so the server side can be changed
+deliberately rather than discovering it as a channel that went quiet.
+
+### What stopped
+
+`gsu/{station_id}/video` is no longer published at all. Nothing on that topic:
+no frames, and **no `available: false` frames either**. The station does not
+open the channel, does not resolve the topic, and does not report a refusal on
+it.
+
+`contract/schemas/video.schema.json` is untouched and still describes exactly
+what a station *would* send if it sent anything. The schema is still validated
+against in `tests/test_video.py`. What has changed is that this station has no
+producer for it.
+
+Concretely, the platform stops receiving:
+
+| Was arriving | Now |
+| --- | --- |
+| One base64 JPEG per message, 640×480 at 2 fps by default, ~30–60 kB each | Nothing |
+| `available: false` with `unavailable_reason` when no camera answered, at up to 1 Hz | Nothing |
+| `width`, `height`, `captured_at` per frame | Nothing |
+
+And the health frame's `video` object has changed shape. Removed:
+`enabled`, `fps_configured`, `fps_measured`, `frames_published`,
+`frames_dropped`, `bytes_per_frame`, `bitrate_bps`, `captured_at`, `refused`.
+Added: `snapshots` (always `false`), `snapshots_removed` (one sentence saying
+why), `preview_frames` / `preview_refused` / `preview_failed`, `watching`, and
+`sensor` — see below. `video.stream` and `video.camera` are unchanged.
+
+**A console that renders zeros from the old fields will render zeros**, which
+is also what a broken camera looks like. That is the reason `snapshots: false`
+is an explicit field rather than an absence: the platform should key off it and
+say "this station does not send snapshots", not "0 fps".
+
+### Why, in one paragraph
+
+The CSI camera is one device with one owner. The snapshot publisher and the
+live encoder were both trying to be that owner, and four successive fixes — a
+lock in the driver, a relinquish before the stream starts, a terminal
+`retire()` on rediscovery, a 2.5-second drain to outlast an in-flight capture —
+were each correct about the case they named and silent about the next one. The
+station still wedged with `Camera in Acquired state trying acquire()` and a
+38-second stream delivering zero frames. Removing one of the two readers does
+not narrow that class of bug, it deletes it. The owner's own framing was the
+same and arrived independently: *"lets just disable all snapshot functionality
+for now so i can tell what is camera not working rather than actually just
+snapshots"*.
+
+### What replaces it, for the operator
+
+Nothing, on the platform side — deliberately. The platform has the media
+channel for live video, and a second, worse copy of the same picture at 2 fps
+was being paid for on a metered link to duplicate it.
+
+Locally, the setup page keeps its preview: `/frame.jpg` still serves the newest
+frame with an `X-Frame-Age` header, unchanged. It is now sourced on demand —
+one frame, taken only while somebody actually has the page open, and never
+while the live stream holds the sensor.
+
+### The three things the platform may want back, and what each would cost
+
+1. **A still image on the fleet list.** This is the real loss: a console
+   showing twelve sites cannot open twelve live streams. If that view matters,
+   the honest shape is a **command**, not a channel — `video.snapshot`,
+   answered with one frame, the way `video.start` is answered with a stream.
+   One reader, on demand, arbitrated by the same sensor lease. The station can
+   implement that; it is not implemented now because nothing has asked.
+2. **`available: false` as a liveness signal.** Already available and better
+   sourced: the health frame carries the camera slot in `devices[]`, and
+   `video.camera.backend_reason` carries the driver's own sentence.
+3. **Bandwidth accounting for video.** `video.stream` still reports measured
+   bytes and bitrate for the live path, which is now the only path that costs
+   anything.
+
+### One field worth adopting: `video.sensor`
+
+New in the health frame, and it is the answer to the question all four previous
+fixes were circling and none could answer from telemetry:
+
+```json
+"sensor": { "holder": "the live stream", "held_for_s": 12.4,
+            "grants": 31, "refusals": 2 }
+```
+
+`holder` is `null`, `"the live stream"` or `"the camera preview"`. A camera that
+is *busy* and a camera that is *broken* have looked identical from the platform
+for the whole life of this bug, and this is the field that separates them. Worth
+surfacing wherever a camera fault would otherwise be raised.
+
+### What the station needs from the platform
+
+Nothing blocking. Two things to do at leisure:
+
+- **Stop expecting the channel.** Any dashboard, retention job or alert keyed
+  on `gsu/{station_id}/video` arriving should be retired or repointed. An alert
+  on "no video frames for N minutes" will now fire permanently.
+- **The broker ACL can drop the video topic**, if it was ever granted. Item 12
+  asked for it to be added; this withdraws that ask. Leaving it granted is
+  harmless — nothing publishes to it.
+
+### Not withdrawn
+
+The `video_topic` field in the enrolment response is still parsed and still
+stored, and `contract/enrolment.md` is unchanged. Removing it would be a
+breaking change to the enrolment contract to save one unused string, and if
+item 1 above is ever built it is exactly the field that would carry the reply
+topic.
