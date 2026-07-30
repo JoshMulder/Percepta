@@ -87,10 +87,26 @@ class Broker:
 
 @dataclass(frozen=True)
 class Site:
+    """What the platform told this box it is, at the moment it enrolled.
+
+    Name and position are settled at enrolment and frozen afterwards: a station
+    that needs a different position has physically moved, and a box that has
+    moved is recommissioned rather than edited. So this is not a snapshot to be
+    kept in sync — it is the answer, and the setup page shows it read-only.
+    """
+
     name: str
     timezone: str
     latitude: float | None
     longitude: float | None
+    #: The tenant this box now belongs to, echoed back by the platform so the
+    #: person who pasted the code can confirm they enrolled it into the right
+    #: one. A code carries no visible clue whose it is.
+    organization: str | None = None
+    #: Where this is, in words, derived by the platform from the coordinates.
+    #: Lets somebody at the site check the position they were given is the site
+    #: they are standing at, which a pair of decimals does not.
+    locality: str | None = None
 
 
 @dataclass(frozen=True)
@@ -134,6 +150,8 @@ class Enrolment:
                 timezone=station.get("timezone") or "UTC",
                 latitude=station.get("latitude"),
                 longitude=station.get("longitude"),
+                organization=station.get("organization"),
+                locality=station.get("locality"),
             ),
             config_version=int(body.get("config_version", 0)),
             enrolled_at=at or clock.now(),

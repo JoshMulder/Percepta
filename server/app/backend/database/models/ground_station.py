@@ -32,6 +32,18 @@ class GroundStation(UUIDMixin, TimestampMixin, Base):
     latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
     longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
 
+    #: Where this is, in words — "Timaru", "Canterbury". Derived from the
+    #: coordinates by the server (services/geocode.py), never sent by the
+    #: station, and recomputed only when `locality_for` no longer matches the
+    #: position. Null is a real state: no position, open water, or a provider
+    #: that could not resolve it.
+    locality: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    region: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    #: The rounded coordinate pair the two above were derived from, so a stale
+    #: locality is detectable and the lookup neither repeats every frame nor
+    #: never repeats.
+    locality_for: Mapped[str | None] = mapped_column(String(48), nullable=True)
+
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
     # Whether this station's data is synthetic. Per-station rather than a

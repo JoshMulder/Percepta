@@ -75,7 +75,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from .camera.rtsp import split_credentials
-from .config import parse_elevation_m, parse_latitude, parse_longitude
+from .config import parse_elevation_m
 from .devices import registry
 from .setup_access import COOKIE_NAME, Gate, is_loopback_host
 
@@ -806,67 +806,52 @@ class Console:
         )
 
     def _set_location(self, form: dict) -> None:
-        """Where this station is, typed by somebody who is standing there.
+        """The local half of where this station is.
 
-        This is the **only** place a position is entered. The platform holds
-        one too and used to let you edit it; the owner's decision is that it
-        must not, because two editable copies of one fact disagree and neither
-        end can see that they have. The station reports this one up in the
-        health frame and the platform displays what it is told
-        (CONTRACT-QUESTIONS.md 16).
+        Latitude and longitude are **not** here any more. They are settled at
+        enrolment and frozen: a station that needs a different position has
+        physically moved, and a box that has moved needs commissioning at its
+        new site rather than a new number typed into a form. Letting one be
+        edited here would make the station's own history describe two places.
 
-        Every refusal here is a `ValueError` carrying a sentence, which
-        `_handle` turns into the red message on the page. Nothing about a
-        mistyped coordinate should produce a traceback in a log nobody on site
-        can read — the person who can fix it is holding the phone.
+        What remains is genuinely local. Elevation is measured at the mast, not
+        issued by the platform, and exists for the ADS-B barometric correction —
+        which is computed on this box, from this box's barometer. The switch for
+        that correction lives beside it because they are one decision.
+
+        Every refusal is a `ValueError` carrying a sentence, which `_handle`
+        turns into the red message inside the dialog. Nothing about a mistyped
+        elevation should produce a traceback in a log nobody on site can read.
         """
-        raw = {
-            name: (form.get(name) or [""])[0].strip()
-            for name in ("latitude", "longitude", "elevation_m")
-        }
+        raw = (form.get("elevation_m") or [""])[0].strip()
         # An unchecked checkbox sends nothing at all, so its absence from a
-        # submission of *this* form is a real "off" — unlike the fields above,
-        # where absence would be ambiguous. That only holds because the input
-        # is inside this form and always rendered; if it is ever moved, this
-        # line becomes a bug that silently disables the correction.
+        # submission of *this* form is a real "off". That only holds because
+        # the input is inside this form and always rendered.
         correction = bool(form.get("adsb_baro_correction"))
-        if not any(raw.values()):
-            # All three empty is a deliberate clear, and it has to be possible:
-            # a station commissioned at the wrong coordinates must be able to
-            # stop asserting a position rather than be stuck with a plausible
-            # wrong one, which is worse than none.
-            #
-            # The correction goes off with it, whatever the box said. It is
-            # computed from the elevation being cleared here, and leaving it on
-            # would leave a station switched on to correct altitudes it can no
-            # longer correct — which reports nulls and a health condition
-            # rather than doing harm, but is still a switch left claiming
-            # something untrue about the site.
-            self.agent.set_location(None, None, None, baro_correction=False)
-            self.message = ("good", "Location cleared.")
-            return
-        if not raw["latitude"] or not raw["longitude"]:
-            raise ValueError("Latitude and longitude are both needed.")
-        latitude = parse_latitude(raw["latitude"])
-        longitude = parse_longitude(raw["longitude"])
-        elevation = parse_elevation_m(raw["elevation_m"]) if raw["elevation_m"] else None
+
+        elevation = parse_elevation_m(raw) if raw else None
         if correction and elevation is None:
             # Refused rather than accepted-and-idle. The correction cannot run
             # without an elevation, and a checkbox that stays ticked while
             # nothing happens is how somebody comes to trust a number that was
-            # never computed. The reason lands in the dialog, beside the empty
-            # field that caused it.
+            # never computed.
             raise ValueError(
                 "Elevation is needed for the altitude correction. "
                 "Set one, or clear the correction."
             )
+
+        # The position arguments keep this station's own coordinates exactly as
+        # they are. On a box enrolled from here on they are None and stay None;
+        # on one enrolled before this changed they are its only position, and
+        # clearing them from an elevation form would take its range and bearing
+        # away without anybody asking for that.
         self.agent.set_location(
-            latitude, longitude, elevation, baro_correction=correction,
+            self.agent.site.latitude,
+            self.agent.site.longitude,
+            elevation,
+            baro_correction=correction,
         )
-        self.message = (
-            "good",
-            f"Location saved: {_degrees(latitude)}, {_degrees(longitude)}.",
-        )
+        self.message = ("good", "Saved.")
 
     def _set_device(self, form: dict) -> str:
         slot = (form.get("slot") or [""])[0]
@@ -1277,8 +1262,16 @@ class Console:
 
     def _section_enrol(self, state: dict, csrf: str) -> str:
         if state["enrolled"]:
+            # The organisation is echoed back by the platform and shown here
+            # because a code carries no visible clue whose it is. The mistake
+            # this catches is a contractor commissioning a box into the
+            # previous customer's tenant, which otherwise surfaces as data
+            # appearing in the wrong console days later.
+            org = (state.get("position") or {}).get("organization")
+            where = f" · {html.escape(org)}" if org else ""
             return (
-                f"<p class=sub>Enrolled as {html.escape(state['station'] or '')}.</p>"
+                f"<p class=sub>Enrolled as {html.escape(state['station'] or '')}"
+                f"{where}.</p>"
             )
         return (
             "<p class=sub>Not set up yet.</p>"
@@ -1349,12 +1342,8 @@ class Console:
             )
         out.append(
             "<div class=field><a class=btn href='#location'>Edit</a></div>"
-            # Deliberately "shows what this station reports" and not "clears it
-            # there": an omitted field cannot retract a value the platform
-            # already holds, and the page must not promise something the wire
-            # cannot do (CONTRACT-QUESTIONS.md 16, retraction).
-            "<div class=muted>Set here, not on the platform, which shows what "
-            "this station reports.</div></div>"
+            "<div class=muted>Position is set when this box is enrolled. "
+            "Re-enrol to move it.</div></div>"
         )
 
         # The dialog. A real element in the page, hidden until the fragment
@@ -1382,10 +1371,16 @@ class Console:
         # this hemisphere is negative and the numeric keypad iOS raises for a
         # number input has no minus key on it — a field you cannot type the
         # commonest value into is worse than one without a tuned keyboard.
+        # No latitude or longitude here any more. Position is settled at
+        # enrolment and frozen: a station that needs a different one has
+        # physically moved, and a box that has moved is recommissioned rather
+        # than edited. The rows above show what it was issued.
+        #
+        # Elevation stays, and is not an inconsistency. It is not part of the
+        # position the platform issues — it exists for the ADS-B barometric
+        # correction, which is computed on this box from this box's own
+        # barometer, and it is measured at the mast rather than looked up.
         fields = (
-            ("latitude", "Latitude", station.get("latitude"), -90, 90, "-90 to 90"),
-            ("longitude", "Longitude", station.get("longitude"), -180, 180,
-             "-180 to 180"),
             ("elevation_m", "Elevation", station.get("elevation_m"), -500, 100000,
              "metres"),
         )
@@ -1429,8 +1424,7 @@ class Console:
             "</div></div></form>"
         )
         out.append(
-            "<div class=muted>Clearing all three stops this station reporting "
-            "one.</div>"
+
             "</div>"
             # After the card in the DOM, under it by z-index: see STYLE.
             "<a class=modal-scrim href='#' aria-label='Close'></a>"
@@ -1479,10 +1473,17 @@ class Console:
         where = (f"{_degrees(position.get('latitude'))}, "
                  f"{_degrees(position.get('longitude'))}")
         source = position.get("source") or ""
+        locality = position.get("locality")
+        if source == "enrolment":
+            # The normal case now: settled when the code was redeemed. The
+            # locality is what lets somebody standing at the site tell that the
+            # coordinates are this site rather than the last one commissioned.
+            return (f"{where} — {locality}" if locality else where), "ok"
         if source == "station":
-            return where, "ok"
-        if source == "platform":
-            return f"{where} — from the platform", "warn"
+            # Set locally before position moved to enrolment. Still honoured so
+            # boxes already in the field keep their range and bearing, and
+            # labelled so it is clear which answer is in use.
+            return f"{where} — set on this box", "ok"
         return "not set", "warn"
 
     def _section_security(self, state: dict) -> str:

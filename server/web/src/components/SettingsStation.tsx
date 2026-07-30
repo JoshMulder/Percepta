@@ -100,6 +100,14 @@ export function SettingsStation({
             onSaved={onSaved}
           />
           <SettingsEnrolment stationId={station.id} stationName={station.name} />
+          <DeleteStation
+            key={`del-${station.id}`}
+            station={station}
+            onDeleted={async () => {
+              await loadStations();
+              onSaved();
+            }}
+          />
         </>
       ) : (
         <p className="settings-note">
@@ -400,5 +408,106 @@ function StationConfigForm({
         {error && <span className="settings-error">{error}</span>}
       </div>
     </form>
+  );
+}
+
+
+/**
+ * Removing a record that never became a station.
+ *
+ * Records are created in the console before anyone is standing at the
+ * hardware, so typos, abandoned plans and duplicates accumulate. Until a
+ * station has enrolled there is nothing behind the row — no telemetry, no
+ * history, nothing anybody will look up — and deleting one is tidying.
+ *
+ * Hidden entirely once it has enrolled, rather than shown and refused. A
+ * disabled destructive control invites someone to go looking for how to enable
+ * it, and the honest answer is that this is the wrong tool: a station that has
+ * enrolled has history and may have a box on a hill still holding a working
+ * credential, which needs revoking first. The server refuses it too — this is
+ * the affordance, not the enforcement.
+ */
+function DeleteStation({
+  station,
+  onDeleted,
+}: {
+  station: StationSummary;
+  onDeleted: () => void | Promise<void>;
+}) {
+  const [enrolled, setEnrolled] = useState<boolean | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setEnrolled(null);
+    setConfirming(false);
+    setError(null);
+    api
+      .enrolmentStatus(station.id)
+      .then((s) => !cancelled && setEnrolled(s.enrolled))
+      // Unknown is treated as enrolled: the failure mode of guessing wrong in
+      // the other direction is offering to delete a live station.
+      .catch(() => !cancelled && setEnrolled(true));
+    return () => {
+      cancelled = true;
+    };
+  }, [station.id]);
+
+  if (enrolled !== false) return null;
+
+  return (
+    <section className="settings-section">
+      <h3>Delete</h3>
+      {!confirming ? (
+        <div className="settings-actions">
+          <button
+            type="button"
+            className="btn danger"
+            onClick={() => setConfirming(true)}
+          >
+            Delete station
+          </button>
+          <span className="settings-note">Never enrolled.</span>
+        </div>
+      ) : (
+        <div className="settings-actions">
+          {/* The name is in the button, so the click that deletes says what it
+              deletes. A bare "Confirm" is the same keystroke wherever the list
+              happened to have scrolled to. */}
+          <button
+            type="button"
+            className="btn danger"
+            disabled={busy}
+            onClick={async () => {
+              setBusy(true);
+              setError(null);
+              try {
+                await api.deleteStation(station.id);
+                await onDeleted();
+              } catch (err) {
+                setError(
+                  err instanceof ApiError ? err.message : "Could not delete.",
+                );
+                setBusy(false);
+                setConfirming(false);
+              }
+            }}
+          >
+            {busy ? "Deleting…" : `Delete ${station.name}`}
+          </button>
+          <button
+            type="button"
+            className="btn ghost"
+            onClick={() => setConfirming(false)}
+            disabled={busy}
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+      {error && <span className="settings-error">{error}</span>}
+    </section>
   );
 }

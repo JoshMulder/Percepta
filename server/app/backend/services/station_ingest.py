@@ -50,6 +50,7 @@ from backend.core.config import settings
 from backend.database.models.ground_station import GroundStation
 from backend.database.session import PrivilegedSessionLocal
 from backend.realtime.hub import hub
+from backend.services import geocode
 from backend.services.enrolment import has_valid_credential
 
 log = logging.getLogger(__name__)
@@ -418,12 +419,17 @@ class StationIngest:
     ) -> None:
         try:
             with PrivilegedSessionLocal() as db:
+                # The locality is derived from the position, so it is written
+                # in the same statement — there is no moment where a station
+                # carries one position's coordinates and another's town.
+                place = self._locality_for(db, station_id, fix)
                 db.execute(
                     update(GroundStation)
                     .where(GroundStation.id == station_id)
                     .values(
                         latitude=fix[0] if fix else None,
                         longitude=fix[1] if fix else None,
+                        **place,
                     )
                 )
                 db.commit()
@@ -434,6 +440,47 @@ class StationIngest:
             )
         except Exception:
             log.exception("Could not update position for %s.", station_id)
+
+    @staticmethod
+    def _fingerprint(fix: tuple[float, float] | None) -> str | None:
+        """The coordinates a stored locality belongs to.
+
+        Rounded to five places — about a metre — because a station reporting a
+        position derived from GNSS jitters in the last digits, and looking a
+        town up again because a mast moved 30 cm would be a request per health
+        frame for ever.
+        """
+        return None if fix is None else f"{fix[0]:.5f},{fix[1]:.5f}"
+
+    def _locality_for(
+        self, db, station_id: uuid.UUID, fix: tuple[float, float] | None
+    ) -> dict:
+        """Columns to write alongside a new position.
+
+        Skips the network entirely when the position has not really changed,
+        which is the normal case: this runs on every health frame that carries
+        a position, and a fixed site sends the same one for months.
+        """
+        wanted = self._fingerprint(fix)
+        current = db.execute(
+            select(GroundStation.locality_for).where(GroundStation.id == station_id)
+        ).scalar_one_or_none()
+        if current == wanted:
+            return {}
+        if fix is None:
+            return {"locality": None, "region": None, "locality_for": None}
+
+        place = geocode.describe(fix[0], fix[1])
+        if place is None:
+            # Remember that this position was tried, so a station over water
+            # does not re-ask on every frame. A retry costs a position change.
+            return {"locality": None, "region": None, "locality_for": wanted}
+        log.info("Station %s is at %s.", station_id, place["label"])
+        return {
+            "locality": place["locality"],
+            "region": place["region"],
+            "locality_for": wanted,
+        }
 
     def _write_simulated(self, station_id: uuid.UUID, simulated: bool) -> None:
         try:

@@ -913,84 +913,52 @@ class ServedPageTests(unittest.TestCase):
         self.request("POST", "/location", f"{body}&csrf={csrf}", {"Cookie": cookie})
         return self.request("GET", "/connection", None, {"Cookie": cookie})[1]
 
-    def test_the_connection_page_asks_for_the_position_and_says_who_owns_it(self):
+    def test_the_connection_page_states_the_position_and_does_not_ask_for_it(self):
+        # Position is settled at enrolment and frozen. The page reports what
+        # this box was issued; it offers no way to type a different one.
         _, _, body = self.page("/connection")
-        for name in ("latitude", "longitude", "elevation_m"):
-            self.assertIn(f"name='{name}'", body, name)
-        self.assertIn("Where this box is", body)
-        # The one line the page owes anybody who has used the platform console
-        # and seen the same two fields there.
-        self.assertIn("Set here, not on the platform", body)
-        # Unset is stated, never implied by an empty box.
-        self.assertIn("not set", body)
+        self.assertIn("Position", body)
+        self.assertNotIn("name='latitude'", body)
+        self.assertNotIn("name='longitude'", body)
 
-    def test_a_position_is_saved_persisted_and_used(self):
+    def test_the_elevation_survives_a_reload_and_reaches_the_correction(self):
+        # Elevation stays editable and is not an inconsistency: it is measured
+        # at the mast rather than issued, and exists for the barometric
+        # correction computed on this box.
         token, csrf, _ = self.page("/connection")
-        body = self.location("latitude=-42.4004&longitude=173.68&elevation_m=120",
-                             csrf, token)
-        self.assertIn("Location saved", body)
-        self.assertEqual(self.agent.site.latitude, -42.4004)
-        self.assertEqual(self.agent.site.longitude, 173.68)
+        self.request("POST", "/location", f"elevation_m=120&csrf={csrf}",
+                     {"Cookie": token})
         self.assertEqual(self.agent.site.elevation_m, 120.0)
-        # Site configuration, not the device inventory — the same file the rest
-        # of the site's policy lives in, and it survives a restart.
-        stored = json.loads(
-            (Path(self.directory.name) / "site-config.json").read_text()
-        )
-        self.assertEqual(stored["latitude"], -42.4004)
-        self.assertEqual(stored["elevation_m"], 120.0)
-        self.assertEqual(
-            self.agent.effective_position(), (-42.4004, 173.68, "station")
-        )
+        from gsu.config import SiteConfig
+        reloaded = SiteConfig.load(self.agent.config.site_config_path)
+        self.assertEqual(reloaded.elevation_m, 120.0)
 
-    def test_garbage_in_a_coordinate_is_a_sentence_and_not_a_traceback(self):
+    def test_garbage_in_an_elevation_is_a_sentence_and_not_a_traceback(self):
         token, csrf, _ = self.page("/connection")
-        body = self.location("latitude=north&longitude=173&elevation_m=", csrf, token)
-        self.assertIn("Latitude must be a number between -90 and 90.", body)
+        self.request("POST", "/location", f"elevation_m=up+a+bit&csrf={csrf}",
+                     {"Cookie": token})
+        _, body = self.request("GET", "/connection", None, {"Cookie": token})
+        self.assertNotIn("Traceback", body)
         self.assertIn("msg bad", body)
-        self.assertIsNone(self.agent.site.latitude)
-        # Nothing half-applied: a refused save stores neither coordinate.
-        self.assertIsNone(self.agent.site.longitude)
 
-    def test_a_coordinate_outside_its_range_is_refused(self):
+    def test_an_elevation_outside_its_range_is_refused(self):
         token, csrf, _ = self.page("/connection")
-        for payload, expected in (
-            ("latitude=91&longitude=0&elevation_m=", "Latitude must be between"),
-            ("latitude=0&longitude=181&elevation_m=", "Longitude must be between"),
-            ("latitude=0&longitude=0&elevation_m=nan", "Elevation must be a number"),
-            ("latitude=0&longitude=0&elevation_m=inf", "Elevation must be a number"),
-        ):
-            body = self.location(payload, csrf, token)
-            self.assertIn(expected, body, payload)
-            self.assertIsNone(self.agent.site.latitude, payload)
+        self.request("POST", "/location", f"elevation_m=999999&csrf={csrf}",
+                     {"Cookie": token})
+        self.assertIsNone(self.agent.site.elevation_m)
 
-    def test_half_a_position_is_refused_rather_than_stored(self):
-        # A latitude with no longitude is not a position, and storing one would
-        # make `effective_position` fall through to the platform's without
-        # anything saying so.
+    def test_saving_an_elevation_does_not_clear_an_older_boxs_position(self):
+        # A station enrolled before position moved to enrolment has its own
+        # coordinates and nothing else. An elevation form must not take its
+        # range and bearing away as a side effect.
+        self.agent.set_location(-42.4004, 173.68, None)
         token, csrf, _ = self.page("/connection")
-        body = self.location("latitude=-42.4&longitude=&elevation_m=", csrf, token)
-        self.assertIn("Latitude and longitude are both needed.", body)
-        self.assertIsNone(self.agent.site.latitude)
-
-    def test_clearing_all_three_stops_the_station_asserting_a_position(self):
-        token, csrf, _ = self.page("/connection")
-        self.location("latitude=-42.4&longitude=173.7&elevation_m=10", csrf, token)
-        body = self.location("latitude=&longitude=&elevation_m=", csrf, token)
-        self.assertIn("Location cleared", body)
-        self.assertIsNone(self.agent.site.latitude)
-        self.assertIsNone(self.agent.reported_position())
-
-    def test_a_coordinate_pasted_with_a_typographic_minus_is_understood(self):
-        # What copying a coordinate off a web page actually produces. The two
-        # strings look identical in the box, so refusing it is a refusal
-        # nobody can act on.
-        token, csrf, _ = self.page("/connection")
-        body = self.location(
-            "latitude=%E2%88%9242.4004&longitude=173.68&elevation_m=", csrf, token
+        self.request("POST", "/location", f"elevation_m=80&csrf={csrf}",
+                     {"Cookie": token})
+        self.assertEqual(
+            (self.agent.site.latitude, self.agent.site.longitude),
+            (-42.4004, 173.68),
         )
-        self.assertIn("Location saved", body)
-        self.assertEqual(self.agent.site.latitude, -42.4004)
 
     def test_the_location_post_lands_back_on_connection(self):
         token, csrf, _ = self.page("/connection")
@@ -1028,9 +996,13 @@ class ServedPageTests(unittest.TestCase):
         self.assertIn("Elevation", card)
         self.assertIn("<a class=btn href='#location'>Edit</a>", card)
         # Not an input in sight until the dialog.
-        for name in ("latitude", "longitude", "elevation_m"):
+        # Position is stated in the card and is not editable anywhere; what
+        # moved behind the link is the elevation and the correction switch.
+        for name in ("latitude", "longitude"):
             self.assertNotIn(f"name='{name}'", card, name)
-            self.assertIn(f"name='{name}'", dialog, name)
+            self.assertNotIn(f"name='{name}'", dialog, name)
+        self.assertNotIn("name='elevation_m'", card)
+        self.assertIn("name='elevation_m'", dialog)
 
     def test_the_dialog_and_its_form_are_in_the_page_a_plain_get_returns(self):
         # The fragment never reaches the server, so "a GET of the modal URL"
@@ -1041,8 +1013,7 @@ class ServedPageTests(unittest.TestCase):
         dialog = dialog.split("</div></div>")[0]
         self.assertIn("<form method=post action='/location'>", dialog)
         self.assertIn("name=csrf", dialog)
-        for name in ("latitude", "longitude", "elevation_m"):
-            self.assertIn(f"name='{name}'", dialog, name)
+        self.assertIn("name='elevation_m'", dialog)
         self.assertIn("<button type=submit>Save location</button>", dialog)
         # Closing is a navigation, not a handler.
         self.assertIn("id=location-close href='#'", dialog)
@@ -1062,11 +1033,10 @@ class ServedPageTests(unittest.TestCase):
         # rather than a lie.
         self.assertNotIn("aria-modal", body)
 
-    def test_saving_from_the_dialog_stores_the_position_and_shuts_it(self):
+    def test_saving_from_the_dialog_stores_the_value_and_shuts_it(self):
         token, csrf, _ = self.page("/connection")
         response, _ = self.request(
-            "POST", "/location",
-            f"latitude=-42.4004&longitude=173.68&elevation_m=120&csrf={csrf}",
+            "POST", "/location", f"elevation_m=120&csrf={csrf}",
             {"Cookie": token},
         )
         # No fragment: a save that worked closes the dialog, and the page it
@@ -1075,12 +1045,11 @@ class ServedPageTests(unittest.TestCase):
         self.assertEqual(response.getheader("Location"), "/connection")
         _, body = self.request("GET", "/connection", None, {"Cookie": token})
         # The banner is at the top of the page, not inside a shut dialog.
-        self.assertLess(body.index("Location saved"),
+        self.assertLess(body.index("Saved."),
                         body.index("<div class=modal id=location"))
         # And the read-only rows carry what was saved.
         card = body.split("<h2>Where this box is</h2>", 1)[1]
         card = card.split("<div class=modal id=location", 1)[0]
-        self.assertIn("-42.4004, 173.68", card)
         self.assertIn("120 m", card)
 
     def test_a_refused_save_reopens_the_dialog_with_the_reason_inside_it(self):
@@ -1089,14 +1058,14 @@ class ServedPageTests(unittest.TestCase):
         # on a page behind a dialog the person has to reopen by hand.
         token, csrf, _ = self.page("/connection")
         response, _ = self.request(
-            "POST", "/location", f"latitude=91&longitude=0&elevation_m=&csrf={csrf}",
+            "POST", "/location", f"elevation_m=999999&csrf={csrf}",
             {"Cookie": token},
         )
         self.assertEqual(response.getheader("Location"), "/connection#location")
         _, body = self.request("GET", "/connection", None, {"Cookie": token})
         self.assertEqual(body.count("msg bad"), 1, "said twice is said wrong")
         opened = body.index("<div class=modal id=location")
-        reason = body.index("Latitude must be between")
+        reason = body.index("Elevation must be between")
         self.assertLess(opened, reason)
         self.assertLess(reason, body.index("<form method=post action='/location'>"))
 
@@ -1104,10 +1073,10 @@ class ServedPageTests(unittest.TestCase):
         # The message is addressed to a dialog. If the person goes somewhere
         # that does not render it, the top of the page beats silence.
         token, csrf, _ = self.page("/connection")
-        self.request("POST", "/location", f"latitude=91&longitude=0&csrf={csrf}",
+        self.request("POST", "/location", f"elevation_m=999999&csrf={csrf}",
                      {"Cookie": token})
         _, body = self.request("GET", "/", None, {"Cookie": token})
-        self.assertIn("Latitude must be between", body)
+        self.assertIn("Elevation must be between", body)
 
     def test_the_connection_script_is_admitted_by_the_responses_own_nonce(self):
         # Escape-to-close is the only thing it adds, and it is admitted the
@@ -1126,9 +1095,9 @@ class ServedPageTests(unittest.TestCase):
         # two columns still fit, and to collapse with everything else.
         _, _, body = self.page("/connection")
         dialog = body.split("<div class=modal id=location", 1)[1]
-        # Latitude, Longitude, Elevation, the altitude-correction checkbox, and
-        # the actions row.
-        self.assertEqual(dialog.count("<div class=field>"), 5)
+        # Elevation, the altitude-correction checkbox, and the actions row.
+        # Latitude and longitude are gone: settled at enrolment and frozen.
+        self.assertEqual(dialog.count("<div class=field>"), 3)
         self.assertNotIn("grid-template-columns", dialog)
         # 30rem holds a 9.5rem label column and a usable input beside it, and
         # below 34rem every .field on the page — these included — is one column.
@@ -1282,12 +1251,14 @@ class StationPositionTests(unittest.TestCase):
         # And it is the station's that goes out, not the platform's echo.
         self.assertEqual(self.agent.reported_position()["latitude"], -42.4004)
 
-    def test_the_platforms_position_is_a_labelled_fallback_only(self):
-        # A box enrolled before the setup page had these fields must not lose
-        # its range and bearing the day this ships.
+    def test_the_enrolment_settles_the_position(self):
+        # Position is decided when the code is redeemed and frozen afterwards:
+        # a station that needs a different one has physically moved, and a box
+        # that has moved is recommissioned rather than edited.
         self.enrol_with(-43.5, 172.6)
-        self.assertEqual(self.agent.effective_position(), (-43.5, 172.6, "platform"))
-        # But it is never reported back up as though somebody had confirmed it.
+        self.assertEqual(self.agent.effective_position(), (-43.5, 172.6, "enrolment"))
+        # And it is not echoed back up as though the box had confirmed it —
+        # the platform already knows what it issued.
         self.assertIsNone(self.agent.reported_position())
 
     def test_a_platform_with_no_position_leaves_the_station_with_none(self):
@@ -1307,27 +1278,25 @@ class StationPositionTests(unittest.TestCase):
         self.assertNotIn("elevation_m", position)
 
     def test_the_page_marks_the_platforms_position_as_not_its_own(self):
-        """The fallback must never read as a confirmed position.
+        """Whichever answer is in use, the page says which one it is.
 
         Both pages that show it: the Summary row an installer scans before
-        leaving, and the Connection section they would fix it on.
+        leaving, and the Connection section beside the enrolment.
         """
         console = Console(self.agent, "127.0.0.1", 0)
         self.enrol_with(-43.5, 172.6)
         for page in ("/", "/connection"):
             body = console.render(None, page)
-            self.assertIn("-43.5, 172.6 — from the platform", body, page)
-        # The boxes stay empty, so the form asks rather than looking answered.
-        connection = console.render(None, "/connection")
-        boxes = dict(re.findall(r"name='(latitude|longitude)'[^>]*value='([^']*)'",
-                                connection))
-        self.assertEqual(boxes, {"latitude": "", "longitude": ""})
-        # Once the station has its own, it is stated plainly and unqualified.
+            self.assertIn("-43.5, 172.6", body, page)
+            # Settled at enrolment is the normal case and reads as an answer,
+            # not as a caveat.
+            self.assertNotIn("from the platform", body, page)
+        # A position configured locally, which only boxes enrolled before this
+        # changed will have, is labelled so it is clear which one is in use.
         self.agent.set_location(-42.4004, 173.68, None)
         for page in ("/", "/connection"):
             body = console.render(None, page)
-            self.assertIn("-42.4004, 173.68", body, page)
-            self.assertNotIn("from the platform", body, page)
+            self.assertIn("-42.4004, 173.68 — set on this box", body, page)
 
     def test_an_unset_position_is_a_warning_on_the_summary(self):
         # It is a fault an installer can still fix while on site, and every

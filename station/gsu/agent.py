@@ -272,20 +272,23 @@ class Agent:
     # --- devices --------------------------------------------------------
 
     def effective_position(self) -> tuple[float | None, float | None, str]:
-        """Where this station believes it is, and on whose word.
+        """Where this station is, and on whose word.
 
-        **The station's own configuration wins, always.** That is the owner's
-        decision and it is what makes the number mean anything: the platform's
-        copy is no longer editable there, so a position typed on the setup page
-        by somebody standing at the site is the only one anybody ever enters.
-        It is reported up in the health frame and the platform displays what it
-        is told.
+        **The enrolment answers this now.** Position is settled when the code is
+        redeemed and frozen afterwards, because a station that needs a different
+        position has physically moved — and a box that has moved needs
+        commissioning at its new site anyway: new coordinates, new basemap
+        cache, quite possibly a new owner. Two editable copies of one fact was
+        the earlier problem; one editable copy that outlives the site it
+        describes is a worse one, because every bearing the station ever
+        reported becomes unattributable.
 
-        The platform's value is still read, but only as the fallback for a
-        station enrolled before this page had the fields — dropping it outright
-        would silently take range and bearing away from every station already
-        in the field on the day this ships. It is labelled as the platform's
-        wherever it is shown, and the page asks for the local one.
+        A locally configured position is still preferred if one is present, and
+        that is not a leftover. It is what a station enrolled before the
+        platform carried a position has, and dropping it would take range and
+        bearing away from boxes already in the field. Nothing sets it any more
+        — the setup page shows position read-only — so on a station enrolled
+        from here on it is never populated and the enrolment value is used.
 
         Returns `(None, None, "")` when nobody has said. Unset is a state, and
         it is reported as absent rather than as a plausible-looking default.
@@ -294,7 +297,7 @@ class Agent:
             return self.site.latitude, self.site.longitude, "station"
         site = self.enrolment.site if self.enrolment else None
         if site and site.latitude is not None and site.longitude is not None:
-            return site.latitude, site.longitude, "platform"
+            return site.latitude, site.longitude, "enrolment"
         return None, None, ""
 
     def position_state(self) -> dict:
@@ -312,6 +315,11 @@ class Agent:
             "source": source,
             "latitude": latitude,
             "longitude": longitude,
+            # The platform's words for the coordinates it issued. A pair of
+            # decimals cannot be checked against the view out of the door;
+            # "Timaru District, Canterbury" can.
+            "locality": site.locality if site else None,
+            "organization": site.organization if site else None,
             "elevation_m": self.site.elevation_m,
             "station": {
                 "latitude": self.site.latitude,

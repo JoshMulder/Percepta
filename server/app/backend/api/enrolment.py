@@ -20,6 +20,9 @@ from pydantic import BaseModel, Field
 
 from backend.core import ratelimit
 from backend.core.config import settings
+from sqlalchemy import select
+
+from backend.database.models.organization import Organization
 from backend.database.session import PrivilegedSessionLocal
 from backend.services import broker_acl, enrolment
 from backend.services.audit import record
@@ -79,10 +82,29 @@ class BrokerOut(BaseModel):
 
 
 class StationOut(BaseModel):
+    """What the station is told it is, at the moment it enrols.
+
+    Name and position are settled here and frozen afterwards — a station that
+    needs a different position has moved, and a box that has moved is
+    recommissioned rather than edited (see api/station_config.py). So this is
+    not a snapshot the station should expect to be updated: it is the answer.
+    """
+
     name: str
     timezone: str
     latitude: float | None
     longitude: float | None
+    #: Which tenant this box now belongs to, echoed back so the person standing
+    #: at it can confirm they enrolled it into the right one. Enrolment is done
+    #: by pasting a code, and a code carries no visible clue whose it is; the
+    #: mistake it guards against is a contractor commissioning a box into the
+    #: previous customer's organisation and nobody noticing until data appears
+    #: in the wrong console.
+    organization: str | None = None
+    #: Where this is, in words. Derived by the server from the coordinates
+    #: above, so a person at the site can tell at a glance that the position
+    #: they were given is the site they are standing at.
+    locality: str | None = None
 
 
 class EnrolResponse(BaseModel):
@@ -127,6 +149,27 @@ def _broker(station_id: uuid.UUID) -> BrokerOut:
     )
 
 
+def _organization_name(organization_id) -> str | None:
+    """The tenant's name, for the station to show back to whoever enrolled it.
+
+    Read on its own privileged session rather than through the station's
+    relationship: this runs inside the enrolment transaction, and touching a
+    lazy relationship there has historically been how an unrelated query gets
+    dragged into a transaction that is about to commit a credential.
+
+    Never fatal. A station that cannot be told its organisation's name is still
+    correctly enrolled into it; the name is for a person's eyes.
+    """
+    try:
+        with PrivilegedSessionLocal() as db:
+            return db.execute(
+                select(Organization.name).where(Organization.id == organization_id)
+            ).scalar_one_or_none()
+    except Exception:
+        log.warning("Could not read the organisation name for enrolment.", exc_info=True)
+        return None
+
+
 def _response(issued: enrolment.IssuedCredential) -> EnrolResponse:
     station = issued.station
     return EnrolResponse(
@@ -148,6 +191,10 @@ def _response(issued: enrolment.IssuedCredential) -> EnrolResponse:
             timezone=station.timezone,
             latitude=station.latitude,
             longitude=station.longitude,
+            organization=_organization_name(station.organization_id),
+            locality=", ".join(
+                part for part in (station.locality, station.region) if part
+            ) or None,
         ),
         config_version=station.config_version,
     )

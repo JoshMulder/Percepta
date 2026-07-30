@@ -170,6 +170,11 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  /** Only ever succeeds before a station has enrolled; the server refuses with
+   *  409 afterwards. See the endpoint for why that line is where it is. */
+  deleteStation: (id: string) =>
+    request<void>(`/api/stations/${id}/config`, { method: "DELETE" }),
+
   enrolmentStatus: (id: string) =>
     request<EnrolmentStatus>(`/api/stations/${id}/enrolment`),
 
