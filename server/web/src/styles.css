@@ -330,12 +330,31 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  /* Sized by its content, which is the rem-width stack above. */
-  overflow: hidden;
+  /* Normally there is nothing to scroll: useFitScale solves the root font size
+     so this stack's natural height equals the viewport, and it lands within a
+     couple of pixels.
+
+     It cannot always succeed. The solve is clamped at MIN_ROOT_PX, below which
+     the numeric readouts stop being glanceable — the point of a wall display —
+     and the five panels need roughly a 965px-tall viewport at that floor. On
+     anything shorter the fit bottoms out and the remainder used to be clipped
+     by `overflow: hidden`: on a 1366x768 laptop that silently removed the
+     Power panel, which on a solar site is the one an operator most needs. Not
+     scrolled off — gone, with nothing to say so.
+
+     Scrolling is the honest failure. It does not pretend the stack fits, and
+     nothing becomes unreachable. The scrollbar is hidden because it would
+     otherwise take width out of a stack whose width is fixed in rem, reflowing
+     the content it is measuring; the overflow is small and contiguous, and the
+     panels below are reached by ordinary wheel or trackpad scrolling. */
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: none;
   background: var(--bg);
   flex: none;
   width: var(--sidebar-base);
 }
+.sidebar::-webkit-scrollbar { display: none; }
 
 /* Each section is its own raised panel rather than a band separated by a rule.
    On a wall display a flat stack of dividers reads as one long list; discrete
