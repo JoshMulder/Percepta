@@ -1059,6 +1059,26 @@ class Agent:
             "kind": kind,
             "available": False,
             "unavailable_reason": reason[:REASON_LIMIT],
+            # Why, in one machine-readable word, beside the sentence.
+            #
+            # "Nothing is selected for this slot" and "something is selected
+            # and is not working" need opposite reactions — one is a complete
+            # station, the other is a fault someone has to go and fix — and the
+            # only place that distinction lived was inside an English sentence
+            # the console would have had to parse.
+            #
+            # It rides the stream rather than the health frame because of when
+            # it is needed. Health goes out every 30 seconds; these go out at
+            # the stream's own cadence. A console that has just connected, or
+            # just switched station, was waiting up to half a minute to find
+            # out a slot was empty, and showing a red X or a skeleton in the
+            # meantime. The answer is known the instant the first frame lands.
+            "unavailable_cause": (
+                "not_fitted"
+                if report is None or not report.configured
+                else "stopped" if report.status == "stalled"
+                else "not_detected"
+            ),
         }
 
     def _reports(self) -> dict:

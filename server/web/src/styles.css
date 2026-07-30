@@ -2169,11 +2169,27 @@ body {
     animation: none;
   }
 }
-.panel-fault {
+.panel-fault,
+.panel-unfitted {
   position: absolute;
   inset: 0;
   min-height: 0;
 }
+
+/* An empty slot, struck through like a fault because the dashes underneath are
+   equally not a measurement — but grey, because a station without a floodlight
+   is a complete station and an operator scanning the wall for red must not
+   find one here. Same geometry as .panel-fault so the two never shift the
+   layout between them. */
+.panel-unfitted {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  width: 100%;
+}
+.panel-unfitted .fault-x { stroke: var(--dim); opacity: 0.3; }
+.panel-unfitted .fault-text strong { color: var(--muted); }
+.panel-unfitted .fault-text span { color: var(--dim); }
 
 .flood-denied {
   font: 0.7rem var(--mono);

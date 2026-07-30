@@ -176,6 +176,12 @@ export interface Aircraft {
 export interface Availability {
   available?: boolean;
   unavailable_reason?: string;
+  /** The same fact as `unavailable_reason`, in one word worth branching on.
+   *  `not_fitted` is a complete station with nothing selected for this slot and
+   *  is not a fault; the other two are. Carried per frame rather than only in
+   *  health, because health is every 30 s and a console that has just switched
+   *  station has to show something now. Absent means unknown. */
+  unavailable_cause?: "not_fitted" | "not_detected" | "stopped";
 }
 
 export interface AdsbPayload extends Availability {

@@ -157,6 +157,11 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
   const raisedConditions = useRef<Set<string>>(new Set());
   // Streams the station says it has no source for, with its reason. Distinct
   // from a fault: nothing has failed, the hardware was never fitted.
+  /** Streams whose own frames say the slot has nothing selected. Separate from
+   *  `unavailable` because "no sensor" and "sensor not working" are opposite
+   *  conclusions, and this one arrives on the stream's cadence rather than
+   *  waiting for a health frame. */
+  const [unfitted, setUnfitted] = useState<Record<string, boolean>>({});
   const [unavailable, setUnavailable] = useState<
     Partial<Record<StreamKind, string>>
   >({});
@@ -232,7 +237,22 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
       // A stream declaring itself unavailable is still arriving, so it counts
       // as live for staleness - the station is talking to us, it just has
       // nothing to measure with.
-      const declared = message.payload as { available?: boolean; unavailable_reason?: string };
+      const declared = message.payload as {
+        available?: boolean;
+        unavailable_reason?: string;
+        unavailable_cause?: "not_fitted" | "not_detected" | "stopped";
+      };
+      setUnfitted((prev) => {
+        // Only the frames that actually declare themselves say anything here.
+        // An available stream clears it; anything else leaves it alone.
+        const empty = declared.available === false
+          && declared.unavailable_cause === "not_fitted";
+        if ((prev[kind] ?? false) === empty) return prev;
+        const next = { ...prev };
+        if (empty) next[kind] = true;
+        else delete next[kind];
+        return next;
+      });
       setUnavailable((prev) => {
         const reason =
           declared.available === false
@@ -363,6 +383,7 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
     setFrame(null);
     raisedConditions.current = new Set();
     setUnavailable({});
+    setUnfitted({});
     setWeather(null);
     setPower(null);
     setRadio(null);
@@ -503,8 +524,49 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
   const aircraft = adsb?.aircraft ?? [];
   const adsbDeviceStatus = health?.devices?.find((d) => d.slot === "adsb")?.status;
 
-  const statusOf = (kind: StreamKind) =>
-    panelStatus(lastSeen[kind] ?? null, streamsSince, STALE_AFTER_MS[kind], simulated);
+  /**
+   * Whether the station has a sensor selected for the slot behind a stream.
+   *
+   * `undefined` until a health frame has arrived, which is the honest answer:
+   * "nobody has told us yet" must keep showing skeletons rather than jumping
+   * to "not fitted" and then back again when the truth turns up.
+   *
+   * Slot and stream share a name for every panel here. `adsb` is excluded
+   * because it does not have a panel — it draws on the map, which is always
+   * rendered and carries its own fault indication in the contact count.
+   */
+  const fittedFor = (kind: StreamKind): boolean | undefined => {
+    const slots = health?.devices;
+    if (!slots) return undefined;
+    const slot = slots.find((d) => d.slot === kind);
+    // A slot the station does not report at all is not evidence of absence.
+    return slot ? slot.status !== "not_fitted" : undefined;
+  };
+
+  const statusOf = (kind: StreamKind) => {
+    // The station's own statement comes first, because it is a statement
+    // rather than an inference. A slot with nothing selected is Not fitted the
+    // moment the first health frame lands — no grace period, and it never
+    // becomes a fault however long you wait.
+    // The stream's own frame first: it arrives at the stream's cadence, where
+    // the health frame that carries the same fact is every 30 seconds. On a
+    // console that has just switched station that is the difference between
+    // knowing now and showing a red X for half a minute.
+    if (unfitted[kind] || fittedFor(kind) === false) return "not-fitted" as const;
+
+    // A stream that declares itself unavailable is arriving but carries no
+    // readings. It used to count as live, on the reasoning that the station is
+    // talking to us — true, and the wrong conclusion for a *panel*, which then
+    // sat showing dashes indefinitely and looked identical to one still
+    // waiting. Reaching here means the slot is configured, so no source for it
+    // is a fault: something was specified and is not delivering.
+    if (unavailable[kind] && !simulated) return "fault" as const;
+
+    return panelStatus(
+      lastSeen[kind] ?? null, streamsSince, STALE_AFTER_MS[kind], simulated,
+      fittedFor(kind),
+    );
+  };
 
   const renderMap = (small: boolean) => {
     if (bootstrapping) return <MapSkeleton />;

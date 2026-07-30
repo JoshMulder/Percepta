@@ -1,23 +1,33 @@
 import type { ReactNode } from "react";
 
 /**
- * Three states, kept deliberately distinct.
+ * Four states, kept deliberately distinct.
  *
- *   loading  nothing has arrived yet, and not enough time has passed to call
- *            that a problem. Shows skeletons.
- *   live     data is arriving. Shows the panel.
- *   fault    data was expected and is not there - either it stopped, or it
- *            never started long after the link came up. Shows a red X.
+ *   loading    nothing has arrived yet, and not enough time has passed to call
+ *              that a problem. Shows skeletons.
+ *   live       data is arriving. Shows the panel.
+ *   fault      data was expected and is not there - either it stopped, or it
+ *              never started long after the link came up. Shows a red X.
+ *   not-fitted no sensor is selected for this slot. Not a fault, and never
+ *              becomes one however long you wait.
  *
  * Collapsing "no data yet" and "sensor is broken" into one state is the mistake
  * this exists to avoid. On a console watching unattended sites, an operator
  * needs to tell "still connecting" from "the weather station has failed", and a
  * spinner that never resolves communicates neither.
  *
+ * `not-fitted` closes the other half of the same gap. A station with no
+ * floodlight publishes no light stream at all, so the only evidence was an
+ * absence — and an absence takes twelve seconds to become suggestive and then
+ * resolves to a red X, which is the wrong answer twice: it wastes the wait, and
+ * it calls a complete station broken. The station already says which slots are
+ * configured in every health frame, so this is knowable on the first frame and
+ * needs no timer.
+ *
  * Fault is suppressed in demo mode: the simulator is the sensor there, so a red
  * X would only ever mean the simulator stopped.
  */
-export type PanelStatus = "loading" | "live" | "fault";
+export type PanelStatus = "loading" | "live" | "fault" | "not-fitted";
 
 /** Time from the link coming up to calling a silent sensor faulty. Generous:
  *  a station on a degraded backhaul can legitimately take a while to get its
@@ -35,7 +45,17 @@ export function panelStatus(
   since: number | null,
   staleAfterMs: number,
   demo: boolean,
+  fitted?: boolean,
 ): PanelStatus {
+  // Checked before anything time-based: an empty slot is a fact the station
+  // states, not something to be inferred from silence. Only `false` counts —
+  // `undefined` means no health frame has arrived yet, which is genuinely
+  // still loading and must not be read as "nothing fitted".
+  //
+  // Deliberately not applied once data is arriving: a slot reported empty
+  // while its stream is live is a contradiction, and showing the readings the
+  // station is actually sending is the safer half of it.
+  if (fitted === false && lastSeen === null) return "not-fitted";
   if (lastSeen === null) {
     if (demo || since === null) return "loading";
     return Date.now() - since > FIRST_DATA_GRACE_MS ? "fault" : "loading";
@@ -113,6 +133,24 @@ export function PanelState({
           <div className="fault-text">
             <strong>{label}</strong>
             <span>No data</span>
+          </div>
+        </div>
+      )}
+
+      {status === "not-fitted" && (
+        // Struck through like a fault, because the readings underneath are
+        // equally not-a-measurement — but grey and without role="alert". This
+        // is a complete station that simply does not have this sensor, and an
+        // operator scanning for red must not find one here.
+        <div className="panel-unfitted">
+          <svg className="fault-x" viewBox="0 0 100 100" preserveAspectRatio="none"
+               aria-hidden focusable="false">
+            <line x1="4" y1="4" x2="96" y2="96" />
+            <line x1="96" y1="4" x2="4" y2="96" />
+          </svg>
+          <div className="fault-text">
+            <strong>{label}</strong>
+            <span>Not fitted</span>
           </div>
         </div>
       )}
