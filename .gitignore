@@ -8,3 +8,6 @@
 # Python bytecode, wherever it lands.
 __pycache__/
 *.py[cod]
+
+# Agent worktrees: working copies of this same repo, never content of it.
+.claude/worktrees/
