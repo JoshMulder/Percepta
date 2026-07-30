@@ -3002,6 +3002,15 @@ body {
 .power .stats dd {
   font-size: 1.125rem;
 }
+/* Breathing room at the panel's edges. Each row is a label pushed left and a
+   figure pushed right, so at the enlarged size they sat hard against the
+   border on both sides - the only text in the stack doing so, and it read as
+   overflow rather than layout. The column gap widens with them: "Solar in"
+   and its watts must not run into "Battery" and its volts. */
+.power .stats {
+  padding: 0 0.5rem;
+  gap: 0.5rem 1.75rem;
+}
 
 /* A value the platform was told rather than one it offers to change. Reads as
    a field so it sits in the form's rhythm, but there is nothing to type into:
