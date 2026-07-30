@@ -349,11 +349,31 @@ POST_HOME = {
     "/logout": "/",
 }
 
+#: Three states, an owner requirement, and they answer three different
+#: questions an installer actually has:
+#:
+#:   Not fitted    nothing is selected for this slot. Not a fault — a station
+#:                 without a floodlight is a complete station.
+#:   Connected     selected, and talking to us right now.
+#:   Disconnected  selected, and not. Something is wrong and it is here.
+#:
+#: The internal vocabulary keeps four, because `stalled` — a device that was
+#: streaming and has gone quiet — is a genuinely different thing from one that
+#: never answered, and the drivers are right to distinguish them. It is not a
+#: different thing *to an installer standing at the site*: both mean "this is
+#: selected and you are not getting data from it", and both send them to the
+#: same cable. So the two collapse here, at the point of display, and the
+#: `found:` line underneath keeps the distinction for whoever needs it.
+#:
+#: Disconnected is amber rather than red on purpose. It is overwhelmingly the
+#: normal state during commissioning — you select the device before you plug it
+#: in — and a red pill on every slot you have not wired yet teaches people that
+#: red means nothing.
 STATUS_PILL = {
-    "present": ("ok", "detected"),
-    "stalled": ("warn", "configured, gone quiet"),
-    "configured_absent": ("bad", "configured, not detected"),
-    "not_fitted": ("off", "not fitted"),
+    "present": ("ok", "Connected"),
+    "stalled": ("warn", "Disconnected"),
+    "configured_absent": ("warn", "Disconnected"),
+    "not_fitted": ("off", "Not fitted"),
 }
 
 
@@ -1135,9 +1155,28 @@ class Console:
                 "<p class=sub>Not set up yet — "
                 "<a href='/connection'>enter the enrolment code</a>.</p>"
             )
-        if state["health"]:
+        # Two conditions are dropped here and only here, because the Slots
+        # table further down this same page already says exactly what they say:
+        # `devices.absent` names the selected devices that are not answering,
+        # and `telemetry.unsourced` names the streams that have no source —
+        # which on this page is the same list, rendered as pills, per slot,
+        # next to the device each one is about. Printing them again as a
+        # sentence at the top was the same fact twice on one screen.
+        #
+        # Filtered rather than the box removed: the rest of this list has
+        # nowhere else to appear. A credential that is failing to renew is
+        # invisible until it expires and then costs a site visit, and a clock
+        # that is refusing enrolment, a demoted setup page and a rejected
+        # uplink are all things no slot pill will ever show. They still go
+        # out in telemetry unchanged — this is display only.
+        DUPLICATED_BY_SLOTS = {"devices.absent", "telemetry.unsourced"}
+        attention = [
+            condition for condition in state["health"]
+            if condition["id"] not in DUPLICATED_BY_SLOTS
+        ]
+        if attention:
             out.append("<div class=card><div class=k>Needs attention</div><ul>")
-            for condition in state["health"]:
+            for condition in attention:
                 css = "bad" if condition["severity"] == "critical" else "warn"
                 out.append(
                     f"<li class={css}>{html.escape(condition['id'])}: "
@@ -1182,10 +1221,11 @@ class Console:
                 f"<span>{html.escape(report['label'])} "
                 f"<span class='pill {css}'>{html.escape(wording)}</span></span></div>"
             )
-        out.append(
-            "<div class=muted>Selection and parameters are on the "
-            "<a href='/devices'>Devices</a> page.</div></div>"
-        )
+        # No trailing "selection and parameters are on the Devices page" line.
+        # Devices is a tab at the top of every page, so it was navigation
+        # advice for a journey already offered, and prose of exactly the kind
+        # this page is supposed to be free of.
+        out.append("</div>")
         return "".join(out)
 
     def _section_enrol(self, state: dict, csrf: str) -> str:

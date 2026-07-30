@@ -98,6 +98,13 @@ FAILURE_WINDOW_SECONDS = 900.0
 #: More than this and something is enumerating rather than typing.
 MAX_SESSIONS = 8
 
+#: Idle session lifetime when the access window is pinned open
+#: (`GSU_SETUP_WINDOW_MINUTES=0`). The shipped default window, because that is
+#: the length of time this system already treats as a reasonable working
+#: session — and long enough that somebody configuring a device, walking to the
+#: mast and coming back is still logged in.
+PINNED_IDLE_MINUTES = 30.0
+
 
 # --- where a request came from -------------------------------------------
 
@@ -358,12 +365,34 @@ class Gate:
             session = self._sessions.get(token)
             if session is None:
                 return None
-            idle_limit = max(self.window_minutes, 1.0) * 60
-            if time.monotonic() - session.last_seen > idle_limit:
+            if time.monotonic() - session.last_seen > self._idle_limit_s():
                 self._sessions.pop(token, None)
                 return None
             session.last_seen = time.monotonic()
             return session
+
+    def _idle_limit_s(self) -> float:
+        """How long a logged-in session survives without activity.
+
+        Tied to the access window because the two are the same intent: the
+        window says how long this page is reachable, and there is no point
+        holding a session past it.
+
+        Except at zero, which is where this went wrong. `GSU_SETUP_WINDOW_
+        MINUTES=0` means *pinned open* — the strongest possible statement that
+        the page should stay usable — and the old `max(window_minutes, 1.0)`
+        read it as the shortest possible session instead, logging people out
+        after sixty seconds on exactly the boxes configured never to close.
+        The floor was there to stop a tiny window making sessions unusable and
+        it was applied to the one value that does not mean a tiny window.
+
+        Zero now gets the shipped default instead. Not unlimited: a browser
+        left open on a bench is still a way in, and the pin is about the socket
+        staying bound, not about never having to log in again.
+        """
+        if self.window_minutes <= 0:
+            return PINNED_IDLE_MINUTES * 60
+        return max(self.window_minutes, 1.0) * 60
 
     def forget_all(self) -> None:
         """Drop every session. Used when the window closes, so that a cookie

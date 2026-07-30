@@ -1711,3 +1711,102 @@ class BarometricCorrectionSettingTests(unittest.TestCase):
         form = markup[markup.index("<form"):markup.index("</form>")]
         self.assertIn("name='adsb_baro_correction'", form)
         self.assertIn("type=checkbox", form)
+
+class DeviceStateVocabularyTests(unittest.TestCase):
+    """Three states on the setup page, an owner requirement.
+
+    Not fitted, Connected, Disconnected. They answer the three questions an
+    installer actually has, and the four-state internal vocabulary answers a
+    different one.
+    """
+
+    def test_it_offers_exactly_three_words(self):
+        from gsu.console import STATUS_PILL
+        self.assertEqual(
+            {wording for _, wording in STATUS_PILL.values()},
+            {"Not fitted", "Connected", "Disconnected"},
+        )
+
+    def test_gone_quiet_and_never_answered_both_read_as_disconnected(self):
+        # Genuinely different to a driver and identical to a person standing at
+        # the site: both mean "selected, and you are not getting data", and
+        # both send them to the same cable. The `found:` line keeps the
+        # distinction for whoever needs it.
+        from gsu.console import STATUS_PILL
+        self.assertEqual(STATUS_PILL["stalled"][1], "Disconnected")
+        self.assertEqual(STATUS_PILL["configured_absent"][1], "Disconnected")
+
+    def test_an_empty_slot_is_not_a_fault(self):
+        # A station with no floodlight is a complete station.
+        from gsu.console import STATUS_PILL
+        css, wording = STATUS_PILL["not_fitted"]
+        self.assertEqual(wording, "Not fitted")
+        self.assertEqual(css, "off")
+
+    def test_disconnected_is_not_red(self):
+        # It is the normal state during commissioning — you select a device
+        # before you plug it in — and a red pill on every unwired slot teaches
+        # people that red means nothing.
+        from gsu.console import STATUS_PILL
+        self.assertEqual(STATUS_PILL["configured_absent"][0], "warn")
+        self.assertEqual(STATUS_PILL["present"][0], "ok")
+
+
+class PinnedWindowSessionTests(unittest.TestCase):
+    """A pinned-open access window must not shorten the login.
+
+    `GSU_SETUP_WINDOW_MINUTES=0` means the page stays reachable for as long as
+    the station runs. The idle limit read that as `max(0, 1.0)` — sixty
+    seconds — so the boxes configured never to close were the ones that logged
+    you out fastest, mid-task, repeatedly.
+    """
+
+    def gate(self, window_minutes):
+        return Gate(window_minutes=window_minutes)
+
+    def test_pinned_open_gets_a_working_session_not_a_minute(self):
+        pinned = self.gate(0)._idle_limit_s()
+        self.assertGreaterEqual(pinned, 20 * 60)
+        self.assertGreater(pinned, self.gate(1)._idle_limit_s())
+
+    def test_a_real_window_still_governs_its_own_session(self):
+        self.assertEqual(self.gate(30)._idle_limit_s(), 30 * 60)
+
+    def test_a_tiny_window_keeps_its_floor(self):
+        # The floor exists so a two-second window does not make the page
+        # unusable; it was only ever wrong when applied to zero.
+        self.assertEqual(self.gate(0.25)._idle_limit_s(), 60.0)
+
+    def test_pinned_open_is_not_unlimited(self):
+        # A browser left open on a bench is still a way in. The pin is about
+        # the socket staying bound, not about never logging in again.
+        self.assertLess(self.gate(0)._idle_limit_s(), 24 * 60 * 60)
+
+
+class SummaryPageTests(unittest.TestCase):
+    """What the landing page says, and what it has stopped saying twice."""
+
+    def test_device_conditions_are_not_restated_above_the_slots(self):
+        source = (Path(__file__).resolve().parents[1]
+                  / "gsu" / "console.py").read_text()
+        # The Slots table on this same page names every selected device and
+        # whether it is answering. These two conditions say exactly that.
+        self.assertIn("DUPLICATED_BY_SLOTS", source)
+        self.assertIn('"devices.absent"', source)
+        self.assertIn('"telemetry.unsourced"', source)
+
+    def test_the_conditions_with_nowhere_else_to_go_are_kept(self):
+        # A credential failing to renew is invisible until it expires and then
+        # costs a site visit. No slot pill will ever show it.
+        source = (Path(__file__).resolve().parents[1]
+                  / "gsu" / "console.py").read_text()
+        summary = source[source.index("def _page_summary"):
+                         source.index("def _section_enrol")]
+        self.assertIn("Needs attention", summary)
+        for condition in ("uplink.refused", "clock.implausible", "setup.demoted"):
+            self.assertNotIn(condition, summary)
+
+    def test_no_navigation_prose_under_the_slots(self):
+        source = (Path(__file__).resolve().parents[1]
+                  / "gsu" / "console.py").read_text()
+        self.assertNotIn("Selection and parameters are on the", source)
