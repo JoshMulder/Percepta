@@ -365,7 +365,7 @@ class AgentRefusalTests(unittest.TestCase):
 
     def test_a_pinned_station_refuses_a_plaintext_broker_and_keeps_working(self):
         agent = Agent(AgentConfig(home=self.home, setup_enabled=False,
-                                  single_instance=False))
+                                  single_instance=False, demo=True))
         self.enrol(agent)
         try:
             self.assertIsNone(agent.transport, "it must not have connected")
@@ -381,7 +381,7 @@ class AgentRefusalTests(unittest.TestCase):
 
     def test_the_ca_from_enrolment_is_persisted_0600_and_pinned_next_boot(self):
         agent = Agent(AgentConfig(home=self.home, setup_enabled=False,
-                                  single_instance=False))
+                                  single_instance=False, demo=True))
         self.enrol(agent)
         agent.shutdown()
         # Named for the broker, because that is whose root it is.
@@ -390,7 +390,7 @@ class AgentRefusalTests(unittest.TestCase):
         self.assertEqual(stored.stat().st_mode & 0o777, 0o600)
 
         restarted = Agent(AgentConfig(home=self.home, setup_enabled=False,
-                                      single_instance=False))
+                                      single_instance=False, demo=True))
         try:
             self.assertTrue(restarted.trust.pinned)
             self.assertEqual(restarted.trust.source, "enrolment")

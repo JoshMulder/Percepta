@@ -505,12 +505,25 @@ def get(type_id: str) -> DeviceType | None:
     return None
 
 
-def default_fitted() -> dict[str, str]:
-    """What a box ships with before anyone has told it anything.
+def default_fitted(demo: bool = False) -> dict[str, str]:
+    """What a box has selected before anyone has told it anything.
 
-    Everything simulated, because that is what is true of this build: there is
-    no hardware attached and nothing here will claim otherwise.
+    **Nothing, unless this is a demo box.** A real station is provisioned by
+    someone standing in front of it who knows what is bolted to the mast, and
+    every slot pre-filled with a Demo sensor means their first job is to
+    un-demo six slots they never asked for — and to notice that they must. A
+    slot they have not touched reads "Not fitted", which is true, rather than
+    "Demo weather station", which is a claim nobody made.
+
+    `GSU_DEMO=1` at provisioning time flips it, and then everything is
+    simulated, which is what a demo box is for: unbox, power on, and it is a
+    complete station with a test card, weather, power and traffic. The flag is
+    read once from the environment rather than stored in the device file, so
+    the answer to "is this a demo box" lives with the provisioning rather than
+    in state a factory reset would carry forward.
     """
+    if not demo:
+        return {}
     return {
         "adsb": "simulated-adsb",
         "radio": "simulated-airband",

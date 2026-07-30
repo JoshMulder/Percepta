@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import re
 import socket
 import tempfile
@@ -243,8 +244,7 @@ class BindingTests(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         agent = Agent(AgentConfig(
-            home=Path(directory.name), setup_enabled=False, single_instance=False,
-        ))
+            home=Path(directory.name), setup_enabled=False, single_instance=False, demo=True))
         self.addCleanup(agent.shutdown)
         kwargs.setdefault("port", 0)
         return Console(agent, **kwargs)
@@ -290,8 +290,7 @@ class WindowLifecycleTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.home = Path(directory.name)
         self.agent = Agent(AgentConfig(
-            home=self.home, setup_enabled=False, single_instance=False,
-        ))
+            home=self.home, setup_enabled=False, single_instance=False, demo=True))
         self.addCleanup(self.agent.shutdown)
         # The watcher's own period, shortened so this takes a second rather
         # than half a minute.
@@ -372,8 +371,7 @@ class ServedPageTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.agent = Agent(AgentConfig(
             home=Path(self.directory.name), setup_enabled=False,
-            single_instance=False,
-        ))
+            single_instance=False, demo=True))
         self.addCleanup(self.agent.shutdown)
         self.console = Console(
             self.agent, "127.0.0.1", 0,
@@ -1158,8 +1156,7 @@ class StationPositionTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.agent = Agent(AgentConfig(
             home=Path(self.directory.name), setup_enabled=False,
-            single_instance=False,
-        ))
+            single_instance=False, demo=True))
         self.addCleanup(self.agent.shutdown)
 
     def enrol_with(self, latitude, longitude):
@@ -1353,8 +1350,7 @@ class LanPeerTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.agent = Agent(AgentConfig(
             home=Path(self.directory.name), setup_enabled=False,
-            single_instance=False,
-        ))
+            single_instance=False, demo=True))
         self.addCleanup(self.agent.shutdown)
         patcher = mock.patch(
             "gsu.setup_access.classify",
@@ -1592,8 +1588,7 @@ class BarometricCorrectionSettingTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.agent = Agent(AgentConfig(
             home=Path(self.directory.name), setup_enabled=False,
-            single_instance=False,
-        ))
+            single_instance=False, demo=True))
         self.addCleanup(self.agent.shutdown)
         self.console = Console(self.agent)
 
@@ -1776,8 +1771,7 @@ class DevicePickerTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.agent = Agent(AgentConfig(
             home=Path(self.directory.name), setup_enabled=False,
-            single_instance=False,
-        ))
+            single_instance=False, demo=True))
         self.addCleanup(self.agent.shutdown)
         self.console = Console(self.agent)
 
@@ -1860,8 +1854,7 @@ class FactoryResetTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.config = AgentConfig(
             home=Path(self.directory.name), setup_enabled=False,
-            single_instance=False,
-        )
+            single_instance=False, demo=True)
         self.agent = Agent(self.config)
         self.addCleanup(self.agent.shutdown)
         self.console = Console(self.agent)
@@ -1940,3 +1933,91 @@ class FactoryResetTests(unittest.TestCase):
         # scroll-and-click cannot land past it.
         body = self.console.render(None, "/connection")
         self.assertGreater(body.index("<h2>Reset</h2>"), body.index("<h2>Security</h2>"))
+
+class DemoProvisioningTests(unittest.TestCase):
+    """Demo is decided when the box is provisioned, not slot by slot afterwards.
+
+    A fresh station used to come up with every slot on its Demo sensor. That
+    made a demo box free and a real installation expensive: six slots to
+    un-demo, and the alertness to notice they needed it. The default is now
+    nothing fitted, which is true of a box nobody has configured, and
+    `GSU_DEMO=1` at provisioning time gives the demo station instead.
+    """
+
+    def agent(self, **kwargs):
+        from gsu.devices import registry  # noqa: F401 - used below
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        agent = Agent(AgentConfig(
+            home=Path(directory.name), setup_enabled=False,
+            single_instance=False, **kwargs,
+        ))
+        self.addCleanup(agent.shutdown)
+        return agent
+
+    def test_a_real_box_starts_with_nothing_selected(self):
+        fitted = self.agent().inventory.fitted
+        self.assertEqual({s: e.type_id for s, e in fitted.items() if e.type_id}, {})
+
+    def test_a_demo_box_starts_complete(self):
+        from gsu.devices import registry
+        fitted = self.agent(demo=True).inventory.fitted
+        for slot in registry.SLOTS:
+            self.assertTrue(fitted[slot].type_id, slot)
+            self.assertTrue(registry.get(fitted[slot].type_id).simulated, slot)
+
+    def test_the_flag_only_seeds_a_box_nobody_has_configured(self):
+        # Provisioning, not a runtime switch. Turning it on later must not
+        # replace somebody's real sensors.
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        home = Path(directory.name)
+        first = Agent(AgentConfig(home=home, setup_enabled=False,
+                                  single_instance=False))
+        first.inventory.set_device("weather", "airmar-110wx", {})
+        first.shutdown()
+
+        second = Agent(AgentConfig(home=home, setup_enabled=False,
+                                   single_instance=False, demo=True))
+        self.addCleanup(second.shutdown)
+        self.assertEqual(
+            second.inventory.fitted["weather"].type_id, "airmar-110wx")
+
+    def test_it_is_read_from_the_environment(self):
+        from gsu.config import AgentConfig as AC
+        with mock.patch.dict(os.environ, {"GSU_DEMO": "1"}, clear=False):
+            self.assertTrue(AC.from_env().demo)
+        with mock.patch.dict(os.environ, {"GSU_DEMO": "0"}, clear=False):
+            self.assertFalse(AC.from_env().demo)
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("GSU_DEMO", None)
+            self.assertFalse(AC.from_env().demo)
+
+    def test_a_reset_returns_the_box_to_its_provisioned_kind(self):
+        # A demo box resets to a demo box; a real one resets to empty slots.
+        demo = self.agent(demo=True)
+        demo.inventory.set_device("weather", "airmar-110wx", {})
+        demo.factory_reset()
+        self.assertEqual(
+            demo.inventory.fitted["weather"].type_id, "simulated-weather")
+
+        real = self.agent()
+        real.inventory.set_device("weather", "airmar-110wx", {})
+        real.factory_reset()
+        # Back to nothing selected, which for a real box means the slot is not
+        # in the map at all rather than present-and-empty.
+        self.assertFalse(real.inventory.fitted.get("weather"))
+
+    def test_a_demo_sensor_is_badged_on_the_summary(self):
+        console = Console(self.agent(demo=True))
+        body = console.render(None, "/")
+        self.assertIn("<span class='pill demo'>DEMO</span>", body)
+
+    def test_a_real_sensor_is_not(self):
+        agent = self.agent()
+        agent.inventory.set_device("weather", "airmar-110wx", {})
+        agent.build_devices()
+        body = Console(agent).render(None, "/")
+        rows = [r for r in body.split("<div class=slot-row>") if "Weather" in r]
+        self.assertTrue(rows)
+        self.assertNotIn("pill demo", rows[0])

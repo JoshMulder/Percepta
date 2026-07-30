@@ -120,7 +120,7 @@ class ShippedInventoryTests(unittest.TestCase):
             (DEPLOY / "devices.pi.json").read_text()
         )
         self.agent = Agent(AgentConfig(home=self.home, setup_enabled=False,
-                                       single_instance=False))
+                                       single_instance=False, demo=True))
 
     def tearDown(self):
         self.agent.shutdown()

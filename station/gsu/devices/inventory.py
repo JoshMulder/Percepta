@@ -132,11 +132,16 @@ def scan_rtlsdr() -> list[Resource]:
 
 
 class Inventory:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, demo: bool = False) -> None:
         self.path = path
+        #: Only ever seeds a *fresh* box — `load()` below overwrites this from
+        #: the device file the moment one exists. So flipping GSU_DEMO on a
+        #: station that has already been configured changes nothing, which is
+        #: the right way round: it is a provisioning decision, not a runtime
+        #: switch that could quietly replace somebody's real sensors.
         self.fitted: dict[str, Fitted] = {
             slot: Fitted(type_id=type_id)
-            for slot, type_id in registry.default_fitted().items()
+            for slot, type_id in registry.default_fitted(demo).items()
         }
         self.drivers: dict[str, object] = {}
         self.reasons: dict[str, str] = {}

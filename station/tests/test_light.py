@@ -111,8 +111,7 @@ class LightFaultTests(unittest.TestCase):
         self._dir = tempfile.TemporaryDirectory()
         self.addCleanup(self._dir.cleanup)
         self.agent = Agent(AgentConfig(
-            home=Path(self._dir.name), setup_enabled=False, single_instance=False,
-        ))
+            home=Path(self._dir.name), setup_enabled=False, single_instance=False, demo=True))
         self.addCleanup(self.agent.shutdown)
         self.sent: list[dict] = []
         self.agent._publish = lambda topic, payload: self.sent.append(payload) or True

@@ -101,7 +101,7 @@ class Agent:
         self.trust = self._resolve_broker_trust()
         self.api_trust = self._resolve_api_trust()
         self.client = EnrolmentClient(config.platform_url, trust=self.api_trust)
-        self.inventory = Inventory(config.devices_path)
+        self.inventory = Inventory(config.devices_path, demo=config.demo)
 
         self.enrolment: Enrolment | None = None
         self.transport: Transport | None = None
@@ -740,7 +740,8 @@ class Agent:
             enabled=self.site.adsb_baro_correction, elevation_m=self.site.elevation_m
         )
         self.store = LocalStore(self.config.store_path, self.config.recordings_dir)
-        self.inventory = Inventory(self.config.devices_path)
+        self.inventory = Inventory(self.config.devices_path,
+                                   demo=self.config.demo)
         self.build_devices()
         self.health.clear_all()
         log.warning("Factory reset: cleared %s.", ", ".join(gone))

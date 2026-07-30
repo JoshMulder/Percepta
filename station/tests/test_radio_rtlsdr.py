@@ -391,8 +391,7 @@ class BenchCommandTests(unittest.TestCase):
         self.addCleanup(self._dir.cleanup)
         self.out = str(Path(self._dir.name) / "radio.wav")
         self.agent = Agent(AgentConfig(
-            home=Path(self._dir.name), setup_enabled=False, single_instance=False,
-        ))
+            home=Path(self._dir.name), setup_enabled=False, single_instance=False, demo=True))
         self.agent.inventory.resources = lambda: [
             Resource(id="rtlsdr:00000001", kind="rtlsdr", serial="00000001",
                      model="RTL2838", detail="")

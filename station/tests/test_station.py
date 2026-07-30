@@ -31,8 +31,7 @@ STATION = "29ed8568-999e-4725-8daa-3ee3cea1751e"
 def agent_in(directory: str, traffic: str = "low") -> Agent:
     config = AgentConfig(
         home=Path(directory), setup_enabled=False, single_instance=False,
-        airband_traffic=traffic,
-    )
+        airband_traffic=traffic, demo=True)
     return Agent(config)
 
 
@@ -664,8 +663,7 @@ class DemoSensorStampTests(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         agent = Agent(AgentConfig(
-            home=Path(directory.name), setup_enabled=False, single_instance=False,
-        ))
+            home=Path(directory.name), setup_enabled=False, single_instance=False, demo=True))
         self.addCleanup(agent.shutdown)
         for slot, type_id in slots.items():
             agent.inventory.set_device(slot, type_id, {})

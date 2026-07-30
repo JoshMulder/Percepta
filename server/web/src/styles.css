@@ -3194,29 +3194,3 @@ body {
   font: 0.812rem var(--sans);
 }
 
-
-/* RF gain, under the volume row. A label and a select on one line, sized like
-   the rest of the panel's small controls — this is a set-once site setting, not
-   something reached for while listening, so it gets a row rather than a place
-   in the transport controls. */
-.radio-gain {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  margin-top: 0.35rem;
-}
-.radio-gain label {
-  font: 0.7rem var(--mono);
-  color: var(--muted);
-}
-.radio-gain select {
-  flex: 1;
-  min-width: 0;
-  background: var(--panel-2);
-  color: var(--text);
-  border: 1px solid var(--line);
-  border-radius: 0.25rem;
-  padding: 0.2rem 0.35rem;
-  font: 0.7rem var(--mono);
-}
-.radio-gain select:disabled { color: var(--dim); }

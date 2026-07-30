@@ -125,8 +125,7 @@ class AgentFixture(unittest.TestCase):
         self.sink = str(Path(self._dir.name) / "stream.mp4")
         self.agent = Agent(AgentConfig(
             home=Path(self._dir.name), setup_enabled=False, single_instance=False,
-            stream_sink=self.sink,
-        ))
+            stream_sink=self.sink, demo=True))
         # Attached by hand rather than through `_attach`, which would start the
         # video thread, the renewer and a transport. Every test here drives
         # `cycle()` itself so that timing is the test's business.

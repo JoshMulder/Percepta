@@ -31,8 +31,7 @@ from gsu.devices.inventory import Inventory, SlotReport
 
 def agent_in(directory: str) -> Agent:
     return Agent(AgentConfig(
-        home=Path(directory), setup_enabled=False, single_instance=False,
-    ))
+        home=Path(directory), setup_enabled=False, single_instance=False, demo=True))
 
 
 class RecordingDriver:

@@ -333,7 +333,7 @@ class StreamSeamTests(unittest.TestCase):
         directory = tf.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         agent = Agent(AgentConfig(home=Path(directory.name),
-                                  setup_enabled=False, single_instance=False))
+                                  setup_enabled=False, single_instance=False, demo=True))
         self.addCleanup(agent.shutdown)
         agent.camera = camera
         agent.inventory.drivers["camera"] = camera

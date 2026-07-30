@@ -83,6 +83,20 @@ class AgentConfig:
     #: page itself.
     setup_window_minutes: float = 30.0
 
+    #: Provision this box as a demo station: every slot starts on its Demo
+    #: sensor, so it is a complete working station out of the box with no
+    #: hardware attached.
+    #:
+    #: Off by default, because the opposite default costs a real installation
+    #: real work — six slots to un-demo, and the alertness to notice they need
+    #: it. An untouched slot on a real box reads "Not fitted", which is true.
+    #:
+    #: **Provisioning, not runtime.** It only seeds a station that has never
+    #: been configured; once a device file exists this is ignored entirely, so
+    #: setting it later cannot replace somebody's real sensors, and clearing it
+    #: later cannot strip a demo box someone is using.
+    demo: bool = False
+
     #: How busy the simulated airband channel is: "off", "low" or "busy".
     #: A rural airband channel is silent the vast majority of the time and the
     #: default reflects that; "busy" is for exercising the audio path.
@@ -150,6 +164,7 @@ class AgentConfig:
             # plain line must not silently keep honouring the old line.
             setup_password=_env("GSU_SETUP_PASSWORD_HASH") or _env("GSU_SETUP_PASSWORD"),
             setup_window_minutes=float(_env("GSU_SETUP_WINDOW_MINUTES", "30")),
+            demo=_env("GSU_DEMO", "0") not in ("0", "false", "no", ""),
             airband_traffic=_env("GSU_AIRBAND_TRAFFIC", "low"),
             stream_sink=_env("GSU_STREAM_SINK"),
             encoder=_env("GSU_ENCODER", "auto"),

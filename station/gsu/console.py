@@ -280,11 +280,25 @@ STYLE = """
  /* Height comes from the bar, never the other way round: `align-self:
     stretch` with a centred button means the control fills the strip without
     contributing a millimetre to it. */
- .topbar-out { display: flex; align-items: center; flex: none; margin: 0 0 0 .5rem; }
- .topbar-out button { background: none; border: 1px solid transparent;
+ /* Identical box to a tab link, so the two sit on one line: same padding,
+    same radius, same font size, and the same 1px transparent border — without
+    that border the button is 2px shorter than its neighbours and reads as
+    misaligned however the flexbox is set. */
+ /* `display: contents` so the form contributes no box of its own and the
+    button becomes a direct flex item of the strip, centred by the same line
+    that centres the tabs. As a flex item the form was 48px tall against the
+    nav's 37 and sat its button 6px low — an intermediate box that exists only
+    because signing out has to be a POST. The form still submits normally; it
+    simply stops taking part in layout. */
+ .topbar-out { display: contents; }
+ /* `margin-top: 0` is the one that matters. The page's general button rule
+    gives every button .7rem of top margin, which is right for a button at the
+    end of a form and is exactly what sat this one 11px below the tabs beside
+    it. Everything else here matches a tab link so the two are the same box. */
+ .topbar-out button { margin: 0; background: none; border: 1px solid transparent;
    border-radius: .375rem; color: var(--muted); font-size: .8rem;
-   font-family: inherit; padding: .5rem .75rem; cursor: pointer;
-   white-space: nowrap; }
+   font-weight: 400; font-family: inherit; line-height: 1.5;
+   padding: .5rem .75rem; cursor: pointer; white-space: nowrap; }
  .topbar-out button:hover { color: var(--danger);
    background: rgba(255,122,69,.1); border-color: rgba(255,122,69,.35); }
  .topbar-out button:focus-visible { outline: 2px solid var(--danger);
@@ -300,8 +314,11 @@ STYLE = """
     that is a few pixels off centre, so when the bar is tight this column wins
     and the middle one gives way. On any wide screen there is slack and the
     name is exactly centred. */
- .topbar-right { display: flex; align-items: center; justify-content: flex-end;
-   min-width: max-content; height: 100%;
+ /* Hard against the right edge, and the sign-out is laid out by the same
+    flex line as the tabs rather than being a block with its own padding —
+    which is what left it sitting a couple of pixels low against them. */
+ .topbar-right { display: flex; align-items: center; align-self: stretch;
+   justify-content: flex-end; min-width: max-content; gap: .25rem;
    padding-right: max(.75rem, calc((100vw - 54rem) / 2)); }
  .topbar .pagetabs { position: static; height: auto; border-bottom: 0;
    background: none; padding: 0; overflow: visible; align-items: center; }
@@ -317,6 +334,28 @@ STYLE = """
  .btn.danger, button.danger { border-color: var(--danger); color: var(--danger);
    background: rgba(255,122,69,.08); }
  .btn.danger:hover, button.danger:hover { background: rgba(255,122,69,.18); }
+ /* Name, device, status — three columns, so the pills line up down the card
+    instead of following each device name's length. */
+ /* The columns are defined once, on the card, and each row borrows them with
+    subgrid. A grid per row is what it was, and a grid only aligns its own
+    columns — so every row sized column 2 to its own device name and the status
+    pills landed wherever each name happened to end. The fallback below is a
+    plain three-column grid for anything without subgrid: slightly ragged,
+    which is what it was, rather than broken. */
+ .slot-grid { display: grid; grid-template-columns: 7rem 1fr auto; }
+ .slot-row { display: grid; grid-template-columns: 7rem 1fr auto;
+   grid-column: 1 / -1; align-items: center; gap: .75rem; padding: .3rem 0;
+   border-bottom: 1px solid var(--line-soft); }
+ @supports (grid-template-columns: subgrid) {
+   .slot-row { grid-template-columns: subgrid; }
+ }
+ .slot-row:last-of-type { border-bottom: 0; }
+ .slot-device { display: flex; align-items: center; gap: .5rem;
+   justify-content: flex-end; min-width: 0; }
+ .slot-device > :first-child { overflow: hidden; text-overflow: ellipsis;
+   white-space: nowrap; }
+ .pill.demo { border-color: var(--warn); background: rgba(232,176,75,.12);
+   color: var(--warn); }
  .slot-link { color: var(--muted); text-decoration: none; }
  .slot-link:hover { color: var(--brand); text-decoration: underline; }
  .slot-link:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px;
@@ -1377,7 +1416,7 @@ class Console:
         out.append("</div>")
         # One line per slot: the same pill the Devices page shows, without the
         # forms. Intent (the label) and fact (the pill), still never merged.
-        out.append("<h2>Slots</h2><div class=card>")
+        out.append("<h2>Slots</h2><div class='card slot-grid'>")
         by_slot = {report["slot"]: report for report in state["devices"]}
         for slot in registry.SLOTS:
             report = by_slot[slot]
@@ -1389,12 +1428,21 @@ class Console:
             # Only the name is a link; the pill beside it is a status, and
             # making a whole row clickable hides where the target is.
             label = SLOT_LABELS.get(slot, slot.title())
+            # Three columns rather than a flex row with the device and its pill
+            # bundled into one span: bundled, the pills landed wherever each
+            # device name happened to end, so a column of statuses an installer
+            # scans down was a ragged edge. Grid gives the pill its own column
+            # and every one starts at the same x.
+            badge = (
+                "<span class='pill demo'>DEMO</span>"
+                if report.get("simulated") else ""
+            )
             out.append(
-                "<div class=row>"
+                "<div class=slot-row>"
                 f"<a class=slot-link href='/devices?slot={slot}'>"
                 f"{html.escape(label)}</a>"
-                f"<span>{html.escape(report['label'])} "
-                f"<span class='pill {css}'>{html.escape(wording)}</span></span></div>"
+                f"<span class=slot-device>{html.escape(report['label'])}{badge}</span>"
+                f"<span class='pill {css}'>{html.escape(wording)}</span></div>"
             )
         # No trailing "selection and parameters are on the Devices page" line.
         # Devices is a tab at the top of every page, so it was navigation
