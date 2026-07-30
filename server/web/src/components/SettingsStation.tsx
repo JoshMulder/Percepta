@@ -317,33 +317,21 @@ function StationConfigForm({
             required
           />
         </label>
-        <div className="field-row">
-          <label className="field">
-            <span>Latitude</span>
-            <input
-              type="number"
-              step="0.00001"
-              min={-90}
-              max={90}
-              value={config.latitude ?? ""}
-              onChange={(e) =>
-                set("latitude", e.target.value === "" ? null : Number(e.target.value))
-              }
-            />
-          </label>
-          <label className="field">
-            <span>Longitude</span>
-            <input
-              type="number"
-              step="0.00001"
-              min={-180}
-              max={180}
-              value={config.longitude ?? ""}
-              onChange={(e) =>
-                set("longitude", e.target.value === "" ? null : Number(e.target.value))
-              }
-            />
-          </label>
+        {/* Read-only. Position is owned by the station: it is set on the box
+            by whoever is standing at the site, reported up in the health
+            frame, and written here. Two places to set one fact is two places
+            for it to be wrong, and the one with a person at it wins. */}
+        <div className="field">
+          <span>Position</span>
+          <div className="reported-value">
+            {config.latitude === null || config.longitude === null ? (
+              <em>Not set. Set it on the station's own setup page.</em>
+            ) : (
+              <code>
+                {config.latitude.toFixed(5)}, {config.longitude.toFixed(5)}
+              </code>
+            )}
+          </div>
         </div>
         <label className="field checkbox-field">
           <input

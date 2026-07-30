@@ -101,6 +101,9 @@ class StationIngest:
         #: Last known synthetic/real state per station, so the row is written
         #: when it changes rather than on every health frame.
         self._simulated: dict[uuid.UUID, bool] = {}
+        #: Last position written per station, so a health frame every half
+        #: minute is not a database write every half minute.
+        self._position: dict[uuid.UUID, tuple[float, float] | None] = {}
         self._unknown_kinds: set[str] = set()
         self._unknown_stations: set[uuid.UUID] = set()
 
@@ -311,6 +314,7 @@ class StationIngest:
 
         if kind == "health":
             await self._reconcile_simulated(station_id, payload)
+            await self._reconcile_position(station_id, payload)
 
         # Onto the internal fan-out, where authorisation and per-subscriber
         # delivery already apply. Nothing downstream needs to know the frame
@@ -341,6 +345,77 @@ class StationIngest:
             return
         self._simulated[station_id] = simulated
         await asyncio.to_thread(self._write_simulated, station_id, simulated)
+
+    async def _reconcile_position(self, station_id: uuid.UUID, payload: dict) -> None:
+        """Believe the station about where it is.
+
+        The station owns its position: it is set on the box, by whoever is
+        standing at the site, and the platform stores what it is told rather
+        than offering a second field that can disagree. The console's
+        latitude and longitude are read-only for the same reason - two places
+        to set one fact is two places for it to be wrong, and the one with a
+        person and a handset at it wins.
+
+        An **absent** `position` means "not telling you", not "I have none":
+        a station enrolled before the field existed sends nothing, and reading
+        that as a clearing instruction would silently take the map away from
+        every station in the field. Clearing is therefore explicit -
+        `"position": null` - which is the retraction the station side raised
+        as unanswerable from its end (CONTRACT-QUESTIONS item 16) and which is
+        the platform's to define. This is that definition.
+        """
+        if "position" not in payload:
+            return
+        position = payload.get("position")
+
+        if position is None:
+            fix: tuple[float, float] | None = None
+        elif isinstance(position, dict):
+            try:
+                latitude = float(position["latitude"])
+                longitude = float(position["longitude"])
+            except (KeyError, TypeError, ValueError):
+                log.warning(
+                    "Station %s reported a position that could not be read: %r",
+                    station_id, position,
+                )
+                return
+            if not (-90.0 <= latitude <= 90.0 and -180.0 <= longitude <= 180.0):
+                log.warning(
+                    "Station %s reported a position out of range: %r",
+                    station_id, position,
+                )
+                return
+            fix = (latitude, longitude)
+        else:
+            return
+
+        if station_id in self._position and self._position[station_id] == fix:
+            return
+        self._position[station_id] = fix
+        await asyncio.to_thread(self._write_position, station_id, fix)
+
+    def _write_position(
+        self, station_id: uuid.UUID, fix: tuple[float, float] | None
+    ) -> None:
+        try:
+            with PrivilegedSessionLocal() as db:
+                db.execute(
+                    update(GroundStation)
+                    .where(GroundStation.id == station_id)
+                    .values(
+                        latitude=fix[0] if fix else None,
+                        longitude=fix[1] if fix else None,
+                    )
+                )
+                db.commit()
+            log.info(
+                "Station %s position %s.",
+                station_id,
+                f"set to {fix[0]:.5f}, {fix[1]:.5f}" if fix else "cleared by the station",
+            )
+        except Exception:
+            log.exception("Could not update position for %s.", station_id)
 
     def _write_simulated(self, station_id: uuid.UUID, simulated: bool) -> None:
         try:

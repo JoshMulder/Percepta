@@ -3002,3 +3002,16 @@ body {
 .power .stats dd {
   font-size: 1.125rem;
 }
+
+/* A value the platform was told rather than one it offers to change. Reads as
+   a field so it sits in the form's rhythm, but there is nothing to type into:
+   position belongs to the station. */
+.reported-value {
+  font: 0.875rem var(--mono);
+  color: var(--text);
+  padding: 0.35rem 0;
+}
+.reported-value em {
+  color: var(--muted);
+  font: 0.812rem var(--sans);
+}
