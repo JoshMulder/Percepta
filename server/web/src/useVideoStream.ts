@@ -65,6 +65,16 @@ export function useVideoStream(
     let objectUrl: string | null = null;
     let attempt = 0;
     let retryTimer: number | null = null;
+    // Connections in a row that delivered no media at all. Distinct from
+    // `attempt`, which paces the backoff: this one decides when to stop
+    // asking. Reconnecting through a platform restart is the point of the
+    // retries; reconnecting forever into a station whose camera is wedged
+    // starts the encoder every thirty seconds, each start writes two events
+    // to the station's log and burns its uplink for nothing, and the first
+    // wedged station filled six minutes of journal with exactly that duet
+    // before anyone looked. Ten silent connections is past every legitimate
+    // spin-up; after that the panel says unavailable and a human decides.
+    let silentConnections = 0;
 
     /** Drop media the playhead has left behind.
      *
@@ -225,6 +235,7 @@ export function useVideoStream(
           // is what resets the backoff - not the socket opening, which succeeds
           // and immediately dies while the platform is mid-restart.
           attempt = 0;
+          silentConnections = 0;
           setState("playing");
         }
       };
@@ -234,7 +245,12 @@ export function useVideoStream(
       socket.onerror = () => undefined;
       socket.onclose = () => {
         if (cancelled) return;
+        const gotMedia = pending.length > 0 || buffer !== null;
         teardownMedia();
+        if (!gotMedia && ++silentConnections >= 10) {
+          setState("unavailable");
+          return;
+        }
         scheduleRetry();
       };
     };

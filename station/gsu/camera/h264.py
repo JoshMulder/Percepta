@@ -351,6 +351,16 @@ class ProcessEncoder:
 
     @property
     def running(self) -> bool:
+        # The pump thread, not the process. Between acquire-failure respawns
+        # the process is dead by definition, and judging the session by the
+        # process let the stream's liveness monitor tear everything down one
+        # second into a four-attempt retry - "attempt 1 of 4" followed by
+        # "the encoder exited" is that race, verbatim, in the first wedged
+        # station's journal. The thread lives exactly as long as the session:
+        # through the waits, and not one line past the final give-up.
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            return True
         return self._process is not None and self._process.poll() is None
 
     def start(self, on_unit) -> bool:

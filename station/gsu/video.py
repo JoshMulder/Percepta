@@ -146,6 +146,16 @@ class VideoPublisher:
             # snapshot capture fails with a device-busy, which would be reported
             # as a broken camera when in fact it is a working one being used for
             # something better. Say which.
+            #
+            # And RELINQUISH, not just skip. A capture that raced the stream's
+            # own close can have reopened picamera2 a moment ago, and a skipped
+            # tick leaves that hold in place while the encoder burns through
+            # every acquire retry against it. close() is serialized with
+            # capture in the driver and does nothing when nothing is open, so
+            # this costs one lock acquisition on the ticks that matter and
+            # nothing on the rest.
+            if hasattr(camera, "close"):
+                camera.close()
             self.last_reason = (
                 "the camera is in use by the live stream; snapshots resume when "
                 "it stops"

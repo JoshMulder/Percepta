@@ -55,6 +55,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 from .. import clock
@@ -112,6 +113,13 @@ class PiCsiCamera:
         self.backend_reason = self._explain_backend()
         self._camera = None            # a Picamera2, once one has been opened
         self._reason = "" if self._backend != "none" else self.backend_reason
+        # One lock over open, capture and close. The publisher thread captures,
+        # the commands thread closes when a stream starts, and unserialized
+        # they double-opened picamera2 - the second __init__ found the sensor
+        # held BY ITS OWN SIBLING, died half-built, and leaked the acquisition
+        # for the life of the process. The original "no locking, runs inside a
+        # tick" comment was written when there was one consumer; there are two.
+        self._io_lock = threading.Lock()
         self._failures = 0
         self._next_attempt = 0.0
         self.frames = 0
@@ -192,6 +200,10 @@ class PiCsiCamera:
         return self._reason
 
     def capture(self) -> Frame | None:
+        with self._io_lock:
+            return self._capture_locked()
+
+    def _capture_locked(self) -> Frame | None:
         if self._backend == "none":
             return None
         if time.monotonic() < self._next_attempt:
@@ -255,19 +267,44 @@ class PiCsiCamera:
         )
 
     def close(self) -> None:
+        with self._io_lock:
+            self._close_locked()
+
+    def _close_locked(self) -> None:
         camera, self._camera = self._camera, None
         if camera is not None:
             for method in ("stop", "close"):
                 try:
                     getattr(camera, method)()
                 except Exception:  # noqa: BLE001 - shutting down, say so and go on
-                    log.debug("Camera %s() failed during shutdown.", method, exc_info=True)
+                    # Loud, and remembered. A close that failed can leave
+                    # picamera2's camera manager holding the sensor in Running
+                    # state, and the next Picamera2() then dies half-built and
+                    # LEAKS the acquisition - after which nothing in this
+                    # process, snapshots or encoder, can ever take the camera
+                    # again. That wedge took the first real station off the
+                    # air until a restart. Once a close has failed, picamera2
+                    # is not trusted again this run; the cli path costs a
+                    # subprocess per frame and cannot poison the manager.
+                    log.warning("Camera %s() failed during shutdown; not "
+                                "trusting picamera2 again this run.",
+                                method, exc_info=True)
+                    self._close_failed = True
         try:
             os.unlink(self._scratch)
         except OSError:
             pass
 
     # --- backends -------------------------------------------------------
+
+    #: Set when a picamera2 close() ever fails. From then on the cli path is
+    #: used unconditionally - see close() for the wedge this prevents.
+    _close_failed = False
+
+    #: Monotonic time before which picamera2 must not be reopened. A failed
+    #: open is retried, but not at the snapshot rate: hammering a busy sensor
+    #: at 2 Hz is how the fatal half-open happens in the first place.
+    _reopen_after = 0.0
 
     def _capture_picamera2(self) -> bytes | None:
         """One JPEG through the Python API.
@@ -276,6 +313,10 @@ class PiCsiCamera:
         part of a second, and doing that per frame would put the frame rate out
         of reach before anything else did.
         """
+        if self._close_failed:
+            return self._capture_cli()
+        if self._camera is None and time.monotonic() < self._reopen_after:
+            return None
         try:
             if self._camera is None:
                 self._camera = self._open_picamera2()
@@ -285,6 +326,20 @@ class PiCsiCamera:
             self._camera.capture_file(buffer, format="jpeg")
             return buffer.getvalue()
         except Exception as exc:  # noqa: BLE001 - reported, never raised upward
+            text = str(exc).lower()
+            if self._camera is None and (
+                "running state" in text or "busy" in text
+                or "did not complete" in text or "allocator" in text
+            ):
+                # The sensor is merely held - by the encoder winding down, or
+                # by a subprocess finishing. That is weather, not a fault:
+                # falling back to cli here would silently abandon the fast
+                # path forever over a two-second contention. Wait it out and
+                # try again, but not at the snapshot rate.
+                self._reopen_after = time.monotonic() + 5.0
+                log.info("picamera2 could not open (camera busy); retrying "
+                         "in 5s without changing backend.")
+                return None
             self._drop_picamera2(exc)
             return None
 
