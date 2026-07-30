@@ -1,4 +1,4 @@
-"""Fragmented MP4, built here, from H.264 access units.
+"""Fragmented MP4, built here, from H.264 or HEVC access units.
 
 The platform wants fMP4 over a WebSocket rather than the Annex B byte stream the
 encoder produces, and the reasoning is the platform's to make: fMP4 keeps the
@@ -31,20 +31,23 @@ Structure, which is the whole format:
 One frame per fragment rather than one per keyframe: a fragment cannot be shown
 until it is complete, so batching two seconds of frames into one would add two
 seconds of latency to a live view for a few hundred bytes.
+
+**Two codecs, one container.** A network camera that encodes HEVC for itself is
+remuxed the same way, into the same boxes, with two things swapped: the sample
+entry is `hvc1` with an `hvcC` under it instead of `avc1` with an `avcC`, and
+the codec string is `hvc1.…` instead of `avc1.…`. Both are read before a single
+frame is decoded and both fail the same way when wrong — Media Source
+Extensions accepts the source buffer, decodes nothing, and shows black with no
+error. Which is the same failure signature as a dead camera, an unopened
+uplink, and a wrong NAL header, so it is worth being exact about.
 """
 
 from __future__ import annotations
 
 import logging
 
-from ..camera.h264 import (
-    NAL_AUD,
-    NAL_IDR,
-    NAL_PPS,
-    NAL_SPS,
-    nal_type,
-    split_annexb,
-)
+from ..camera.h264 import H264, NalRules, split_annexb
+from ..camera.hevc import HEVC, SequenceParameterSet, parse_sps
 
 log = logging.getLogger("gsu.media")
 
@@ -112,9 +115,86 @@ def avcc(sps: bytes, pps: bytes) -> bytes:
     )
 
 
-def visual_sample_entry(sps: bytes, pps: bytes, width: int, height: int) -> bytes:
+def hvcc(vps: bytes, sps: bytes, pps: bytes, parsed: SequenceParameterSet) -> bytes:
+    """The HEVC decoder configuration record — ISO/IEC 14496-15 §8.3.3.1.
+
+    Genuinely a different shape from `avcC`, not a renamed one. Three things
+    about it are worth stating because getting any of them wrong produces a
+    video element that stays black and reports nothing at all:
+
+    **The profile, tier and level are copied out, not just carried.** Twelve
+    bytes of them sit in front, and they have to agree with what is inside the
+    SPS *and* with the codec string sent alongside. They are read straight from
+    the parsed SPS here so there is one source for all three.
+
+    **The parameter sets are arrays with counts**, not the fixed one-SPS-one-PPS
+    of `avcC` — one array per NAL type, each with its own count. That is what
+    makes room for the VPS, which H.264 has no equivalent of.
+
+    **`array_completeness` is set.** It means "every parameter set of this type
+    is in here", which is a promise the muxer keeps by stripping them out of the
+    samples — and it is what `hvc1` means, as opposed to `hev1`.
+
+    The reserved bits are ones, not zeros. A decoder that validates them refuses
+    a record full of zeros, and one that does not is reading a field that means
+    something else.
+    """
+    ptl = parsed.profile_tier_level
+    arrays = b""
+    count = 0
+    for kind, nal in ((HEVC.vps, vps), (HEVC.sps, sps), (HEVC.pps, pps)):
+        if not nal:
+            continue
+        count += 1
+        arrays += bytes((0x80 | kind,)) + _u16(1) + _u16(len(nal)) + nal
     return box(
-        b"avc1",
+        b"hvcC",
+        bytes((1,)),                           # configurationVersion
+        bytes(((ptl.profile_space << 6) | (ptl.tier_flag << 5) | ptl.profile_idc,)),
+        _u32(ptl.compatibility_flags),
+        ptl.constraint_flags,                  # 48 bits
+        bytes((ptl.level_idc,)),
+        # 1111 + min_spatial_segmentation_idc. Zero means "not stated": it comes
+        # from the VUI, which is not parsed, and a wrong non-zero value here
+        # tells a decoder it may parallelise in a way the stream does not allow.
+        b"\xf0\x00",
+        b"\xfc",                               # 111111 + parallelismType = 0
+        bytes((0xFC | (parsed.chroma_format_idc & 3),)),
+        bytes((0xF8 | ((parsed.bit_depth_luma - 8) & 7),)),
+        bytes((0xF8 | ((parsed.bit_depth_chroma - 8) & 7),)),
+        _u16(0),                               # avgFrameRate: unstated
+        # constantFrameRate = 0 (unknown), then the temporal layer count and
+        # nesting flag out of the SPS, then lengthSizeMinusOne = 3 so every
+        # sample is 4-byte-length-prefixed, exactly as on the H.264 path.
+        bytes(((parsed.max_sub_layers & 7) << 3
+               | (parsed.temporal_id_nesting & 1) << 2 | 3,)),
+        bytes((count,)),
+        arrays,
+    )
+
+
+def visual_sample_entry(sps: bytes, pps: bytes, width: int, height: int) -> bytes:
+    return _sample_entry(b"avc1", width, height, avcc(sps, pps))
+
+
+def hevc_sample_entry(vps: bytes, sps: bytes, pps: bytes,
+                      parsed: SequenceParameterSet,
+                      width: int, height: int) -> bytes:
+    """`hvc1`, not `hev1`.
+
+    The two differ only in whether parameter sets may also appear in the
+    samples. This muxer strips them out — the same as it does for H.264 — so
+    they exist in exactly one place and `hvc1` is the accurate name. It is also
+    the stricter one, and the only one Safari will play.
+    """
+    return _sample_entry(b"hvc1", width, height, hvcc(vps, sps, pps, parsed))
+
+
+def _sample_entry(kind: bytes, width: int, height: int, config: bytes) -> bytes:
+    """A `VisualSampleEntry`, which is identical for both codecs but the name
+    and the configuration box hanging off the end of it."""
+    return box(
+        kind,
         b"\x00" * 6, _u16(1),                  # reserved, data_reference_index
         b"\x00" * 16,                          # pre_defined and reserved
         _u16(width), _u16(height),
@@ -122,19 +202,34 @@ def visual_sample_entry(sps: bytes, pps: bytes, width: int, height: int) -> byte
         _u32(0), _u16(1),                      # reserved, frame_count
         b"\x00" * 32,                          # compressorname
         _u16(0x0018), b"\xff\xff",             # depth, pre_defined = -1
-        avcc(sps, pps),
+        config,
     )
 
 
 def init_segment(sps: bytes, pps: bytes, width: int, height: int,
-                 timescale: int = TIMESCALE) -> bytes:
+                 timescale: int = TIMESCALE, *, vps: bytes | None = None,
+                 parsed: SequenceParameterSet | None = None,
+                 rules: NalRules = H264) -> bytes:
     """`ftyp` + `moov`: everything a decoder needs before the first frame.
 
     The platform keeps this and gives it to every later viewer, because a viewer
     handed only the next fragment sees nothing at all — and that is
     indistinguishable from a dead camera.
+
+    `rules` picks the codec. Everything below the sample entry — the movie
+    header, the track, the timescale, `mvex` — is the same either way, and the
+    one place the two diverge is the four-character code and the configuration
+    box under it.
     """
-    ftyp = box(b"ftyp", b"isom", _u32(0x200), b"isom", b"iso2", b"avc1", b"mp41", b"iso6")
+    hevc = rules is HEVC
+    if hevc and parsed is None:                # pragma: no cover - callers check
+        raise ValueError("an HEVC init segment needs a parsed sequence parameter set")
+    brand = b"hvc1" if hevc else b"avc1"
+    sample_entry = (
+        hevc_sample_entry(vps or b"", sps, pps, parsed, width, height) if hevc
+        else visual_sample_entry(sps, pps, width, height)
+    )
+    ftyp = box(b"ftyp", b"isom", _u32(0x200), b"isom", b"iso2", brand, b"mp41", b"iso6")
 
     mvhd = full_box(
         b"mvhd", 0, 0,
@@ -156,7 +251,7 @@ def init_segment(sps: bytes, pps: bytes, width: int, height: int,
     dinf = box(b"dinf", box(b"dref", _u32(0) + _u32(1) + full_box(b"url ", 0, 1)))
     stbl = box(
         b"stbl",
-        full_box(b"stsd", 0, 0, _u32(1), visual_sample_entry(sps, pps, width, height)),
+        full_box(b"stsd", 0, 0, _u32(1), sample_entry),
         full_box(b"stts", 0, 0, _u32(0)),
         full_box(b"stsc", 0, 0, _u32(0)),
         full_box(b"stsz", 0, 0, _u32(0), _u32(0)),
@@ -173,27 +268,61 @@ def init_segment(sps: bytes, pps: bytes, width: int, height: int,
     return ftyp + box(b"moov", mvhd, trak, mvex)
 
 
-def to_avcc(nals: list[bytes]) -> bytes:
-    """Annex B NALs → the length-prefixed form a sample carries."""
+def to_length_prefixed(nals: list[bytes]) -> bytes:
+    """Annex B NALs → the length-prefixed form a sample carries.
+
+    Four-byte lengths, because both configuration records above say
+    `lengthSizeMinusOne = 3`.
+    """
     return b"".join(_u32(len(nal)) + nal for nal in nals)
 
 
 class Fmp4Muxer:
-    """H.264 access units in, an init segment and fragments out.
+    """Access units in, an init segment and fragments out.
 
     Holds three pieces of state and nothing else: the parameter sets it has
     seen, the fragment sequence number, and the decode time. The last one is why
     a dropped fragment still has to be *counted* — see `advance`.
+
+    `rules` says which codec is arriving. H.264 by default, so nothing that
+    predates HEVC has to say so; `HEVC` from `gsu/camera/hevc.py` for a camera
+    that streams H.265, which the station remuxes and never transcodes.
+
+    **Known limitation: no composition time offsets.** Every sample is written
+    with presentation time equal to decode time and a fixed duration, because
+    Annex B carries no timestamps — `-c copy` into the raw `h264`/`hevc` muxer
+    discards the RTP ones, and recovering them would mean parsing slice headers
+    for the picture order count and the whole reference-picture-set machinery
+    behind it. On a stream with B-frames the pictures still come out in the
+    right order (a decoder reorders from the POC in the bitstream, not from the
+    container) but the timeline is flat, and a strict downstream muxer drops
+    the last picture of the stream. Measured on both codecs; it is a property of
+    this file rather than of HEVC, and it was simply never reachable before,
+    because rpicam-vid and the synthetic source emit no B-frames. A network
+    camera may, and HEVC cameras usually do. It costs a couple of frames of
+    presentation offset on a live view and nothing else — but a camera set to a
+    low-latency profile avoids it entirely, which is the cheaper fix if it ever
+    turns out to matter.
     """
 
     def __init__(self, width: int, height: int, fps: float = 30.0,
-                 timescale: int = TIMESCALE) -> None:
+                 timescale: int = TIMESCALE, rules: NalRules = H264) -> None:
         self.width = width
         self.height = height
+        self.rules = rules
         self.timescale = timescale
         self.sample_duration = max(1, round(timescale / max(1.0, float(fps))))
+        self.vps: bytes | None = None
         self.sps: bytes | None = None
         self.pps: bytes | None = None
+        #: The SPS, read. HEVC only: `hvcC` and the codec string are both built
+        #: out of fields inside it, so it is parsed once when it arrives rather
+        #: than twice on every session.
+        self.parsed: SequenceParameterSet | None = None
+        #: Why there is no init segment, when there is a parameter set but it
+        #: could not be used. Surfaced by `gsu/stream.py` — the alternative is a
+        #: stream that reports healthy and shows black.
+        self.reason = ""
         self.sequence = 0
         self.decode_time = 0
         self.samples = 0
@@ -202,15 +331,54 @@ class Fmp4Muxer:
 
     @property
     def ready(self) -> bool:
-        return self.sps is not None and self.pps is not None
+        if self.sps is None or self.pps is None:
+            return False
+        if self.rules.vps is not None and self.vps is None:
+            return False
+        return self.rules is not HEVC or self.parsed is not None
 
     def init_segment(self) -> bytes | None:
         if not self.ready:
             return None
-        return init_segment(self.sps, self.pps, self.width, self.height, self.timescale)
+        width, height = self.width, self.height
+        if self.parsed is not None and self.parsed.width and self.parsed.height:
+            # The stream's own size, not the one this station asked for. On the
+            # remux path they are different things: the settings are what the
+            # site's policy allows, and the picture is whatever the network
+            # camera was already configured to send — 4K, on the first one.
+            width, height = self.parsed.width, self.parsed.height
+        return init_segment(
+            self.sps, self.pps, width, height, self.timescale,
+            vps=self.vps, parsed=self.parsed, rules=self.rules,
+        )
 
     def codec(self) -> str:
+        if self.rules is HEVC:
+            return self.parsed.codec_string() if self.parsed else ""
         return codec_string(self.sps or b"")
+
+    def _remember(self, kind: int, nal: bytes) -> bool:
+        """Store one parameter set. True when it differs from the one held.
+
+        A changed SPS is a changed decoder configuration, and for HEVC it is
+        also a re-parse: the profile, tier and level in `hvcC` and in the codec
+        string both come from in here, and carrying the old ones forward is how
+        a resolution change turns into a black picture rather than a new one.
+        """
+        rules = self.rules
+        slot = {rules.vps: "vps", rules.sps: "sps", rules.pps: "pps"}[kind]
+        if getattr(self, slot) == nal:
+            return False
+        had = getattr(self, slot) is not None
+        setattr(self, slot, nal)
+        if slot == "sps" and rules is HEVC:
+            self.parsed = parse_sps(nal)
+            self.reason = "" if self.parsed else (
+                "the camera's HEVC sequence parameter set could not be read, so "
+                "there is no way to tell a browser what to decode. The stream is "
+                "stopped rather than sent as a picture nothing can play."
+            )
+        return had
 
     # --- frames ----------------------------------------------------------
 
@@ -227,32 +395,30 @@ class Fmp4Muxer:
         before the first parameter sets have arrived there is no decoder
         configuration, and a fragment sent then is a fragment nobody can play.
         """
+        rules = self.rules
         changed = False
         payload: list[bytes] = []
         keyframe = False
         for nal in split_annexb(unit.data):
-            kind = nal_type(nal)
-            if kind == NAL_SPS:
-                if self.sps != nal:
-                    changed = self.sps is not None
-                    self.sps = nal
+            kind = rules.nal_type(nal)
+            if kind in rules.parameter_sets:
+                # Stripped from the sample, not merely skipped: they live in the
+                # configuration record instead, which is what `avc1` and `hvc1`
+                # both promise. Leaving them in the sample as well is what
+                # `hev1` means, and Safari will not play that.
+                changed = self._remember(kind, nal) or changed
                 continue
-            if kind == NAL_PPS:
-                if self.pps != nal:
-                    changed = changed or self.pps is not None
-                    self.pps = nal
-                continue
-            if kind == NAL_AUD:
+            if kind == rules.aud:
                 # Access unit delimiters carry no picture and MSE has no use for
                 # them; the boundary they mark is already the fragment boundary.
                 continue
-            if kind == NAL_IDR:
+            if kind in rules.keyframes:
                 keyframe = True
             payload.append(nal)
 
         if not payload or not self.ready:
             return None, keyframe, changed
-        return self.fragment(to_avcc(payload), keyframe), keyframe, changed
+        return self.fragment(to_length_prefixed(payload), keyframe), keyframe, changed
 
     def fragment(self, sample: bytes, keyframe: bool) -> bytes:
         """`moof` + `mdat` for one sample, at the current decode time."""

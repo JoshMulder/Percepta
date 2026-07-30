@@ -8,10 +8,14 @@ of a proposed change and what the station does about it.
 done and conformant. They are kept here with what shipped, because the reasoning
 is why the schema and the harness look the way they do.
 
-**Open: 4, 6, 9, 10 and 11.** The event channel (4) is the one that matters most
-now that video is closed — it is the only thing the station buffers during an
-outage with nowhere to send it afterwards. 10 is the stale TLS wording in
-`enrolment.md`; 11 is that nothing can tell a station to look for an update.
+**Open: 4, 6, 9, 10, 11, 15 and 16.** The event channel (4) is the one that
+matters most now that video is closed — it is the only thing the station buffers
+during an outage with nowhere to send it afterwards. 10 is the stale TLS wording
+in `enrolment.md`; 11 is that nothing can tell a station to look for an update.
+**16 is the newest and needs a console answer as well as a contract one**: the
+station now streams H.265 from a camera that speaks it, so the media channel's
+codec string is sometimes `hvc1.…`, and a browser that cannot decode HEVC shows
+black without raising anything.
 
 **The whole camera path closed in one pass**: 7 (the camera had nowhere to send
 anything), 12 (the broker refused the video channel), 13 (on-demand needed a
@@ -758,3 +762,122 @@ critical — a welded relay burning the battery at an unattended site), the
 amps appear in the device detail in `health.devices[]` and on the setup
 page's light tab, and the local event log records fault edges. Nothing
 invented on the wire; nothing measured kept from the operator.
+
+---
+
+## 16. The media channel's codec string is now sometimes `hvc1.…`
+
+**Where** `transport.md` §"The live video stream"; `schemas/video.schema.json`
+for the neighbouring question it raises.
+
+A real RTSP camera arrived on the bench and it is 4K HEVC Main. The station
+now carries H.265 end to end on the live stream — the same Annex B reader, the
+same fMP4 muxer, the same uplink, one `hvc1` sample entry instead of `avc1` —
+so the first text frame of a media session is no longer always an `avc1.…`
+string. Nothing else about the channel changes: same URL, same bearer
+credential, same `init`-then-segment-then-fragments order, station id still
+never sent.
+
+### What the platform must accept
+
+The codec string is **derived from the stream's sequence parameter set**, per
+ISO/IEC 14496-15 Annex E.3, and is one of two shapes:
+
+```
+avc1.PPCCLL            as today, unchanged, for any H.264 source
+hvc1.P.C.TLL.CC…       for an HEVC source
+```
+
+Real examples, each verified byte-for-byte against what ffmpeg writes for the
+same parameter sets:
+
+| Stream | String |
+|---|---|
+| 1080p Main, level 4.0 | `hvc1.1.6.L120.90` |
+| 4K25 Main, level 5.0 — the shape the bench camera will produce | `hvc1.1.6.L150.90` |
+| Main 10, level 3.0 | `hvc1.2.4.L90.90` |
+
+(The 4K row is what libx265 produces for 3840x2160 at 25 fps. The bench
+camera's own value is the camera's to state and will appear in `video.codec` in
+health telemetry the first time it streams — it is read from the camera's
+parameter sets, not assumed.)
+
+The parts are: profile space (empty, or `A`/`B`/`C`), profile, the
+compatibility flags **in reverse bit order** as hex with leading zeros dropped,
+then `L` for main tier or `H` for high tier followed by the level times thirty,
+then up to six constraint-flag bytes with trailing zero bytes omitted. The
+count of trailing components is therefore variable — `hvc1.1.6.L120.90` and
+`hvc1.1.6.L120.90.00.00.00.00.00` name the same thing, and a parser that
+requires a fixed number of dots will reject valid strings.
+
+**The ask is that the platform treat this field as opaque** and hand it to the
+browser unread. It exists to be passed to `MediaSource.isTypeSupported` and
+`addSourceBuffer`; nothing in the relay needs to understand it, and the relay
+is meant to be a byte pipe. If the platform does validate it, please accept
+both prefixes and a variable tail rather than matching `avc1\.[0-9a-f]{6}`.
+
+Two smaller consequences of the same change:
+
+- **The `ftyp` compatible brands now include `hvc1` instead of `avc1`** on an
+  HEVC session. A relay that forwards bytes will not notice. One that sniffs
+  the init segment to decide anything will.
+- **The station always says `hvc1`, never `hev1`.** The two differ in whether
+  parameter sets may also appear in the samples; this muxer strips them into
+  the configuration box, so `hvc1` is the accurate name as well as the stricter
+  one, and it is the only one Safari plays.
+
+### Where this actually belongs
+
+`transport.md` gives the codec string only as a prose example
+(`text {"codec": "avc1.640028"}`). That example now reads as the specification,
+which is how it came to be assumed on both sides. **Proposal:** state the field
+as "an RFC 6381 codec string for the track in the init segment that follows,
+opaque to the platform", and mark the `avc1.…` value as illustrative.
+
+`schemas/video.schema.json` is a **different channel** — MJPEG snapshots on
+`gsu/{station_id}/video` — and its `format` enum (`["mjpeg"]`) is not the field
+above. It is worth noting only because the two are easy to conflate: the live
+stream has no schema at all, and its wire format is prose in `transport.md`.
+That is fine while it is one paragraph; it is the reason this question exists.
+
+### The console-side constraint, which is the real risk
+
+**HEVC playback in a browser is hardware-dependent in a way H.264 is not**, and
+the failure mode is silence. Roughly: Safari plays it; Chrome and Edge play it
+only where the machine has a hardware HEVC decoder (and on some builds only
+behind a flag); Firefox largely does not. The same station, the same stream,
+two operators — one sees the site and one sees a black rectangle.
+
+Worse, there are two distinct failures and only one of them announces itself:
+
+- `MediaSource.isTypeSupported(...)` returns **false** and
+  `addSourceBuffer` throws `NotSupportedError`. Catchable, reportable, fine.
+- `isTypeSupported` returns **true**, the source buffer accepts every fragment,
+  and nothing is ever decoded. No exception, no `error` event on the media
+  element, no console warning. A black video element and a station reporting
+  that it is streaming happily — which is the same signature as a dead camera,
+  an unopened uplink and a wrong NAL header, and is why this is being raised
+  before anyone is looking at it over a satellite link.
+
+**The ask: a station streaming HEVC to a browser that cannot decode it must
+fail visibly.** Concretely, three things that would do it:
+
+1. **Check before opening.** The station already publishes the codec string in
+   health telemetry — `video.codec` in the `health` payload, populated as soon
+   as a session starts — so the console can call `isTypeSupported` and say "this
+   camera streams H.265, which this browser cannot play" *instead of* opening a
+   player. That is the cheap one and it catches the honest failure.
+2. **Time out the silent one.** After the init segment and some fragments have
+   been appended, `videoWidth` is still 0 and `currentTime` has not advanced —
+   that is the case `isTypeSupported` lied about. A few seconds of nothing
+   should become a message, not a black box.
+3. **Say what still works.** The MJPEG snapshot channel is unaffected by any of
+   this and keeps arriving. An operator told "live H.265 will not play in this
+   browser; snapshots below are current" has lost a feature; one shown black has
+   lost confidence in the site.
+
+None of this is the station's to build, and all of it depends on the station
+sending an honest codec string, which is now the thing it is most careful
+about: an HEVC sequence parameter set that will not parse stops the stream with
+a reason rather than being guessed at, precisely because a guess here is
+invisible.

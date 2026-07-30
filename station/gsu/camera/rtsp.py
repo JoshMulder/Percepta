@@ -2,21 +2,24 @@
 
 This is the long-term camera path — the CSI ribbon was the easy test article —
 and it is a different job in one important way: the camera does its own
-capture and its own H.264 encode. This station never decodes for the live
-stream and never re-encodes anything; a Pi 2B cannot transcode and must never
-be asked to. Two paths, both ffmpeg subprocesses:
+capture and its own encode, in whichever codec it was configured for. This
+station never decodes for the live stream and never re-encodes anything; a Pi
+2B cannot transcode and must never be asked to. Two paths, both ffmpeg
+subprocesses:
 
     snapshot   one JPEG per capture: connect, decode one frame, encode one
                JPEG, exit. This *does* decode — it is the only place a decoder
                runs, it is bounded to a single frame at the snapshot cadence,
                and its cost is why the frame rate lever (`video_fps`) matters
                more on this camera than on the CSI one.
-    stream     remux without re-encode (`-c copy`): the camera's own H.264
-               copied into Annex B on stdout, cut into access units by the
+    stream     remux without re-encode (`-c copy`): the camera's own H.264 or
+               HEVC copied into Annex B on stdout, cut into access units by the
                same reader as every other encoder, muxed into the same fMP4.
-               A source that is not H.264 fails with ffmpeg's own sentence
-               rather than with an attempted transcode that would peg the CPU
-               and deliver seconds per frame.
+               Which codec it is decides the ffmpeg muxer and the NAL grammar
+               together — see `STREAM_CODECS`, and the comment on it, which is
+               a scar. A source that is neither is refused by name rather than
+               transcoded, which would peg the CPU and deliver seconds per
+               frame.
 
 `ffmpeg` is an apt dependency (DEPLOYMENT.md §2 and the installer say so). A
 box without it reports exactly that, per path, rather than a camera fault.
@@ -46,7 +49,8 @@ from urllib.parse import quote, unquote, urlsplit
 from .. import clock
 from ..sensors import Device
 from . import Frame, complete_jpeg, jpeg_dimensions
-from .h264 import EncoderProbe, ProcessEncoder, StreamSettings
+from .h264 import H264, EncoderProbe, ProcessEncoder, StreamSettings
+from .hevc import HEVC
 
 log = logging.getLogger("gsu.rtsp")
 
@@ -65,6 +69,17 @@ NO_FFMPEG = (
     "ffmpeg is not installed, and it is what reads an RTSP camera. "
     "`apt install ffmpeg` — the installer lists it for exactly this."
 )
+
+#: What the live path can carry, by ffprobe's name for it, mapped to the NAL
+#: grammar the reader downstream must use and the ffmpeg muxer that produces it.
+#: Both have to change together: `-f h264` around an HEVC stream is a container
+#: that lies, and the reader then looks for H.264 headers in H.265 and finds a
+#: frame every few thousand. That combination is what the first real camera
+#: produced, silently, and it is why this is one table rather than two defaults.
+STREAM_CODECS = {
+    "h264": ("h264", H264),
+    "hevc": ("hevc", HEVC),
+}
 
 
 def build_url(address: str, port: int = 554, rtsp_path: str = "",
@@ -266,29 +281,33 @@ class RtspCamera:
         self.probe_codec()
 
     def stream_source(self, settings: StreamSettings):
-        """The live path: this camera's own H.264, remuxed. None with the
-        reason in `unavailable_reason` when there is nothing to remux with."""
+        """The live path: this camera's own H.264 or HEVC, remuxed. None with
+        the reason in `unavailable_reason` when there is nothing to remux
+        with."""
         if self._ffmpeg is None:
             self._reason = NO_FFMPEG
             return None
         codec = self.probe_codec()
-        if codec and codec != "h264":
-            # Refuse rather than remux. `-c copy` will happily pour H.265 into
-            # a container labelled H.264: ffmpeg succeeds, bytes flow, and the
-            # Annex B reader downstream finds no H.264 access units in what is
-            # actually HEVC - one frame in a hundred seconds, and no error
-            # anywhere to explain it. The first real camera this met was a 4K
-            # HEVC unit and that is exactly what it did. Transcoding is not the
-            # answer either: this hardware cannot, and saying so is the whole
-            # point of naming the codec here.
+        if codec and codec not in STREAM_CODECS:
+            # Still a refusal, and for the reason the refusal was written: the
+            # station remuxes and cannot transcode, so a codec it does not carry
+            # end to end has to be named rather than attempted. What changed is
+            # the list. `-c copy` will pour anything into whatever container the
+            # `-f` names, ffmpeg exits zero, bytes flow, and the reader
+            # downstream finds nothing it recognises - one access unit in 109
+            # seconds, no error anywhere. That is why the codec decides the
+            # muxer and the NAL grammar together, below, instead of both being
+            # assumed.
             self._reason = (
                 f"this camera streams {codec.upper()}, and the live stream "
-                f"needs H.264 - the station remuxes without re-encoding and "
-                f"cannot transcode. Set the camera's encoder to H.264, or use "
-                f"a substream that is already H.264. Snapshots still work."
+                f"carries H.264 or H.265 - the station remuxes without "
+                f"re-encoding and cannot transcode. Set the camera's encoder to "
+                f"one of those, or use a substream that already is. Snapshots "
+                f"still work."
             )
             return None
-        return RtspRemuxSource(settings, url=self._url, transport=self.transport)
+        return RtspRemuxSource(settings, url=self._url, transport=self.transport,
+                               codec=codec or "h264")
 
     def probe_codec(self) -> str | None:
         """The stream's video codec, via ffprobe, cached for the session.
@@ -379,26 +398,39 @@ class RtspCamera:
 
 
 class RtspRemuxSource(ProcessEncoder):
-    """The camera's H.264 copied to Annex B on stdout. No encoder anywhere.
+    """The camera's own H.264 or HEVC copied to Annex B on stdout.
 
-    Everything downstream — the access-unit reader, the fMP4 muxer, the
-    uplink — is byte-identical to the rpicam paths, which is the point: one
-    container, one bug surface, and the synthetic source proves it. What is
-    different is stated: the bitrate, resolution and keyframe interval are the
-    *camera's*, set on the camera, and the settings this station computed are
-    hints it cannot enforce. A non-H.264 source dies at start with ffmpeg's
-    own sentence; attempting a transcode instead would peg a Pi 2B and
-    deliver seconds per frame, which is a worse failure than an honest one.
+    No encoder anywhere. Everything downstream — the access-unit reader, the
+    fMP4 muxer, the uplink — is the same code on both codecs, which is the
+    point: one container, one bug surface, and the synthetic source proves the
+    H.264 half of it. What is different is stated: the bitrate, resolution and
+    keyframe interval are the *camera's*, set on the camera, and the settings
+    this station computed are hints it cannot enforce. Attempting a transcode
+    instead would peg a Pi 2B and deliver seconds per frame, which is a worse
+    failure than an honest one.
+
+    `codec` is what ffprobe said, and it decides two things that must agree:
+    the ffmpeg muxer that frames stdout, and the NAL grammar the reader parses
+    it with. They were previously both fixed at H.264, and an HEVC camera
+    therefore produced an H.264-labelled container full of H.265 that failed
+    without a single error message in it.
     """
 
     name = "rtsp-remux"
-    kind = "RTSP remux, no re-encode (ffmpeg -c copy)"
 
     def __init__(self, settings: StreamSettings | None = None, *,
-                 url: str, transport: str = "tcp") -> None:
+                 url: str, transport: str = "tcp", codec: str = "h264") -> None:
+        # Before super().__init__, which builds the first access-unit reader
+        # and needs to be told which grammar it is reading.
+        self.codec = codec if codec in STREAM_CODECS else "h264"
+        self.muxer_format, self.nal_rules = STREAM_CODECS[self.codec]
         super().__init__(settings)
         self.url = url
         self.transport = transport
+        self.kind = (
+            f"RTSP remux of the camera's {self.codec.upper()}, no re-encode "
+            f"(ffmpeg -c copy)"
+        )
         # ProcessEncoder probes for rpicam-vid; this source's tool is ffmpeg.
         self.tool = "ffmpeg" if shutil.which("ffmpeg") else None
         self.reason = "" if self.tool else NO_FFMPEG
@@ -410,12 +442,13 @@ class RtspRemuxSource(ProcessEncoder):
             "-i", self.url,
             "-an", "-dn",                      # video only; no audio, no data
             "-c:v", "copy",                    # the whole design: never encode
-            # No h264_mp4toannexb. RTP already delivers H.264 as Annex B, and
-            # the filter refuses a stream that is not in the MP4 length-prefixed
-            # form - "Error initializing output stream 0:0" against the first
-            # real camera this met. The `h264` muxer emits Annex B regardless,
-            # which is what AnnexBReader downstream expects.
-            "-f", "h264",
+            # No h264_mp4toannexb / hevc_mp4toannexb. RTP already delivers both
+            # codecs as Annex B, and the filter refuses a stream that is not in
+            # the MP4 length-prefixed form - "Error initializing output stream
+            # 0:0" against the first real camera this met. The raw `h264` and
+            # `hevc` muxers emit Annex B regardless, which is what AnnexBReader
+            # downstream expects.
+            "-f", self.muxer_format,
             "pipe:1",
         ]
 

@@ -38,7 +38,7 @@ import time
 
 from . import clock
 from .camera import sensor_exclusive
-from .camera.h264 import StreamSettings, choose_encoder, probe_encoders
+from .camera.h264 import H264, StreamSettings, choose_encoder, probe_encoders
 from .media.fmp4 import Fmp4Muxer
 from .transport.stream import build_uplink, media_url
 
@@ -168,8 +168,14 @@ class StreamSession:
         self.codec = ""
         # One muxer per session. It holds the parameter sets and the decode
         # clock, so a new stream starts at zero rather than continuing a
-        # timeline the platform has already forgotten.
-        self.muxer = Fmp4Muxer(settings.width, settings.height, settings.fps)
+        # timeline the platform has already forgotten. It is also told which
+        # codec's access units to expect, by the source that produces them —
+        # the two rpicam encoders and the synthetic one are H.264 by
+        # construction, and a network camera is whatever it was configured for.
+        self.muxer = Fmp4Muxer(
+            settings.width, settings.height, settings.fps,
+            rules=getattr(source, "nal_rules", H264),
+        )
 
         # No retry loop here, deliberately - one was tried and it was dead
         # weight. source.start() returns False only for a missing tool or a
@@ -298,8 +304,20 @@ class StreamSession:
                 # No parameter sets yet, so there is nothing a decoder could do
                 # with a fragment. Waiting is correct; the next keyframe carries
                 # them, and `--inline` means that is at most one keyframe away.
+                #
+                # Unless the muxer has one and could not use it, which is a
+                # different situation with the same shape: frames arriving,
+                # nothing sendable, and — without this line — a stream that
+                # reports `streaming` forever while the console shows black.
+                if muxer.reason:
+                    self.reason = muxer.reason
                 return
             self.codec = muxer.codec()
+            # A parameter set that would not read is recoverable — the next
+            # keyframe carries another one — so the reason it left behind is
+            # cleared here rather than lingering in telemetry over a stream
+            # that has since started working.
+            self.reason = ""
             self._session_open = uplink.begin(self.codec, segment)
             if not self._session_open:
                 self.dropped += 1

@@ -83,6 +83,95 @@ def nal_type(nal: bytes) -> int:
     return nal[0] & 0x1F if nal else 0
 
 
+@dataclass(frozen=True)
+class NalRules:
+    """How one codec spells the things the reader and the muxer have to know.
+
+    Annex B framing is shared: the start codes, the trailing zero that belongs
+    to the four-byte form, the buffering, the one-frame latency, the flush. That
+    is the load-bearing and easily-broken part, and there is one copy of it.
+    What H.264 and HEVC actually differ about is smaller than it looks — how a
+    NAL says what it is, and which types mean what — so that is what lives here
+    and gets passed in.
+
+    A second reader was the alternative and was rejected: it would have meant a
+    second copy of `_take_nal` and `flush`, which is precisely the code whose
+    bugs do not announce themselves.
+
+    `HEVC` is in `gsu/camera/hevc.py`. This one is H.264 and is the default
+    everywhere, so no existing caller has to say so.
+    """
+
+    name: str
+    #: How the type is packed into the header. H.264 keeps it in the low five
+    #: bits of a one-byte header; HEVC has a two-byte header and puts it in bits
+    #: 1-6 of the first. Read an HEVC stream with H.264's rule and an IDR
+    #: (type 19 or 20) reads as an SEI or a PPS, so the stream appears to be
+    #: parameter sets with no pictures — which is exactly what a real camera
+    #: did, for 109 seconds, with no error anywhere.
+    type_shift: int
+    type_mask: int
+    #: Where the payload starts, which is also where the first-slice bit is.
+    header_bytes: int
+    #: Types kept for a viewer that attaches mid-stream, in decoder order.
+    parameter_sets: tuple[int, ...]
+    #: Non-slice types that begin an access unit.
+    starters: frozenset[int]
+    #: Slice types — the ones that carry picture.
+    slices: frozenset[int]
+    #: Slice types a decoder can start on, which become sync samples.
+    keyframes: frozenset[int]
+    #: The access unit delimiter, which the muxer drops.
+    aud: int
+    #: The parameter sets by name, so the muxer can hold them in named slots.
+    #: `vps` is None for H.264, which has no equivalent.
+    sps: int
+    pps: int
+    vps: int | None = None
+
+    def nal_type(self, nal: bytes) -> int:
+        return (nal[0] >> self.type_shift) & self.type_mask if nal else 0
+
+    def starts_picture(self, nal: bytes) -> bool:
+        """Whether this NAL begins a new access unit.
+
+        The first-slice test is the same expression for both codecs and is a
+        coincidence worth naming rather than relying on quietly. HEVC's
+        `first_slice_segment_in_pic_flag` is literally the top bit of the first
+        payload byte. H.264 has no such flag — it has `first_mb_in_slice`, an
+        Exp-Golomb value whose encoding of zero is the single bit `1`, which
+        lands in the same place. Two different fields, one test.
+        """
+        kind = self.nal_type(nal)
+        if kind in self.starters:
+            return True
+        return (
+            kind in self.slices
+            and len(nal) > self.header_bytes
+            and bool(nal[self.header_bytes] & 0x80)
+        )
+
+
+#: H.264, and the default for every reader and muxer that does not say
+#: otherwise. `slices` is deliberately just the two types this station has ever
+#: seen from an encoder: data partitions (2-4) and auxiliary pictures (19-20)
+#: are not produced by anything in this pipeline, and adding them speculatively
+#: would change how existing streams are cut for no observed reason.
+H264 = NalRules(
+    name="h264",
+    type_shift=0,
+    type_mask=0x1F,
+    header_bytes=1,
+    parameter_sets=(NAL_SPS, NAL_PPS),
+    starters=frozenset({NAL_AUD, NAL_SPS, NAL_PPS, NAL_SEI}),
+    slices=frozenset({NAL_IDR, NAL_NON_IDR}),
+    keyframes=frozenset({NAL_IDR}),
+    aud=NAL_AUD,
+    sps=NAL_SPS,
+    pps=NAL_PPS,
+)
+
+
 def split_annexb(data: bytes) -> list[bytes]:
     """Annex B byte stream → NAL units, start codes removed.
 
@@ -130,9 +219,14 @@ class AnnexBReader:
     This assumes one slice per picture, which is what `rpicam-vid` produces. It
     is a limitation and it is stated rather than hidden: a multi-slice encoder
     would need `first_mb_in_slice` parsed rather than merely looked at.
+
+    `rules` says which codec's NAL headers these are — `H264` here, `HEVC` in
+    `gsu/camera/hevc.py`. Everything below this line is framing and is the same
+    either way, which is why there is one reader and not two.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, rules: NalRules = H264) -> None:
+        self.rules = rules
         self.buffer = bytearray()
         self.parameter_sets = bytearray()
         self._pending: list[bytes] = []
@@ -190,24 +284,25 @@ class AnnexBReader:
 
     def _add(self, nal: bytes) -> AccessUnit | None:
         """Add one NAL, returning an access unit if this one started a picture."""
-        kind = nal_type(nal)
-        starts_picture = kind in (NAL_AUD, NAL_SPS, NAL_PPS, NAL_SEI) or (
-            kind in (NAL_IDR, NAL_NON_IDR) and len(nal) > 1 and nal[1] & 0x80
-        )
+        rules = self.rules
+        kind = rules.nal_type(nal)
         unit = None
-        if starts_picture and self._seen_slice:
+        if rules.starts_picture(nal) and self._seen_slice:
             unit = self._emit()
-        if kind in (NAL_SPS, NAL_PPS):
+        if kind in rules.parameter_sets:
             # Kept so a viewer that attaches mid-stream can be given them
             # immediately instead of waiting for the next keyframe, which at a
-            # two-second interval is two seconds of nothing.
+            # two-second interval is two seconds of nothing. For HEVC that is
+            # three sets rather than two: a viewer handed SPS and PPS but no
+            # VPS gets a black element and no error.
             self.parameter_sets += b"\x00\x00\x00\x01" + nal
-        if kind in (NAL_IDR, NAL_NON_IDR):
+        if kind in rules.slices:
             self._seen_slice = True
         self._pending.append(nal)
         return unit
 
     def _emit(self) -> AccessUnit | None:
+        rules = self.rules
         nals, self._pending = self._pending, []
         self._seen_slice = False
         if not nals:
@@ -215,7 +310,7 @@ class AnnexBReader:
         return AccessUnit(
             data=b"".join(b"\x00\x00\x00\x01" + nal for nal in nals),
             captured_at=clock.now(),
-            keyframe=any(nal_type(nal) == NAL_IDR for nal in nals),
+            keyframe=any(rules.nal_type(nal) in rules.keyframes for nal in nals),
             parameter_sets=bytes(self.parameter_sets),
         )
 
@@ -295,6 +390,10 @@ class ProcessEncoder:
     #: What a person should understand this to be, in telemetry and on the
     #: console. Not the tool — the *path*.
     kind = "unknown"
+    #: Which codec's NAL headers arrive on stdout. Every encoder in this file
+    #: is H.264 by construction; the RTSP remux source overrides it per
+    #: instance, because what a network camera sends is the camera's decision.
+    nal_rules = H264
 
     def __init__(self, settings: StreamSettings | None = None) -> None:
         self.settings = settings or StreamSettings()
@@ -302,7 +401,7 @@ class ProcessEncoder:
         self._process: subprocess.Popen | None = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
-        self._reader = AnnexBReader()
+        self._reader = AnnexBReader(self.nal_rules)
         self._on_unit = None
         self.started_at: float | None = None
         self.frames = 0
@@ -383,7 +482,7 @@ class ProcessEncoder:
         self.frames = 0
         self.bytes_out = 0
         self.keyframes = 0
-        self._reader = AnnexBReader()
+        self._reader = AnnexBReader(self.nal_rules)
         self._thread = threading.Thread(target=self._pump, name="gsu-h264", daemon=True)
         self._thread.start()
         log.info("Started %s", " ".join(self.command()))
@@ -495,7 +594,7 @@ class ProcessEncoder:
                 self.reason = f"{self.tool} could not be restarted: {exc}"[:200]
                 log.error("%s", self.reason)
                 return
-            self._reader = AnnexBReader()
+            self._reader = AnnexBReader(self.nal_rules)
 
     def _deliver(self, unit) -> None:
         self.frames += 1

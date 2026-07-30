@@ -227,7 +227,15 @@ def _stream(agent, config: AgentConfig, seconds: float, out: str | None,
           f"({state['bytes'] / max(1, state['frames']) / 1024:.1f} kB/frame)")
     print(f"  asked for  {settings.fps} fps, {settings.bitrate_kbps / 1000:.2f} Mbit/s")
     print(f"  encoder    {state['encoder_choice'] or state['encoder']}")
+    # The single value that says whether the whole chain agreed with itself:
+    # what the parameter sets in the stream turned into, which is what the
+    # platform is told and what a browser is asked to decode. Empty means
+    # frames arrived and nothing sendable came out of them — on HEVC that is a
+    # parameter set that would not read, and `reason` says so.
+    print(f"  codec      {state['codec'] or '(none — see reason below)'}")
     print(f"  written to {sink}")
+    if state["reason"]:
+        print(f"  reason     {state['reason']}")
     if state["frames"] and state["fps_measured"] < settings.fps * 0.9:
         print(
             "\n  The encoder did not keep up. That is a hardware answer, not a\n"
