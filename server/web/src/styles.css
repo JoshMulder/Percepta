@@ -2924,12 +2924,17 @@ body {
   border: 2px solid #0b0f13;
   box-shadow: 0 0 0.5rem rgba(53, 196, 138, 0.7);
 }
+/* Legible over imagery, which is what the old dim grey on a 70% panel was
+   not: at 0.62rem it was smaller than the map's own place names and the same
+   colour as the sea. Sized and coloured to match the rings it names. */
 .map-ring-label {
-  font: 0.62rem var(--mono);
-  color: var(--dim);
-  background: rgba(11, 15, 19, 0.7);
-  padding: 0 0.25rem;
-  border-radius: 0.15rem;
+  font: 600 0.72rem var(--mono);
+  color: #7fe3c0;
+  background: rgba(5, 10, 14, 0.78);
+  border: 1px solid rgba(127, 227, 192, 0.28);
+  padding: 0.05rem 0.32rem;
+  border-radius: 0.2rem;
+  letter-spacing: 0.04em;
   white-space: nowrap;
   pointer-events: none;
 }

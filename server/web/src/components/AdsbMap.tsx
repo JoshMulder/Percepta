@@ -177,14 +177,33 @@ function AdsbMapInner({
         type: "geojson",
         data: { type: "FeatureCollection", features },
       });
+      // Two passes: a dark halo under a bright line. Satellite imagery is
+      // busy and varies from pale surf to near-black water, so a single
+      // stroke that reads over one is invisible over the other - the old
+      // 1px #2c3d49 dashes disappeared entirely against the sea, which is
+      // most of this station's view. The halo gives the line something
+      // constant to sit on, which is the same reason a chart draws contours
+      // that way.
+      map.addLayer({
+        id: "rings-halo",
+        type: "line",
+        source: "rings",
+        paint: {
+          "line-color": "#050a0e",
+          "line-width": 3.5,
+          "line-opacity": 0.55,
+          "line-blur": 1,
+        },
+      });
       map.addLayer({
         id: "rings",
         type: "line",
         source: "rings",
         paint: {
-          "line-color": "#2c3d49",
-          "line-width": 1,
-          "line-dasharray": [2, 4],
+          "line-color": "#7fe3c0",
+          "line-width": 1.4,
+          "line-opacity": 0.75,
+          "line-dasharray": [3, 3],
         },
       });
 
