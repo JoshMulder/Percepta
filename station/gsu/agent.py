@@ -315,6 +315,16 @@ class Agent:
         # no subprocess until the first capture, which happens off this loop.
         if not keep_camera:
             self.camera = self.inventory.build("camera", context)
+            # Forget the outgoing camera's last picture. The preview keeps a
+            # stale frame on purpose - a picture with a stated age beats a
+            # blank box while a camera is merely struggling - but that
+            # reasoning stops at the device staying the same. After a swap it
+            # shows the OLD camera's view under the NEW camera's name, which
+            # is how somebody points a station at an RTSP URL, sees the
+            # previous sensor's test card, and concludes it worked.
+            publisher = getattr(self, "video", None)
+            if publisher is not None:
+                publisher.last_frame = None
 
         self._log_unconfigured = True
 

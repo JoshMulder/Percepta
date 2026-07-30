@@ -183,6 +183,9 @@ class RtspCamera:
             if self._ffmpeg else NO_FFMPEG
         )
         self._reason = "" if self._ffmpeg else NO_FFMPEG
+        #: The stream's codec, probed once and cached for the session. "" means
+        #: "probed and could not tell"; None means "not probed yet".
+        self._codec: str | None = None
         self._failures = 0
         self._next_attempt = 0.0
         self.frames = 0
@@ -258,13 +261,74 @@ class RtspCamera:
         return Frame(jpeg=done.stdout, width=dims[0], height=dims[1],
                      captured_at=at)
 
+    def refresh_stream_facts(self) -> None:
+        """Learn the codec and frame rate from the camera itself, once."""
+        self.probe_codec()
+
     def stream_source(self, settings: StreamSettings):
         """The live path: this camera's own H.264, remuxed. None with the
         reason in `unavailable_reason` when there is nothing to remux with."""
         if self._ffmpeg is None:
             self._reason = NO_FFMPEG
             return None
+        codec = self.probe_codec()
+        if codec and codec != "h264":
+            # Refuse rather than remux. `-c copy` will happily pour H.265 into
+            # a container labelled H.264: ffmpeg succeeds, bytes flow, and the
+            # Annex B reader downstream finds no H.264 access units in what is
+            # actually HEVC - one frame in a hundred seconds, and no error
+            # anywhere to explain it. The first real camera this met was a 4K
+            # HEVC unit and that is exactly what it did. Transcoding is not the
+            # answer either: this hardware cannot, and saying so is the whole
+            # point of naming the codec here.
+            self._reason = (
+                f"this camera streams {codec.upper()}, and the live stream "
+                f"needs H.264 - the station remuxes without re-encoding and "
+                f"cannot transcode. Set the camera's encoder to H.264, or use "
+                f"a substream that is already H.264. Snapshots still work."
+            )
+            return None
         return RtspRemuxSource(settings, url=self._url, transport=self.transport)
+
+    def probe_codec(self) -> str | None:
+        """The stream's video codec, via ffprobe, cached for the session.
+
+        None when it cannot be determined - an unreachable camera is already
+        reported by the snapshot path, and refusing a stream because a probe
+        timed out would turn a network blip into a configuration error.
+        """
+        if self._codec is not None:
+            return self._codec or None
+        probe = shutil.which("ffprobe")
+        if not probe:
+            return None
+        try:
+            result = subprocess.run(
+                [probe, "-v", "error", "-rtsp_transport", self.transport,
+                 "-select_streams", "v:0",
+                 "-show_entries", "stream=codec_name,avg_frame_rate",
+                 "-of", "default=nw=1:nk=1", self._url],
+                capture_output=True, text=True, timeout=15,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        lines = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+        self._codec = lines[0] if lines else ""
+        # ffprobe reports the rate as a rational, "25/1". Taken from the stream
+        # rather than asked of an operator: the camera decides its own rate, the
+        # station only copies what arrives, and a hand-typed figure that
+        # disagrees plays the result fast or slow at the far end for no reason
+        # anybody could see. A wrong default of 15 or 30 against a real 25 was
+        # what made the field worth removing.
+        if len(lines) > 1 and "/" in lines[1]:
+            numerator, _, denominator = lines[1].partition("/")
+            try:
+                rate = float(numerator) / float(denominator)
+            except (ValueError, ZeroDivisionError):
+                rate = 0.0
+            if 1.0 <= rate <= 120.0:
+                self.stream_fps = rate
+        return self._codec or None
 
     def raw_sample(self) -> list[str]:
         if not self.frames:
@@ -346,7 +410,11 @@ class RtspRemuxSource(ProcessEncoder):
             "-i", self.url,
             "-an", "-dn",                      # video only; no audio, no data
             "-c:v", "copy",                    # the whole design: never encode
-            "-bsf:v", "h264_mp4toannexb",      # normalise to start codes
+            # No h264_mp4toannexb. RTP already delivers H.264 as Annex B, and
+            # the filter refuses a stream that is not in the MP4 length-prefixed
+            # form - "Error initializing output stream 0:0" against the first
+            # real camera this met. The `h264` muxer emits Annex B regardless,
+            # which is what AnnexBReader downstream expects.
             "-f", "h264",
             "pipe:1",
         ]

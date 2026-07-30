@@ -38,6 +38,19 @@ ENV PYTHONUNBUFFERED=1 \
 # the host. Device access does NOT come from this user's own groups — the host's
 # dialout/plugdev gids differ per distribution — it comes from `group_add` in
 # docker-compose.yml, which is where the numbers can be checked against the box.
+# ffmpeg, which is the whole of the network-camera path: one frame per
+# snapshot and a copy-codec remux for the live stream. Installed here rather
+# than left to the camera-specific image because an RTSP camera needs no
+# libcamera, no /dev, and no Raspberry Pi archive - it is a URL - so making it
+# depend on the heavyweight variant would be an accident of packaging. It is
+# ~1 MB of binary against a base already carrying Python; ffmpeg's own
+# dependency tail is the cost, measured in the build log rather than guessed.
+#
+# Placed above the code COPY so a code update still ships one small layer.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ffmpeg \
+ && rm -rf /var/lib/apt/lists/*
+
 RUN groupadd --system --gid 10001 gsu \
  && useradd --system --uid 10001 --gid gsu --no-create-home --shell /usr/sbin/nologin gsu \
  && mkdir -p /var/lib/percepta-gsu \

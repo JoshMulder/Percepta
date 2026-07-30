@@ -254,7 +254,11 @@ class RemuxSourceTests(unittest.TestCase):
     def test_the_command_copies_and_never_encodes(self):
         command = self.source().command()
         self.assertIn("copy", command)
-        self.assertIn("h264_mp4toannexb", command)
+        # Deliberately NO h264_mp4toannexb: RTP already carries Annex B and
+        # the filter rejects a stream that is not MP4 length-prefixed, which
+        # is how the first real camera failed. The h264 muxer emits Annex B.
+        self.assertNotIn("h264_mp4toannexb", command)
+        self.assertNotIn("-bsf:v", command)
         self.assertIn("-an", command)
         joined = " ".join(command)
         for encoder in ("libx264", "h264_v4l2m2m", "-b:v", "-crf"):
@@ -385,7 +389,11 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(device.driver, "gsu.camera.rtsp:RtspCamera")
         parameters = {p.name: p for p in device.parameters}
         self.assertEqual(parameters["password"].type, "password")
-        self.assertIn("fps", parameters)
+        # No fps field: the camera decides its own rate and the station only
+        # copies what arrives, so it is probed from the stream rather than
+        # typed in. A hand-entered 30 against a real 25 played the result
+        # fast at the far end, which is what removed the field.
+        self.assertNotIn("fps", parameters)
         self.assertIn("transport", parameters)
 
     def test_the_inventory_builds_it_and_a_bad_url_is_a_recorded_reason(self):

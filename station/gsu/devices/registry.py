@@ -446,11 +446,6 @@ REGISTRY: tuple[DeviceType, ...] = (
                       help="TCP unless the camera cannot: it survives NAT and "
                            "lossy Wi-Fi, and a lost UDP packet is a smeared "
                            "picture."),
-            Parameter("fps", "Camera frame rate", "number", 15, required=False,
-                      help="Must match the rate configured on the camera. The "
-                           "live stream is remuxed, not re-encoded, so the "
-                           "station cannot change it — a wrong value here "
-                           "plays the stream fast or slow."),
         ),
         provides=("video",),
         notes="The case contract/enrolment.md §7 describes, and the long-term "
