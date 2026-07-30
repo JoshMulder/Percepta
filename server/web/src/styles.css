@@ -444,6 +444,15 @@ body {
 /* ---------------------------------------------------------------- buttons */
 
 .btn {
+  /* inline-flex, so a button carrying an icon centres it against the label
+     instead of dropping it on the text baseline - which is where an SVG sits
+     by default, a couple of pixels low, on every icon button in the header.
+     justify-content matters for the full-width buttons in the login card and
+     the settings panes, which would otherwise go left-aligned. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
   background: var(--panel);
   color: var(--text);
   border: 1px solid var(--line);
@@ -1509,7 +1518,10 @@ body {
 .drawer-scrim {
   position: fixed;
   inset: 0;
-  z-index: 900;
+  /* Above the map overlay vocabulary, which tops out at 1100 (.swap-hint,
+     the view badges). At 900 the preview's expand icon and "click to enlarge"
+     painted straight through an open alerts drawer. */
+  z-index: 1400;
   background: rgba(0, 0, 0, 0.45);
   opacity: 0;
   pointer-events: none;
@@ -1525,7 +1537,7 @@ body {
   top: 0;
   right: 0;
   bottom: 0;
-  z-index: 901;
+  z-index: 1401;
   width: min(26rem, 92vw);
   display: flex;
   flex-direction: column;
