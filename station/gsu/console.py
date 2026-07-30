@@ -44,12 +44,13 @@ Who may reach this page, and for how long, is `setup_access.py` and the
 reasoning is all in that module's docstring. What this file owes it:
 
 - every response carries `Cache-Control: no-store` and a CSP that permits no
-  frame, no off-box form target and no script beyond the single inline block
-  the Devices page carries under a per-response nonce. That script is
-  progressive enhancement only — live save buttons, a refreshing datastream
-  field, and the camera preview's re-fetch — and every page keeps working
-  with it blocked or absent (the preview's click-to-expand is a checkbox,
-  not script, for exactly that reason)
+  frame, no off-box form target and no script beyond the one inline block a
+  response may carry under a per-response nonce. Those scripts are progressive
+  enhancement only — live save buttons, a refreshing datastream field, the
+  camera preview's re-fetch on Devices, and Escape-to-close on Connection —
+  and every page keeps working with them blocked or absent. The two overlays
+  are the proof: the preview's click-to-expand is a checkbox and the location
+  editor is a `:target` dialog, neither of which is script
 - every state-changing POST carries a CSRF token bound to the session cookie
 - the `Host` header must be an IP literal, `localhost` or a `.local` name, which
   is what stops a public web page rebinding its own name to this station's
@@ -91,10 +92,10 @@ MAX_BODY_BYTES = 64 * 1024
 WATCH_SECONDS = 5.0
 
 #: No frames, no off-box form target, no external anything. Script is allowed
-#: only as the one inline block the Devices page carries, keyed by a nonce
-#: generated per response (`_headers`) — a stored-XSS payload cannot know it,
-#: and no other script source is ever valid. `connect-src 'self'` is what lets
-#: that script poll status.json; it permits nothing off-box.
+#: only as the one inline block a page carries, keyed by a nonce generated per
+#: response (`_headers`) — a stored-XSS payload cannot know it, and no other
+#: script source is ever valid. `connect-src 'self'` is what lets the Devices
+#: script poll status.json; it permits nothing off-box.
 CSP = (
     "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; "
     "connect-src 'self'; form-action 'self'; base-uri 'none'; "
@@ -148,10 +149,22 @@ STYLE = """
    outline-offset: 1px; }
  input.code { font: 1.2rem ui-monospace, monospace; letter-spacing: .12em; width: 100%;
    box-sizing: border-box; text-transform: uppercase; }
- button { margin-top: .7rem; font: inherit; font-weight: 600; padding: .45rem 1rem;
+ button, .btn { margin-top: .7rem; font: inherit; font-weight: 600; padding: .45rem 1rem;
    border-radius: .375rem; border: 1px solid var(--brand); background: var(--brand);
    color: #03202b; cursor: pointer; }
- button:hover { background: var(--brand-dim); border-color: var(--brand-dim); }
+ button:hover, .btn:hover { background: var(--brand-dim); border-color: var(--brand-dim); }
+ /* An anchor that opens or closes the editor, shaped like the buttons beside
+    it. A link and not a button because with no script the only thing that can
+    change :target is a navigation. The .btn colour has to beat the `a` rule
+    above it, which it does on specificity. */
+ .btn { display: inline-block; text-decoration: none; }
+ .btn.quiet { background: transparent; border-color: var(--line);
+   color: var(--text); }
+ .btn.quiet:hover { background: var(--panel-2); border-color: var(--line); }
+ .btn:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
+ /* Two controls on one row of the .field grid: the grid would otherwise stack
+    them, since each child is placed in column 2 explicitly. */
+ .actions { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; }
  .msg { padding: .7rem .9rem; border-radius: .375rem; margin-bottom: 1rem;
         border: 1px solid; }
  .msg.bad { background: rgba(255,122,69,.08); border-color: rgba(255,122,69,.35);
@@ -181,7 +194,7 @@ STYLE = """
     and a checkbox keeps its size but not its position — the 4px the UA
     stylesheet gives it is enough to sit visibly off the line every other
     control starts on, which is the exact complaint this rule answers. */
- .field > button { justify-self: start; }
+ .field > button, .field > .btn, .field > .actions { justify-self: start; }
  .field > input[type=checkbox] { justify-self: start; margin: 0; }
  /* Below this the two columns cannot both hold their content — a 9.5rem label
     beside a usable input does not fit a phone held upright — so it becomes one
@@ -266,6 +279,30 @@ STYLE = """
    background: rgba(7,11,15,.94); cursor: zoom-out; }
  .zoom-toggle:checked ~ .preview img { max-width: 100%; max-height: 100%;
    border: 0; cursor: zoom-out; }
+ /* The pop-out editor, on the same no-script principle as the zoom above but
+    driven by :target rather than a checkbox, because this one has to be
+    openable by something other than a click. A refused save redirects to
+    /connection#location, and a fragment in a Location header reopens the
+    dialog with the reason inside it; nothing a hidden checkbox can be made to
+    do from the server. The URL is also the state, so a reload keeps the editor
+    open and Back closes it, which is what a person expects of a dialog.
+    Closed is display:none rather than off-screen: the inputs inside must be
+    unreachable by Tab and unread by a screen reader while the dialog is shut,
+    and they are still submitted normally when it is open. */
+ .modal { display: none; position: fixed; inset: 0; z-index: 20;
+   overflow-y: auto; background: rgba(7,11,15,.86); }
+ .modal:target { display: block; }
+ /* Click-anywhere-outside to close. After the card in the DOM so that Tab
+    reaches the inputs first, and under it by z-index so it does not cover
+    them. */
+ .modal-scrim { position: absolute; inset: 0; z-index: 0; }
+ .modal-card { position: relative; z-index: 1; box-sizing: border-box;
+   width: min(30rem, calc(100% - 2rem)); margin: 3rem auto;
+   background: var(--panel); border: 1px solid var(--line);
+   border-radius: .625rem; padding: 1rem 1.1rem; }
+ /* Same uppercase head as a section's, without the 2rem of air a section
+    needs and a card does not. */
+ .modal-card h2 { margin: 0 0 .8rem; }
  .fixed { color: var(--text); font-family: ui-monospace, monospace; font-size: .9rem;
           word-break: break-all; }
  /* The sign-in, shaped like the console's: a centred card under the brand
@@ -392,6 +429,11 @@ class Console:
         #: is told the reason on the page they *can* reach.
         self.demotion_reason: str = ""
         self.message: tuple[str, str] | None = None
+        #: Which dialog the pending message belongs inside, if any. A refused
+        #: location save reopens its dialog, and the reason has to be in there
+        #: with the inputs rather than on the page the overlay is covering.
+        #: `None` — the ordinary case — is the banner at the top of the page.
+        self.message_at: str | None = None
 
     @classmethod
     def from_config(cls, agent, config) -> Console:
@@ -589,6 +631,11 @@ class Console:
             if path in PAGES:
                 slot = None
                 nonce = None
+                if path in ("/devices", "/connection"):
+                    # The two pages that carry an inline script. Minted here
+                    # and per response, so the header and the tag can agree
+                    # and nothing injected into rendered content can guess it.
+                    nonce = secrets.token_urlsafe(16)
                 if path == "/devices":
                     # One sub-tab per slot; the query names it and anything
                     # unrecognised lands on the first tab rather than erroring.
@@ -596,7 +643,6 @@ class Console:
                     slot = (query.get("slot") or [""])[0]
                     if slot not in registry.SLOTS:
                         slot = registry.SLOTS[0]
-                    nonce = secrets.token_urlsafe(16)
                 return self._send_html(
                     handler, self.render(session, path, slot=slot, nonce=nonce),
                     cookie=cookie, nonce=nonce,
@@ -635,6 +681,15 @@ class Console:
                 self.message = ("good", "Signed out.")
         except Exception as exc:  # noqa: BLE001 - shown to a person
             self.message = ("bad", str(exc))
+        if path == "/location" and self.message and self.message[0] == "bad":
+            # A refused coordinate reopens the editor with the reason in it.
+            # The fragment is a constant like every other part of this header
+            # — nothing from the request reaches it — and it is the whole
+            # reason the dialog is driven by :target and not by a checkbox:
+            # a redirect can reopen a dialog whose state is its URL, and can
+            # do nothing at all to a checkbox.
+            self.message_at = "location"
+            home = f"{home}#location"
         self._redirect(handler, cookie, home)
 
     def _same_origin(self, handler) -> bool:
@@ -990,17 +1045,27 @@ class Console:
             "<main>",
             "<h1>Ground station</h1>",
         ]
+        banner = ""
+        at, self.message_at = self.message_at, None
         if self.message:
             kind, text = self.message
-            out.append(f"<div class='msg {kind}'>{html.escape(text)}</div>")
+            banner = f"<div class='msg {kind}'>{html.escape(text)}</div>"
             self.message = None
+        # A message addressed to a dialog goes into that dialog, and nowhere
+        # else — except on a page that does not render it, where the top of
+        # the page is better than swallowing it.
+        if banner and (at != "location" or page != "/connection"):
+            out.append(banner)
+            banner = ""
 
         if page == "/connection":
             out.append(self._section_enrol(state, csrf))
-            out.append(self._section_location(state, csrf))
+            out.append(self._section_location(state, csrf, banner))
             out.append(self._section_platform(state))
             out.append(self._section_security(state))
             out.append(self._section_access(session, csrf))
+            if nonce:
+                out.append(self._location_script(nonce))
         elif page == "/devices":
             slot = slot if slot in registry.SLOTS else registry.SLOTS[0]
             out.append(self._section_devices(state, csrf, slot))
@@ -1114,7 +1179,7 @@ class Console:
             "</form></div>"
         )
 
-    def _section_location(self, state: dict, csrf: str) -> str:
+    def _section_location(self, state: dict, csrf: str, banner: str = "") -> str:
         """The station's own position, on the page beside its identity.
 
         **Why Connection and not Summary or Devices.** Summary is deliberately
@@ -1135,6 +1200,20 @@ class Console:
         The rendered value states its source, because a station using the
         platform's old value and one using its own look identical otherwise,
         and only the second is a position somebody has confirmed.
+
+        **Reading here, editing in the dialog.** This card used to carry the
+        read-only rows *and*, directly under them, three inputs holding the
+        same three numbers — one fact rendered twice, which is the owner's
+        complaint and a fair one. The rows stay, because the answer to "where
+        does this box think it is" is what somebody comes to this page for and
+        it must be legible without touching anything. The inputs move behind
+        an Edit control into `#location`, a `:target` dialog that needs no
+        script to open, accept a value, save or close (see STYLE).
+
+        `banner` is a validation message that belongs *inside* the dialog — a
+        refused save reopens it, and the reason has to be where the person is
+        looking rather than on the page behind the overlay. It arrives as the
+        escaped markup `render` already built, not as text.
         """
         position = state.get("position") or {}
         station = position.get("station") or {}
@@ -1151,6 +1230,32 @@ class Console:
                 f"<div class=row><span class=k>{html.escape(label)}</span>"
                 f"<span class='{css}'>{html.escape(str(value))}</span></div>"
             )
+        out.append(
+            "<div class=field><a class=btn href='#location'>Edit</a></div>"
+            # Deliberately "shows what this station reports" and not "clears it
+            # there": an omitted field cannot retract a value the platform
+            # already holds, and the page must not promise something the wire
+            # cannot do (CONTRACT-QUESTIONS.md 16, retraction).
+            "<div class=muted>Set here, not on the platform, which shows what "
+            "this station reports.</div></div>"
+        )
+
+        # The dialog. A real element in the page, hidden until the fragment
+        # names it, so with scripts blocked the Edit link above is a plain
+        # navigation and everything below still posts to the same target.
+        out.append(
+            "<div class=modal id=location role=dialog "
+            # tabindex so the fragment navigation can put focus *on* the
+            # dialog — browsers focus the target of a fragment when it is
+            # focusable, which is the only focus handling here that does not
+            # need script. There is no aria-modal and no focus trap: without
+            # script the page behind stays reachable by Tab, and claiming
+            # otherwise to a screen reader would be a lie about the page.
+            "aria-labelledby=location-title tabindex=-1>"
+            "<div class=modal-card>"
+            "<h2 id=location-title>Location</h2>"
+        )
+        out.append(banner)
         out.append(f"<form method=post action='/location'>{self._csrf_field(csrf)}")
         # Bounds go on the inputs as well as in the parser: the browser catches
         # a typed 91 before it costs a round trip, and the parser catches
@@ -1176,18 +1281,54 @@ class Console:
                 f"value='{html.escape(_degrees(value))}'></div>"
             )
         out.append(
-            "<div class=field><button type=submit>Save location</button></div></form>"
+            "<div class=field><div class=actions>"
+            "<button type=submit>Save location</button>"
+            # An empty fragment un-targets the dialog: no script, no reload,
+            # and anything typed and not saved is still in the boxes if it is
+            # reopened. Escape does the same thing when the nonce'd script is
+            # running, by clicking this link.
+            "<a class='btn quiet' id=location-close href='#'>Close</a>"
+            "</div></div></form>"
         )
         out.append(
-            # Deliberately "stops reporting one" and not "clears it there":
-            # an omitted field cannot retract a value the platform already
-            # holds, and the page must not promise something the wire cannot
-            # do (CONTRACT-QUESTIONS.md 16, retraction).
-            "<div class=muted>Set here, not on the platform, which shows what "
-            "this station reports. Clearing all three stops this station "
-            "reporting one.</div></div>"
+            "<div class=muted>Clearing all three stops this station reporting "
+            "one.</div>"
+            "</div>"
+            # After the card in the DOM, under it by z-index: see STYLE.
+            "<a class=modal-scrim href='#' aria-label='Close'></a>"
+            "</div>"
         )
         return "".join(out)
+
+    @staticmethod
+    def _location_script(nonce: str) -> str:
+        """Polish on a dialog that already works without it: Escape closes,
+        and focus lands in the first input rather than on the dialog itself.
+
+        Everything here is a nicety. With the script blocked the dialog still
+        opens from the Edit link, focus still reaches the inputs (the fragment
+        target is focusable, so Tab starts inside), Close still closes, and a
+        refused save still reopens it. Nothing below is load-bearing, which is
+        why it is allowed to bail on a missing element and say nothing.
+        """
+        return (
+            f"<script nonce='{html.escape(nonce)}'>" + """
+(function () {
+  var closer = document.getElementById("location-close");
+  var first = document.getElementById("latitude");
+  if (!closer || !first) return;
+  function isOpen() { return location.hash === "#location"; }
+  function focusFirst() { if (isOpen()) first.focus(); }
+  // Escape closes by following the same link a click would, so there is one
+  // close path and it is the one that works without any of this.
+  document.addEventListener("keydown", function (event) {
+    if (event.key === "Escape" && isOpen()) closer.click();
+  });
+  window.addEventListener("hashchange", focusFirst);
+  focusFirst();
+})();
+""" + "</script>"
+        )
 
     @staticmethod
     def _position_wording(position: dict) -> tuple[str, str]:

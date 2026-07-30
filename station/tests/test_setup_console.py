@@ -1009,6 +1009,131 @@ class ServedPageTests(unittest.TestCase):
                      {"Cookie": token})
         self.assertIsNone(self.agent.site.latitude)
 
+    # --- the location editor, which must work with script blocked --------
+    #
+    # The section shows the position read-only and keeps the three inputs in a
+    # dialog behind an Edit link. The dialog is CSS only — `:target`, so the
+    # open state is the URL — because an installer's phone with scripts
+    # disabled has to be able to set a position, and because the server can
+    # reopen a URL-driven dialog after a refused save and can do nothing at all
+    # to a hidden checkbox. Everything below is that path with no script in it.
+
+    def test_the_position_is_read_once_and_edited_behind_a_link(self):
+        # The duplication this replaced: the same three numbers as read-only
+        # rows and, directly beneath, three inputs holding them again.
+        _, _, body = self.page("/connection")
+        card, dialog = body.split("<div class=modal id=location", 1)
+        card = card.rsplit("<h2>Where this box is</h2>", 1)[1]
+        self.assertIn("Position", card)
+        self.assertIn("Elevation", card)
+        self.assertIn("<a class=btn href='#location'>Edit</a>", card)
+        # Not an input in sight until the dialog.
+        for name in ("latitude", "longitude", "elevation_m"):
+            self.assertNotIn(f"name='{name}'", card, name)
+            self.assertIn(f"name='{name}'", dialog, name)
+
+    def test_the_dialog_and_its_form_are_in_the_page_a_plain_get_returns(self):
+        # The fragment never reaches the server, so "a GET of the modal URL"
+        # *is* a GET of /connection: the dialog has to be in that response
+        # already, form, token and all, or nothing opens without script.
+        _, _, body = self.page("/connection")
+        dialog = body.split("<div class=modal id=location", 1)[1]
+        dialog = dialog.split("</div></div>")[0]
+        self.assertIn("<form method=post action='/location'>", dialog)
+        self.assertIn("name=csrf", dialog)
+        for name in ("latitude", "longitude", "elevation_m"):
+            self.assertIn(f"name='{name}'", dialog, name)
+        self.assertIn("<button type=submit>Save location</button>", dialog)
+        # Closing is a navigation, not a handler.
+        self.assertIn("id=location-close href='#'", dialog)
+        # And the whole open mechanism is one CSS rule.
+        self.assertIn(".modal:target { display: block; }", body)
+
+    def test_the_dialog_says_what_it_is_and_does_not_claim_a_focus_trap(self):
+        _, _, body = self.page("/connection")
+        self.assertIn(
+            "<div class=modal id=location role=dialog "
+            "aria-labelledby=location-title tabindex=-1>", body,
+        )
+        self.assertIn("<h2 id=location-title>Location</h2>", body)
+        # tabindex is what lets the fragment navigation land focus on the
+        # dialog. aria-modal would tell a screen reader the page behind is
+        # unreachable, and without script it is reachable — so it is absent
+        # rather than a lie.
+        self.assertNotIn("aria-modal", body)
+
+    def test_saving_from_the_dialog_stores_the_position_and_shuts_it(self):
+        token, csrf, _ = self.page("/connection")
+        response, _ = self.request(
+            "POST", "/location",
+            f"latitude=-42.4004&longitude=173.68&elevation_m=120&csrf={csrf}",
+            {"Cookie": token},
+        )
+        # No fragment: a save that worked closes the dialog, and the page it
+        # lands on is the unchanged POST_HOME entry.
+        self.assertEqual(response.status, 303)
+        self.assertEqual(response.getheader("Location"), "/connection")
+        _, body = self.request("GET", "/connection", None, {"Cookie": token})
+        # The banner is at the top of the page, not inside a shut dialog.
+        self.assertLess(body.index("Location saved"),
+                        body.index("<div class=modal id=location"))
+        # And the read-only rows carry what was saved.
+        card = body.split("<h2>Where this box is</h2>", 1)[1]
+        card = card.split("<div class=modal id=location", 1)[0]
+        self.assertIn("-42.4004, 173.68", card)
+        self.assertIn("120 m", card)
+
+    def test_a_refused_save_reopens_the_dialog_with_the_reason_inside_it(self):
+        # The property that decided :target over a checkbox: a redirect can
+        # reopen a dialog whose state is its URL. Otherwise the reason lands
+        # on a page behind a dialog the person has to reopen by hand.
+        token, csrf, _ = self.page("/connection")
+        response, _ = self.request(
+            "POST", "/location", f"latitude=91&longitude=0&elevation_m=&csrf={csrf}",
+            {"Cookie": token},
+        )
+        self.assertEqual(response.getheader("Location"), "/connection#location")
+        _, body = self.request("GET", "/connection", None, {"Cookie": token})
+        self.assertEqual(body.count("msg bad"), 1, "said twice is said wrong")
+        opened = body.index("<div class=modal id=location")
+        reason = body.index("Latitude must be between")
+        self.assertLess(opened, reason)
+        self.assertLess(reason, body.index("<form method=post action='/location'>"))
+
+    def test_a_refused_save_still_speaks_up_on_a_page_with_no_dialog(self):
+        # The message is addressed to a dialog. If the person goes somewhere
+        # that does not render it, the top of the page beats silence.
+        token, csrf, _ = self.page("/connection")
+        self.request("POST", "/location", f"latitude=91&longitude=0&csrf={csrf}",
+                     {"Cookie": token})
+        _, body = self.request("GET", "/", None, {"Cookie": token})
+        self.assertIn("Latitude must be between", body)
+
+    def test_the_connection_script_is_admitted_by_the_responses_own_nonce(self):
+        # Escape-to-close is the only thing it adds, and it is admitted the
+        # same way the Devices script is: one nonce, minted per response.
+        response, body = self.request("GET", "/connection")
+        csp = response.getheader("Content-Security-Policy") or ""
+        nonce = csp.split("script-src 'nonce-")[1].split("'")[0]
+        self.assertIn(f"<script nonce='{nonce}'>", body)
+        second, _ = self.request("GET", "/connection")
+        self.assertNotEqual(csp, second.getheader("Content-Security-Policy"))
+
+    def test_the_dialog_keeps_the_shared_field_grid(self):
+        # The alignment work: inside a narrower card the label column has to
+        # still line up, which it does because the dialog reuses .field and
+        # changes none of its rules. It only has to be narrow enough that the
+        # two columns still fit, and to collapse with everything else.
+        _, _, body = self.page("/connection")
+        dialog = body.split("<div class=modal id=location", 1)[1]
+        self.assertEqual(dialog.count("<div class=field>"), 4)
+        self.assertNotIn("grid-template-columns", dialog)
+        # 30rem holds a 9.5rem label column and a usable input beside it, and
+        # below 34rem every .field on the page — these included — is one column.
+        self.assertIn("width: min(30rem, calc(100% - 2rem));", body)
+        self.assertIn("--label-w:9.5rem", body)
+        self.assertIn("@media (max-width: 34rem)", body)
+
     # --- the two strips, and the one alignment --------------------------
 
     def test_both_strips_are_pinned_and_the_slot_strip_sits_below_the_other(self):
