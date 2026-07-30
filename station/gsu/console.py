@@ -85,45 +85,81 @@ CSP = (
 )
 
 STYLE = """
- body { font: 15px/1.5 system-ui, sans-serif; margin: 0; background: #10151b; color: #dfe6ee; }
+ /* The console's palette, transcribed from server/web/src/styles.css rather
+    than approximated - an installer moves between this page and the console,
+    and two dark themes that almost match read as one of them being wrong.
+    Transcribed, not shared: this page is served by a stdlib HTTP server on a
+    box in a paddock and must stay self-contained, so the tokens are copied
+    and the comment says where from. The console's Inter/JetBrains arrive via
+    its bundle; system-ui and ui-monospace are those fonts' own fallbacks. */
+ :root { --bg:#070b0f; --panel:#121a23; --panel-2:#0c1219; --line:#22303c;
+         --line-soft:#1a2531; --text:#dde6ed; --muted:#7f929f; --dim:#4f626f;
+         --brand:#00a0dc; --brand-dim:#0b7ba7; --accent:#35c48a;
+         --warn:#e8b04b; --danger:#ff7a45; }
+ body { font: 15px/1.5 system-ui, sans-serif; margin: 0; background: var(--bg);
+        color: var(--text); }
  main { max-width: 54rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
  h1 { font-size: 1.35rem; margin: 0 0 .2rem; }
- h2 { font-size: 1rem; margin: 2rem 0 .6rem; color: #9db0c4; text-transform: uppercase;
-      letter-spacing: .08em; }
- .sub { color: #8fa0b3; margin: 0 0 1.2rem; }
- .card { background: #18202a; border: 1px solid #253040; border-radius: 8px;
-         padding: 1rem 1.1rem; margin-bottom: .9rem; }
+ h2 { font-size: 1rem; margin: 2rem 0 .6rem; color: var(--muted);
+      text-transform: uppercase; letter-spacing: .08em; }
+ .sub { color: var(--muted); margin: 0 0 1.2rem; }
+ .card { background: var(--panel); border: 1px solid var(--line);
+         border-radius: .625rem; padding: 1rem 1.1rem; margin-bottom: .9rem; }
  .row { display: flex; justify-content: space-between; gap: 1rem; padding: .3rem 0;
-        border-bottom: 1px solid #1f2833; }
+        border-bottom: 1px solid var(--line-soft); }
  .row:last-child { border-bottom: 0; }
- .k { color: #8fa0b3; }
- .ok { color: #5fd08a; } .warn { color: #f0c674; } .bad { color: #f08a7a; }
- .muted { color: #7d8ea1; font-size: .88rem; }
+ .k { color: var(--muted); }
+ .ok { color: var(--accent); } .warn { color: var(--warn); } .bad { color: var(--danger); }
+ .muted { color: var(--muted); font-size: .88rem; }
  input[type=text], input[type=password], input[type=number], select {
-   font: .95rem system-ui, sans-serif; padding: .45rem .55rem; background: #0d1218;
-   color: #dfe6ee; border: 1px solid #2c3a4c; border-radius: 5px; min-width: 12rem; }
+   font: .95rem system-ui, sans-serif; padding: .45rem .55rem; background: var(--panel-2);
+   color: var(--text); border: 1px solid var(--line); border-radius: .375rem;
+   min-width: 12rem; }
+ input:focus-visible, select:focus-visible { outline: 2px solid var(--brand);
+   outline-offset: 1px; }
  input.code { font: 1.2rem ui-monospace, monospace; letter-spacing: .12em; width: 100%;
    box-sizing: border-box; text-transform: uppercase; }
- button { margin-top: .7rem; font-size: .95rem; padding: .5rem 1rem; border-radius: 6px;
-   border: 0; background: #2f6feb; color: white; cursor: pointer; }
- .msg { padding: .7rem .9rem; border-radius: 6px; margin-bottom: 1rem; }
- .msg.bad { background: #3a1f1c; color: #f5b3a7; }
- .msg.good { background: #14301f; color: #9fe3b8; }
+ button { margin-top: .7rem; font: inherit; font-weight: 600; padding: .45rem 1rem;
+   border-radius: .375rem; border: 1px solid var(--brand); background: var(--brand);
+   color: #03202b; cursor: pointer; }
+ button:hover { background: var(--brand-dim); border-color: var(--brand-dim); }
+ .msg { padding: .7rem .9rem; border-radius: .375rem; margin-bottom: 1rem;
+        border: 1px solid; }
+ .msg.bad { background: rgba(255,122,69,.08); border-color: rgba(255,122,69,.35);
+            color: var(--danger); }
+ .msg.good { background: rgba(53,196,138,.08); border-color: rgba(53,196,138,.35);
+             color: var(--accent); }
  .pill { font-size: .78rem; padding: .1rem .5rem; border-radius: 999px; border: 1px solid; }
- .pill.ok { border-color: #2c6b47; background: #13291d; }
- .pill.warn { border-color: #6b5a2c; background: #292213; }
- .pill.bad { border-color: #6b3129; background: #291714; }
- .pill.off { border-color: #33404f; background: #1b232d; color: #8fa0b3; }
+ .pill.ok { border-color: var(--accent); background: rgba(53,196,138,.1); color: var(--accent); }
+ .pill.warn { border-color: var(--warn); background: rgba(232,176,75,.1); color: var(--warn); }
+ .pill.bad { border-color: var(--danger); background: rgba(255,122,69,.1); color: var(--danger); }
+ .pill.off { border-color: var(--line); background: var(--panel-2); color: var(--muted); }
  .field { display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: center;
           margin: .5rem 0; }
- label { color: #a9b8c8; font-size: .9rem; }
- ul { margin: .4rem 0 0; padding-left: 1.1rem; color: #b9c6d4; }
+ label { color: var(--muted); font-size: .9rem; }
+ ul { margin: .4rem 0 0; padding-left: 1.1rem; color: var(--text); }
  li { padding: .1rem 0; }
- code { color: #9fb4cc; }
+ code { color: var(--muted); font-family: ui-monospace, monospace; }
  .slot-head { display: flex; justify-content: space-between; align-items: baseline;
               gap: 1rem; }
- .fixed { color: #c8d4e0; font-family: ui-monospace, monospace; font-size: .9rem;
+ .fixed { color: var(--text); font-family: ui-monospace, monospace; font-size: .9rem;
           word-break: break-all; }
+ /* The sign-in, shaped like the console's: a centred card under the brand
+    glow. The wordmark is text - the console's mark is a PNG this
+    self-contained page does not carry - and the page still names no station:
+    PERCEPTA is what the product is, not which box this is. */
+ .login-wrap { min-height: 100vh; display: grid; place-items: center;
+   background: radial-gradient(60% 60% at 50% 38%, rgba(0,160,220,.09) 0%, var(--bg) 70%); }
+ .login-card { width: min(22.5rem, calc(100vw - 2rem)); background: var(--panel);
+   border: 1px solid var(--line); border-radius: .625rem; padding: 1.75rem;
+   display: flex; flex-direction: column; box-sizing: border-box; }
+ .brand-word { font-weight: 700; letter-spacing: .18em; font-size: .812rem;
+   text-align: center; margin-bottom: 1.375rem; }
+ .login-card h1 { font-size: 1rem; font-weight: 600; margin: 0 0 .8rem; text-align: center; }
+ .login-card label { font-size: .75rem; margin-bottom: .3rem; }
+ .login-card input { width: 100%; box-sizing: border-box; min-width: 0; }
+ .login-card button { width: 100%; margin-top: 1.125rem; padding: .55rem 1rem; }
+ .login-card .muted { margin-top: .9rem; font-size: .8rem; }
 """
 
 STATUS_PILL = {
@@ -620,16 +656,18 @@ class Console:
             "<meta name=viewport content='width=device-width,initial-scale=1'>",
             "<title>Ground station setup</title>",
             f"<style>{STYLE}</style>",
-            "<main><h1>Ground station setup</h1>",
+            "<div class=login-wrap><div class=login-card>",
+            "<div class=brand-word>PERCEPTA</div>",
+            "<h1>Ground station setup</h1>",
             f"<div class='msg bad'>{html.escape(reason)}</div>" if reason else "",
-            "<div class=card><form method=post action='/login'>",
-            "<label for=password>Setup password</label><br>",
+            "<form method=post action='/login'>",
+            "<label for=password>Setup password</label>",
             "<input id=password name=password type=password autocomplete='off' "
             "autofocus>",
             "<button type=submit>Sign in</button></form>",
             "<div class=muted>It is on the label on this box, or with whoever "
-            "provisioned it. It is not the enrolment code.</div></div>",
-            "</main>",
+            "provisioned it. It is not the enrolment code.</div>",
+            "</div></div>",
         ])
 
     def render(self, session=None) -> str:
