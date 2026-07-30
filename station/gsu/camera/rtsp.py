@@ -207,11 +207,16 @@ class RtspCamera:
 
         self._ffmpeg = shutil.which("ffmpeg")
         self.backend = "ffmpeg" if self._ffmpeg else "none"
-        self.backend_reason = (
-            f"RTSP via ffmpeg from {redact(self._url)}; snapshots decode one "
-            "frame, the live stream is remuxed without re-encoding"
-            if self._ffmpeg else NO_FFMPEG
-        )
+        # Empty when it is working, and that is the whole change here. This
+        # used to read "RTSP via ffmpeg from <url>; snapshots decode one frame,
+        # the live stream is remuxed without re-encoding" — the URL is already
+        # in the form directly below it on the setup page, and the rest
+        # describes how this build is implemented rather than anything about
+        # this camera. `backend_reason` exists to explain a fault (a venv built
+        # without --system-site-packages looks exactly like slow hardware), and
+        # filling it in when there is no fault is how a field people should
+        # read becomes one they skip.
+        self.backend_reason = "" if self._ffmpeg else NO_FFMPEG
         self._reason = "" if self._ffmpeg else NO_FFMPEG
         #: The stream's codec, probed once and cached for the session. "" means
         #: "probed and could not tell"; None means "not probed yet".

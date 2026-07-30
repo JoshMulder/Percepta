@@ -564,7 +564,9 @@ class ServedPageTests(unittest.TestCase):
 
         _, body = self.request("GET", "/")
         for slot in registry.SLOTS:
-            self.assertIn(f"<span class=k>{slot}</span>", body)
+            # Named for people here too, not just on the Devices page.
+            self.assertIn(f"<span class=k>{SLOT_LABELS[slot]}</span>", body)
+            self.assertNotIn(f"<span class=k>{slot}</span>", body)
 
     def test_the_enrolment_field_is_there_before_the_station_is_enrolled(self):
         _, body = self.request("GET", "/connection")
@@ -577,7 +579,6 @@ class ServedPageTests(unittest.TestCase):
         """There is one platform. An installer confirms it; nobody retypes it."""
         pages = self.every_page()
         self.assertIn(self.agent.config.platform_url, pages["/connection"])
-        self.assertIn("GSU_PLATFORM_URL", pages["/connection"])
         # Every editable control on every page, by name. None of them is the
         # platform or the broker address.
         import re
@@ -986,124 +987,68 @@ class ServedPageTests(unittest.TestCase):
     # reopen a URL-driven dialog after a refused save and can do nothing at all
     # to a hidden checkbox. Everything below is that path with no script in it.
 
-    def test_the_position_is_read_once_and_edited_behind_a_link(self):
-        # The duplication this replaced: the same three numbers as read-only
-        # rows and, directly beneath, three inputs holding them again.
+    def test_the_position_is_stated_and_not_editable(self):
+        # Settled at enrolment and frozen. The card reports it; nothing on the
+        # page offers a way to type a different one.
         _, _, body = self.page("/connection")
-        card, dialog = body.split("<div class=modal id=location", 1)
-        card = card.rsplit("<h2>Where this box is</h2>", 1)[1]
+        card = body.split("<h2>Where this box is</h2>", 1)[1]
         self.assertIn("Position", card)
-        self.assertIn("Elevation", card)
-        self.assertIn("<a class=btn href='#location'>Edit</a>", card)
-        # Not an input in sight until the dialog.
-        # Position is stated in the card and is not editable anywhere; what
-        # moved behind the link is the elevation and the correction switch.
-        for name in ("latitude", "longitude"):
-            self.assertNotIn(f"name='{name}'", card, name)
-            self.assertNotIn(f"name='{name}'", dialog, name)
-        self.assertNotIn("name='elevation_m'", card)
-        self.assertIn("name='elevation_m'", dialog)
+        self.assertNotIn("name='latitude'", body)
+        self.assertNotIn("name='longitude'", body)
 
-    def test_the_dialog_and_its_form_are_in_the_page_a_plain_get_returns(self):
-        # The fragment never reaches the server, so "a GET of the modal URL"
-        # *is* a GET of /connection: the dialog has to be in that response
-        # already, form, token and all, or nothing opens without script.
+    def test_the_local_settings_are_inline_and_need_no_dialog(self):
+        # There was a :target dialog here, and it was right while this card
+        # held three coordinates that duplicated the rows above it. With the
+        # position frozen it would hold a number and a checkbox, which is less
+        # than the machinery of an overlay costs.
         _, _, body = self.page("/connection")
-        dialog = body.split("<div class=modal id=location", 1)[1]
-        dialog = dialog.split("</div></div>")[0]
-        self.assertIn("<form method=post action='/location'>", dialog)
-        self.assertIn("name=csrf", dialog)
-        self.assertIn("name='elevation_m'", dialog)
-        self.assertIn("<button type=submit>Save location</button>", dialog)
-        # Closing is a navigation, not a handler.
-        self.assertIn("id=location-close href='#'", dialog)
-        # And the whole open mechanism is one CSS rule.
-        self.assertIn(".modal:target { display: block; }", body)
+        self.assertNotIn("class=modal", body)
+        card = body.split("<h2>Where this box is</h2>", 1)[1]
+        self.assertIn("name='elevation_m'", card)
+        self.assertIn("name='adsb_baro_correction'", card)
 
-    def test_the_dialog_says_what_it_is_and_does_not_claim_a_focus_trap(self):
-        _, _, body = self.page("/connection")
-        self.assertIn(
-            "<div class=modal id=location role=dialog "
-            "aria-labelledby=location-title tabindex=-1>", body,
-        )
-        self.assertIn("<h2 id=location-title>Location</h2>", body)
-        # tabindex is what lets the fragment navigation land focus on the
-        # dialog. aria-modal would tell a screen reader the page behind is
-        # unreachable, and without script it is reachable — so it is absent
-        # rather than a lie.
-        self.assertNotIn("aria-modal", body)
+    def test_the_connection_page_carries_no_script_at_all(self):
+        # The only script this page ever had closed the dialog on Escape. No
+        # dialog, no script, and so no script-src in its policy — the strongest
+        # form of "this page works with scripts blocked".
+        response, body = self.request("GET", "/connection")
+        self.assertNotIn("<script", body)
+        self.assertNotIn("script-src", response.getheader("Content-Security-Policy"))
 
-    def test_saving_from_the_dialog_stores_the_value_and_shuts_it(self):
+    def test_saving_lands_back_on_connection_and_says_so(self):
         token, csrf, _ = self.page("/connection")
         response, _ = self.request(
-            "POST", "/location", f"elevation_m=120&csrf={csrf}",
-            {"Cookie": token},
+            "POST", "/location", f"elevation_m=120&csrf={csrf}", {"Cookie": token},
         )
-        # No fragment: a save that worked closes the dialog, and the page it
-        # lands on is the unchanged POST_HOME entry.
         self.assertEqual(response.status, 303)
+        # From the fixed map, never from the request.
         self.assertEqual(response.getheader("Location"), "/connection")
         _, body = self.request("GET", "/connection", None, {"Cookie": token})
-        # The banner is at the top of the page, not inside a shut dialog.
-        self.assertLess(body.index("Saved."),
-                        body.index("<div class=modal id=location"))
-        # And the read-only rows carry what was saved.
+        self.assertIn("Saved.", body)
+        # The field holds it; there is no separate read-only row saying the
+        # same number back, which is the duplication this card started with.
         card = body.split("<h2>Where this box is</h2>", 1)[1]
-        card = card.split("<div class=modal id=location", 1)[0]
-        self.assertIn("120 m", card)
+        self.assertIn("name='elevation_m'", card)
+        self.assertIn("value='120'", card)
 
-    def test_a_refused_save_reopens_the_dialog_with_the_reason_inside_it(self):
-        # The property that decided :target over a checkbox: a redirect can
-        # reopen a dialog whose state is its URL. Otherwise the reason lands
-        # on a page behind a dialog the person has to reopen by hand.
-        token, csrf, _ = self.page("/connection")
-        response, _ = self.request(
-            "POST", "/location", f"elevation_m=999999&csrf={csrf}",
-            {"Cookie": token},
-        )
-        self.assertEqual(response.getheader("Location"), "/connection#location")
-        _, body = self.request("GET", "/connection", None, {"Cookie": token})
-        self.assertEqual(body.count("msg bad"), 1, "said twice is said wrong")
-        opened = body.index("<div class=modal id=location")
-        reason = body.index("Elevation must be between")
-        self.assertLess(opened, reason)
-        self.assertLess(reason, body.index("<form method=post action='/location'>"))
-
-    def test_a_refused_save_still_speaks_up_on_a_page_with_no_dialog(self):
-        # The message is addressed to a dialog. If the person goes somewhere
-        # that does not render it, the top of the page beats silence.
+    def test_a_refused_save_says_why_on_the_page(self):
+        # No dialog to reopen, so the reason goes where every other refusal on
+        # this page goes.
         token, csrf, _ = self.page("/connection")
         self.request("POST", "/location", f"elevation_m=999999&csrf={csrf}",
                      {"Cookie": token})
-        _, body = self.request("GET", "/", None, {"Cookie": token})
+        _, body = self.request("GET", "/connection", None, {"Cookie": token})
+        self.assertEqual(body.count("msg bad"), 1, "said twice is said wrong")
         self.assertIn("Elevation must be between", body)
 
-    def test_the_connection_script_is_admitted_by_the_responses_own_nonce(self):
-        # Escape-to-close is the only thing it adds, and it is admitted the
-        # same way the Devices script is: one nonce, minted per response.
-        response, body = self.request("GET", "/connection")
-        csp = response.getheader("Content-Security-Policy") or ""
-        nonce = csp.split("script-src 'nonce-")[1].split("'")[0]
-        self.assertIn(f"<script nonce='{nonce}'>", body)
-        second, _ = self.request("GET", "/connection")
-        self.assertNotEqual(csp, second.getheader("Content-Security-Policy"))
-
-    def test_the_dialog_keeps_the_shared_field_grid(self):
-        # The alignment work: inside a narrower card the label column has to
-        # still line up, which it does because the dialog reuses .field and
-        # changes none of its rules. It only has to be narrow enough that the
-        # two columns still fit, and to collapse with everything else.
+    def test_the_local_settings_use_the_shared_field_grid(self):
         _, _, body = self.page("/connection")
-        dialog = body.split("<div class=modal id=location", 1)[1]
-        # Elevation, the altitude-correction checkbox, and the actions row.
-        # Latitude and longitude are gone: settled at enrolment and frozen.
-        self.assertEqual(dialog.count("<div class=field>"), 3)
-        self.assertNotIn("grid-template-columns", dialog)
-        # 30rem holds a 9.5rem label column and a usable input beside it, and
-        # below 34rem every .field on the page — these included — is one column.
-        self.assertIn("width: min(30rem, calc(100% - 2rem));", body)
+        card = body.split("<h2>Where this box is</h2>", 1)[1]
+        # Elevation, the correction checkbox, and the save row.
+        self.assertEqual(card.count("<div class=field>"), 3)
+        self.assertNotIn("grid-template-columns", card)
         self.assertIn("--label-w:9.5rem", body)
-        self.assertIn("@media (max-width: 34rem)", body)
+
 
     # --- the two strips, and the one alignment --------------------------
 
@@ -1292,11 +1237,13 @@ class StationPositionTests(unittest.TestCase):
             # not as a caveat.
             self.assertNotIn("from the platform", body, page)
         # A position configured locally, which only boxes enrolled before this
-        # changed will have, is labelled so it is clear which one is in use.
+        # changed will have, is stated plainly too. Which mechanism supplied it
+        # is not something a person at the site can act on.
         self.agent.set_location(-42.4004, 173.68, None)
         for page in ("/", "/connection"):
             body = console.render(None, page)
-            self.assertIn("-42.4004, 173.68 — set on this box", body, page)
+            self.assertIn("-42.4004, 173.68", body, page)
+            self.assertNotIn("set on this box", body, page)
 
     def test_an_unset_position_is_a_warning_on_the_summary(self):
         # It is a fault an installer can still fix while on site, and every

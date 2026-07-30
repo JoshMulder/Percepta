@@ -473,3 +473,35 @@ class RegistryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BackendReasonTests(unittest.TestCase):
+    """`backend_reason` explains a fault, or says nothing.
+
+    It used to describe the working case too — "RTSP via ffmpeg from <url>;
+    snapshots decode one frame, the live stream is remuxed without
+    re-encoding". The URL is in the form directly below it on the setup page,
+    and the rest is how this build is implemented. A field that is full on
+    every healthy station is one people stop reading, which matters because the
+    fault it exists for (a venv built without --system-site-packages) looks
+    exactly like slow hardware.
+    """
+
+    def test_a_working_camera_says_nothing(self):
+        with mock.patch("shutil.which", return_value="/usr/bin/ffmpeg"):
+            camera = RtspCamera(address="cam.example")
+        self.assertEqual(camera.backend, "ffmpeg")
+        self.assertEqual(camera.backend_reason, "")
+
+    def test_it_never_repeats_the_address_from_the_form(self):
+        with mock.patch("shutil.which", return_value="/usr/bin/ffmpeg"):
+            camera = RtspCamera(address="cam.example")
+        self.assertNotIn("cam.example", camera.backend_reason)
+
+    def test_a_missing_ffmpeg_still_explains_itself(self):
+        # The case the field exists for: nothing else on the page would tell
+        # anybody why a correctly configured camera produces no picture.
+        with mock.patch("shutil.which", return_value=None):
+            camera = RtspCamera(address="cam.example")
+        self.assertEqual(camera.backend, "none")
+        self.assertIn("ffmpeg", camera.backend_reason.lower())

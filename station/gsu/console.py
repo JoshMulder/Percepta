@@ -247,6 +247,20 @@ STYLE = """
  .topbar-mark { display: block; flex: none; }
  .topbar-title { font-size: .95rem; font-weight: 600; letter-spacing: .01em;
    white-space: nowrap; }
+ /* Which box this is. Centred in the bar rather than beside the title,
+    because on a bench with three stations open in three tabs everything else
+    in this strip is identical on every one. `position: absolute` so it centres
+    on the *bar* and not on whatever space is left between the title and the
+    tabs — those differ in width per page, which would make the name drift as
+    you moved between them. */
+ .topbar-station { position: absolute; left: 50%; transform: translateX(-50%);
+   color: var(--muted); font-size: .9rem; white-space: nowrap;
+   pointer-events: none; }
+ /* Last in the strip. A form, because signing out changes state. */
+ .topbar-out { margin: 0 0 0 .5rem; display: flex; }
+ .topbar-out button { background: none; border: 0; color: var(--muted);
+   font: inherit; padding: .35rem .55rem; cursor: pointer; border-radius: 6px; }
+ .topbar-out button:hover { color: var(--danger); background: rgba(255,122,69,.1); }
  /* Pushed to the right of the title, and allowed to scroll on a narrow phone
     rather than wrapping the bar to two rows — a two-row bar would break the
     single --nav-h the slot strip pins to. */
@@ -279,6 +293,20 @@ STYLE = """
  /* The datastream field: the sensor's own last lines, monospace, bounded.
     A fixed min-height so an empty field reads as "no data", not as a
     missing element. */
+ /* The event list scrolls inside itself rather than lengthening the page.
+    A hundred events is several screens, and scrolling the page took the
+    header, the tabs and the storage summary underneath it out of view — so
+    the one thing you scroll to read cost you everything around it.
+
+    Height is the viewport minus the header, the heading, the two muted lines
+    and the card's own padding, so the box ends near the bottom of the window
+    whatever the window is. `min-height` keeps it usable on a short laptop
+    where that arithmetic would otherwise leave a sliver. */
+ ul.log { max-height: calc(100vh - var(--nav-h) - 17.5rem); min-height: 12rem;
+   overflow-y: auto; margin: 0; padding-left: 1.1rem;
+   overscroll-behavior: contain; }
+ ul.log li { margin: .15rem 0; }
+
  pre.raw { font: .8rem ui-monospace, monospace; color: var(--text);
    background: var(--panel-2); border: 1px solid var(--line-soft);
    border-radius: .375rem; padding: .55rem .7rem; margin: .4rem 0 .6rem;
@@ -310,20 +338,6 @@ STYLE = """
     Closed is display:none rather than off-screen: the inputs inside must be
     unreachable by Tab and unread by a screen reader while the dialog is shut,
     and they are still submitted normally when it is open. */
- .modal { display: none; position: fixed; inset: 0; z-index: 20;
-   overflow-y: auto; background: rgba(7,11,15,.86); }
- .modal:target { display: block; }
- /* Click-anywhere-outside to close. After the card in the DOM so that Tab
-    reaches the inputs first, and under it by z-index so it does not cover
-    them. */
- .modal-scrim { position: absolute; inset: 0; z-index: 0; }
- .modal-card { position: relative; z-index: 1; box-sizing: border-box;
-   width: min(30rem, calc(100% - 2rem)); margin: 3rem auto;
-   background: var(--panel); border: 1px solid var(--line);
-   border-radius: .625rem; padding: 1rem 1.1rem; }
- /* Same uppercase head as a section's, without the 2rem of air a section
-    needs and a card does not. */
- .modal-card h2 { margin: 0 0 .8rem; }
  .fixed { color: var(--text); font-family: ui-monospace, monospace; font-size: .9rem;
           word-break: break-all; }
  /* The sign-in, shaped like the console's: a centred card under the brand
@@ -685,10 +699,14 @@ class Console:
             if path in PAGES:
                 slot = None
                 nonce = None
-                if path in ("/devices", "/connection"):
-                    # The two pages that carry an inline script. Minted here
+                if path == "/devices":
+                    # The one page that carries an inline script. Minted here
                     # and per response, so the header and the tag can agree
                     # and nothing injected into rendered content can guess it.
+                    #
+                    # Connection dropped off this list when its location
+                    # dialog went inline: no dialog, no Escape handler, no
+                    # script, and so no script-src in its policy at all.
                     nonce = secrets.token_urlsafe(16)
                 if path == "/devices":
                     # One sub-tab per slot; the query names it and anything
@@ -1109,7 +1127,7 @@ class Console:
             f"<title>Ground station — {PAGES.get(page, 'Summary')}</title>",
             f"<link rel=icon href='{LOGO_DATA_URI}'>",
             f"<style>{STYLE}</style>",
-            self._nav(page),
+            self._nav(page, state, csrf, session),
             "<main>",
         ]
         banner = ""
@@ -1130,9 +1148,6 @@ class Console:
             out.append(self._section_location(state, csrf, banner))
             out.append(self._section_platform(state))
             out.append(self._section_security(state))
-            out.append(self._section_access(session, csrf))
-            if nonce:
-                out.append(self._location_script(nonce))
         elif page == "/devices":
             slot = slot if slot in registry.SLOTS else registry.SLOTS[0]
             out.append(self._section_devices(state, csrf, slot))
@@ -1147,9 +1162,9 @@ class Console:
         out.append("</main>")
         return "".join(out)
 
-    @staticmethod
-    def _nav(page: str) -> str:
-        """The one bar at the top: mark, title, page tabs.
+    def _nav(self, page: str, state: dict, csrf: str,
+             session=None) -> str:
+        """The one bar at the top: mark, title, which box, tabs, and the way out.
 
         The title used to be an `<h1>` inside `main`, which meant it scrolled
         away while the tabs — pinned — stayed. A heading that leaves and a bar
@@ -1163,11 +1178,28 @@ class Console:
             f"<img class=topbar-mark src='{LOGO_DATA_URI}' alt='' "
             "width=26 height=26>",
             "<span class=topbar-title>Ground station</span>",
-            "<nav class='tabs pagetabs'>",
         ]
+        # Which box this is, centred, because on a bench with three of them
+        # open in three tabs the tab strip looks identical on every one.
+        # Absent until enrolled: there is no name to show, and a placeholder
+        # would be a worse answer than the space.
+        if state.get("station"):
+            out.append(
+                f"<span class=topbar-station>{html.escape(state['station'])}</span>"
+            )
+        out.append("<nav class='tabs pagetabs'>")
         for path, label in PAGES.items():
             active = " class=active" if path == page else ""
             out.append(f"<a href='{path}'{active}>{html.escape(label)}</a>")
+        # Last in the strip, and a form rather than a link because signing out
+        # changes state — a GET that ends a session is one a prefetcher can
+        # trigger.
+        if session is not None and session.scope == "local":
+            out.append(
+                "<form method=post action='/logout' class=topbar-out>"
+                + self._csrf_field(csrf)
+                + "<button type=submit>Sign out</button></form>"
+            )
         out.append("</nav></header>")
         return "".join(out)
 
@@ -1249,7 +1281,8 @@ class Console:
             report = by_slot[slot]
             css, wording = STATUS_PILL.get(report["status"], ("off", report["status"]))
             out.append(
-                f"<div class=row><span class=k>{html.escape(slot)}</span>"
+                "<div class=row><span class=k>"
+                f"{html.escape(SLOT_LABELS.get(slot, slot.title()))}</span>"
                 f"<span>{html.escape(report['label'])} "
                 f"<span class='pill {css}'>{html.escape(wording)}</span></span></div>"
             )
@@ -1290,49 +1323,32 @@ class Console:
         )
 
     def _section_location(self, state: dict, csrf: str, banner: str = "") -> str:
-        """The station's own position, on the page beside its identity.
+        """Where this box is, and the one local thing about it worth setting.
 
-        **Why Connection and not Summary or Devices.** Summary is deliberately
-        read-only — its docstring says every fix lives on the page whose tab
-        names the thing that is wrong — so an editable form there would break
-        the one rule that makes that page scannable. Devices is per-slot
-        hardware, and a position is not fitted to a slot. Connection is where
-        this box's identity lives: who it enrolled as, where it talks, what
-        credential it holds. Where it *is* is the same class of fact and the
-        same five minutes of an installer's time.
+        **Position is read-only.** It is settled when the station enrols and
+        frozen afterwards: a station that needs a different one has physically
+        moved, and a box that has moved is recommissioned rather than edited.
+        The rows state what it was issued, with the platform's own words for
+        those coordinates beside them so somebody at the site can check the
+        position matches the site they are standing at.
 
-        **Why it is editable here when the platform address next to it is
-        not.** The address is one value, fixed for the whole fleet, and
-        retyping it on a roof can only make it wrong. The position is
-        per-station and *only* knowable on site — nobody at a desk can supply
-        it, which is precisely why the owner took it off the platform.
+        **Elevation is not, and that is not an inconsistency.** It is measured
+        at the mast rather than issued, and it exists for the ADS-B barometric
+        correction, which is computed on this box from this box's barometer.
+        The switch for that correction sits directly under it because they are
+        one decision — the correction refuses to run without the elevation.
 
-        The rendered value states its source, because a station using the
-        platform's old value and one using its own look identical otherwise,
-        and only the second is a position somebody has confirmed.
-
-        **Reading here, editing in the dialog.** This card used to carry the
-        read-only rows *and*, directly under them, three inputs holding the
-        same three numbers — one fact rendered twice, which is the owner's
-        complaint and a fair one. The rows stay, because the answer to "where
-        does this box think it is" is what somebody comes to this page for and
-        it must be legible without touching anything. The inputs move behind
-        an Edit control into `#location`, a `:target` dialog that needs no
-        script to open, accept a value, save or close (see STYLE).
-
-        `banner` is a validation message that belongs *inside* the dialog — a
-        refused save reopens it, and the reason has to be where the person is
-        looking rather than on the page behind the overlay. It arrives as the
-        escaped markup `render` already built, not as text.
+        **No dialog.** There was one, and it was right while this held three
+        coordinates and duplicated the rows above it. With the position frozen
+        it holds a number and a checkbox, and putting two controls behind an
+        overlay, a fragment target and a focus dance is more machinery than the
+        thing it hides. Inline, they are simply the rest of the card.
         """
         position = state.get("position") or {}
         station = position.get("station") or {}
         elevation = position.get("elevation_m")
         rows = [
             ("Position", *self._position_wording(position)),
-            ("Elevation",
-             f"{_degrees(elevation)} m" if elevation is not None else "not set",
-             "ok" if elevation is not None else "warn"),
         ]
         out = ["<h2>Where this box is</h2><div class=card>"]
         for label, value, css in rows:
@@ -1340,70 +1356,15 @@ class Console:
                 f"<div class=row><span class=k>{html.escape(label)}</span>"
                 f"<span class='{css}'>{html.escape(str(value))}</span></div>"
             )
-        out.append(
-            "<div class=field><a class=btn href='#location'>Edit</a></div>"
-            "<div class=muted>Position is set when this box is enrolled. "
-            "Re-enrol to move it.</div></div>"
-        )
-
-        # The dialog. A real element in the page, hidden until the fragment
-        # names it, so with scripts blocked the Edit link above is a plain
-        # navigation and everything below still posts to the same target.
-        out.append(
-            "<div class=modal id=location role=dialog "
-            # tabindex so the fragment navigation can put focus *on* the
-            # dialog — browsers focus the target of a fragment when it is
-            # focusable, which is the only focus handling here that does not
-            # need script. There is no aria-modal and no focus trap: without
-            # script the page behind stays reachable by Tab, and claiming
-            # otherwise to a screen reader would be a lie about the page.
-            "aria-labelledby=location-title tabindex=-1>"
-            "<div class=modal-card>"
-            "<h2 id=location-title>Location</h2>"
-        )
         out.append(banner)
         out.append(f"<form method=post action='/location'>{self._csrf_field(csrf)}")
-        # Bounds go on the inputs as well as in the parser: the browser catches
-        # a typed 91 before it costs a round trip, and the parser catches
-        # everything else, including every client that is not a browser.
-        #
-        # `inputmode=text` against type=number on purpose. Every latitude in
-        # this hemisphere is negative and the numeric keypad iOS raises for a
-        # number input has no minus key on it — a field you cannot type the
-        # commonest value into is worse than one without a tuned keyboard.
-        # No latitude or longitude here any more. Position is settled at
-        # enrolment and frozen: a station that needs a different one has
-        # physically moved, and a box that has moved is recommissioned rather
-        # than edited. The rows above show what it was issued.
-        #
-        # Elevation stays, and is not an inconsistency. It is not part of the
-        # position the platform issues — it exists for the ADS-B barometric
-        # correction, which is computed on this box from this box's own
-        # barometer, and it is measured at the mast rather than looked up.
-        fields = (
-            ("elevation_m", "Elevation", station.get("elevation_m"), -500, 100000,
-             "metres"),
+        out.append(
+            "<div class=field><label for='elevation_m'>Elevation</label>"
+            "<input type=number step=any min='-500' max='100000' "
+            "id='elevation_m' name='elevation_m' inputmode=text "
+            f"placeholder='metres' value='{html.escape(_degrees(elevation))}'>"
+            "</div>"
         )
-        for name, label, value, low, high, hint in fields:
-            out.append(
-                f"<div class=field><label for='{name}'>{html.escape(label)}</label>"
-                f"<input type=number step=any min='{low}' max='{high}' "
-                f"id='{name}' name='{name}' inputmode=text "
-                f"placeholder='{html.escape(hint)}' "
-                f"value='{html.escape(_degrees(value))}'></div>"
-            )
-        # Immediately under Elevation, because it is the same decision: the
-        # correction re-references reported pressure altitudes to this station's
-        # own barometer, which needs the elevation to be right as well as the
-        # barometer to be working. Separating them would let somebody switch on
-        # a correction whose input is two screens away and empty.
-        #
-        # Labels and a short constraint only — the reasoning is in
-        # devices/altitude.py and in SiteConfig, not on the page.
-        # Control then muted constraint, both direct children of .field — the
-        # same shape as the tuner row, and no wrapper. A wrapper would need its
-        # own alignment rule to undo the 4px a UA gives a checkbox, and would
-        # put a nested </div></div> inside the dialog.
         checked = " checked" if station.get("adsb_baro_correction") else ""
         out.append(
             "<div class=field><label for='adsb_baro_correction'>"
@@ -1414,53 +1375,11 @@ class Console:
             "Needs an elevation.</span></div>"
         )
         out.append(
-            "<div class=field><div class=actions>"
-            "<button type=submit>Save location</button>"
-            # An empty fragment un-targets the dialog: no script, no reload,
-            # and anything typed and not saved is still in the boxes if it is
-            # reopened. Escape does the same thing when the nonce'd script is
-            # running, by clicking this link.
-            "<a class='btn quiet' id=location-close href='#'>Close</a>"
-            "</div></div></form>"
-        )
-        out.append(
-
-            "</div>"
-            # After the card in the DOM, under it by z-index: see STYLE.
-            "<a class=modal-scrim href='#' aria-label='Close'></a>"
-            "</div>"
+            "<div class=field><button type=submit>Save</button></div></form>"
+            "<div class=muted>Position is set when this box is enrolled. "
+            "Re-enrol to move it.</div></div>"
         )
         return "".join(out)
-
-    @staticmethod
-    def _location_script(nonce: str) -> str:
-        """Polish on a dialog that already works without it: Escape closes,
-        and focus lands in the first input rather than on the dialog itself.
-
-        Everything here is a nicety. With the script blocked the dialog still
-        opens from the Edit link, focus still reaches the inputs (the fragment
-        target is focusable, so Tab starts inside), Close still closes, and a
-        refused save still reopens it. Nothing below is load-bearing, which is
-        why it is allowed to bail on a missing element and say nothing.
-        """
-        return (
-            f"<script nonce='{html.escape(nonce)}'>" + """
-(function () {
-  var closer = document.getElementById("location-close");
-  var first = document.getElementById("latitude");
-  if (!closer || !first) return;
-  function isOpen() { return location.hash === "#location"; }
-  function focusFirst() { if (isOpen()) first.focus(); }
-  // Escape closes by following the same link a click would, so there is one
-  // close path and it is the one that works without any of this.
-  document.addEventListener("keydown", function (event) {
-    if (event.key === "Escape" && isOpen()) closer.click();
-  });
-  window.addEventListener("hashchange", focusFirst);
-  focusFirst();
-})();
-""" + "</script>"
-        )
 
     @staticmethod
     def _position_wording(position: dict) -> tuple[str, str]:
@@ -1480,10 +1399,11 @@ class Console:
             # coordinates are this site rather than the last one commissioned.
             return (f"{where} — {locality}" if locality else where), "ok"
         if source == "station":
-            # Set locally before position moved to enrolment. Still honoured so
-            # boxes already in the field keep their range and bearing, and
-            # labelled so it is clear which answer is in use.
-            return f"{where} — set on this box", "ok"
+            # A position configured locally, which only boxes enrolled before
+            # position moved to enrolment will have. Stated plainly: it is the
+            # position this station is using, and which of two mechanisms put
+            # it there is not something a person at the site can act on.
+            return where, "ok"
         return "not set", "warn"
 
     def _section_security(self, state: dict) -> str:
@@ -1548,14 +1468,13 @@ class Console:
                 f"<div class=row><span class=k>{html.escape(label)}</span>"
                 f"<span class=fixed>{html.escape(str(value))}</span></div>"
             )
-        out.append(
-            "<div class=muted>Fixed in the station's environment file "
-            "(<code>GSU_PLATFORM_URL</code>, <code>GSU_BROKER_URL</code>) and "
-            "deliberately not editable here: there is one platform, and a URL "
-            "that can be retyped on site is a station that enrols against "
-            "nothing and reports no error anybody sees. Check it matches what "
-            "you were told, then carry on.</div></div>"
-        )
+        # No paragraph explaining why these are read-only. They are shown
+        # without a control beside them, which says it; the reasoning — one
+        # platform, and a URL retypable on site is a station that enrols
+        # against nothing and reports no error anybody sees — belongs here.
+        # Set in the station's environment file: GSU_PLATFORM_URL,
+        # GSU_BROKER_URL.
+        out.append("</div>")
         return "".join(out)
 
     def _section_camera(self, state: dict) -> str:
@@ -1620,8 +1539,8 @@ class Console:
                 f"<span class='{css}'>{html.escape(str(value))}</span></div>"
             )
         if reason:
-            # Same correction: a working camera explaining itself is a note,
-            # whichever backend is doing the working.
+            # A working camera explaining itself is a note; only one that is
+            # not working is a warning.
             css = "warn" if camera.get("backend") in (None, "none") else "muted"
             out.append(f"<div class='{css}'>{html.escape(reason)}</div>")
         if video.get("reason"):
@@ -1747,32 +1666,11 @@ class Console:
             f"{html.escape(SLOT_LABELS.get(slot, slot.title()))}</strong>"
             f"<span class='pill {css}'>{html.escape(wording)}</span></div>"
         )
-        # Intent and fact, on separate lines, always both.
-        out.append(f"<div class=muted>selected: {html.escape(report['label'])}</div>")
-        if report["detail"]:
-            out.append(f"<div class=muted>found: {html.escape(report['detail'])}</div>")
-        elif report["configured"]:
-            out.append("<div class=muted>found: nothing reported yet</div>")
-
-        if slot == "camera":
-            # A picture instead of the datastream lines: the camera's raw tap
-            # is capture statistics, and the question an installer is actually
-            # asking is "is it pointed at the right thing". The image is the
-            # publisher's cached frame (/frame.jpg — never a fresh capture),
-            # the nonce'd script re-fetches it, and the checkbox is the whole
-            # zoom mechanism: :checked pins the label full-screen, so
-            # expanding works with scripts blocked.
-            out.append(self._preview(state.get("video") or {}))
-        else:
-            # The sensor's own last lines — empty when nothing is connected.
-            # The nonce'd script refreshes it from status.json; without script
-            # it is the state at render time, which is still the truth.
-            lines = (state.get("raw_samples") or {}).get(slot) or []
-            out.append("<div class=field><label>Data</label></div>")
-            out.append(
-                f"<pre class=raw id=raw data-slot='{slot}'>"
-                + html.escape("\n".join(lines)) + "</pre>"
-            )
+        # No "selected:" or "found:" lines. Both were the same fact twice on
+        # one card: the dropdown below shows what is selected, and the pill
+        # beside the heading says whether it is answering. Intent and detection
+        # are still kept apart — that is what the dropdown and the pill *are* —
+        # they are simply not also narrated.
 
         out.append(
             f"<form method=post action='/device' data-device>"
@@ -1874,30 +1772,35 @@ class Console:
         # .field with no label so that it sits under the controls rather than
         # under the labels — the only child of a row goes to column 2.
         out.append("<div class=field><button type=submit>Save</button></div></form>")
+
+        # The live tap goes *under* the controls. It is what an installer reads
+        # to confirm a change worked, so it belongs after the thing they
+        # changed rather than above it — with it on top, saving scrolled the
+        # evidence off the screen.
+        if slot == "camera":
+            # A picture instead of datastream lines: the camera's raw tap is
+            # capture statistics, and the question being asked is "is it
+            # pointed at the right thing". The image is the cached frame
+            # (/frame.jpg — never a fresh capture), and the checkbox is the
+            # whole zoom mechanism, so expanding works with scripts blocked.
+            out.append(self._preview(state.get("video") or {}))
+        else:
+            # Empty when nothing is connected. The nonce'd script refreshes it
+            # from status.json; without script it is the state at render time,
+            # which is still the truth.
+            lines = (state.get("raw_samples") or {}).get(slot) or []
+            out.append("<div class=field><label>Data</label></div>")
+            out.append(
+                f"<pre class=raw id=raw data-slot='{slot}'>"
+                + html.escape("\n".join(lines)) + "</pre>"
+            )
         out.append("</div>")
 
-        connections = {device.connection for device in registry.by_slot(slot)}
-        if "serial" in connections:
-            ports = state.get("serial_ports") or []
-            out.append("<div class=card><div class=k>Serial ports present now</div><ul>")
-            if not ports:
-                out.append("<li class=warn>none</li>")
-            for port in ports:
-                out.append(
-                    f"<li><code>{html.escape(port['id'])}</code>"
-                    + (f" <span class=muted>→ {html.escape(port['detail'])}</span>"
-                       if port["detail"] else "")
-                    + "</li>"
-                )
-            out.append(
-                "</ul><div class=muted>Use the <code>/dev/serial/by-id/…</code> "
-                "name.</div></div>"
-            )
-        if "usb-sdr" in connections and not resources:
-            out.append(
-                "<div class=card><div class=muted>No SDR receivers on the USB "
-                "bus.</div></div>"
-            )
+        # No "serial ports present now" list and no "no SDR receivers" note.
+        # The first duplicated the port dropdown above it, which offers exactly
+        # those ports and is where the choice is actually made; the second was
+        # a sentence about absent hardware on a card whose pill already says
+        # the slot is not fitted.
         return "".join(out)
 
     @staticmethod
@@ -2014,7 +1917,7 @@ class Console:
         out = [
             "<h2>Recent events (kept on the box)</h2><div class=card>",
             f"<div class=muted>Newest first, at most 100. Times are the "
-            f"station's own, {html.escape(zone)}.</div><ul>",
+            f"station's own, {html.escape(zone)}.</div><ul class=log>",
         ]
         for event in events:
             css = {"critical": "bad", "error": "bad", "warning": "warn"}.get(
@@ -2037,48 +1940,3 @@ class Console:
         out.append("</div>")
         return "".join(out)
 
-    def _section_access(self, session, csrf: str) -> str:
-        """What this page itself is doing, said on the page itself.
-
-        An installer needs to know the door shuts behind them, and the person
-        who has to reopen it in six months needs to know how. Both are one
-        paragraph, and neither is discoverable from anywhere else on site.
-        """
-        out = ["<h2>This setup page</h2><div class=card>"]
-        where = self.bound_host or "not listening"
-        out.append(
-            f"<div class=row><span class=k>Listening on</span>"
-            f"<span class=fixed>{html.escape(str(where))}:{self.port}</span></div>"
-        )
-        left = self.gate.seconds_left()
-        if left is None:
-            closing = (
-                "stays open while this station is unenrolled"
-                if self.gate.window_minutes > 0 else
-                "pinned open by GSU_SETUP_WINDOW_MINUTES=0"
-            )
-            css = "ok" if self.gate.window_minutes > 0 else "warn"
-        else:
-            closing = f"closes in {int(left // 60)} min"
-            css = "ok"
-        out.append(
-            f"<div class=row><span class=k>Access window</span>"
-            f"<span class='{css}'>{html.escape(closing)}</span></div>"
-        )
-        if self.demotion_reason:
-            out.append(f"<div class=warn>{html.escape(self.demotion_reason)}</div>")
-        out.append(
-            "<div class=muted>When the window closes this page stops answering "
-            "on the local network entirely — it is not a permanent service. "
-            "Reboot the station to open it again, or, with a shell on the box, "
-            "create the <code>setup-open</code> file in the state directory. "
-            "Loopback keeps working over an SSH tunnel either way.</div>"
-        )
-        if session is not None and session.scope == "local":
-            out.append(
-                "<form method=post action='/logout'>"
-                + self._csrf_field(csrf)
-                + "<button type=submit>Sign out</button></form>"
-            )
-        out.append("</div>")
-        return "".join(out)
