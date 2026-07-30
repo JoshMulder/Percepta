@@ -22,7 +22,7 @@ from unittest import mock
 
 from gsu.agent import Agent
 from gsu.config import AgentConfig
-from gsu.console import Console, _host_is_addressable
+from gsu.console import SLOT_LABELS, Console, _host_is_addressable
 from gsu.setup_access import (
     COOKIE_NAME,
     Gate,
@@ -424,14 +424,14 @@ class ServedPageTests(unittest.TestCase):
         # An unknown slot lands on the first tab rather than erroring.
         response, body = self.request("GET", "/devices?slot=../etc")
         self.assertEqual(response.status, 200)
-        self.assertIn(f"<strong>{registry.SLOTS[0]}</strong>", body)
+        self.assertIn(f"<strong>{SLOT_LABELS[registry.SLOTS[0]]}</strong>", body)
 
     def test_each_slot_tab_offers_its_own_devices_from_the_registry(self):
         from gsu.devices import registry
 
         for slot in registry.SLOTS:
             _, body = self.request("GET", f"/devices?slot={slot}")
-            self.assertIn(f"<strong>{slot}</strong>", body)
+            self.assertIn(f"<strong>{SLOT_LABELS[slot]}</strong>", body)
             self.assertIn(f"href='/devices?slot={slot}' class=active", body)
             # Driven from the registry, not from a second list in the template.
             for device in registry.by_slot(slot):
@@ -1146,9 +1146,12 @@ class ServedPageTests(unittest.TestCase):
         """
         from gsu.console import STYLE
 
-        page_strip = STYLE.split(".pagetabs {")[1].split("}")[0]
+        # The top strip is the whole header bar — mark, title and tabs — since
+        # the title moved into it. The tabs themselves are static inside it;
+        # what has to be pinned, and what --nav-h has to describe, is the bar.
+        page_strip = STYLE.split(".topbar {")[1].split("}")[0]
         slot_strip = STYLE.split(".subtabs {")[1].split("}")[0]
-        for name, block in (("pagetabs", page_strip), ("subtabs", slot_strip)):
+        for name, block in (("topbar", page_strip), ("subtabs", slot_strip)):
             self.assertIn("position: sticky", block, name)
         self.assertIn("top: 0", page_strip)
         # The offset is the page strip's own height, and that strip is given
@@ -1163,8 +1166,33 @@ class ServedPageTests(unittest.TestCase):
 
     def test_the_page_strip_is_marked_so_only_it_is_pinned_to_the_top(self):
         _, _, body = self.page("/devices")
+        self.assertIn("<header class=topbar>", body)
         self.assertIn("<nav class='tabs pagetabs'>", body)
         self.assertIn("<nav class='tabs subtabs'>", body)
+
+    def test_the_header_bar_carries_the_mark_and_the_title(self):
+        body = self.every_page()["/"]
+        header = body.split("<header class=topbar>")[1].split("</header>")[0]
+        self.assertIn("topbar-mark", header)
+        self.assertIn("Ground station", header)
+        # And the title is no longer a heading that scrolls away underneath it.
+        self.assertNotIn("<h1>Ground station</h1>", body)
+
+    def test_every_page_carries_a_favicon(self):
+        # Self-contained like the logo: a data: URI, so a station on an
+        # isolated network still has an icon in the tab.
+        for path, body in self.every_page().items():
+            self.assertIn("rel=icon", body, path)
+            self.assertIn("data:image", body.split("rel=icon")[1][:40], path)
+
+    def test_slot_tabs_are_named_for_people_not_for_the_wire(self):
+        _, _, body = self.page("/devices")
+        strip = body.split("<nav class='tabs subtabs'>")[1].split("</nav>")[0]
+        self.assertIn(">ADS-B<", strip)
+        self.assertIn(">Weather<", strip)
+        # The raw slot key must not reach a tab.
+        self.assertNotIn(">adsb<", strip)
+        self.assertNotIn(">weather<", strip)
 
     def test_every_form_row_on_every_page_is_the_same_two_columns(self):
         """The owner's complaint: controls started wherever their label ended.

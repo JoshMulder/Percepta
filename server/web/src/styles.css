@@ -2371,8 +2371,15 @@ body {
 .settings-scrim {
   position: fixed;
   inset: 0;
-  background: rgba(3, 6, 9, 0.72);
-  backdrop-filter: blur(2px);
+  /* Opaque enough to stand alone, because there is no blur behind it.
+     `backdrop-filter` here was a full-viewport filter sitting over a live
+     MapLibre WebGL canvas and a playing video, so the compositor re-read and
+     re-blurred the entire screen on every frame those produced — and scrolling
+     inside the dialog made it worse by adding a repaint per scroll step. It
+     lagged the whole machine, not just the tab, which is what a
+     viewport-sized filter over animating content does. Two pixels of blur is
+     not worth a continuous full-screen GPU readback. */
+  background: rgba(3, 6, 9, 0.86);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -3025,8 +3032,11 @@ body {
   padding: 0.75rem 0.875rem 0.875rem;
   border: 1px solid var(--line);
   border-radius: 0.5rem;
-  background: rgba(11, 15, 19, 0.94);
-  backdrop-filter: blur(6px);
+  /* Also no backdrop-filter, for the same reason and the same neighbour: this
+     one sits directly on the map's WebGL canvas, which repaints continuously
+     as contacts move. Smaller area, same class of cost. At 0.97 the panel is
+     legible over imagery without one. */
+  background: rgba(11, 15, 19, 0.97);
   box-shadow: 0 0.5rem 1.5rem rgba(0, 0, 0, 0.55);
 }
 .contact-head {

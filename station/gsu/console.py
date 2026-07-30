@@ -235,8 +235,24 @@ STYLE = """
     exactly this offset — so the vertical padding is dropped and the links are
     centred in it instead. Full-bleed already (it is outside main and pads
     itself to centre), so its own background covers the whole strip. */
- .pagetabs { position: sticky; top: 0; z-index: 6; height: var(--nav-h);
-   box-sizing: border-box; padding-block: 0; align-items: center; }
+ /* One bar: the mark, what this box is, and where you are in it. The title
+    was an <h1> inside main, which scrolled away while the pinned tabs stayed —
+    a heading that leaves and a bar that does not read as two separate things.
+    The bar is sticky as a whole now, so --nav-h still describes exactly what
+    the slot strip pins under. */
+ .topbar { position: sticky; top: 0; z-index: 6; height: var(--nav-h);
+   box-sizing: border-box; display: flex; align-items: center; gap: .6rem;
+   padding: 0 1.25rem; background: var(--panel-2);
+   border-bottom: 1px solid var(--line); }
+ .topbar-mark { display: block; flex: none; }
+ .topbar-title { font-size: .95rem; font-weight: 600; letter-spacing: .01em;
+   white-space: nowrap; }
+ /* Pushed to the right of the title, and allowed to scroll on a narrow phone
+    rather than wrapping the bar to two rows — a two-row bar would break the
+    single --nav-h the slot strip pins to. */
+ .topbar .pagetabs { position: static; height: auto; margin-left: auto;
+   border-bottom: 0; background: none; padding: 0; min-width: 0;
+   overflow-x: auto; }
  .slot-head { display: flex; justify-content: space-between; align-items: baseline;
               gap: 1rem; }
  /* The Devices page's slot strip: same tab language as the page strip, one
@@ -333,6 +349,19 @@ STYLE = """
 #: The four pages, in the order the strip shows them. The path is the whole
 #: identity: the router, the nav and the post-redirects all key on it, so a
 #: page cannot be reachable without appearing in the strip or vice versa.
+#: Slot ids are wire identifiers — lowercase, no punctuation, and the key in
+#: devices.json. What goes on a tab is a name a person reads, so ADS-B keeps
+#: the hyphen the standard spells it with rather than inheriting the id's
+#: convenience. One map so a new slot cannot appear on screen as a raw key.
+SLOT_LABELS = {
+    "adsb": "ADS-B",
+    "radio": "Radio",
+    "weather": "Weather",
+    "power": "Power",
+    "light": "Light",
+    "camera": "Camera",
+}
+
 PAGES = {
     "/": "Summary",
     "/connection": "Connection",
@@ -1065,6 +1094,7 @@ class Console:
             "<!doctype html><meta charset=utf-8>",
             "<meta name=viewport content='width=device-width,initial-scale=1'>",
             "<title>Ground station setup</title>",
+            f"<link rel=icon href='{LOGO_DATA_URI}'>",
             f"<style>{STYLE}</style>",
             "<div class=login-wrap><div class=login-card>",
             f"<img class=brand-mark src='{LOGO_DATA_URI}' alt='' "
@@ -1084,16 +1114,18 @@ class Console:
 
     def render(self, session=None, page: str = "/", slot: str | None = None,
                nonce: str | None = None) -> str:
+        from .brand import LOGO_DATA_URI
+
         state = self.agent.snapshot()
         csrf = self.gate.csrf_token(session)
         out = [
             "<!doctype html><meta charset=utf-8>",
             "<meta name=viewport content='width=device-width,initial-scale=1'>",
             f"<title>Ground station — {PAGES.get(page, 'Summary')}</title>",
+            f"<link rel=icon href='{LOGO_DATA_URI}'>",
             f"<style>{STYLE}</style>",
             self._nav(page),
             "<main>",
-            "<h1>Ground station</h1>",
         ]
         banner = ""
         at, self.message_at = self.message_at, None
@@ -1132,11 +1164,26 @@ class Console:
 
     @staticmethod
     def _nav(page: str) -> str:
-        out = ["<nav class='tabs pagetabs'>"]
+        """The one bar at the top: mark, title, page tabs.
+
+        The title used to be an `<h1>` inside `main`, which meant it scrolled
+        away while the tabs — pinned — stayed. A heading that leaves and a bar
+        that does not read as two separate things; they are one thing, and the
+        bar is where a person looks to know what they are configuring.
+        """
+        from .brand import LOGO_DATA_URI
+
+        out = [
+            "<header class=topbar>",
+            f"<img class=topbar-mark src='{LOGO_DATA_URI}' alt='' "
+            "width=26 height=26>",
+            "<span class=topbar-title>Ground station</span>",
+            "<nav class='tabs pagetabs'>",
+        ]
         for path, label in PAGES.items():
             active = " class=active" if path == page else ""
             out.append(f"<a href='{path}'{active}>{html.escape(label)}</a>")
-        out.append("</nav>")
+        out.append("</nav></header>")
         return "".join(out)
 
     @staticmethod
@@ -1669,7 +1716,8 @@ class Console:
         out = ["<nav class='tabs subtabs'>"]
         for slot in registry.SLOTS:
             css = " class=active" if slot == active else ""
-            out.append(f"<a href='/devices?slot={slot}'{css}>{html.escape(slot)}</a>")
+            label = SLOT_LABELS.get(slot, slot.title())
+            out.append(f"<a href='/devices?slot={slot}'{css}>{html.escape(label)}</a>")
         out.append("</nav>")
         return "".join(out)
 
@@ -1694,7 +1742,8 @@ class Console:
 
         out.append("<div class=card>")
         out.append(
-            f"<div class=slot-head><strong>{html.escape(slot)}</strong>"
+            "<div class=slot-head><strong>"
+            f"{html.escape(SLOT_LABELS.get(slot, slot.title()))}</strong>"
             f"<span class='pill {css}'>{html.escape(wording)}</span></div>"
         )
         # Intent and fact, on separate lines, always both.
