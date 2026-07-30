@@ -163,8 +163,23 @@ class MediaRelay:
         stream = self._streams.get(station_id)
         if stream is None or stream.codec == codec:
             return
+        # A *change*, not a first announcement: the station's encoder is now
+        # producing something else - an operator changed the camera's encoder
+        # from H.265 to H.264, and it is a checkbox in the camera's own web
+        # interface. Every fragment already buffered was the old codec, and
+        # the init segment we are holding describes it, so both have to go or
+        # the viewer decodes new bytes against old parameters and shows a
+        # picture that is subtly, silently wrong.
+        changed = stream.codec is not None and stream.codec != codec
+        if changed:
+            log.info(
+                "Media: station %s changed codec %s -> %s; resetting viewers.",
+                station_id, stream.codec, codec,
+            )
+            stream.init_segment = None
+            stream.recent.clear()
         stream.codec = codec
-        message = json.dumps({"codec": codec})
+        message = json.dumps({"codec": codec, "reset": changed})
         for queue in list(stream.viewers):
             with suppress(asyncio.QueueFull):
                 queue.put_nowait(message)

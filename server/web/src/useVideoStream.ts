@@ -150,7 +150,14 @@ export function useVideoStream(
         URL.revokeObjectURL(objectUrl);
         objectUrl = null;
       }
-      if (video.current) video.current.removeAttribute("src");
+      if (video.current) {
+        video.current.removeAttribute("src");
+        // Not just the attribute: an element keeps its old MediaSource
+        // attached until it reloads, and a codec change reuses this same
+        // element immediately. Without the load() the new source never
+        // attaches and the picture stops for good.
+        video.current.load();
+      }
     };
 
     const scheduleRetry = () => {
@@ -198,12 +205,26 @@ export function useVideoStream(
         if (typeof event.data === "string") {
           // The codec handshake, and the only text the relay sends.
           let codec: string | undefined;
+          let reset = false;
           try {
-            codec = JSON.parse(event.data).codec;
+            const parsed = JSON.parse(event.data);
+            codec = parsed.codec;
+            reset = Boolean(parsed.reset);
           } catch {
             return;
           }
-          if (!codec || source) return;
+          if (!codec) return;
+          if (source) {
+            // A second codec means the station's encoder changed underneath
+            // us - somebody switched the camera from H.265 to H.264, which is
+            // a checkbox in its own web interface. A SourceBuffer's type is
+            // fixed for its lifetime, so the whole MediaSource has to be
+            // rebuilt; ignoring this (as this hook used to) leaves the player
+            // decoding new bytes against the old codec's parameters, which
+            // does not error - it just looks broken.
+            if (!reset) return;
+            teardownMedia();
+          }
           const mime = `video/mp4; codecs="${codec}"`;
           if (!MediaSource.isTypeSupported(mime)) {
             setState("unavailable");
