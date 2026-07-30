@@ -105,7 +105,36 @@ INVALID_U16 = 0xFFFF
 #:   9s callsign       B emitter_type  B tslc                       = 38 bytes
 ADSB_VEHICLE_FORMAT = "<IiiiHHhHHB9sBB"
 
-CRC_EXTRA = {MSG_ADSB_VEHICLE: ADSB_VEHICLE_CRC_EXTRA, MSG_HEARTBEAT: HEARTBEAT_CRC_EXTRA}
+#: The other three messages the ping RX Pro puts on the wire, once a second
+#: each, from component 156 (`MAV_COMP_ID_ADSB`).
+#:
+#: They are here for one reason: **liveness**. The receiver sends
+#: `ADSB_VEHICLE` only when there is an aircraft to report, and it does not
+#: send `HEARTBEAT` at all — so on a quiet day these are the only frames on the
+#: line. Without their CRC_EXTRA every one failed the checksum, which mixes
+#: that byte in, and the station reported "absent, 61 false starts": a healthy
+#: receiver under clear sky, indistinguishable on the setup page from a dead
+#: dongle or the wrong baud rate.
+#:
+#: Nothing decodes them. Being framed and checksummed correctly is the entire
+#: contribution, and it is enough — it proves the cable, the power and the baud.
+#:
+#: 66 is `REQUEST_DATA_STREAM` and its 148 is the published value, which is how
+#: this method was checked. 202 and 203 are uAvionix's own and are not in
+#: common.xml, so their bytes were derived from the hardware: for each captured
+#: frame, the one CRC_EXTRA in 0..255 that makes the stated checksum correct.
+#: Fifteen frames of each agreed on a single value with no second candidate.
+#: Derived, not guessed — and a wrong byte here cannot let anything through,
+#: it can only keep rejecting.
+MSG_REQUEST_DATA_STREAM = 66
+UAVIONIX_STATUS_MSGIDS = {202: 7, 203: 85}
+
+CRC_EXTRA = {
+    MSG_ADSB_VEHICLE: ADSB_VEHICLE_CRC_EXTRA,
+    MSG_HEARTBEAT: HEARTBEAT_CRC_EXTRA,
+    MSG_REQUEST_DATA_STREAM: 148,
+    **UAVIONIX_STATUS_MSGIDS,
+}
 PAYLOAD_LEN = {MSG_ADSB_VEHICLE: ADSB_VEHICLE_LEN, MSG_HEARTBEAT: HEARTBEAT_LEN}
 
 

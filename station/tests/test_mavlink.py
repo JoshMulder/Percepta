@@ -443,3 +443,52 @@ class SimulationCoverageTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReceiverLivenessTests(unittest.TestCase):
+    """A receiver under clear sky must not look like a dead one.
+
+    The ping RX Pro sends ADSB_VEHICLE only when there is an aircraft, and
+    sends no HEARTBEAT. Its other three messages were failing the checksum for
+    want of a CRC_EXTRA byte, so with nothing overhead the station saw zero
+    frames and 61 false starts and called the device absent — the same thing it
+    would say about an unplugged dongle.
+    """
+
+    def test_the_receivers_own_messages_validate(self):
+        for msgid in (66, 202, 203):
+            parser = mavlink.MavlinkParser()
+            frames = list(parser.feed(mavlink.build_frame(msgid, b"\x01\x02\x03")))
+            self.assertEqual([f.msgid for f in frames], [msgid])
+            self.assertEqual(parser.false_starts, 0, msgid)
+
+    def test_request_data_stream_uses_the_published_byte(self):
+        # 148 is REQUEST_DATA_STREAM's value in common.xml. It agreeing with
+        # what the hardware produced is what validates deriving the other two
+        # the same way.
+        self.assertEqual(mavlink.CRC_EXTRA[66], 148)
+
+    def test_they_prove_the_link_without_being_decoded(self):
+        # Liveness only. Nothing reads their payloads, and the contact table
+        # must stay empty.
+        rx = PingRxAdsb(
+            _Source(b"".join(
+                mavlink.build_frame(m, b"\x00\x00") for m in (66, 202, 203)
+            )),
+            latitude=-42.4, longitude=173.68,
+        )
+        self.assertEqual(rx.poll(1.0), [])
+        self.assertEqual(rx.status, "streaming")
+
+    def test_a_silent_port_is_still_absent(self):
+        # The fix must not make every configured port look connected.
+        rx = PingRxAdsb(_Source(b""), latitude=-42.4, longitude=173.68)
+        self.assertIsNone(rx.poll(1.0))
+        self.assertEqual(rx.status, "absent")
+
+    def test_a_wrong_crc_on_one_of_them_is_still_rejected(self):
+        bad = bytearray(mavlink.build_frame(202, b"\x00\x00"))
+        bad[-1] ^= 0xFF
+        parser = mavlink.MavlinkParser()
+        self.assertEqual(list(parser.feed(bytes(bad))), [])
+        self.assertGreater(parser.false_starts, 0)
