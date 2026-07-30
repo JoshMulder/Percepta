@@ -1281,32 +1281,46 @@ class Console:
     def _section_camera(self, state: dict) -> str:
         """Why the camera is doing what it is doing, without an SSH session.
 
-        The specific fault this exists for: `picamera2` is a Debian package, a
-        virtual environment built without `--system-site-packages` cannot import
-        it, and the station silently falls back to one subprocess per frame.
-        That is several times slower and presents as "the camera is slow" —
-        which is a hardware conversation about a packaging mistake. The driver
-        already computes the reason; this puts it where the question is asked.
+        The question this exists to answer used to be "why is the camera slow"
+        and is now "who has the camera". Busy and broken were indistinguishable
+        from here for the whole of the wedge hunt: a stream delivering nothing
+        and a stream that could not get the sensor looked identical. The lease
+        holder is a fact the station knows and nobody could see.
         """
         video = state.get("video") or {}
         camera = video.get("camera") or {}
         stream = video.get("stream") or {}
+        sensor = video.get("sensor") or {}
         reason = camera.get("backend_reason") or ""
+
+        holder = sensor.get("holder")
+        held_for = sensor.get("held_for_s")
+        holds = f"{holder} for {held_for:.0f}s" if holder and held_for else (holder or "nobody")
+
         rows = [
-            ("Snapshots", "on" if video.get("enabled") else "off",
-             "ok" if video.get("enabled") else "off"),
-            ("Frame rate", f"{video.get('fps_measured', 0)} fps measured, "
-                           f"{video.get('fps_configured', 0)} configured", "ok"),
-            ("Cost on the link", f"{round((video.get('bitrate_bps') or 0) / 1000)} kbit/s, "
-                                 f"{video.get('bytes_per_frame') or 0} bytes/frame", "ok"),
-            ("Published / dropped",
-             f"{video.get('frames_published', 0)} / {video.get('frames_dropped', 0)}",
-             "ok" if not video.get("frames_dropped") else "warn"),
+            ("Camera held by", holds, "warn" if holder else "ok"),
+            ("Snapshots", "removed", "off"),
+            ("Preview", f"{video.get('preview_frames', 0)} frames, "
+                        f"{video.get('preview_refused', 0)} refused", "ok"),
             ("Live stream", stream.get("state") or "idle", "ok"),
         ]
+        delivered = stream.get("delivered") or {}
+        if delivered:
+            # What the camera actually sent, beside what the site asked for.
+            # A wrong size or rate is invisible until they are side by side,
+            # and both were wrong for a whole evening.
+            requested = stream.get("requested") or {}
+            rows.append((
+                "Delivering",
+                f"{delivered.get('width')}x{delivered.get('height')} at "
+                f"{delivered.get('fps')} fps"
+                + (f" (asked for {requested.get('width')}x{requested.get('height')}"
+                   f" at {requested.get('fps')})" if requested else ""),
+                "ok",
+            ))
         if camera.get("backend"):
             rows.insert(0, ("Capture path", camera["backend"],
-                            "ok" if camera["backend"] == "picamera2" else "warn"))
+                            "ok" if camera.get("backend") == "rpicam" else "warn"))
         out = ["<h2>Camera</h2><div class=card>"]
         for label, value, css in rows:
             out.append(
@@ -1314,7 +1328,7 @@ class Console:
                 f"<span class='{css}'>{html.escape(str(value))}</span></div>"
             )
         if reason:
-            css = "muted" if camera.get("backend") == "picamera2" else "warn"
+            css = "muted" if camera.get("backend") == "rpicam" else "warn"
             out.append(f"<div class='{css}'>{html.escape(reason)}</div>")
         if video.get("reason"):
             out.append(
