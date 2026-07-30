@@ -2916,13 +2916,18 @@ body {
    same, from the same proxy. These are the HTML markers it draws - labels are
    DOM nodes rather than symbol layers, so no glyph server is contacted. */
 
+/* The one fixed thing on the map, and the point every range and bearing is
+   measured from. At 0.7rem it was smaller than the aircraft passing it and
+   easy to lose against a town. */
 .map-station {
-  width: 0.7rem;
-  height: 0.7rem;
+  width: 1.05rem;
+  height: 1.05rem;
   border-radius: 50%;
   background: var(--accent);
-  border: 2px solid #0b0f13;
-  box-shadow: 0 0 0.5rem rgba(53, 196, 138, 0.7);
+  border: 2.5px solid #0b0f13;
+  box-shadow:
+    0 0 0 1.5px rgba(53, 196, 138, 0.45),
+    0 0 0.75rem rgba(53, 196, 138, 0.8);
 }
 /* Legible over imagery, which is what the old dim grey on a 70% panel was
    not: at 0.62rem it was smaller than the map's own place names and the same
