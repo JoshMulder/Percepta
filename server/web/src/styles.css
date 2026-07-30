@@ -2964,6 +2964,103 @@ body {
   white-space: nowrap;
 }
 .map-contact.alert svg { filter: drop-shadow(0 0 0.3rem rgba(255, 122, 69, 0.9)); }
+/* Only the glyph is clickable. The marker as a whole keeps pointer-events off
+   so a callsign label — which can be several times the width of the aircraft
+   it names — never swallows a click meant for the map behind it. */
+.map-contact.clickable svg { pointer-events: auto; cursor: pointer; }
+.map-contact.selected svg {
+  filter: drop-shadow(0 0 0.35rem rgba(53, 196, 138, 0.95));
+}
+.map-contact.selected span { color: var(--accent) !important; }
+
+/* --- one contact, in full ------------------------------------------------ */
+/* Anchored bottom-left rather than beside the aircraft: a panel that follows
+   the contact moves while being read, and covers the airspace next to the one
+   thing the operator is looking at. Bottom-left is the emptiest corner of a
+   station-centred map — the basemap switch is top-left and the rings label due
+   north. */
+.contact-detail {
+  position: absolute;
+  left: 0.75rem;
+  bottom: 0.75rem;
+  z-index: 5;
+  width: min(19rem, calc(100% - 1.5rem));
+  max-height: calc(100% - 1.5rem);
+  overflow-y: auto;
+  padding: 0.75rem 0.875rem 0.875rem;
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  background: rgba(11, 15, 19, 0.94);
+  backdrop-filter: blur(6px);
+  box-shadow: 0 0.5rem 1.5rem rgba(0, 0, 0, 0.55);
+}
+.contact-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.contact-head h4 {
+  margin: 0;
+  font-size: 0.938rem;
+  letter-spacing: 0.02em;
+}
+.contact-icao { font: 0.688rem var(--mono); color: var(--muted); }
+.contact-close {
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 1.25rem;
+  line-height: 1;
+  padding: 0 0.125rem;
+  cursor: pointer;
+}
+.contact-close:hover { color: var(--text); }
+
+/* Above the rows, because each one changes how everything below it reads. */
+.contact-flag {
+  margin-top: 0.5rem;
+  padding: 0.3rem 0.5rem;
+  border-radius: 0.25rem;
+  font-size: 0.719rem;
+  line-height: 1.35;
+}
+.contact-flag.sim { background: rgba(126, 148, 168, 0.16); color: #b9c7d3; }
+.contact-flag.stale { background: rgba(232, 176, 75, 0.14); color: var(--warn); }
+.contact-flag.alert { background: rgba(255, 122, 69, 0.14); color: var(--danger); }
+
+/* The answer the panel exists for, sized so it is read first. */
+.contact-altitude {
+  margin: 0.625rem 0 0.5rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--line-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+}
+.contact-altitude strong { font: 1.25rem var(--mono); color: var(--text); }
+.contact-datum { font-size: 0.688rem; color: var(--muted); }
+
+.contact-rows { display: flex; flex-direction: column; gap: 0.25rem; }
+.contact-row {
+  display: grid;
+  grid-template-columns: 4.75rem 1fr;
+  gap: 0.5rem;
+  align-items: baseline;
+  font-size: 0.75rem;
+}
+/* For values that run past the column — a corrected altitude with its
+   qualifier, a full emitter category — so they wrap under the label rather
+   than squeezing the value column for every other row. */
+.contact-row.wide { grid-template-columns: 1fr; gap: 0.05rem; }
+.contact-k { color: var(--muted); }
+.contact-v { font-family: var(--mono); }
+.contact-row.wide .contact-v { font-family: inherit; }
+.contact-note { color: var(--muted); font-family: inherit; }
+/* Deliberately not styled as an error. A field the aircraft did not transmit is
+   ordinary — most GA traffic sends no squawk and plenty sends no callsign — and
+   colouring it amber would put a warning on every second contact. */
+.contact-absent { color: var(--muted); font-style: italic; font-family: inherit; }
 
 /* MapLibre draws into a canvas that fills its container; the container is the
    one that must be told how big it is. */

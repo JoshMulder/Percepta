@@ -64,6 +64,13 @@ class Contact:
     out, because that is what real ADS-B reports and what the map plots.
     """
 
+    #: `ADSB_EMITTER_TYPE`, weighted the way a quiet rural airspace actually
+    #: looks rather than uniformly: mostly light and small aircraft, a helicopter
+    #: or two, the occasional airliner, and 0 — a transponder that was never
+    #: configured with a category — which is common on general aviation and is
+    #: the case the console must render as "not set" rather than "unknown type".
+    EMITTERS = [0, 0, 0, 1, 1, 1, 1, 2, 2, 3, 5, 6, 7, 7, 9, 10, 11, 12, 14]
+
     def __init__(self) -> None:
         self.icao = f"{random.randint(0, 0xFFFFFF):06X}"
         self.callsign = random.choice(
@@ -78,6 +85,28 @@ class Contact:
         self.vy = math.cos(heading) * speed_kmh / 3600
         self.altitude = random.uniform(600, 11000)
         self.speed_kt = speed_kmh / 1.852
+
+        self.emitter_type = random.choice(self.EMITTERS)
+        # **Absent, not zero.** A real receiver attaches a validity flag to each
+        # of these and the station preserves the difference all the way to the
+        # wire, so a simulator that always sends a number would hide the one
+        # case the console most needs to get right — and would let a `?? 0`
+        # creep into the console unnoticed. A quarter of contacts send no
+        # squawk and no vertical rate, which is about what the real receiver on
+        # the bench produces.
+        self.squawk = (
+            None if random.random() < 0.25
+            # Octal digits only. 7500/7600/7700 are real and rare.
+            else random.choice([7000, 7000, 1200, 2000, 3000, 7700])
+            if random.random() < 0.06
+            else int(f"{random.randint(0,7)}{random.randint(0,7)}"
+                     f"{random.randint(0,7)}{random.randint(0,7)}")
+        )
+        self.vertical_speed = (
+            None if random.random() < 0.25 else round(random.uniform(-12, 12), 1)
+        )
+        self.altitude_type = random.choice(["pressure", "pressure", "geometric"])
+        self.source = "uat" if random.random() < 0.12 else "adsb"
 
     def step(self, dt: float) -> None:
         self.x += self.vx * dt
@@ -109,6 +138,23 @@ class Contact:
             # arbitrary here; a real deployment would make it configurable per
             # station and feed it from the alerting path, not the display.
             "alert": self.range_km < 12 and self.altitude < 1500,
+            "altitude_type": self.altitude_type,
+            # Never corrected here. The correction is a station computing one
+            # sensor's data against another's, and a simulator inventing a
+            # plausible corrected altitude would put a number in front of an
+            # operator that no barometer ever produced.
+            "altitude_corrected_m": None,
+            "vertical_speed": self.vertical_speed,
+            "emitter_type": self.emitter_type,
+            "squawk": self.squawk,
+            "seconds_since_contact": round(random.uniform(0.5, 4.0), 1),
+            # Unanswerable from ADSB_VEHICLE for airborne categories, so null —
+            # the same thing the real receiver reports (CONTRACT-QUESTIONS 19).
+            "on_ground": None,
+            # Honest about itself. A demo station's contacts are not traffic,
+            # and the console says so on the panel.
+            "simulated": True,
+            "source": self.source,
         }
 
 

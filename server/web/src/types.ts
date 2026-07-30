@@ -135,6 +135,38 @@ export interface Aircraft {
   bearing: number;
   /** Set when the aircraft is close enough to be worth flagging. */
   alert?: boolean;
+
+  /* Everything below is nullable because the receiver attaches a validity flag
+     to each one, and the flag is it telling us which of "the value is zero" and
+     "there is no value" it means. A squawk of 0000 is a real code and 0 kt is
+     an aircraft that has stopped, so the console must never render a null as a
+     zero — `field ?? 0` anywhere in here is a bug. */
+
+  /** `pressure` (referenced to 1013.25 hPa, not local QNH) or `geometric`.
+   *  Null when the receiver did not say, which is why `altitude` alone cannot
+   *  be labelled. */
+  altitude_type?: string | null;
+  /** The pressure altitude re-referenced to the station's own barometer, when
+   *  that correction is switched on and possible. Carried *beside* `altitude`,
+   *  never instead of it: what the receiver said and what it means locally are
+   *  two facts, and a panel that shows only one cannot show its working. */
+  altitude_corrected_m?: number | null;
+  /** Metres per second, positive climbing. */
+  vertical_speed?: number | null;
+  /** `ADSB_EMITTER_TYPE` as reported, unmapped — naming it is this console's
+   *  job (`emitterKind`). 0 means the receiver was not told, which is a
+   *  different statement from a category it does not recognise. */
+  emitter_type?: number | null;
+  /** Mode A as an integer, so 7700 is 7700 and 0 is the code 0000. */
+  squawk?: number | null;
+  /** `tslc`. A contact still drawn at 30 seconds is a memory, not an aircraft. */
+  seconds_since_contact?: number | null;
+  on_ground?: boolean | null;
+  /** The receiver flagged this as an injected test target. Shown, so a test
+   *  transmission can never be read as traffic. */
+  simulated?: boolean | null;
+  /** `adsb` (1090ES) or `uat` (978 MHz). */
+  source?: string | null;
 }
 
 /** Carried by every telemetry payload. `available: false` says the station has

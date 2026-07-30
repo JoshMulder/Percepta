@@ -1,6 +1,14 @@
 import maplibregl from "maplibre-gl";
 import { memo, useEffect, useRef, useState } from "react";
+import {
+  emitterKind,
+  glyphPath,
+  glyphSize,
+  isStroked,
+  rotates,
+} from "../emitters";
 import type { Aircraft, MapConfig } from "../types";
+import { ContactDetail } from "./ContactDetail";
 
 /**
  * Range rings, in kilometres.
@@ -71,6 +79,17 @@ function AdsbMapInner({
   const markersRef = useRef(new Map<string, maplibregl.Marker>());
   const readyRef = useRef(false);
   const [style, setStyle] = useState(config.default_basemap);
+  /** ICAO of the contact whose detail panel is open, or null.
+   *
+   *  Held as the address rather than the contact object so that the panel
+   *  re-reads the live array every render: a selected aircraft is still moving,
+   *  and a panel frozen at the values it had when clicked would quietly become
+   *  wrong while being read. */
+  const [selected, setSelected] = useState<string | null>(null);
+  /** So the marker click handlers, which are created once per contact and live
+   *  outside React, can set state without being rebuilt on every selection. */
+  const selectRef = useRef(setSelected);
+  selectRef.current = setSelected;
 
   const basemap =
     config.basemaps.find((b) => b.key === style) ?? config.basemaps[0];
@@ -286,6 +305,7 @@ function AdsbMapInner({
       const pos: [number, number] = [contact.longitude, contact.latitude];
       const colour = contact.alert ? "#ff7a45" : "#e8b04b";
       const label = contact.callsign?.trim() || contact.icao;
+      const kind = emitterKind(contact.emitter_type);
 
       let marker = existing.get(contact.icao);
       if (!marker) {
@@ -293,8 +313,27 @@ function AdsbMapInner({
         el.className = "map-contact";
         el.innerHTML =
           '<svg viewBox="0 0 18 18" width="18" height="18">' +
-          '<path d="M9 1 L13 15 L9 12 L5 15 Z" stroke="#0b0f13" stroke-width="0.8"/>' +
+          '<path stroke="#0b0f13" stroke-width="0.8"/>' +
           "</svg><span></span>";
+        // Pointer events are off for the marker as a whole (see STYLE) so the
+        // label never eats a click meant for the map behind it; the glyph opts
+        // back in — but only where there is a panel to open. In the mini
+        // viewer the detail panel would cover most of the airspace it exists
+        // to show, so contacts are not clickable there at all rather than
+        // clickable and inert, which is what a cursor change would promise.
+        // `compact` is fixed for the life of this map: Console keys the
+        // component on it, so a swap remounts rather than mutating it.
+        if (!compact) {
+          el.classList.add("clickable");
+          const glyph = el.querySelector("svg");
+          // Clicking selects rather than toggling: a second click on an
+          // already-open contact is far more often a missed drag than a
+          // request to close, and Close is right there.
+          glyph?.addEventListener("click", (e) => {
+            e.stopPropagation();
+            selectRef.current(contact.icao);
+          });
+        }
         marker = new maplibregl.Marker({ element: el }).setLngLat(pos).addTo(map);
         existing.set(contact.icao, marker);
       } else {
@@ -303,10 +342,38 @@ function AdsbMapInner({
 
       const el = marker.getElement();
       el.classList.toggle("alert", Boolean(contact.alert));
-      const svg = el.querySelector("svg");
-      if (svg) svg.style.transform = `rotate(${contact.track ?? 0}deg)`;
+      el.classList.toggle("selected", contact.icao === selected);
+      // Ground vehicles and obstacles are not rotated at all, and a contact
+      // that sent no track is left pointing north rather than being asserted
+      // to be heading north — `track ?? 0` would have invented a heading.
+      const svg = el.querySelector("svg") as SVGElement | null;
+      if (svg) {
+        const track = rotates(kind) && contact.track !== null ? contact.track : 0;
+        svg.style.transform = `rotate(${track}deg)`;
+      }
+      if (svg) {
+        // Size carries the weight class; see glyphSize. Set on the element
+        // rather than in CSS because it varies per contact and can change if a
+        // transponder starts reporting a category it was not reporting before.
+        const size = String(glyphSize(kind));
+        svg.setAttribute("width", size);
+        svg.setAttribute("height", size);
+      }
       const path = el.querySelector("path");
-      if (path) path.setAttribute("fill", colour);
+      if (path) {
+        path.setAttribute("d", glyphPath(kind));
+        if (isStroked(kind)) {
+          path.setAttribute("fill", "none");
+          path.setAttribute("stroke", colour);
+          path.setAttribute("stroke-width", "1.5");
+          path.setAttribute("stroke-linejoin", "round");
+          path.setAttribute("stroke-linecap", "round");
+        } else {
+          path.setAttribute("fill", colour);
+          path.setAttribute("stroke", "#0b0f13");
+          path.setAttribute("stroke-width", "0.8");
+        }
+      }
       const span = el.querySelector("span");
       if (span) {
         // Compact hides the label: at that size a dozen callsigns overlap into
@@ -321,15 +388,44 @@ function AdsbMapInner({
       marker.remove();
       existing.delete(icao);
     }
-  }, [aircraft, compact]);
+  }, [aircraft, compact, selected]);
+
+  /** A selected contact that has left the airspace must not leave a panel of
+   *  values behind that no longer describe anything. Handled here rather than
+   *  in the marker loop so it also fires when the whole stream goes away. */
+  useEffect(() => {
+    if (selected && !aircraft.some((c) => c.icao === selected)) setSelected(null);
+  }, [aircraft, selected]);
+
+  // Escape closes it, like every other overlay in the console. Bound only while
+  // something is open so the console is not carrying a key listener per map for
+  // the 99% of the time nothing is selected.
+  useEffect(() => {
+    if (!selected) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setSelected(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selected]);
 
   if (config.latitude === null || config.longitude === null) {
     return <div className="not-permitted">Station has no location set</div>;
   }
 
+  const openContact = selected
+    ? aircraft.find((c) => c.icao === selected) ?? null
+    : null;
+
   return (
     <div className="map-holder">
-      <div ref={holderRef} className="map-canvas" />
+      {/* Clicking the map itself dismisses. The glyph handlers stop
+          propagation, so this only fires on empty sky. */}
+      <div
+        ref={holderRef}
+        className="map-canvas"
+        onClick={() => setSelected(null)}
+      />
       {!compact && config.basemaps.length > 1 && (
         <div className="basemap-switch" role="group" aria-label="Basemap">
           {config.basemaps.map((b) => (
@@ -344,6 +440,15 @@ function AdsbMapInner({
             </button>
           ))}
         </div>
+      )}
+      {/* Not in compact: the mini viewer is a thumbnail, and a detail panel
+          over it would cover most of the airspace it exists to show. Clicking
+          a contact there is not offered rather than offered and useless. */}
+      {!compact && openContact && (
+        <ContactDetail
+          contact={openContact}
+          onClose={() => setSelected(null)}
+        />
       )}
     </div>
   );
