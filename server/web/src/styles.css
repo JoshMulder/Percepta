@@ -3026,3 +3026,11 @@ body {
   letter-spacing: 0.06em;
   word-break: break-all;
 }
+
+/* The camera panel's parking space in each layout slot. It holds no styling of
+   its own: the panel is portalled in and brings its own, and the host exists
+   only so React has a stable DOM parent to move it between. Full size in both,
+   because the panel sizes itself from the slot it lands in. */
+.video-host {
+  display: contents;
+}

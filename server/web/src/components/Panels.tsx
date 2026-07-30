@@ -1,8 +1,7 @@
-import { memo } from "react";
+import { memo, useEffect, useRef } from "react";
 import type { Capability, LightPayload, PowerPayload } from "../types";
-import { useRef } from "react";
 import { DemoCamera } from "./DemoCamera";
-import { useVideoStream } from "../useVideoStream";
+import type { StreamState } from "../useVideoStream";
 import type { VideoPayload } from "../types";
 import {
   BatteryChart,
@@ -28,15 +27,15 @@ function VideoPanelInner({
   compact,
   streaming,
   frame,
-  stationId,
-  live,
   canPtz,
   online,
   demo,
   lightOn,
+  videoEl,
+  streamState,
 }: {
-  /** Which station to stream from, and whether to ask for it at all. Asking is
-   *  what starts the camera, so this is not merely a rendering choice. */
+  /** Kept for callers; the stream itself is owned by the console now, because
+   *  it must outlive this component being remounted by a layout swap. */
   stationId?: string | null;
   live?: boolean;
   compact?: boolean;
@@ -50,31 +49,35 @@ function VideoPanelInner({
    *  nothing here could be mistaken for a real place. */
   demo?: boolean;
   lightOn?: boolean;
+  /** The one `<video>` element for the whole console, created outside React and
+   *  adopted here. Swapping the map and the camera remounts this component, and
+   *  a `<video>` React owns would be destroyed and rebuilt with it - a new
+   *  ticket, a new socket, the station asked to stop and start encoding, and
+   *  three seconds of black for what is visually a resize. An element the
+   *  parent owns is merely re-parented, which a browser does without
+   *  interrupting playback. */
+  videoEl?: HTMLVideoElement | null;
+  streamState?: StreamState;
 }) {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  // Only the expanded view asks for the stream. A thumbnail nobody is really
-  // watching is not worth several megabits of satellite bandwidth, and the
-  // snapshot channel already shows what the site looks like.
-  const streamState = useVideoStream(
-    videoRef,
-    stationId ?? null,
-    // `live` is the whole decision now - the console only mounts this panel
-    // where it is actually on screen, so a compact guard here just made the
-    // preview and the phone tab lie about a camera that works.
-    Boolean(live && online),
-  );
+  const surfaceRef = useRef<HTMLDivElement>(null);
   const showingLive = streamState === "playing";
+
+  // Adopt the shared element into whichever surface is currently on screen.
+  useEffect(() => {
+    const surface = surfaceRef.current;
+    if (!surface || !videoEl) return;
+    if (videoEl.parentElement !== surface) surface.insertBefore(videoEl, surface.firstChild);
+  });
+
+  // The class is set imperatively for the same reason the element is: React
+  // does not render it, so it cannot keep its className in sync.
+  useEffect(() => {
+    if (videoEl) videoEl.className = `video-live-el${showingLive ? "" : " hidden"}`;
+  }, [videoEl, showingLive]);
 
   return (
     <div className="video-panel">
-      <div className="video-surface">
-        <video
-          ref={videoRef}
-          className={`video-live-el${showingLive ? "" : " hidden"}`}
-          autoPlay
-          muted
-          playsInline
-        />
+      <div className="video-surface" ref={surfaceRef}>
         {showingLive ? (
           <div className="video-live">
             <span className="video-live-dot" />

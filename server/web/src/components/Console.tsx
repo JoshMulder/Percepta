@@ -21,6 +21,7 @@ import { useAudio } from "../useAudio";
 import { useFitScale } from "../useFitScale";
 import { useMediaQuery } from "../useMediaQuery";
 import { useSocket } from "../useSocket";
+import { useVideoStream } from "../useVideoStream";
 import { AdsbMap } from "./AdsbMap";
 import { SOC_WINDOWS, type SocSample, type SocWindowKey } from "./BatteryChart";
 import {
@@ -100,6 +101,21 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
   const [fitReady, setFitReady] = useState(false);
   const fit = useFitScale({ enabled: !compact, ready: fitReady });
   const audio = useAudio(true);
+
+  // The console's one and only <video>, created outside React and handed to
+  // whichever VideoPanel is on screen. Swapping the map and the camera
+  // remounts that component; an element React owned would be destroyed with
+  // it, taking the socket, the MSE buffer and the station's encoder down and
+  // rebuilding all three for what is visually a resize. This one is merely
+  // re-parented, which a browser does without interrupting playback.
+  const videoElRef = useRef<HTMLVideoElement | null>(null);
+  if (videoElRef.current === null && typeof document !== "undefined") {
+    const el = document.createElement("video");
+    el.autoplay = true;
+    el.muted = true;
+    el.playsInline = true;
+    videoElRef.current = el;
+  }
 
   const [stations, setStations] = useState<StationSummary[]>([]);
   const [stationId, setStationId] = useState<string | null>(null);
@@ -490,6 +506,15 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
     );
   };
 
+  // One stream for the console, not one per panel: `enabled` must not change
+  // when the panel moves between slots, or the swap tears the pipeline down
+  // exactly as remounting used to.
+  const streamState = useVideoStream(
+    videoElRef,
+    stationId,
+    Boolean(canVideo && (detail?.online ?? false)),
+  );
+
   const renderVideo = (small: boolean) =>
     bootstrapping ? (
       <MapSkeleton />
@@ -509,6 +534,8 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
         // encoder when the console closes.
         live
         streaming={frame?.jpeg != null}
+        videoEl={videoElRef.current}
+        streamState={streamState}
         canPtz={!small && has(caps, "video.ptz")}
         online={detail?.online ?? false}
         demo={simulated}
@@ -552,6 +579,9 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
       key: "camera",
       label: "Camera",
       Icon: IconCamera,
+      // An empty host; the panel is portalled in below. Compact mounts the
+      // panel directly, because that layout shows one tab at a time and
+      // unmounting a hidden camera is exactly what should happen there.
       body: renderVideo(false),
       fills: true,
     },
