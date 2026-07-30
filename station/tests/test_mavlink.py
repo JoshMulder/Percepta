@@ -303,7 +303,7 @@ class FramingTests(unittest.TestCase):
         frame[-1] ^= 0xFF
         parser = mavlink.MavlinkParser()
         self.assertEqual(list(parser.feed(bytes(frame))), [])
-        self.assertGreater(parser.bad_frames, 0)
+        self.assertGreater(parser.false_starts, 0)
 
     def test_truncated_v2_payload_is_zero_padded(self):
         payload = mavlink.encode_adsb_vehicle(icao=7, flags=0).rstrip(b"\x00")

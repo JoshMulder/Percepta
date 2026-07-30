@@ -317,6 +317,11 @@ class Agent:
                 "latitude": self.site.latitude,
                 "longitude": self.site.longitude,
                 "elevation_m": self.site.elevation_m,
+                # Here rather than in a settings block of its own because it is
+                # part of the same decision: the correction is computed from
+                # this elevation and refuses without it, so the setup page edits
+                # the two together.
+                "adsb_baro_correction": self.site.adsb_baro_correction,
             },
             "platform": {
                 "latitude": site.latitude if site else None,
@@ -361,19 +366,31 @@ class Agent:
             if set_site:
                 set_site(latitude, longitude)
 
-    def set_location(self, latitude, longitude, elevation_m) -> None:
+    def set_location(
+        self, latitude, longitude, elevation_m, baro_correction=None,
+    ) -> None:
         """Store what the setup page was given, and act on it immediately.
 
         Values are already parsed and range-checked by the caller
-        (`config.parse_latitude` and friends); `None` for all three is a
-        deliberate clear, which is how a station wrongly positioned during
+        (`config.parse_latitude` and friends); `None` for all three positions
+        is a deliberate clear, which is how a station wrongly positioned during
         commissioning stops asserting a position it does not have.
+
+        `baro_correction` defaults to `None` meaning *leave it as it is*, not
+        *off*. The switch also arrives by `config.set` from the platform, and a
+        caller that does not mention it — including every existing one — must
+        not silently turn it off as a side effect of saving a coordinate.
         """
         self.site.latitude = latitude
         self.site.longitude = longitude
         self.site.elevation_m = elevation_m
+        if baro_correction is not None:
+            self.site.adsb_baro_correction = bool(baro_correction)
         self.site.save(self.config.site_config_path)
         self.apply_position()
+        # No rebuild and no restart: `tick` re-reads both the switch and the
+        # elevation from `site` every cycle, precisely so this takes effect on
+        # the next contact rather than the next boot.
 
     def device_context(self) -> dict:
         site = self.enrolment.site if self.enrolment else None

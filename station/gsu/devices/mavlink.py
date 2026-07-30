@@ -299,7 +299,13 @@ class MavlinkParser:
 
     def __init__(self) -> None:
         self._buffer = bytearray()
-        self.bad_frames = 0
+        #: Byte positions that looked like a start byte and did not parse.
+        #: Emphatically *not* a corruption count, which is what it was called
+        #: before: 0xFD and 0xFE occur inside the payloads of good frames, and
+        #: `_next` tries every candidate rather than trusting the first, so a
+        #: healthy link generates these continuously. It outnumbering
+        #: `good_frames` is normal and says nothing about the hardware.
+        self.false_starts = 0
         self.good_frames = 0
 
     def feed(self, data: bytes) -> Iterator[Frame]:
@@ -326,7 +332,7 @@ class MavlinkParser:
         buffer = self._buffer
         index = 0
         earliest_incomplete: int | None = None
-        bad_positions: list[int] = []
+        false_start_positions: list[int] = []
 
         while index < len(buffer):
             if buffer[index] not in (MAVLINK_V1, MAVLINK_V2):
@@ -334,7 +340,7 @@ class MavlinkParser:
                 continue
             outcome, frame, end = self._try_at(index)
             if outcome == "frame":
-                self.bad_frames += sum(1 for position in bad_positions if position < index)
+                self.false_starts += sum(1 for position in false_start_positions if position < index)
                 del buffer[:end]
                 self.good_frames += 1
                 return frame
@@ -342,11 +348,11 @@ class MavlinkParser:
                 if earliest_incomplete is None:
                     earliest_incomplete = index
             else:
-                bad_positions.append(index)
+                false_start_positions.append(index)
             index += 1
 
         cut = earliest_incomplete if earliest_incomplete is not None else len(buffer)
-        self.bad_frames += sum(1 for position in bad_positions if position < cut)
+        self.false_starts += sum(1 for position in false_start_positions if position < cut)
         del buffer[:cut]
         return None
 

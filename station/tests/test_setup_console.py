@@ -1126,7 +1126,9 @@ class ServedPageTests(unittest.TestCase):
         # two columns still fit, and to collapse with everything else.
         _, _, body = self.page("/connection")
         dialog = body.split("<div class=modal id=location", 1)[1]
-        self.assertEqual(dialog.count("<div class=field>"), 4)
+        # Latitude, Longitude, Elevation, the altitude-correction checkbox, and
+        # the actions row.
+        self.assertEqual(dialog.count("<div class=field>"), 5)
         self.assertNotIn("grid-template-columns", dialog)
         # 30rem holds a 9.5rem label column and a usable input beside it, and
         # below 34rem every .field on the page — these included — is one column.
@@ -1624,3 +1626,88 @@ class HonestVerdictTests(unittest.TestCase):
         # camera/ownership.py exists precisely so that one reader holds it.
         self.assertNotIn('("Camera held by", holds, "warn" if holder else "ok")',
                          self.source)
+
+
+class BarometricCorrectionSettingTests(unittest.TestCase):
+    """The altitude correction, switched on where its input is typed.
+
+    It re-references reported pressure altitudes to this station's own
+    barometer and is computed from the site elevation, so the setup page edits
+    the two together rather than putting the switch a screen away from the
+    number it depends on.
+    """
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.agent = Agent(AgentConfig(
+            home=Path(self.directory.name), setup_enabled=False,
+            single_instance=False,
+        ))
+        self.addCleanup(self.agent.shutdown)
+        self.console = Console(self.agent)
+
+    def submit(self, **fields):
+        return self.console._set_location(
+            {name: [value] for name, value in fields.items()}
+        )
+
+    def test_it_is_off_until_somebody_turns_it_on(self):
+        # It applies one sensor's reading to another sensor's data. That is a
+        # decision an operator makes, never a default.
+        self.assertFalse(self.agent.site.adsb_baro_correction)
+
+    def test_ticking_it_with_an_elevation_switches_it_on(self):
+        self.submit(latitude="-42.4004", longitude="173.68",
+                    elevation_m="120", adsb_baro_correction="1")
+        self.assertTrue(self.agent.site.adsb_baro_correction)
+        self.assertEqual(self.agent.site.elevation_m, 120.0)
+
+    def test_ticking_it_without_an_elevation_is_refused_not_accepted_idle(self):
+        # A checkbox that stays ticked while nothing happens is how somebody
+        # comes to trust a number that was never computed.
+        with self.assertRaises(ValueError) as caught:
+            self.submit(latitude="-42.4004", longitude="173.68",
+                        elevation_m="", adsb_baro_correction="1")
+        self.assertIn("Elevation", str(caught.exception))
+        self.assertFalse(self.agent.site.adsb_baro_correction)
+
+    def test_an_unticked_box_turns_it_off(self):
+        # An unchecked checkbox sends nothing, and on this form that absence is
+        # a real "off" because the input is always rendered inside it.
+        self.submit(latitude="-42.4004", longitude="173.68",
+                    elevation_m="120", adsb_baro_correction="1")
+        self.submit(latitude="-42.4004", longitude="173.68", elevation_m="120")
+        self.assertFalse(self.agent.site.adsb_baro_correction)
+
+    def test_clearing_the_location_takes_the_correction_with_it(self):
+        # Leaving it on would leave a station switched on to correct altitudes
+        # it can no longer correct.
+        self.submit(latitude="-42.4004", longitude="173.68",
+                    elevation_m="120", adsb_baro_correction="1")
+        self.submit(latitude="", longitude="", elevation_m="")
+        self.assertFalse(self.agent.site.adsb_baro_correction)
+        self.assertIsNone(self.agent.site.elevation_m)
+
+    def test_a_caller_that_does_not_mention_it_does_not_change_it(self):
+        # The switch also arrives by config.set from the platform. Saving a
+        # coordinate must not silently undo that.
+        self.agent.site.adsb_baro_correction = True
+        self.agent.set_location(-42.4004, 173.68, 120.0)
+        self.assertTrue(self.agent.site.adsb_baro_correction)
+
+    def test_it_survives_a_reload_of_the_site_file(self):
+        self.submit(latitude="-42.4004", longitude="173.68",
+                    elevation_m="120", adsb_baro_correction="1")
+        from gsu.config import SiteConfig
+        reloaded = SiteConfig.load(self.agent.config.site_config_path)
+        self.assertTrue(reloaded.adsb_baro_correction)
+
+    def test_the_checkbox_is_rendered_inside_the_location_form(self):
+        # The "absence means off" reading in _set_location is only sound while
+        # the input is inside this form and always present.
+        state = {"position": self.agent.position_state()}
+        markup = self.console._section_location(state, "tok")
+        form = markup[markup.index("<form"):markup.index("</form>")]
+        self.assertIn("name='adsb_baro_correction'", form)
+        self.assertIn("type=checkbox", form)

@@ -226,8 +226,16 @@ class PingRxAdsb:
         detail = f"{self.label}{where}, {self.status}"
         if self._parser.good_frames:
             detail += f", {self._parser.good_frames} frames"
-        if self._parser.bad_frames:
-            detail += f", {self._parser.bad_frames} bad"
+        if self._parser.false_starts:
+            # Not "bad frames": these are byte positions that looked like a
+            # start byte and did not pan out. 0xFD and 0xFE occur inside the
+            # payloads of perfectly good frames, and the parser deliberately
+            # tries every candidate rather than trusting the first, so a
+            # healthy receiver produces these continuously — 57 of them
+            # alongside 38 good frames is what a working link looks like.
+            # Called "bad" it read as a corruption rate and invited exactly
+            # the wrong conclusion about the hardware.
+            detail += f", {self._parser.false_starts} false starts"
         if self.positionless:
             detail += f", {self.positionless} contact(s) with no position"
         return Device(

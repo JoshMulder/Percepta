@@ -775,12 +775,25 @@ class Console:
             name: (form.get(name) or [""])[0].strip()
             for name in ("latitude", "longitude", "elevation_m")
         }
+        # An unchecked checkbox sends nothing at all, so its absence from a
+        # submission of *this* form is a real "off" — unlike the fields above,
+        # where absence would be ambiguous. That only holds because the input
+        # is inside this form and always rendered; if it is ever moved, this
+        # line becomes a bug that silently disables the correction.
+        correction = bool(form.get("adsb_baro_correction"))
         if not any(raw.values()):
             # All three empty is a deliberate clear, and it has to be possible:
             # a station commissioned at the wrong coordinates must be able to
             # stop asserting a position rather than be stuck with a plausible
             # wrong one, which is worse than none.
-            self.agent.set_location(None, None, None)
+            #
+            # The correction goes off with it, whatever the box said. It is
+            # computed from the elevation being cleared here, and leaving it on
+            # would leave a station switched on to correct altitudes it can no
+            # longer correct — which reports nulls and a health condition
+            # rather than doing harm, but is still a switch left claiming
+            # something untrue about the site.
+            self.agent.set_location(None, None, None, baro_correction=False)
             self.message = ("good", "Location cleared.")
             return
         if not raw["latitude"] or not raw["longitude"]:
@@ -788,7 +801,19 @@ class Console:
         latitude = parse_latitude(raw["latitude"])
         longitude = parse_longitude(raw["longitude"])
         elevation = parse_elevation_m(raw["elevation_m"]) if raw["elevation_m"] else None
-        self.agent.set_location(latitude, longitude, elevation)
+        if correction and elevation is None:
+            # Refused rather than accepted-and-idle. The correction cannot run
+            # without an elevation, and a checkbox that stays ticked while
+            # nothing happens is how somebody comes to trust a number that was
+            # never computed. The reason lands in the dialog, beside the empty
+            # field that caused it.
+            raise ValueError(
+                "Elevation is needed for the altitude correction. "
+                "Set one, or clear the correction."
+            )
+        self.agent.set_location(
+            latitude, longitude, elevation, baro_correction=correction,
+        )
         self.message = (
             "good",
             f"Location saved: {_degrees(latitude)}, {_degrees(longitude)}.",
@@ -1285,6 +1310,27 @@ class Console:
                 f"placeholder='{html.escape(hint)}' "
                 f"value='{html.escape(_degrees(value))}'></div>"
             )
+        # Immediately under Elevation, because it is the same decision: the
+        # correction re-references reported pressure altitudes to this station's
+        # own barometer, which needs the elevation to be right as well as the
+        # barometer to be working. Separating them would let somebody switch on
+        # a correction whose input is two screens away and empty.
+        #
+        # Labels and a short constraint only — the reasoning is in
+        # devices/altitude.py and in SiteConfig, not on the page.
+        # Control then muted constraint, both direct children of .field — the
+        # same shape as the tuner row, and no wrapper. A wrapper would need its
+        # own alignment rule to undo the 4px a UA gives a checkbox, and would
+        # put a nested </div></div> inside the dialog.
+        checked = " checked" if station.get("adsb_baro_correction") else ""
+        out.append(
+            "<div class=field><label for='adsb_baro_correction'>"
+            "Correct altitudes</label>"
+            "<input type=checkbox id='adsb_baro_correction' "
+            f"name='adsb_baro_correction' value='1'{checked}>"
+            "<span class=muted>Uses this station's barometer. "
+            "Needs an elevation.</span></div>"
+        )
         out.append(
             "<div class=field><div class=actions>"
             "<button type=submit>Save location</button>"
