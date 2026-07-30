@@ -113,7 +113,7 @@
             "number",
             "null"
           ],
-          "description": "Metres."
+          "description": "Metres. Which datum this is depends on altitude_type; a pressure altitude is not height above the station's ground and can be several hundred feet out on a low-pressure day."
         },
         "track": {
           "type": [
@@ -145,6 +145,81 @@
         "alert": {
           "type": "boolean",
           "description": "Close and low enough to be worth flagging. The station decides, because the threshold belongs with the site."
+        },
+        "altitude_type": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "pressure",
+            "geometric",
+            null
+          ],
+          "description": "ADSB_ALTITUDE_TYPE. `pressure` is referenced to 1013.25 hPa, which is what most transponders send; `geometric` is GNSS height. Null when the receiver did not say."
+        },
+        "altitude_corrected_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "The pressure altitude re-referenced to the station's own measured barometer, in metres. Present only when altitude_type is `pressure` and the station has a working barometric sensor; null otherwise. Never a substitute for `altitude` - both travel, so the console can show what was received and what it means locally."
+        },
+        "vertical_speed": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Metres per second, positive climbing. Null when the receiver's vertical-velocity flag was not set."
+        },
+        "emitter_type": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 255,
+          "description": "ADSB_EMITTER_TYPE as the receiver reported it, unmapped: 0 no info, 1 light, 2 small, 3 large, 4 high-vortex large, 5 heavy, 6 highly manoeuvrable, 7 rotorcraft, 9 glider, 10 lighter-than-air, 11 parachute, 12 ultralight, 14 UAV, 15 space, 17 emergency surface, 18 service surface, 19 point obstacle. The integer travels rather than a name because naming is a display decision and a receiver may report a value this list does not cover."
+        },
+        "squawk": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Mode A code as four octal digits carried as an integer, so 7700 is 7700. Null when the receiver's squawk flag was not set."
+        },
+        "seconds_since_contact": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "ADSB_VEHICLE's tslc. How long since this contact was last heard from - a track still on the map at 30 seconds is a memory, not an aircraft."
+        },
+        "on_ground": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Reported airborne/surface state. Null when unknown."
+        },
+        "simulated": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "The receiver flagged this contact as simulated. Carried so a test injection can never be mistaken for traffic."
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "adsb",
+            "uat",
+            null
+          ],
+          "description": "1090ES or UAT, from the receiver's source flag."
         }
       },
       "required": [
