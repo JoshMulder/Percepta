@@ -204,6 +204,12 @@ class PiCsiCamera:
             return self._capture_locked()
 
     def _capture_locked(self) -> Frame | None:
+        if self._retired:
+            # Replaced during rediscovery. Refusing here is what stops a
+            # capture that raced the replacement from reopening the sensor on
+            # an instance nobody references any more — see retire().
+            self._reason = "this camera driver was replaced; not reopening"
+            return None
         if self._backend == "none":
             return None
         if time.monotonic() < self._next_attempt:
@@ -238,6 +244,16 @@ class PiCsiCamera:
         self.last_capture_ms = (time.monotonic() - started) * 1000
         return Frame(jpeg=data, width=self.width, height=self.height, captured_at=at)
 
+    def raw_sample(self) -> list[str]:
+        """Capture stats for the setup page's datastream field: what a frame
+        costs is the camera's data stream, there being no raw bytes to show."""
+        if self._retired or not self.frames:
+            return []
+        return [
+            f"frame {self.frames}: {self.last_bytes / 1024:.1f} kB, "
+            f"{self.last_capture_ms:.0f} ms via {self._backend}"
+        ]
+
     def describe(self) -> Device:
         if self._backend == "none":
             detail = self._reason
@@ -270,6 +286,24 @@ class PiCsiCamera:
         with self._io_lock:
             self._close_locked()
 
+    def retire(self) -> None:
+        """close(), and never open again. For the driver being replaced.
+
+        close() alone is a *relinquish* — the stream path uses it to borrow the
+        sensor, and the next capture reopens picamera2. That is exactly wrong
+        for device rediscovery: the publisher thread can be one line into a
+        capture on this instance when the agent rebuilds the slot, and a
+        relinquished instance then reopens the sensor AFTER its replacement was
+        built — an acquisition nothing will ever release, because nothing holds
+        a reference to this object any more. That zombie hold is what kept the
+        first real station churning `acquire()` every retry until a restart.
+        Serialized on the same lock as capture, so once this returns there is
+        no capture in flight and none can start.
+        """
+        with self._io_lock:
+            self._retired = True
+            self._close_locked()
+
     def _close_locked(self) -> None:
         camera, self._camera = self._camera, None
         if camera is not None:
@@ -300,6 +334,10 @@ class PiCsiCamera:
     #: Set when a picamera2 close() ever fails. From then on the cli path is
     #: used unconditionally - see close() for the wedge this prevents.
     _close_failed = False
+
+    #: Set by retire(). A retired driver never captures and never reopens:
+    #: it has been replaced, and the sensor belongs to its successor.
+    _retired = False
 
     #: Monotonic time before which picamera2 must not be reopened. A failed
     #: open is retried, but not at the snapshot rate: hammering a busy sensor

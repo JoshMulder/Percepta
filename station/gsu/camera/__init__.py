@@ -121,6 +121,57 @@ class Camera(Protocol):
     def close(self) -> None: ...
 
 
+def jpeg_dimensions(data: bytes | None) -> tuple[int, int] | None:
+    """Width and height out of a JPEG's own start-of-frame marker.
+
+    The RTSP driver needs this: the frame size is whatever the camera is
+    configured to send, not a parameter this station holds, and the video
+    schema requires real dimensions on every frame. Walks the marker segments
+    to the SOF (C0-C3, C5-C7, C9-CB, CD-CF — everything but DHT/DAC/RST),
+    which carries height then width, big-endian, after the precision byte.
+    Returns None rather than guessing when the structure is not there.
+    """
+    if not data or len(data) < 4 or not data.startswith(SOI):
+        return None
+    index = 2
+    length = len(data)
+    while index + 4 <= length:
+        if data[index] != 0xFF:
+            return None
+        marker = data[index + 1]
+        if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
+            index += 2               # markers with no payload
+            continue
+        segment = int.from_bytes(data[index + 2:index + 4], "big")
+        if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+            if index + 9 > length:
+                return None
+            height = int.from_bytes(data[index + 5:index + 7], "big")
+            width = int.from_bytes(data[index + 7:index + 9], "big")
+            return (width, height) if width and height else None
+        index += 2 + segment
+    return None
+
+
+def sensor_exclusive(camera) -> bool:
+    """Whether snapshots and the live encoder contend for one physical sensor.
+
+    True for the CSI camera: one ribbon, one owner at a time, so the snapshot
+    path has to relinquish before the encoder starts and hold off while it
+    runs. False for anything that declares `owns_sensor = False` — a network
+    camera does its own capture and encode, and both of this station's paths
+    are just readers — and false for the synthetic source, which is a drawing
+    routine two of which can run at once. The stream and snapshot paths both
+    ask this one function so they cannot drift apart on the answer.
+    """
+    if camera is None:
+        return False
+    if not getattr(camera, "owns_sensor", True):
+        return False
+    describe = getattr(camera, "describe", None)
+    return not (describe and describe().simulated)
+
+
 def parse_resolution(value: object, default: tuple[int, int] = (640, 480)) -> tuple[int, int]:
     """`"640x480"` → `(640, 480)`, tolerantly.
 

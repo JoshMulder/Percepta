@@ -32,6 +32,7 @@ import logging
 import math
 import random
 import time
+from collections import deque
 
 from ..sensors import Aircraft, Device, bearing_to
 from . import mavlink
@@ -72,6 +73,11 @@ class PingRxAdsb:
         self._last_frame: float | None = None
         self._failed = False
         self.positionless = 0
+        # The last few frames, decoded to one line each, for the setup page's
+        # datastream field. Decoded rather than hex: MAVLink bytes tell an
+        # installer nothing, "which aircraft just reported" tells them the
+        # receiver works. Bounded — a tap, never a history.
+        self._raw: deque[str] = deque(maxlen=4)
 
     def set_site(self, latitude: float, longitude: float) -> None:
         self.lat = latitude
@@ -95,9 +101,24 @@ class PingRxAdsb:
         for frame in self._parser.feed(data):
             self._last_frame = now
             if frame.msgid != mavlink.MSG_ADSB_VEHICLE:
+                if frame.msgid == mavlink.MSG_HEARTBEAT:
+                    self._raw.append("HEARTBEAT")
                 continue
             vehicle = mavlink.decode_adsb_vehicle(frame.payload)
             self._vehicles[vehicle.icao] = (vehicle, now)
+            altitude = (
+                f"{vehicle.altitude_m:.0f} m" if vehicle.altitude_m is not None
+                else "alt n/a"
+            )
+            position = (
+                f"{vehicle.latitude:.4f},{vehicle.longitude:.4f}"
+                if vehicle.latitude is not None and vehicle.longitude is not None
+                else "no position"
+            )
+            self._raw.append(
+                f"ADSB_VEHICLE {vehicle.icao} "
+                f"{vehicle.callsign or '-'} {position} {altitude}"
+            )
 
     def poll(self, dt: float) -> list[Aircraft] | None:
         """Contacts, or None when the receiver is not talking to us."""
@@ -168,6 +189,10 @@ class PingRxAdsb:
             present=self.status == "streaming",
             detail=detail, simulated=False,
         )
+
+    def raw_sample(self) -> list[str]:
+        """The last frames, one line each, only while the receiver talks."""
+        return list(self._raw) if self.status == "streaming" else []
 
     def close(self) -> None:
         self.source.close()

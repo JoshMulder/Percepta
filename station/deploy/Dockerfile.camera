@@ -77,7 +77,8 @@ https://archive.raspberrypi.com/debian/ ${SUITE} main" \
         rpicam-apps \
         python3-picamera2 \
         libcamera-ipa \
-        libcamera-tools; \
+        libcamera-tools \
+        ffmpeg; \
     apt-get autoremove -y; \
     rm -rf /var/lib/apt/lists/*
 

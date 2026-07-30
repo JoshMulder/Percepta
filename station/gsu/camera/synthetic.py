@@ -137,6 +137,14 @@ class SyntheticCamera:
         self._reason = ""
         return Frame(jpeg=data, width=self.width, height=self.height, captured_at=at)
 
+    def raw_sample(self) -> list[str]:
+        if not self.frames:
+            return []
+        return [
+            f"frame {self.frames}: {self.last_bytes / 1024:.1f} kB, "
+            f"{self.width}x{self.height} test card"
+        ]
+
     def describe(self) -> Device:
         return Device(
             id="camera",

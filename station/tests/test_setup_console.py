@@ -414,15 +414,77 @@ class ServedPageTests(unittest.TestCase):
 
     # --- what a technician on an SSH tunnel sees ---
 
-    def test_the_devices_page_offers_every_slot_from_the_registry(self):
+    def test_the_devices_page_offers_every_slot_as_a_sub_tab(self):
         from gsu.devices import registry
 
         _, _, body = self.page("/devices")
         for slot in registry.SLOTS:
+            self.assertIn(f"href='/devices?slot={slot}'", body)
+        # An unknown slot lands on the first tab rather than erroring.
+        response, body = self.request("GET", "/devices?slot=../etc")
+        self.assertEqual(response.status, 200)
+        self.assertIn(f"<strong>{registry.SLOTS[0]}</strong>", body)
+
+    def test_each_slot_tab_offers_its_own_devices_from_the_registry(self):
+        from gsu.devices import registry
+
+        for slot in registry.SLOTS:
+            _, body = self.request("GET", f"/devices?slot={slot}")
             self.assertIn(f"<strong>{slot}</strong>", body)
-        # Driven from the registry, not from a second list in the template.
-        for device in registry.REGISTRY:
-            self.assertIn(f"value='{device.id}'", body)
+            self.assertIn(f"href='/devices?slot={slot}' class=active", body)
+            # Driven from the registry, not from a second list in the template.
+            for device in registry.by_slot(slot):
+                self.assertIn(f"value='{device.id}'", body, f"{slot}: {device.id}")
+
+    def test_every_slot_tab_carries_a_datastream_field(self):
+        from gsu.devices import registry
+
+        for slot in registry.SLOTS:
+            _, body = self.request("GET", f"/devices?slot={slot}")
+            self.assertIn(f"data-slot='{slot}'", body, slot)
+
+    def test_the_devices_script_is_admitted_by_the_responses_own_nonce(self):
+        # One inline script, one nonce, minted per response: the header and
+        # the tag must agree, and two responses must not share one.
+        response, body = self.request("GET", "/devices")
+        csp = response.getheader("Content-Security-Policy") or ""
+        self.assertIn("script-src 'nonce-", csp)
+        nonce = csp.split("'nonce-")[1].split("'")[0]
+        self.assertIn(f"<script nonce='{nonce}'>", body)
+        second, _ = self.request("GET", "/devices")
+        self.assertNotEqual(
+            csp, second.getheader("Content-Security-Policy"),
+            "a reused nonce is a nonce an injected payload can learn",
+        )
+        # Pages without the script advertise no script source at all.
+        response, _ = self.request("GET", "/")
+        self.assertNotIn("script-src",
+                         response.getheader("Content-Security-Policy") or "")
+
+    def test_without_javascript_the_save_button_is_simply_enabled(self):
+        # The no-JS path is acceptable degradation, which means the rendered
+        # button must not be disabled — only the script may disable it.
+        _, _, body = self.page("/devices")
+        self.assertIn("<button type=submit>Save</button>", body)
+        self.assertNotIn("<button type=submit disabled", body)
+
+    def test_status_json_carries_the_raw_samples_the_script_polls(self):
+        from gsu.devices import registry
+
+        self.agent.step(1.0, weather_due=True)   # give the sensors a tick
+        _, body = self.request("GET", "/status.json")
+        samples = json.loads(body)["raw_samples"]
+        self.assertEqual(set(samples), set(registry.SLOTS))
+        self.assertTrue(samples["weather"], "a connected sensor shows its data")
+        for slot in registry.SLOTS:
+            for line in samples[slot]:
+                self.assertLessEqual(len(line), 200)
+
+    def test_the_camera_tab_carries_the_camera_section(self):
+        _, body = self.request("GET", "/devices?slot=camera")
+        self.assertIn("Camera</h2>", body)
+        _, body = self.request("GET", "/devices?slot=weather")
+        self.assertNotIn("Camera</h2>", body)
 
     def test_the_summary_page_has_a_line_per_slot(self):
         from gsu.devices import registry
@@ -530,7 +592,8 @@ class ServedPageTests(unittest.TestCase):
             {"Cookie": token},
         )
         self.assertEqual(response.status, 303)
-        self.assertEqual(response.getheader("Location"), "/devices")
+        # And to the sub-tab the form lives on, not the page's first tab.
+        self.assertEqual(response.getheader("Location"), "/devices?slot=weather")
         token, csrf, _ = self.page()
         response, _ = self.request(
             "POST", "/enrol", f"token=&csrf={csrf}", {"Cookie": token},
@@ -664,9 +727,9 @@ class ServedPageTests(unittest.TestCase):
             self.agent.inventory.fitted["camera"].params["password"],
             "s3cr3t-camera-pw",
         )
-        _, _, body = self.page()
+        _, _, body = self.page("/devices?slot=camera")
         self.assertNotIn("s3cr3t-camera-pw", body)
-        self.assertIn("A password is stored", body)
+        self.assertIn("Stored. Blank keeps it.", body)
         response, status = self.request("GET", "/status.json")
         self.assertNotIn("s3cr3t-camera-pw", status)
 
@@ -793,6 +856,37 @@ class LanPeerTests(unittest.TestCase):
         self.assertEqual(response.status, 401)
         self.assertIn("wrong password", body)
         self.assertIsNone(response.getheader("Set-Cookie"))
+
+    def test_a_first_view_shows_no_error_because_there_is_none(self):
+        # "password required" in a red box before anyone has typed anything
+        # reads as a fault. Reasons belong to attempts.
+        response, body = self.request("GET", "/")
+        self.assertEqual(response.status, 401)
+        self.assertNotIn("msg bad", body)
+        self.assertNotIn("password required", body)
+        # An attempt earns one.
+        _, body = self.request("POST", "/login", "password=nope")
+        self.assertIn("msg bad", body)
+
+    def test_the_helper_line_says_where_the_password_lives(self):
+        _, body = self.request("GET", "/")
+        self.assertIn(
+            "The login password can be found on this box's label, or with "
+            "whoever provisioned it.", body,
+        )
+
+    def test_the_login_page_wears_the_mark_and_stays_self_contained(self):
+        from gsu.brand import LOGO_DATA_URI
+
+        response, body = self.request("GET", "/")
+        self.assertIn("data:image/png;base64,", body)
+        self.assertIn(LOGO_DATA_URI, body)
+        self.assertIn("PERCEPTA", body)
+        # Self-contained means self-contained: nothing fetched from anywhere.
+        self.assertNotIn("http://", body.replace("http://127.0.0.1", ""))
+        self.assertNotIn("https://", body)
+        csp = response.getheader("Content-Security-Policy") or ""
+        self.assertIn("img-src 'self' data:", csp)
 
 
 if __name__ == "__main__":

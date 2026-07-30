@@ -69,6 +69,9 @@ class AirmarWeather:
         self._gusts: deque[tuple[float, float]] = deque()
         self._last_data: float | None = None
         self._failed = False
+        # The last few sentences as they arrived, for the setup page's
+        # datastream field. Bounded and current — a tap, never a history.
+        self._raw: deque[str] = deque(maxlen=4)
 
     # --- reading --------------------------------------------------------
 
@@ -82,6 +85,7 @@ class AirmarWeather:
         if not data:
             return
         for line in self._lines.feed(data):
+            self._raw.append(line)
             if self._decoder.feed_line(line):
                 self._last_data = time.monotonic()
 
@@ -155,6 +159,11 @@ class AirmarWeather:
             present=self.status in ("streaming", "stalled"),
             detail=detail, simulated=False,
         )
+
+    def raw_sample(self) -> list[str]:
+        """The instrument's own last sentences, only while it is talking.
+        Stale lines rendered as live data would be a lie with a timestamp."""
+        return list(self._raw) if self.receiving else []
 
     def close(self) -> None:
         self.source.close()

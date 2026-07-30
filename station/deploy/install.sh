@@ -365,6 +365,18 @@ else
 fi
 timedatectl 2>/dev/null | sed 's/^/      /' || true
 
+# --- 7b. the RTSP camera path ----------------------------------------------
+# ffmpeg is what reads a network (RTSP) camera: one frame per snapshot, and
+# the live stream remuxed without re-encoding (gsu/camera/rtsp.py). Advisory
+# rather than fatal — a CSI-only or camera-less station does not need it, and
+# the driver reports its absence in the device inventory in exactly these
+# words. The camera container image installs it unconditionally
+# (Dockerfile.camera); this covers the systemd path.
+if [ "$DEPLOY_PATH" = "systemd" ] && ! command -v ffmpeg >/dev/null 2>&1; then
+  info "ffmpeg is not installed. Only needed for a network (RTSP) camera:"
+  info "  apt install ffmpeg"
+fi
+
 # --- 8. the service --------------------------------------------------------
 # Both unit files are installed either way, so switching paths later is one
 # systemctl command rather than another install. **Only one is ever enabled**:

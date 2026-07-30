@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -115,6 +116,10 @@ class RadioController:
         self._rssi_db = -100.0
         self._floor_db = -100.0
         self._open = False
+        # The last few measurement lines for the setup page's datastream
+        # field: what the receiver is hearing, in the terms the console's own
+        # radio panel uses. Bounded — a tap, never a history.
+        self._raw: deque[str] = deque(maxlen=4)
 
         self._load()
         self.front_end.tune(self.freq_hz)
@@ -240,6 +245,12 @@ class RadioController:
             "tx_capable": False,
         }
 
+        self._raw.append(
+            f"{self.freq_hz / 1e6:.3f} MHz  rssi {self._rssi_db:.1f} dB  "
+            f"floor {self._floor_db:.1f} dB  squelch "
+            f"{'open' if self._open else 'closed'}"
+        )
+
         audio = None
         if self._open:
             samples = self.front_end.demodulate(int(AUDIO_RATE * dt))
@@ -251,6 +262,9 @@ class RadioController:
     @property
     def squelch_open(self) -> bool:
         return self._open
+
+    def raw_sample(self) -> list[str]:
+        return list(self._raw)
 
     def describe(self) -> Device:
         return self.front_end.describe()

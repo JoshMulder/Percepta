@@ -37,6 +37,7 @@ import logging
 import time
 
 from . import clock
+from .camera import sensor_exclusive
 from .camera.h264 import StreamSettings, choose_encoder, probe_encoders
 from .media.fmp4 import Fmp4Muxer
 from .transport.stream import build_uplink, media_url
@@ -141,9 +142,12 @@ class StreamSession:
         # retries below outlast the one already in flight. Neither hold was
         # visible on a box where the camera is synthetic, which is every box
         # this ran on before a real one.
+        # Only where snapshots and the encoder share one physical sensor — a
+        # network camera serves both readers at once, and the synthetic pair
+        # can run together. One predicate decides, shared with video.py.
         self.state = "starting"
         camera = getattr(self.agent, "camera", None)
-        if camera is not None and hasattr(camera, "close"):
+        if sensor_exclusive(camera) and hasattr(camera, "close"):
             camera.close()
             # And wait out the capture already running. close() frees the
             # picamera2 hold, but a cli snapshot is a subprocess that owns the
@@ -151,12 +155,10 @@ class StreamSession:
             # outlasted. The encoder spawns cleanly either way and dies
             # asynchronously when acquisition fails, which is why retrying the
             # spawn never helped. Two and a half seconds covers the slowest
-            # capture this hardware has produced; a real camera is the only
-            # case that needs it, and the platform's viewer is already seconds
-            # of tickets and websockets away from instant.
-            describe = getattr(camera, "describe", None)
-            if not (describe and describe().simulated):
-                time.sleep(2.5)
+            # capture this hardware has produced; a sensor-exclusive camera is
+            # the only case that needs it, and the platform's viewer is
+            # already seconds of tickets and websockets away from instant.
+            time.sleep(2.5)
 
         self.frames = 0
         self.bytes_out = 0
@@ -330,6 +332,21 @@ class StreamSession:
                 "channel is publishing available: false for the same reason."
             )
             return None
+        # A camera that brings its own stream brings it whole: an RTSP camera
+        # encodes on the far end and the station remuxes, so probing this
+        # box's encoders would answer a question nobody asked.
+        build_source = getattr(camera, "stream_source", None)
+        if build_source is not None:
+            source = build_source(settings)
+            if source is None:
+                self.reason = (
+                    getattr(camera, "unavailable_reason", "")
+                    or "the camera cannot provide a live stream"
+                )[:200]
+                return None
+            self.encoder_choice = getattr(source, "kind", "camera-provided stream")
+            log.info("Streaming from the camera's own source: %s", self.encoder_choice)
+            return source
         encoder, why = choose_encoder(self.agent.config.encoder)
         self.encoder_choice = why
         if encoder is None:
@@ -355,6 +372,13 @@ class StreamSession:
             int(request.get("bitrate_kbps", site.stream_bitrate_kbps)),
         )
         camera = getattr(self.agent, "camera", None)
+        # A remux source runs at the camera's own configured rate — the
+        # station copies what arrives and cannot change it. The muxer's clock
+        # is built from this figure, and pacing it to anything else plays the
+        # stream fast or slow at the far end.
+        camera_fps = getattr(camera, "stream_fps", None)
+        if camera_fps:
+            fps = float(camera_fps)
         return StreamSettings(
             width=max(160, width - width % 16 if width % 16 else width),
             height=max(120, height),

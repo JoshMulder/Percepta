@@ -44,8 +44,10 @@ Who may reach this page, and for how long, is `setup_access.py` and the
 reasoning is all in that module's docstring. What this file owes it:
 
 - every response carries `Cache-Control: no-store` and a CSP that permits no
-  script, no frame and no off-box form target — the page uses no JavaScript at
-  all, so that policy costs nothing and closes most of what is left
+  frame, no off-box form target and no script beyond the single inline block
+  the Devices page carries under a per-response nonce. That script is
+  progressive enhancement only — live save buttons and a refreshing
+  datastream field — and every page keeps working with it blocked or absent
 - every state-changing POST carries a CSRF token bound to the session cookie
 - the `Host` header must be an IP literal, `localhost` or a `.local` name, which
   is what stops a public web page rebinding its own name to this station's
@@ -62,6 +64,7 @@ import html
 import ipaddress
 import json
 import logging
+import secrets
 import threading
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -83,11 +86,15 @@ MAX_BODY_BYTES = 64 * 1024
 #: free on a Pi 2B.
 WATCH_SECONDS = 5.0
 
-#: No script, no frames, no off-box form target. The page has no JavaScript, so
-#: the only relaxation needed is the inline stylesheet.
+#: No frames, no off-box form target, no external anything. Script is allowed
+#: only as the one inline block the Devices page carries, keyed by a nonce
+#: generated per response (`_headers`) — a stored-XSS payload cannot know it,
+#: and no other script source is ever valid. `connect-src 'self'` is what lets
+#: that script poll status.json; it permits nothing off-box.
 CSP = (
     "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; "
-    "form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+    "connect-src 'self'; form-action 'self'; base-uri 'none'; "
+    "frame-ancestors 'none'"
 )
 
 STYLE = """
@@ -165,12 +172,27 @@ STYLE = """
  .tabs a:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
  .slot-head { display: flex; justify-content: space-between; align-items: baseline;
               gap: 1rem; }
+ /* The Devices page's slot strip: same tab language as the page strip, one
+    level down, so "which slot am I on" reads the same way as "which page". */
+ .subtabs { background: transparent; border-bottom: 0;
+   padding: .25rem 0 .75rem; margin: 0; }
+ /* The datastream field: the sensor's own last lines, monospace, bounded.
+    A fixed min-height so an empty field reads as "no data", not as a
+    missing element. */
+ pre.raw { font: .8rem ui-monospace, monospace; color: var(--text);
+   background: var(--panel-2); border: 1px solid var(--line-soft);
+   border-radius: .375rem; padding: .55rem .7rem; margin: .4rem 0 .6rem;
+   min-height: 2.4rem; white-space: pre; overflow-x: auto; }
+ button:disabled { opacity: .45; cursor: default; }
+ button:disabled:hover { background: var(--brand); border-color: var(--brand); }
  .fixed { color: var(--text); font-family: ui-monospace, monospace; font-size: .9rem;
           word-break: break-all; }
  /* The sign-in, shaped like the console's: a centred card under the brand
-    glow. The wordmark is text - the console's mark is a PNG this
-    self-contained page does not carry - and the page still names no station:
-    PERCEPTA is what the product is, not which box this is. */
+    glow, the mark above the wordmark at the console's large brand size. The
+    page still names no station: PERCEPTA is what the product is, not which
+    box this is. */
+ .brand-mark { display: block; width: 3.5rem; height: 3.5rem;
+   margin: 0 auto .625rem; }
  .login-wrap { min-height: 100vh; display: grid; place-items: center;
    background: radial-gradient(60% 60% at 50% 38%, rgba(0,160,220,.09) 0%, var(--bg) 70%); }
  .login-card { width: min(22.5rem, calc(100vw - 2rem)); background: var(--panel);
@@ -449,9 +471,12 @@ class Console:
 
         if not decision.allow:
             if decision.login:
+                # A plain first view carries no error: nobody has done
+                # anything yet, and "password required" in a red box reads as
+                # a fault. Reasons appear only on the responses to an actual
+                # attempt — wrong password, lockout — which _do_login renders.
                 return self._send_html(
-                    handler, self._render_login(decision.reason),
-                    status=decision.status,
+                    handler, self._render_login(""), status=decision.status,
                 )
             log.warning(
                 "Setup page refused a %s from %s: %s", method, peer, decision.reason
@@ -469,8 +494,19 @@ class Console:
             if path in ("/index.html", "/login"):
                 path = "/"
             if path in PAGES:
+                slot = None
+                nonce = None
+                if path == "/devices":
+                    # One sub-tab per slot; the query names it and anything
+                    # unrecognised lands on the first tab rather than erroring.
+                    query = parse_qs(urlsplit(handler.path).query)
+                    slot = (query.get("slot") or [""])[0]
+                    if slot not in registry.SLOTS:
+                        slot = registry.SLOTS[0]
+                    nonce = secrets.token_urlsafe(16)
                 return self._send_html(
-                    handler, self.render(session, path), cookie=cookie
+                    handler, self.render(session, path, slot=slot, nonce=nonce),
+                    cookie=cookie, nonce=nonce,
                 )
             return self._deny(handler, 404, "No such page.")
 
@@ -491,7 +527,12 @@ class Console:
             return self._redirect(handler, cookie, home)
         try:
             if path == "/device":
-                self._set_device(form)
+                saved = self._set_device(form)
+                if saved:
+                    # Back to the sub-tab the form lives on. `saved` has been
+                    # validated against registry.SLOTS — nothing from the
+                    # request reaches the Location header unchecked.
+                    home = f"/devices?slot={saved}"
             elif path == "/enrol":
                 self._enrol(form)
             else:  # /logout
@@ -560,7 +601,7 @@ class Console:
             f"Enrolled as {enrolment.site.name}. Telemetry is on its way.",
         )
 
-    def _set_device(self, form: dict) -> None:
+    def _set_device(self, form: dict) -> str:
         slot = (form.get("slot") or [""])[0]
         if slot not in registry.SLOTS:
             raise ValueError(f"{slot!r} is not a slot on this station.")
@@ -596,6 +637,14 @@ class Console:
         # Rebuild immediately: an installer who changes a port expects to see
         # within seconds whether the box can now talk to the thing.
         self.agent.build_devices()
+        if slot == "camera" and getattr(self.agent, "_stream_holds_camera",
+                                        lambda: False)():
+            # The rebuild deliberately leaves the camera alone while the live
+            # stream holds the sensor (agent.build_devices); say so rather
+            # than reporting the old driver's state as this save's outcome.
+            self.message = ("good", f"{slot}: saved. Applies when the live "
+                                    "stream stops.")
+            return slot
         report = {r.slot: r for r in self.agent.inventory.report()}[slot]
         if not type_id:
             self.message = ("good", f"{slot}: nothing fitted.")
@@ -605,6 +654,7 @@ class Console:
             self.message = (
                 "bad", f"{slot}: {report.label} saved, but not detected. {report.detail}",
             )
+        return slot
 
     # --- rendering ------------------------------------------------------
 
@@ -632,7 +682,7 @@ class Console:
         }
 
     def _headers(self, handler, status: int, kind: str, length: int,
-                 cookie: str | None) -> None:
+                 cookie: str | None, nonce: str | None = None) -> None:
         handler.send_response(status)
         handler.send_header("Content-Type", kind)
         handler.send_header("Content-Length", str(length))
@@ -650,7 +700,11 @@ class Console:
         # which for a page with no outbound links is the same privacy, and
         # lets the browser vouch for its own posts.
         handler.send_header("Referrer-Policy", "same-origin")
-        handler.send_header("Content-Security-Policy", CSP)
+        # The nonce admits exactly one inline script — the one this response
+        # itself carries — and is minted per response, so nothing injected
+        # into rendered content can ever name it.
+        csp = CSP + (f"; script-src 'nonce-{nonce}'" if nonce else "")
+        handler.send_header("Content-Security-Policy", csp)
         if cookie:
             # No `Secure`: this is plain HTTP and always will be — see
             # setup_access.py on why a self-signed certificate here is theatre.
@@ -667,9 +721,10 @@ class Console:
         handler.wfile.write(body)
 
     def _send_html(self, handler, text: str, cookie: str | None = None,
-                   status: int = 200) -> None:
+                   status: int = 200, nonce: str | None = None) -> None:
         body = text.encode()
-        self._headers(handler, status, "text/html; charset=utf-8", len(body), cookie)
+        self._headers(handler, status, "text/html; charset=utf-8", len(body),
+                      cookie, nonce)
         handler.wfile.write(body)
 
     def _deny(self, handler, status: int, reason: str) -> None:
@@ -699,13 +754,21 @@ class Console:
         Somebody who has reached this page has reached a private network and
         nothing more, and there is no reason to confirm for them which box they
         have found before they can prove they are meant to be here.
+
+        `reason` is non-empty only on the response to a failed attempt or a
+        lockout; a first view shows no error, because there is none. The mark
+        is a data: URI (gsu/brand.py) so the page stays self-contained.
         """
+        from .brand import LOGO_DATA_URI
+
         return "".join([
             "<!doctype html><meta charset=utf-8>",
             "<meta name=viewport content='width=device-width,initial-scale=1'>",
             "<title>Ground station setup</title>",
             f"<style>{STYLE}</style>",
             "<div class=login-wrap><div class=login-card>",
+            f"<img class=brand-mark src='{LOGO_DATA_URI}' alt='' "
+            "width=56 height=56>",
             "<div class=brand-word>PERCEPTA</div>",
             "<h1>Ground station setup</h1>",
             f"<div class='msg bad'>{html.escape(reason)}</div>" if reason else "",
@@ -714,12 +777,13 @@ class Console:
             "<input id=password name=password type=password autocomplete='off' "
             "autofocus>",
             "<button type=submit>Sign in</button></form>",
-            "<div class=muted>It is on the label on this box, or with whoever "
-            "provisioned it. It is not the enrolment code.</div>",
+            "<div class=muted>The login password can be found on this box's "
+            "label, or with whoever provisioned it.</div>",
             "</div></div>",
         ])
 
-    def render(self, session=None, page: str = "/") -> str:
+    def render(self, session=None, page: str = "/", slot: str | None = None,
+               nonce: str | None = None) -> str:
         state = self.agent.snapshot()
         csrf = self.gate.csrf_token(session)
         out = [
@@ -742,9 +806,12 @@ class Console:
             out.append(self._section_security(state))
             out.append(self._section_access(session, csrf))
         elif page == "/devices":
-            out.append(self._section_devices(state, csrf))
-            out.append(self._section_camera(state))
-            out.append(self._section_gaps(state))
+            slot = slot if slot in registry.SLOTS else registry.SLOTS[0]
+            out.append(self._section_devices(state, csrf, slot))
+            if slot == "camera":
+                out.append(self._section_camera(state))
+            if nonce:
+                out.append(self._devices_script(nonce))
         elif page == "/logging":
             out.append(self._section_events(state))
         else:
@@ -1009,197 +1076,238 @@ class Console:
         }.get(source, source)
         return wording if state.get("rtc_present") else f"{wording} (no RTC fitted)"
 
-    def _section_devices(self, state: dict, csrf: str) -> str:
-        out = ["<h2>What is fitted</h2>"]
+    @staticmethod
+    def _slot_tabs(active: str) -> str:
+        """One sub-tab per slot, same tab language as the page strip. Links,
+        not buttons: they must work with no script, and each is a GET."""
+        out = ["<nav class='tabs subtabs'>"]
+        for slot in registry.SLOTS:
+            css = " class=active" if slot == active else ""
+            out.append(f"<a href='/devices?slot={slot}'{css}>{html.escape(slot)}</a>")
+        out.append("</nav>")
+        return "".join(out)
+
+    def _section_devices(self, state: dict, csrf: str, slot: str) -> str:
+        # Rendering rule for this page, an owner requirement: labels and short
+        # constraints only. Everything that used to be explained on screen —
+        # why ports are assigned by-id, why a tuner serves one band, what a
+        # device cannot measure and why that matters — lives in the registry
+        # and in code comments. The page states facts; the reasoning is here.
+        out = ["<h2>What is fitted</h2>", self._slot_tabs(slot)]
         if state["conflicts"]:
+            # Not prose: these are faults, in the words an operator acts on.
             out.append("<div class='msg bad'><ul>")
             for conflict in state["conflicts"]:
                 out.append(f"<li>{html.escape(conflict)}</li>")
             out.append("</ul></div>")
 
         resources = state["resources"]
-        by_slot = {report["slot"]: report for report in state["devices"]}
-        fitted = self.agent.inventory.fitted
+        report = {r["slot"]: r for r in state["devices"]}[slot]
+        entry = self.agent.inventory.fitted.get(slot)
+        css, wording = STATUS_PILL.get(report["status"], ("off", report["status"]))
 
-        for slot in registry.SLOTS:
-            report = by_slot[slot]
-            entry = fitted.get(slot)
-            css, wording = STATUS_PILL.get(report["status"], ("off", report["status"]))
-            out.append("<div class=card>")
-            out.append(
-                f"<div class=slot-head><strong>{html.escape(slot)}</strong>"
-                f"<span class='pill {css}'>{html.escape(wording)}</span></div>"
-            )
-            # Intent and fact, on separate lines, always both.
-            out.append(
-                f"<div class=muted>selected: {html.escape(report['label'])}</div>"
-            )
-            if report["detail"]:
-                out.append(f"<div class=muted>found: {html.escape(report['detail'])}</div>")
-            elif report["configured"]:
-                out.append("<div class=muted>found: nothing reported yet</div>")
-
-            out.append(f"<form method=post action='/device'><input type=hidden name=slot value='{slot}'>")
-            out.append(self._csrf_field(csrf))
-            out.append("<div class=field><label>Device</label><select name=type_id>")
-            out.append(
-                f"<option value=''{' selected' if not report['configured'] else ''}>"
-                "— not fitted —</option>"
-            )
-            for device in registry.by_slot(slot):
-                selected = " selected" if entry and entry.type_id == device.id else ""
-                suffix = "" if device.driver else "  (no driver in this build)"
-                out.append(
-                    f"<option value='{device.id}'{selected}>"
-                    f"{html.escape(device.label)}{suffix}</option>"
-                )
-            out.append("</select></div>")
-
-            selected_device = registry.get(entry.type_id) if entry and entry.type_id else None
-            if selected_device is not None:
-                for parameter in selected_device.parameters:
-                    value = (entry.params or {}).get(parameter.name, parameter.default)
-                    out.append("<div class=field>")
-                    out.append(
-                        f"<label for='p_{parameter.name}'>{html.escape(parameter.label)}</label>"
-                    )
-                    name = f"p_{parameter.name}"
-                    if parameter.type == "bool":
-                        checked = " checked" if value else ""
-                        out.append(
-                            f"<input type=checkbox id='{name}' name='{name}'{checked}>"
-                        )
-                    elif parameter.type == "password":
-                        # The one field on this page whose current value is a
-                        # secret. It is never rendered — not as a value, not in
-                        # a placeholder, not in a comment. What is rendered is
-                        # whether one is stored, which is what an installer
-                        # actually needs to know.
-                        stored = bool((entry.params or {}).get(parameter.name))
-                        out.append(
-                            f"<input type=password id='{name}' name='{name}' "
-                            f"value='' autocomplete='new-password' "
-                            f"placeholder='{'unchanged' if stored else 'not set'}'>"
-                        )
-                        out.append(
-                            "<span class=muted>"
-                            + ("A password is stored. Leave blank to keep it."
-                               if stored else "No password stored.")
-                            + "</span>"
-                        )
-                    elif parameter.type == "select":
-                        out.append(f"<select id='{name}' name='{name}'>")
-                        for choice in parameter.choices:
-                            sel = " selected" if str(value) == str(choice) else ""
-                            out.append(f"<option{sel}>{html.escape(str(choice))}</option>")
-                        out.append("</select>")
-                    elif parameter.name == "port":
-                        # The single most likely thing to be got wrong on a
-                        # first install, so the ports that exist right now are
-                        # offered rather than described. A free-text field is
-                        # kept underneath it: the device may not be plugged in
-                        # yet, and refusing to save a port that is currently
-                        # absent would be worse than saving one that is.
-                        out.append(
-                            f"<input type=text id='{name}' name='{name}' "
-                            f"list='ports-{slot}' value='{html.escape(str(value))}' "
-                            "placeholder='/dev/serial/by-id/…'>"
-                        )
-                        out.append(f"<datalist id='ports-{slot}'>")
-                        for port in state.get("serial_ports") or []:
-                            out.append(
-                                f"<option value='{html.escape(port['id'])}'>"
-                                f"{html.escape(port['detail'] or port['model'])}</option>"
-                            )
-                        out.append("</datalist>")
-                    else:
-                        field_type = "number" if parameter.type == "number" else "text"
-                        out.append(
-                            f"<input type={field_type} id='{name}' name='{name}' "
-                            f"value='{html.escape(str(value))}'>"
-                        )
-                    if parameter.help:
-                        out.append(f"<span class=muted>{html.escape(parameter.help)}</span>")
-                    out.append("</div>")
-
-                if selected_device.resource:
-                    out.append("<div class=field><label>Receiver</label><select name=resource>")
-                    out.append("<option value=''>— none assigned —</option>")
-                    for resource in resources:
-                        sel = " selected" if entry and entry.resource == resource["id"] else ""
-                        label = f"{resource['model']} serial {resource['serial'] or 'unset'}"
-                        out.append(
-                            f"<option value='{html.escape(resource['id'])}'{sel}>"
-                            f"{html.escape(label)}</option>"
-                        )
-                    out.append("</select>")
-                    out.append(
-                        "<span class=muted>One tuner serves one band. Assigned by "
-                        "serial number, because USB order changes between boots.</span>"
-                    )
-                    out.append("</div>")
-
-                if selected_device.absent:
-                    out.append(
-                        "<div class=muted>No source on this device for: "
-                        + html.escape(", ".join(selected_device.absent))
-                        + " — those fields are published as absent, never as zero.</div>"
-                    )
-                if selected_device.notes:
-                    out.append(f"<div class=muted>{html.escape(selected_device.notes)}</div>")
-            out.append("<button type=submit>Save</button></form>")
-            out.append("</div>")
-
-        if not resources:
-            out.append(
-                "<div class=card><div class=muted>No SDR receivers detected on the "
-                "USB bus. A dongle with no serial programmed cannot be told apart "
-                "from an identical one — program it with rtl_eeprom before fitting "
-                "a second.</div></div>"
-            )
-
-        # What is actually plugged in, listed once. On a box with two USB-UARTs
-        # this is the page a technician reads to work out which is which.
-        ports = state.get("serial_ports") or []
-        out.append("<div class=card><div class=k>Serial ports present now</div><ul>")
-        if not ports:
-            out.append(
-                "<li class=warn>None. Neither USB-UART is enumerating — check "
-                "the leads, then <code>dmesg | tail</code>.</li>"
-            )
-        for port in ports:
-            out.append(
-                f"<li><code>{html.escape(port['id'])}</code>"
-                + (f" <span class=muted>→ {html.escape(port['detail'])}</span>"
-                   if port["detail"] else "")
-                + "</li>"
-            )
+        out.append("<div class=card>")
         out.append(
-            "</ul><div class=muted>Use the <code>/dev/serial/by-id/…</code> "
-            "names. They come from the adapter's own identity; ttyUSB numbering "
-            "changes between boots and two adapters will swap over.</div></div>"
+            f"<div class=slot-head><strong>{html.escape(slot)}</strong>"
+            f"<span class='pill {css}'>{html.escape(wording)}</span></div>"
         )
+        # Intent and fact, on separate lines, always both.
+        out.append(f"<div class=muted>selected: {html.escape(report['label'])}</div>")
+        if report["detail"]:
+            out.append(f"<div class=muted>found: {html.escape(report['detail'])}</div>")
+        elif report["configured"]:
+            out.append("<div class=muted>found: nothing reported yet</div>")
+
+        # The sensor's own last lines — empty when nothing is connected. The
+        # nonce'd script refreshes it from status.json; without script it is
+        # the state at render time, which is still the truth.
+        lines = (state.get("raw_samples") or {}).get(slot) or []
+        out.append("<div class=field><label>Data</label></div>")
+        out.append(
+            f"<pre class=raw id=raw data-slot='{slot}'>"
+            + html.escape("\n".join(lines)) + "</pre>"
+        )
+
+        out.append(
+            f"<form method=post action='/device' data-device>"
+            f"<input type=hidden name=slot value='{slot}'>"
+        )
+        out.append(self._csrf_field(csrf))
+        out.append("<div class=field><label>Device</label><select name=type_id>")
+        out.append(
+            f"<option value=''{' selected' if not report['configured'] else ''}>"
+            "— not fitted —</option>"
+        )
+        for device in registry.by_slot(slot):
+            selected = " selected" if entry and entry.type_id == device.id else ""
+            suffix = "" if device.driver else "  (no driver in this build)"
+            out.append(
+                f"<option value='{device.id}'{selected}>"
+                f"{html.escape(device.label)}{suffix}</option>"
+            )
+        out.append("</select></div>")
+
+        selected_device = registry.get(entry.type_id) if entry and entry.type_id else None
+        if selected_device is not None:
+            for parameter in selected_device.parameters:
+                value = (entry.params or {}).get(parameter.name, parameter.default)
+                name = f"p_{parameter.name}"
+                out.append("<div class=field>")
+                out.append(
+                    f"<label for='{name}'>{html.escape(parameter.label)}</label>"
+                )
+                if parameter.type == "bool":
+                    checked = " checked" if value else ""
+                    out.append(
+                        f"<input type=checkbox id='{name}' name='{name}'{checked}>"
+                    )
+                elif parameter.type == "password":
+                    # The one field whose current value is a secret. Never
+                    # rendered — not as a value, not in a placeholder. What is
+                    # rendered is whether one is stored, which is the fact an
+                    # installer needs; blank means "keep it" (see _set_device).
+                    stored = bool((entry.params or {}).get(parameter.name))
+                    out.append(
+                        f"<input type=password id='{name}' name='{name}' "
+                        f"value='' autocomplete='new-password' "
+                        f"placeholder='{'unchanged' if stored else 'not set'}'>"
+                    )
+                    out.append(
+                        "<span class=muted>"
+                        + ("Stored. Blank keeps it." if stored else "Not set.")
+                        + "</span>"
+                    )
+                elif parameter.type == "select":
+                    out.append(f"<select id='{name}' name='{name}'>")
+                    for choice in parameter.choices:
+                        sel = " selected" if str(value) == str(choice) else ""
+                        out.append(f"<option{sel}>{html.escape(str(choice))}</option>")
+                    out.append("</select>")
+                elif parameter.name == "port":
+                    # The ports that exist right now are offered; free text is
+                    # kept because the device may not be plugged in yet.
+                    out.append(
+                        f"<input type=text id='{name}' name='{name}' "
+                        f"list='ports-{slot}' value='{html.escape(str(value))}' "
+                        "placeholder='/dev/serial/by-id/…'>"
+                    )
+                    out.append(f"<datalist id='ports-{slot}'>")
+                    for port in state.get("serial_ports") or []:
+                        out.append(
+                            f"<option value='{html.escape(port['id'])}'>"
+                            f"{html.escape(port['detail'] or port['model'])}</option>"
+                        )
+                    out.append("</datalist>")
+                else:
+                    field_type = "number" if parameter.type == "number" else "text"
+                    out.append(
+                        f"<input type={field_type} id='{name}' name='{name}' "
+                        f"value='{html.escape(str(value))}'>"
+                    )
+                out.append("</div>")
+
+            if selected_device.resource:
+                out.append("<div class=field><label>Receiver</label><select name=resource>")
+                out.append("<option value=''>— none assigned —</option>")
+                for resource in resources:
+                    sel = " selected" if entry and entry.resource == resource["id"] else ""
+                    label = f"{resource['model']} serial {resource['serial'] or 'unset'}"
+                    out.append(
+                        f"<option value='{html.escape(resource['id'])}'{sel}>"
+                        f"{html.escape(label)}</option>"
+                    )
+                out.append("</select><span class=muted>One tuner, one band.</span></div>")
+
+            if selected_device.absent:
+                out.append(
+                    "<div class=muted>No source for: "
+                    + html.escape(", ".join(selected_device.absent)) + "</div>"
+                )
+        # Enabled without script (degradation the design accepts); the nonce'd
+        # script disables it until a field differs from its loaded value.
+        out.append("<button type=submit>Save</button></form>")
+        out.append("</div>")
+
+        connections = {device.connection for device in registry.by_slot(slot)}
+        if "serial" in connections:
+            ports = state.get("serial_ports") or []
+            out.append("<div class=card><div class=k>Serial ports present now</div><ul>")
+            if not ports:
+                out.append("<li class=warn>none</li>")
+            for port in ports:
+                out.append(
+                    f"<li><code>{html.escape(port['id'])}</code>"
+                    + (f" <span class=muted>→ {html.escape(port['detail'])}</span>"
+                       if port["detail"] else "")
+                    + "</li>"
+                )
+            out.append(
+                "</ul><div class=muted>Use the <code>/dev/serial/by-id/…</code> "
+                "name.</div></div>"
+            )
+        if "usb-sdr" in connections and not resources:
+            out.append(
+                "<div class=card><div class=muted>No SDR receivers on the USB "
+                "bus.</div></div>"
+            )
         return "".join(out)
 
-    def _section_gaps(self, state: dict) -> str:
-        streams = state["unsourced_streams"]
-        fields = state["unsourced_fields"]
-        if not streams and not fields:
-            return ""
-        out = ["<h2>What the console will have no data for</h2><div class=card><ul>"]
-        for stream in streams:
-            out.append(
-                f"<li class=warn><strong>{html.escape(stream)}</strong> — no working "
-                "device. Nothing is published for it at all, so the platform can show "
-                "'no receiver' rather than an empty panel.</li>"
-            )
-        for kind, missing in sorted(fields.items()):
-            out.append(
-                f"<li class=warn><strong>{html.escape(kind)}</strong> — no sensor for "
-                f"{html.escape(', '.join(missing))}. Published as absent, not zero.</li>"
-            )
-        out.append("</ul></div>")
-        return "".join(out)
+    @staticmethod
+    def _devices_script(nonce: str) -> str:
+        """The one script this app carries, admitted by a per-response nonce.
+
+        Two jobs, both progressive enhancement over a page that already works
+        without it: the save button goes disabled until a field differs from
+        its loaded value, and the datastream field refreshes from status.json
+        — same auth gate as every page, every 2.5 seconds, nothing off-box
+        (the CSP's connect-src enforces that). Password fields count as
+        changed when non-empty: their loaded value is never in the page to
+        compare against, by design.
+        """
+        script = """
+"use strict";
+(function () {
+  function fingerprint(form) {
+    var out = [];
+    var fields = form.querySelectorAll("input, select");
+    for (var i = 0; i < fields.length; i++) {
+      var f = fields[i];
+      if (f.type === "hidden") continue;
+      if (f.type === "checkbox") out.push(f.name + "=" + f.checked);
+      else if (f.type === "password") out.push(f.name + "=" + (f.value ? "!" : ""));
+      else out.push(f.name + "=" + f.value);
+    }
+    return out.join("&");
+  }
+  var forms = document.querySelectorAll("form[data-device]");
+  for (var i = 0; i < forms.length; i++) {
+    (function (form) {
+      var button = form.querySelector("button[type=submit]");
+      if (!button) return;
+      var loaded = fingerprint(form);
+      button.disabled = true;
+      var update = function () { button.disabled = fingerprint(form) === loaded; };
+      form.addEventListener("input", update);
+      form.addEventListener("change", update);
+    })(forms[i]);
+  }
+  var raw = document.getElementById("raw");
+  if (raw && raw.getAttribute("data-slot")) {
+    var poll = function () {
+      fetch("/status.json", { credentials: "same-origin" })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (s) {
+          if (!s || !s.raw_samples) return;
+          var lines = s.raw_samples[raw.getAttribute("data-slot")] || [];
+          raw.textContent = lines.join("\\n");
+        })
+        .catch(function () {});
+    };
+    setInterval(poll, 2500);
+  }
+})();
+"""
+        return f"<script nonce='{nonce}'>{script}</script>"
 
     def _section_events(self, state: dict) -> str:
         """Read straight off the store rather than the snapshot: the snapshot

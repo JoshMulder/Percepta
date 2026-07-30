@@ -79,7 +79,7 @@ class SimulatedWeather:
             self.rain_mm_today = 0.0
         self.rain_mm_today += self._rain_rate * (dt / 3600)
 
-        return WeatherReading(
+        reading = WeatherReading(
             wind_kt=8 + 6 * math.sin(self._t / 90) + self._rng.uniform(-1, 1),
             gust_kt=12 + 8 * math.sin(self._t / 70) + self._rng.uniform(0, 3),
             # Backs and veers slowly rather than jumping, so the compass needle
@@ -94,6 +94,18 @@ class SimulatedWeather:
             rain_rate_mmh=self._rain_rate,
             rain_mm_today=self.rain_mm_today,
         )
+        # For the setup page's datastream field. A simulation has no raw
+        # bytes, so its "raw" is the reading it just produced, in one line.
+        self._last_line = (
+            f"wind {reading.wind_kt:.1f} kt @ {reading.wind_dir_deg % 360:.0f}°  "
+            f"{reading.temperature_c:.1f} °C  {reading.pressure_hpa:.1f} hPa  "
+            f"rh {reading.humidity_pct:.0f}%  {reading.sky}"
+        )
+        return reading
+
+    def raw_sample(self) -> list[str]:
+        line = getattr(self, "_last_line", "")
+        return [line] if line else []
 
     def describe(self) -> Device:
         return Device(
@@ -126,6 +138,10 @@ class SimulatedPower:
         load_w = 120 + extra_load_w + self._rng.uniform(-8, 8)
         net = pv_w - load_w
         self.soc = max(2.0, min(100.0, self.soc + net * dt / 40000))
+        self._last_line = (
+            f"soc {self.soc:.0f}%  {48.0 + (self.soc - 50) * 0.042:.1f} V  "
+            f"pv {pv_w:.0f} W  load {load_w:.0f} W"
+        )
         return PowerReading(
             soc_pct=self.soc,
             battery_v=48.0 + (self.soc - 50) * 0.042,
@@ -135,6 +151,10 @@ class SimulatedPower:
             # "indefinitely" is worse than no figure.
             runtime_h=None if net > 0 else self.soc * 0.42,
         )
+
+    def raw_sample(self) -> list[str]:
+        line = getattr(self, "_last_line", "")
+        return [line] if line else []
 
     def describe(self) -> Device:
         return Device(
@@ -180,6 +200,13 @@ class SimulatedFloodlight:
     @property
     def load_w(self) -> float:
         return self.LOAD_W if self._on else 0.0
+
+    def raw_sample(self) -> list[str]:
+        return [
+            f"relay {'on' if self._on else 'off'}"
+            + (", actuating" if self._pending > 0 else "")
+            + (f", {self.load_w:.0f} W" if self._on else "")
+        ]
 
     def describe(self) -> Device:
         return Device(

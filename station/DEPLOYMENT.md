@@ -50,6 +50,14 @@ Package names, which changed once and are stable now: **`rpicam-apps`** (the
 on current images) and **`python3-picamera2`**. On Bullseye they were
 `libcamera-apps`, which is one more reason not to be on Bullseye.
 
+One more, only for a **network (RTSP) camera**: **`ffmpeg`**. It is what the
+station reads an RTSP camera with — one decoded frame per snapshot, and the
+live stream remuxed from the camera's own H.264 without re-encoding
+(`gsu/camera/rtsp.py`). The camera container image installs it
+unconditionally; on the systemd path `apt install ffmpeg`. Without it the
+camera slot reports exactly that sentence rather than a hardware fault. A
+CSI-only station does not need it.
+
 **From the platform admin, before you go anywhere**
 
 1. **The platform URL and the broker URL**, with ports. For example

@@ -484,3 +484,38 @@ only when the platform asks and stops when the platform stops asking
 snapshot channel at 640×480/2 fps is 245 kbit/s of synthetic frames or around
 1 Mbit/s of real ones — a twelfth of the stream — and is what a console shows
 when nobody is watching live.
+
+## 10. The RTSP camera path: what is written, and what has never met a camera
+
+The network-camera driver (`gsu/camera/rtsp.py`) is the long-term camera path —
+the CSI ribbon was the easy test article — and this register exists so nobody
+mistakes tested seams for tested hardware.
+
+**Exercised, in unit tests with fake subprocesses and synthetic H.264:**
+
+| Seam | How |
+|---|---|
+| URL construction | credentials percent-encoded, credentialled URLs refused, redaction everywhere a human or telemetry reads |
+| Snapshot handling | complete-JPEG gate, dimensions parsed from the frame's own SOF, failure back-off, ffmpeg-absent reason |
+| Remux command | `-c copy`, Annex B normalisation, no transcode flags anywhere |
+| Remux pump | the ffmpeg stdout path driven with real synthetic Annex B through the same access-unit reader and fMP4 muxer as every other source |
+| Stream seam | `StreamSession` takes the camera's own source, skips the sensor relinquish dance, paces the muxer to the camera's configured rate |
+
+**Never exercised:** RTSP negotiation against a real camera, authentication
+against a real camera, camera-side keyframe intervals, network loss mid-stream,
+and the actual CPU cost on a Pi 2B of a per-snapshot decode running beside a
+live remux. The ffmpeg command lines follow documented behaviour; the first
+real camera will say whether the documentation was the whole story, exactly as
+the first real CSI camera did (§7).
+
+Two costs to know before fitting one:
+
+* **Snapshots decode.** One frame per capture at `video_fps` — the only
+  decoder anywhere in this station. At 1080p on a Pi 2B that is real work per
+  frame; turn `video_fps` down before blaming the camera.
+* **The stream is the camera's.** Bitrate, resolution and keyframe interval
+  are set on the camera and remuxed as-is. The site's stream ceilings cannot
+  narrow them, and the `fps` device parameter must match the camera's own
+  setting or playback runs fast or slow. A camera not sending H.264 is
+  refused with ffmpeg's own message — a Pi 2B cannot transcode and is never
+  asked to.

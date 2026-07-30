@@ -383,24 +383,41 @@ REGISTRY: tuple[DeviceType, ...] = (
     DeviceType(
         id="onvif-network-camera",
         slot="camera",
-        label="Network camera (ONVIF / RTSP)",
+        label="Network camera (RTSP)",
         connection="network",
-        driver=None,
+        driver="gsu.camera.rtsp:RtspCamera",
         parameters=(
-            Parameter("address", "Address", "text", "", help="Host or IP on the "
-                      "station's local network."),
+            Parameter("address", "Address", "text", "",
+                      help="Host, host:port, or a full rtsp:// URL. "
+                           "Credentials go in their own fields, never in the "
+                           "URL."),
+            Parameter("port", "RTSP port", "number", 554, required=False),
+            Parameter("rtsp_path", "RTSP path", "text", "/Streaming/Channels/101",
+                      required=False),
             Parameter("username", "Username", "text", "", required=False),
             Parameter("password", "Password", "password", "", required=False,
                       help="Stored on the box no less carefully than the "
                            "station's own credential."),
-            Parameter("rtsp_path", "RTSP path", "text", "/Streaming/Channels/101",
-                      required=False),
+            Parameter("transport", "Transport", "select", "tcp",
+                      choices=("tcp", "udp"), required=False,
+                      help="TCP unless the camera cannot: it survives NAT and "
+                           "lossy Wi-Fi, and a lost UDP packet is a smeared "
+                           "picture."),
+            Parameter("fps", "Camera frame rate", "number", 15, required=False,
+                      help="Must match the rate configured on the camera. The "
+                           "live stream is remuxed, not re-encoded, so the "
+                           "station cannot change it — a wrong value here "
+                           "plays the stream fast or slow."),
         ),
         provides=("video",),
-        notes="The case contract/enrolment.md §7 describes. Driver not "
-              "implemented: it would pull RTSP and re-encode, which is a "
-              "different job from grabbing a still off the CSI ribbon and is "
-              "the one place a station would need a decoder of its own.",
+        notes="The case contract/enrolment.md §7 describes, and the long-term "
+              "camera path. Snapshots decode one frame per capture through "
+              "ffmpeg; the live stream is the camera's own H.264 remuxed "
+              "without re-encoding (a Pi 2B cannot transcode, and is never "
+              "asked to). Needs ffmpeg installed; a source that is not H.264 "
+              "is refused with ffmpeg's own message rather than transcoded. "
+              "Untested against real camera hardware so far — camera/rtsp.py "
+              "states exactly what is and is not exercised.",
     ),
 )
 

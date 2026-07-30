@@ -252,23 +252,40 @@ class Agent:
     def build_devices(self) -> None:
         """Construct whatever the inventory says is fitted, and record why
         anything else is missing. Never substitutes a simulation for hardware
-        that did not answer."""
+        that did not answer.
+
+        Two rules here, both bought with a wedged station:
+
+        **The outgoing driver is retired, not merely closed.** close() on the
+        camera is a relinquish — the next capture reopens the sensor — and the
+        video thread can be holding the old instance mid-cycle while this
+        method runs. A close alone loses that race: the abandoned instance
+        reopens picamera2 *after* its replacement is built, and the acquisition
+        leaks for the life of the process because nothing references the
+        instance any more. retire() is terminal and serialized with capture.
+
+        **The camera slot is not touched while the live stream has the
+        sensor.** A rebuild mid-stream is guaranteed contention — and worse,
+        the trigger is circular: snapshots fail *because* the encoder holds
+        the sensor, the slot reports failed, and rediscovery then treats the
+        one working consumer of the camera as a broken camera. The slot is
+        rebuilt on the first pass after the stream ends.
+        """
         context = self.device_context()
         self._last_discovery = time.monotonic()
+        keep_camera = self._stream_holds_camera()
 
         if self.radio is not None:
             try:
                 self.radio.shutdown()
             except Exception:  # noqa: BLE001
                 pass
-        for slot in ("adsb", "weather", "power", "light", "camera"):
-            driver = self.inventory.drivers.get(slot)
-            close = getattr(driver, "close", None)
-            if close:
-                try:
-                    close()
-                except Exception:  # noqa: BLE001
-                    pass
+        for slot, driver in list(self.inventory.drivers.items()):
+            if slot == "radio":
+                continue  # its front end was just shut down through the controller
+            if slot == "camera" and keep_camera:
+                continue
+            self._retire_driver(driver)
 
         self.adsb = self.inventory.build("adsb", context)
         self.weather = self.inventory.build("weather", context)
@@ -282,7 +299,10 @@ class Agent:
         # Constructed here and read from the video thread. Constructing it must
         # stay cheap for that reason — `camera/picsi.py` opens nothing and runs
         # no subprocess until the first capture, which happens off this loop.
-        self.camera = self.inventory.build("camera", context)
+        if not keep_camera:
+            self.camera = self.inventory.build("camera", context)
+
+        self._log_unconfigured = True
 
         if self.router is not None:
             self.router.handlers = build_handlers(
@@ -327,8 +347,14 @@ class Agent:
         else:
             self.health.clear("devices.conflict")
 
-        for report in unconfigured:
-            log.info("Slot %s: nothing fitted.", report.slot)
+        # Said once per rebuild, not once per caller: this method also runs on
+        # every health frame and every status.json poll — which the Devices
+        # page now makes every 2.5 seconds — and an empty slot is not news
+        # that often.
+        if getattr(self, "_log_unconfigured", False):
+            self._log_unconfigured = False
+            for report in unconfigured:
+                log.info("Slot %s: nothing fitted.", report.slot)
 
     # --- enrolment ------------------------------------------------------
 
@@ -596,9 +622,43 @@ class Agent:
             self.shutdown()
         return 0
 
+    def _stream_holds_camera(self) -> bool:
+        """Whether the live encoder owns the sensor right now.
+
+        "starting" counts: the encoder is about to take the sensor, and a
+        rebuild dispatched in that window kills the stream at birth.
+        """
+        stream = getattr(self, "stream", None)
+        return stream is not None and stream.state in ("streaming", "starting")
+
+    @staticmethod
+    def _retire_driver(driver) -> None:
+        """Take the hardware off the outgoing driver, permanently.
+
+        retire() where the driver has one (a retired driver never reopens —
+        the race this closes is described in build_devices); close() where it
+        does not, which is fine for drivers that hold nothing another instance
+        would contend for.
+        """
+        if driver is None:
+            return
+        retire = getattr(driver, "retire", None) or getattr(driver, "close", None)
+        if retire is None:
+            return
+        try:
+            retire()
+        except Exception:  # noqa: BLE001 - the replacement matters more
+            log.exception("Retiring an outgoing driver failed; continuing.")
+
     def _anything_missing(self) -> bool:
+        # The camera is excluded while the stream holds the sensor: snapshot
+        # failures during a stream are contention, not a missing device, and
+        # counting them here is what put rediscovery into a rebuild loop on
+        # the first real station.
+        skip_camera = self._stream_holds_camera()
         return any(
             report.configured and report.driver_available and report.status != "present"
+            and not (report.slot == "camera" and skip_camera)
             for report in self.inventory.report()
         )
 
@@ -997,6 +1057,29 @@ class Agent:
                 out[report.telemetry_kind] = list(report.absent)
         return out
 
+    def raw_samples(self) -> dict:
+        """The last raw line(s) each connected sensor produced, per slot.
+
+        For the setup page's datastream fields, and only there — this is a
+        local diagnostic, and putting it in the health frame would spend
+        metered bytes repeating what telemetry already carries in structured
+        form. Each driver keeps its own bounded tap (`raw_sample()`); a slot
+        with no driver, or a driver that is not currently hearing anything,
+        is an empty list, which the page renders as an empty field.
+        """
+        samples: dict[str, list[str]] = {}
+        for slot in self.inventory.fitted:
+            driver = self.radio if slot == "radio" else self.inventory.drivers.get(slot)
+            tap = getattr(driver, "raw_sample", None)
+            lines: list[str] = []
+            if tap is not None:
+                try:
+                    lines = [str(line)[:200] for line in list(tap())[:4]]
+                except Exception:  # noqa: BLE001 - a diagnostic must not wound
+                    lines = []
+            samples[slot] = lines
+        return samples
+
     def snapshot(self) -> dict:
         """What the local console shows, in the installer's terms."""
         self._report_capabilities()
@@ -1025,6 +1108,7 @@ class Agent:
             "conflicts": self.inventory.conflicts(),
             "unsourced_streams": sorted(self.inventory.unsourced_streams()),
             "unsourced_fields": self._unsourced_fields(),
+            "raw_samples": self.raw_samples(),
             "events": [event.to_dict() for event in self.store.recent_events(15)],
             "storage": self.store.stats(),
             "clock": datetime.now(UTC).isoformat(),

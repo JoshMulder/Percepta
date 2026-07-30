@@ -41,7 +41,7 @@ import threading
 import time
 from collections import deque
 
-from .camera import complete_jpeg
+from .camera import complete_jpeg, sensor_exclusive
 
 log = logging.getLogger("gsu.video")
 
@@ -202,10 +202,11 @@ class VideoPublisher:
     def _stream_has_the_camera(self, camera) -> bool:
         """Whether the live encoder is holding the hardware.
 
-        Only for a real camera: the synthetic source is a drawing routine and
-        two of them can run at once, which matters because it is the
-        configuration the platform tests against — losing snapshots there would
-        be an artefact of the test rig rather than of the design.
+        Only where the two paths share one physical sensor: the synthetic
+        source is a drawing routine and two of them can run at once, and a
+        network camera serves snapshots and stream simultaneously from its own
+        encoder. One predicate (camera.sensor_exclusive) decides, shared with
+        the stream's own start path.
         """
         stream = getattr(self.agent, "stream", None)
         # "starting" counts as held: the encoder is about to open the sensor
@@ -214,8 +215,7 @@ class VideoPublisher:
         # best part of a second, so at 2 fps that window is most of the time.
         if stream is None or stream.state not in ("streaming", "starting"):
             return False
-        describe = getattr(camera, "describe", None)
-        return not (describe and describe().simulated)
+        return sensor_exclusive(camera)
 
     # --- publishing -----------------------------------------------------
 
