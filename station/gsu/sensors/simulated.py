@@ -145,51 +145,104 @@ class SimulatedPower:
     MAINS_MTBF_S = 900.0
     MAINS_OUTAGE_S = 240.0
 
+    #: What a grid connection can supply. Not a parameter: every site that has
+    #: mains has one that will deliver far more than a ground station can use,
+    #: so the number is never the interesting part of a demo. It is here as a
+    #: ceiling only so the diagram never draws mains delivering more than a
+    #: plausible supply.
+    MAINS_CAPACITY_W = 2400.0
+
     #: The generator starts below this and stops once the battery is back above
     #: the second. The gap is deliberate: a single threshold makes a generator
     #: hunt on and off around it, which is hard on the machine and looks like a
     #: fault on a graph.
     GEN_START_SOC = 45.0
     GEN_STOP_SOC = 70.0
-    GEN_OUTPUT_W = 1400.0
 
-    def __init__(self, seed: int | None = None) -> None:
+    def __init__(
+        self,
+        seed: int | None = None,
+        solar: bool = True,
+        solar_w: float = 780.0,
+        battery: bool = True,
+        battery_wh: float = 1100.0,
+        mains: bool = True,
+        generator: bool = True,
+        generator_w: float = 1400.0,
+        max_load_w: float = 500.0,
+    ) -> None:
         self._rng = random.Random(seed)
         self._t = self._rng.uniform(0, 1000)
         self.soc = self._rng.uniform(62, 92)
         self._mains_down_for = 0.0
         self._gen_running = False
 
+        # A switch per source, because "this site has no generator" is a fact
+        # about the site and saying it by setting the output to zero would be
+        # saying it sideways. Absent and idle are drawn differently and mean
+        # different things.
+        self.has_solar = bool(solar)
+        self.has_battery = bool(battery)
+        self.has_mains = bool(mains)
+        self.has_generator = bool(generator)
+
+        self.solar_w = max(0.0, float(solar_w))
+        # Guarded because it is a divisor: a zero here would make every state
+        # of charge a NaN, and a form is a place people type zero.
+        self.battery_wh = max(1.0, float(battery_wh))
+        self.generator_w = max(0.0, float(generator_w))
+        self.max_load_w = max(1.0, float(max_load_w))
+
     def read(self, dt: float, extra_load_w: float = 0.0) -> PowerReading:
         self._t += dt
         day = (math.sin(self._t / 240) + 1) / 2
-        pv_w = day * 780
-        load_w = 120 + extra_load_w + self._rng.uniform(-8, 8)
+        pv_w = day * self.solar_w if self.has_solar else 0.0
+        # The site's own draw wanders below its ceiling; the floodlight and
+        # anything else the agent is running is added on top and the whole is
+        # capped, because a site cannot draw more than its peak.
+        base = self.max_load_w * (0.24 + 0.02 * self._rng.uniform(-1, 1))
+        load_w = min(self.max_load_w, base + extra_load_w)
 
-        # The grid, and its habit of going away.
-        if self._mains_down_for > 0:
+        # The grid, and its habit of going away. A site with no connection
+        # reports none at all rather than one that is permanently down.
+        if not self.has_mains:
+            self._mains_down_for = 0.0
+        elif self._mains_down_for > 0:
             self._mains_down_for = max(0.0, self._mains_down_for - dt)
         elif self._rng.random() < dt / self.MAINS_MTBF_S:
             self._mains_down_for = self.MAINS_OUTAGE_S
-        mains_present = self._mains_down_for <= 0
+        mains_present = self.has_mains and self._mains_down_for <= 0
 
-        # The generator, with hysteresis so it does not hunt.
-        if self._gen_running and self.soc >= self.GEN_STOP_SOC:
+        # The generator, with hysteresis so it does not hunt. A site
+        # configured with no generator reports none at all rather than one
+        # that never starts — absent and idle are different statements.
+        has_generator = self.has_generator and self.generator_w > 0
+        if has_generator:
+            if self._gen_running and self.soc >= self.GEN_STOP_SOC:
+                self._gen_running = False
+            elif not self._gen_running and self.soc <= self.GEN_START_SOC:
+                self._gen_running = True
+        else:
             self._gen_running = False
-        elif not self._gen_running and self.soc <= self.GEN_START_SOC:
-            self._gen_running = True
-        gen_w = self.GEN_OUTPUT_W if self._gen_running else 0.0
+        gen_w = self.generator_w if self._gen_running else 0.0
 
         # Solar first because it is free, then mains, then the generator; the
         # battery takes whatever is left over in either direction.
         remaining = max(0.0, load_w - pv_w)
-        mains_w = min(remaining, 2000.0) if mains_present else 0.0
+        mains_w = min(remaining, self.MAINS_CAPACITY_W) if mains_present else 0.0
         remaining = max(0.0, remaining - mains_w)
         gen_delivered = min(remaining, gen_w)
 
         supplied = pv_w + mains_w + gen_w
-        battery_w = supplied - load_w
-        self.soc = max(2.0, min(100.0, self.soc + battery_w * dt / 40000))
+        # With no bank there is nothing to absorb a surplus or cover a
+        # shortfall: the site simply runs on whatever is coming in.
+        battery_w = (supplied - load_w) if self.has_battery else 0.0
+        # One percent of the bank is battery_wh × 3600 / 100 watt-seconds, so
+        # a bigger battery moves more slowly for the same power — which is the
+        # whole reason the capacity is a parameter.
+        self.soc = max(
+            2.0, min(100.0, self.soc + battery_w * dt / (self.battery_wh * 36)),
+        )
 
         self._last_line = (
             f"soc {self.soc:.0f}%  {48.0 + (self.soc - 50) * 0.042:.1f} V  "
@@ -207,10 +260,10 @@ class SimulatedPower:
             # Null while charging: an hours-remaining figure that means
             # "indefinitely" is worse than no figure.
             runtime_h=None if battery_w > 0 else self.soc * 0.42,
-            mains_w=mains_w,
-            mains_present=mains_present,
-            generator_w=gen_delivered,
-            generator_running=self._gen_running,
+            mains_w=mains_w if self.has_mains else None,
+            mains_present=mains_present if self.has_mains else None,
+            generator_w=gen_delivered if has_generator else None,
+            generator_running=self._gen_running if has_generator else None,
         )
 
     def raw_sample(self) -> list[str]:
@@ -222,7 +275,15 @@ class SimulatedPower:
             id="power",
             kind="charge-controller",
             present=True,
-            detail="simulated MPPT, 48 V bank, AC mains and backup generator",
+            detail="simulated " + ", ".join(
+                part for part in (
+                    f"{self.solar_w:.0f} W array" if self.has_solar else "",
+                    f"{self.battery_wh:.0f} Wh bank" if self.has_battery else "",
+                    "AC mains" if self.has_mains else "",
+                    (f"{self.generator_w:.0f} W generator"
+                     if self.has_generator and self.generator_w > 0 else ""),
+                ) if part
+            ) or "simulated site with no power sources",
             simulated=True,
         )
 

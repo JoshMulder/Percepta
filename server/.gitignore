@@ -5,6 +5,10 @@
 # invoked it writes this into the working tree, and it is already excluded from
 # the Docker build context by .dockerignore.
 web/node_modules/
+# Console build output. The app image builds it in its own stage; these only
+# appear on the host when npm is run against a bind mount.
+web/dist/
+web/tsconfig.tsbuildinfo
 __pycache__/
 *.py[cod]
 .pytest_cache/

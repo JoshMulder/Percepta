@@ -51,9 +51,12 @@ function speed(watts: number): number {
 }
 
 function Node({
-  x, y, label, value, tone, dim, half = 42,
+  x, y, label, value, sub, tone, dim, half = 42,
 }: {
   x: number; y: number; label: string; value: string;
+  /** A second reading under the first. Only the battery has one — its state of
+   *  charge is the headline and its throughput is the detail. */
+  sub?: string;
   tone: string; dim?: boolean;
   /** Half-width. Sized by the caller from the space each node actually has:
    *  three sources across a 300-unit box leaves 75 each, and a fixed 84-wide
@@ -62,9 +65,16 @@ function Node({
 }) {
   return (
     <g className={`pf-node pf-${tone}${dim ? " dim" : ""}`}>
-      <rect x={x - half} y={y - 17} width={half * 2} height={34} rx={6} />
-      <text x={x} y={y - 3} className="pf-label">{label}</text>
-      <text x={x} y={y + 11} className="pf-value">{value}</text>
+      <rect
+        x={x - half}
+        y={y - (sub ? 24 : 18)}
+        width={half * 2}
+        height={sub ? 48 : 36}
+        rx={6}
+      />
+      <text x={x} y={y - (sub ? 9 : 3)} className="pf-label">{label}</text>
+      <text x={x} y={y + (sub ? 7 : 12)} className="pf-value">{value}</text>
+      {sub && <text x={x} y={y + 20} className="pf-sub">{sub}</text>}
     </g>
   );
 }
@@ -122,6 +132,12 @@ export function PowerFlow({ power }: { power: PowerPayload | null }) {
     });
   }
 
+  const soc = power.soc_pct ?? null;
+  // The same thresholds the station duty-cycles on: below 20% it starts
+  // shedding load, so the panel should look worried before the site acts.
+  const socTone =
+    soc === null ? "battery" : soc < 20 ? "battery-critical"
+      : soc < 40 ? "battery-low" : "battery";
   const batteryW = power.battery_w ?? 0;
   const charging = batteryW > IDLE_W;
   const discharging = batteryW < -IDLE_W;
@@ -134,16 +150,36 @@ export function PowerFlow({ power }: { power: PowerPayload | null }) {
   // letterboxed into a 34rem-wide sidebar at a fixed height used less than
   // half the width and drew everything half-size for no reason.
   const width = 420;
-  const busY = 56;
+  const busY = 58;
   const step = width / (sources.length + 1);
   // Fit the boxes to the gaps rather than the other way round, with a little
   // air between them.
   const half = Math.min(42, step / 2 - 3);
 
+  // Where everything attaches to the rail, and what it puts in or takes out.
+  // A sink is negative, which makes the running total below a straight sum.
+  const taps = [
+    { x: 46, w: -power.load_w },
+    ...sources.map((s, i) => ({ x: step * (i + 1), w: s.idle ? 0 : s.watts })),
+    // Charging absorbs, discharging supplies — one expression because
+    // `battery_w` already carries the sign the station measured.
+    { x: width - 46, w: -batteryW },
+  ].sort((a, b) => a.x - b.x);
+
+  // What crosses each span between neighbours: everything to its left, summed.
+  // With sources balancing sinks this is zero outside the outermost taps and
+  // non-zero only where power genuinely has to travel.
+  const segments: { from: number; to: number; flow: number }[] = [];
+  let running = 0;
+  for (let i = 0; i < taps.length - 1; i++) {
+    running += taps[i].w;
+    segments.push({ from: taps[i].x, to: taps[i + 1].x, flow: running });
+  }
+
   return (
     <svg
       className="power-flow"
-      viewBox={`0 0 ${width} 114`}
+      viewBox={`0 0 ${width} 122`}
       // Letterboxed rather than stretched: the height is fixed in CSS so the
       // panel cannot change size when data arrives, and the drawing keeps its
       // proportions inside whatever width the sidebar happens to be.
@@ -156,7 +192,7 @@ export function PowerFlow({ power }: { power: PowerPayload | null }) {
         return (
           <g key={s.key}>
             <Link
-              d={`M ${x} 35 L ${x} ${busY}`}
+              d={`M ${x} 36 L ${x} ${busY}`}
               watts={s.idle ? 0 : s.watts}
               tone={s.key}
             />
@@ -173,17 +209,50 @@ export function PowerFlow({ power }: { power: PowerPayload | null }) {
         );
       })}
 
-      {/* The bus: what every source feeds and what feeds the load. */}
-      <path className="pf-bus" d={`M ${step - 6} ${busY} H ${width - step + 6}`} />
+      {/* The bus, one animated segment per span between attachment points.
+
+          A single animation along the whole rail was wrong in both directions:
+          first it appeared to pour out of whichever source happened to sit at
+          the centre — a mains input reading 0 W, in the case that showed it up
+          — and then, made static, it said nothing at all about power that
+          plainly had to cross it to reach the load.
+
+          What actually crosses any point of the rail is the sum of everything
+          attached to its left: sources add, sinks subtract. Positive means
+          the power is travelling right, negative left. Because the station's
+          sources balance its sinks, the running total is zero at both ends and
+          only the middle carries anything — which is the truthful picture, and
+          it falls out of the arithmetic rather than being drawn on top of it. */}
+      {segments.map((seg) => (
+        <Link
+          key={`bus-${seg.from}`}
+          d={
+            seg.flow >= 0
+              ? `M ${seg.from} ${busY} L ${seg.to} ${busY}`
+              : `M ${seg.to} ${busY} L ${seg.from} ${busY}`
+          }
+          watts={seg.flow}
+          tone="bus"
+        />
+      ))}
 
       {/* Battery. Drawn to the right of the bus, and the only link whose
           direction changes — taken from the station's signed measurement, not
-          inferred here. */}
+          inferred here.
+
+          The label does not say "charging" or "discharging". The animation
+          already does, by running the other way, and a word repeating what the
+          picture shows is a word competing with the two numbers that are only
+          available here: the state of charge and what is going in or out. */}
+      {/* Down into the battery when charging, up out of it when discharging.
+          The path's own direction is what the dash animation follows, so the
+          arrow is the geometry rather than a separate flag that could
+          disagree with it. */}
       <Link
         d={
           charging
-            ? `M ${width / 2} ${busY} L ${width - 46} ${busY} L ${width - 46} 75`
-            : `M ${width - 46} 75 L ${width - 46} ${busY} L ${width / 2} ${busY}`
+            ? `M ${width - 46} ${busY} L ${width - 46} 68`
+            : `M ${width - 46} 68 L ${width - 46} ${busY}`
         }
         watts={charging || discharging ? batteryW : 0}
         tone="battery"
@@ -191,14 +260,16 @@ export function PowerFlow({ power }: { power: PowerPayload | null }) {
       <Node
         x={width - 46}
         y={92}
-        label={charging ? "Charging" : discharging ? "Battery" : "Battery"}
-        value={charging || discharging ? W(batteryW) : "idle"}
-        tone="battery"
-        dim={!charging && !discharging}
+        half={52}
+        label="Battery"
+        value={soc === null ? "--" : `${Math.round(soc)}%`}
+        sub={charging || discharging ? W(batteryW) : "idle"}
+        tone={socTone}
+        dim={false}
       />
 
       <Link
-        d={`M ${width / 2} ${busY} L 46 ${busY} L 46 75`}
+        d={`M 46 ${busY} L 46 74`}
         watts={power.load_w}
         tone="load"
       />

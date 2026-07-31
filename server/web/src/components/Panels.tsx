@@ -181,56 +181,24 @@ function PowerPanelInner({
   onWindowChange: (key: SocWindowKey) => void;
 }) {
   const [detailOpen, setDetailOpen] = useState(false);
-  const soc = power?.soc_pct ?? null;
-  // Thresholds match the station's own duty-cycling policy: below 20% the site
-  // starts shedding load, so the console should look worried before it does.
-  const level = soc === null ? "" : soc < 20 ? " critical" : soc < 40 ? " low" : "";
 
   return (
     <div className="power">
-      <div className="soc">
-        <div className="soc-bar">
-          <div
-            className={`soc-fill${level}`}
-            style={{ width: `${soc ?? 0}%` }}
-          />
-        </div>
-        <div className="soc-value">
-          {soc === null ? "--" : `${soc.toFixed(0)}%`}
-        </div>
-        {/* The history moved behind this. With four sources the panel had run
-            out of room, and of the two things competing for it the flow is
-            what somebody reads at a glance and the chart is what they open
-            when they want to know how the day went. */}
-        <button
-          type="button"
-          className="power-detail-btn"
-          onClick={() => setDetailOpen(true)}
-          title="Battery history"
-          aria-label="Battery history"
-        >
-          <IconChart />
-        </button>
-      </div>
+      {/* No state-of-charge bar. It was a second rendering of a number that
+          now sits on the battery in the diagram, where it is next to the
+          thing it describes, and removing it gave the diagram the room it
+          needed to be legible at a glance. */}
+      <button
+        type="button"
+        className="power-detail-btn"
+        onClick={() => setDetailOpen(true)}
+        title="Battery history"
+        aria-label="Battery history"
+      >
+        <IconChart />
+      </button>
 
       <PowerFlow power={power} />
-
-      <dl className="stats">
-        <div>
-          <dt>Battery</dt>
-          <dd>{power ? `${power.battery_v.toFixed(1)} V` : "--"}</dd>
-        </div>
-        <div>
-          <dt>Runtime</dt>
-          <dd>
-            {power
-              ? power.runtime_h === null
-                ? "charging"
-                : `${power.runtime_h.toFixed(1)} h`
-              : "--"}
-          </dd>
-        </div>
-      </dl>
 
       {detailOpen && (
         <div
@@ -245,7 +213,20 @@ function PowerPanelInner({
             onClick={(e) => e.stopPropagation()}
           >
             <div className="power-detail-head">
-              <h4>Battery level</h4>
+              <h4>
+                Battery level
+                {power && (
+                  <span className="power-detail-v">
+                    {power.battery_v.toFixed(1)} V
+                    {/* Null while charging, and the diagram says so already.
+                        A runtime figure is a thing you go looking for, not a
+                        thing you glance at, which is why it lives here. */}
+                    {power.runtime_h !== null && (
+                      <> · {power.runtime_h.toFixed(1)} h left</>
+                    )}
+                  </span>
+                )}
+              </h4>
               <div className="window-switch" role="group" aria-label="Chart period">
                 {SOC_WINDOWS.map((w) => (
                   <button

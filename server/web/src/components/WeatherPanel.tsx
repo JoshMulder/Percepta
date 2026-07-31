@@ -115,14 +115,24 @@ function WeatherPanelInner({ weather }: { weather: WeatherPayload | null }) {
           <div className={`wind-gust ${level}${gusting ? "" : " hidden"}`}>
             gusting {has ? weather.gust_kt.toFixed(0) : "--"} kt
           </div>
+          {/* The sky in words, here rather than under its icon. Under the icon
+              it cost the row twice its own height — once for itself and once
+              for the matching padding that kept the glyph centred against the
+              dial — in a row that already had spare height beside this
+              readout. Same information, no extra rows. */}
+          <div className="wind-sky">
+            {has ? SKY_LABEL[weather.sky ?? "clear"] : "—"}
+          </div>
         </div>
 
         {/* Sky state sits to the right of the wind readout, at the end of the
             row. An icon rather than a word because it is the one thing on this
             panel read from across a room; the label keeps it unambiguous. */}
-        <div className="sky-state" title={has ? SKY_LABEL[weather.sky ?? "clear"] : ""}>
+        <div
+          className="sky-state"
+          title={has ? SKY_LABEL[weather.sky ?? "clear"] : ""}
+        >
           <SkyIcon state={weather?.sky} isDay={weather?.is_day ?? true} />
-          <span>{has ? SKY_LABEL[weather.sky ?? "clear"] : "—"}</span>
         </div>
       </div>
 

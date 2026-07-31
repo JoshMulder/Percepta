@@ -330,7 +330,42 @@ REGISTRY: tuple[DeviceType, ...] = (
         connection="simulated",
         driver="gsu.sensors.simulated:SimulatedPower",
         simulated=True,
-        provides=("soc_pct", "battery_v", "pv_w", "load_w", "runtime_h"),
+        # Sized rather than hardcoded, so a demo can be made to look like the
+        # site it is standing in for. The defaults are a small remote mast: a
+        # 780 W array, a 1.1 kWh bank and a couple of hundred watts of load.
+        #
+        # Mains has no parameter. Every site that has a grid connection has
+        # one that will supply far more than the station can use, so a number
+        # there would be a question with no interesting answer; it is a
+        # constant in the driver.
+        # A switch per source and a size beside it. The switch is the honest
+        # control: "this site has no generator" is a fact about the site, and
+        # saying it by setting the output to zero would be saying it sideways
+        # — a fitted generator that never starts and no generator at all are
+        # different things, and the console draws them differently.
+        parameters=(
+            Parameter("solar", "Solar", "bool", True, required=False),
+            Parameter("solar_w", "Array peak", "number", 780, required=False,
+                      help="Watts at full sun."),
+            Parameter("battery", "Battery", "bool", True, required=False),
+            Parameter("battery_wh", "Capacity", "number", 1100, required=False,
+                      help="Usable watt-hours. Sets how fast the state of "
+                           "charge moves."),
+            Parameter("mains", "AC mains", "bool", True, required=False,
+                      help="A grid connection, which occasionally fails. "
+                           "2.4 kW when it is up — every site that has mains "
+                           "has more than a station can use, so there is no "
+                           "size to set."),
+            Parameter("generator", "Generator", "bool", True, required=False),
+            Parameter("generator_w", "Output", "number", 1400, required=False,
+                      help="Watts while running."),
+            Parameter("max_load_w", "Peak load", "number", 500, required=False,
+                      help="The most this site can draw. The simulated load "
+                           "wanders below it."),
+        ),
+        provides=("soc_pct", "battery_v", "pv_w", "load_w", "runtime_h",
+                  "battery_w", "mains_w", "mains_present",
+                  "generator_w", "generator_running"),
     ),
 
     # --- floodlight ----------------------------------------------------

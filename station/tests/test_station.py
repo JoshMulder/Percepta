@@ -830,3 +830,108 @@ class SimulatedPowerHandoverTests(unittest.TestCase):
         reading = power.read(1.0)
         self.assertGreater(reading.battery_w, 0)
         self.assertIsNone(reading.runtime_h)
+
+
+class SimulatedPowerSizingTests(unittest.TestCase):
+    """A demo box can be made to look like the site it stands in for.
+
+    The array, the bank, the generator and the peak load are all parameters,
+    because a demo of a 200 W repeater and a demo of a 5 kW compound are
+    different demos and hardcoding one makes the other a lie.
+    """
+
+    def source(self, **kwargs):
+        from gsu.sensors.simulated import SimulatedPower
+        return SimulatedPower(seed=11, **kwargs)
+
+    def test_the_array_sets_what_solar_can_deliver(self):
+        small = self.source(solar_w=100)
+        big = self.source(solar_w=4000)
+        # Same seed, same point in the day cycle, so the only difference is
+        # the array.
+        self.assertLess(small.read(1.0).pv_w, big.read(1.0).pv_w)
+
+    def test_the_load_never_exceeds_the_sites_peak(self):
+        power = self.source(max_load_w=250)
+        for _ in range(50):
+            self.assertLessEqual(power.read(1.0).load_w, 250.0)
+
+    def test_a_floodlight_cannot_push_a_site_past_its_peak(self):
+        power = self.source(max_load_w=250)
+        self.assertLessEqual(power.read(1.0, extra_load_w=9000).load_w, 250.0)
+
+    def test_a_bigger_bank_moves_more_slowly(self):
+        # The whole reason capacity is a parameter: a demo of a large site
+        # should not have its battery visibly swinging every few seconds.
+        small = self.source(battery_wh=100, solar_w=0, max_load_w=400)
+        large = self.source(battery_wh=10000, solar_w=0, max_load_w=400)
+        for source in (small, large):
+            source._mains_down_for = 500.0     # nothing but the battery
+            source.soc = 80.0
+        for _ in range(20):
+            small.read(1.0)
+            large.read(1.0)
+        self.assertLess(small.soc, large.soc)
+
+    def test_a_zero_capacity_cannot_produce_a_nan(self):
+        # It is a divisor and a form is a place people type zero.
+        reading = self.source(battery_wh=0).read(1.0)
+        self.assertFalse(math.isnan(reading.soc_pct))
+
+    def test_a_site_with_no_generator_reports_none_at_all(self):
+        # Absent and idle are different statements, and a diagram showing a
+        # generator that never starts is inventing hardware.
+        payload = self.source(generator_w=0).read(1.0).to_payload()
+        self.assertNotIn("generator_w", payload)
+        self.assertNotIn("generator_running", payload)
+
+    def test_a_site_with_one_reports_it_even_while_stopped(self):
+        payload = self.source(generator_w=900).read(1.0).to_payload()
+        self.assertIn("generator_running", payload)
+
+    def test_the_generator_delivers_what_it_is_sized_for(self):
+        power = self.source(generator_w=3000, solar_w=0, max_load_w=400)
+        power._mains_down_for = 500.0
+        power.soc = 10.0
+        # It delivers what the load needs; the surplus goes to the battery
+        # rather than vanishing.
+        reading = power.read(1.0)
+        self.assertAlmostEqual(reading.generator_w, reading.load_w, places=3)
+        self.assertGreater(reading.battery_w, 2000.0)
+
+    def test_mains_is_a_constant_not_a_parameter(self):
+        # Every site with a grid has one that will supply far more than a
+        # ground station can use, so the number is never the interesting part.
+        from gsu.sensors.simulated import SimulatedPower
+        self.assertEqual(SimulatedPower.MAINS_CAPACITY_W, 2400.0)
+
+    def test_the_registry_offers_a_switch_and_a_size_per_source(self):
+        from gsu.devices import registry
+        params = {p.name: p for p in registry.get("simulated-power").parameters}
+        # A switch per source: "this site has no generator" is a fact about
+        # the site, not something to say by setting an output to zero.
+        for name in ("solar", "battery", "mains", "generator"):
+            self.assertEqual(params[name].type, "bool", name)
+        for name in ("solar_w", "battery_wh", "generator_w", "max_load_w"):
+            self.assertEqual(params[name].type, "number", name)
+        # Mains has no size. Every site with a grid has more than a station
+        # can use, so the number would be a question with no useful answer.
+        self.assertNotIn("mains_w", params)
+
+    def test_a_source_can_be_switched_off_entirely(self):
+        for off, absent in (
+            ({"mains": False}, ("mains_w", "mains_present")),
+            ({"generator": False}, ("generator_w", "generator_running")),
+        ):
+            payload = self.source(**off).read(1.0).to_payload()
+            for field in absent:
+                self.assertNotIn(field, payload, off)
+
+    def test_a_site_with_no_solar_generates_none(self):
+        self.assertEqual(self.source(solar=False).read(1.0).pv_w, 0.0)
+
+    def test_a_site_with_no_bank_neither_charges_nor_discharges(self):
+        # Nothing to absorb a surplus or cover a shortfall: it runs on what is
+        # coming in.
+        power = self.source(battery=False, solar_w=4000)
+        self.assertEqual(power.read(1.0).battery_w, 0.0)

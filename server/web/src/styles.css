@@ -885,12 +885,16 @@ body {
 .weather {
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
-  /* The six figures were sitting hard against the panel's lower edge. The row
-     above them has a dial and an icon that both carry their own visual margin,
-     so the text was the only thing touching a border and read as though it had
-     overflowed rather than been placed. */
-  padding-bottom: var(--s2);
+  /* Tight. The dial, the readout and the sky icon all carry generous internal
+     margin of their own — the dial is a circle in a square box and the icon is
+     a glyph in one — so the gaps between them were spacing that had already
+     been paid for once. The panel below this one needed the room more than
+     this one did.
+
+     The bottom padding is gone for the same reason and does not reintroduce
+     the fault it was added for: the figures no longer touch the panel edge
+     because the row gap under them still exists. */
+  gap: 0.3rem;
 }
 .rose-wrap {
   display: flex;
@@ -1030,7 +1034,10 @@ body {
    own: six readings in two rows instead of four plus a separate bar. */
 .weather-stats {
   grid-template-columns: repeat(3, 1fr);
-  gap: var(--s3) var(--s3);
+  /* Rows tighter than columns: the two rows of figures were separated by more
+     space than the label-to-value gap inside each one, which made them read as
+     two unrelated groups rather than six figures. */
+  gap: var(--s1) var(--s3);
 }
 /* Larger than the shared .stats sizing, and deliberately only here: these six
    figures are the panel's remaining content once the dial and the sky icon
@@ -1963,12 +1970,11 @@ body {
   /* Matches .rose - the two are the bookends of a centred row and any
      difference between them reads as the row leaning. */
   width: 8.75rem;
-  /* Space above the icon equal to the label below it, so the ICON centres on
-     the row rather than the icon-plus-label block doing so. Without it the
-     label's height pushed the glyph up and it sat 12px higher than the dial it
-     is meant to balance - the two boxes were already identical, and that offset
-     was the whole of the lopsidedness. */
-  padding-top: calc(var(--s1) + var(--sky-label-h));
+  /* No padding to reserve, because there is no label under the icon any more.
+     It used to sit here and the glyph needed matching space above it to stay
+     centred against the dial — so one line of text cost the row twice its own
+     height. The word moved into the readout column beside it, which had spare
+     height going unused. */
   text-align: center;
 }
 .rose-readout {
@@ -1998,6 +2004,12 @@ body {
 }
 .sky-icon.fog {
   color: var(--dim);
+}
+.wind-sky {
+  /* Sits under the bearing, in the column that had room for it. */
+  font: 0.812rem var(--sans, inherit);
+  color: var(--muted);
+  margin-top: 0.1rem;
 }
 .sky-state span {
   /* Fixed height, and the padding above the icon is expressed in terms of it.
@@ -2135,6 +2147,12 @@ body {
 
 /* Two lines' worth, always. "Clear" is one line and "Partly cloudy" is two, so
    letting this size to its content rescaled the bar whenever the sky changed. */
+.wind-sky {
+  /* Sits under the bearing, in the column that had room for it. */
+  font: 0.812rem var(--sans, inherit);
+  color: var(--muted);
+  margin-top: 0.1rem;
+}
 .sky-state span {
   display: block;
   height: 2.1em;
@@ -3302,8 +3320,11 @@ body {
 .pf-empty {
   display: block;
   width: 100%;
-  height: 8rem;
-  margin: 0.35rem 0 0.5rem;
+  /* Taller than it was, because the state-of-charge bar above it is gone and
+     the diagram is now the whole point of the panel rather than a companion
+     to it. */
+  height: 10.5rem;
+  margin: 0.1rem 0 0.35rem;
 }
 
 .pf-node rect {
@@ -3312,18 +3333,23 @@ body {
   stroke-width: 1;
 }
 .pf-label {
-  font: 0.5rem var(--mono);
+  font: 0.58rem var(--mono);
   fill: var(--muted);
   text-anchor: middle;
 }
 .pf-value {
-  font: 600 0.66rem var(--mono);
+  font: 600 0.8rem var(--mono);
   fill: var(--text);
   text-anchor: middle;
 }
 /* Fitted and contributing nothing. Dim, not hidden — a mains input at 0 W may
    be a grid failure, which is the opposite of nothing to report. A source that
    is *not fitted* is never drawn at all. */
+.pf-sub {
+  font: 0.58rem var(--mono);
+  fill: var(--muted);
+  text-anchor: middle;
+}
 .pf-node.dim rect { opacity: 0.5; }
 .pf-node.dim .pf-value { fill: var(--dim); }
 
@@ -3363,12 +3389,33 @@ body {
 .pf-gen .pf-node rect { stroke: rgba(185, 140, 240, 0.5); }
 .pf-battery .pf-dash { stroke: var(--accent); }
 .pf-battery .pf-node rect { stroke: rgba(53, 196, 138, 0.5); }
+/* The same thresholds the station duty-cycles on, so the battery reads as a
+   worry before the site starts shedding load rather than after. */
+.pf-battery-low .pf-node rect { stroke: rgba(232, 176, 75, 0.6); }
+.pf-battery-low .pf-value { fill: var(--warn); }
+.pf-battery-low .pf-dash { stroke: var(--warn); }
+.pf-battery-critical .pf-node rect { stroke: rgba(255, 122, 69, 0.7); }
+.pf-battery-critical .pf-value { fill: var(--danger); }
+.pf-battery-critical .pf-dash { stroke: var(--danger); }
 .pf-load .pf-dash { stroke: var(--text); }
+/* The rail itself. Neutral, because what travels along it is a mixture of
+   whatever the sources are contributing and belongs to no one of them. */
+.pf-bus .pf-track { stroke: var(--line); }
+.pf-bus .pf-dash { stroke: var(--muted); }
 
 /* The history, behind a button. It is what somebody opens to see how the day
    went, not what they read at a glance, so it stops competing for panel space
    with the flow. */
+/* Top right of the panel, over the diagram's corner — the bar it used to sit
+   beside is gone. */
+.power {
+  position: relative;
+}
 .power-detail-btn {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 1;
   flex: none;
   background: none;
   border: 1px solid transparent;
@@ -3403,5 +3450,14 @@ body {
   gap: 0.75rem;
   margin-bottom: 0.75rem;
 }
-.power-detail-head h4 { margin: 0; font-size: 0.875rem; }
+.power-detail-head h4 {
+  margin: 0;
+  font-size: 0.875rem;
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+}
+/* Voltage lives here now rather than on the panel: it is what you check when
+   you are already looking at the curve, not at a glance. */
+.power-detail-v { font: 0.75rem var(--mono); color: var(--muted); }
 .power-detail-head .window-switch { margin-left: auto; }
