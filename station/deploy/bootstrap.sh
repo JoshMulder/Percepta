@@ -191,7 +191,42 @@ export DEBIAN_FRONTEND=noninteractive
 # daemon. DEPLOYMENT.md §11.
 NEED="chrony rsync"
 if [ "$DEPLOY_PATH" = docker ]; then
-  NEED="$NEED docker.io docker-compose-v2"
+  NEED="$NEED docker.io"
+  # Compose v2 is spelled differently depending on where it comes from, and
+  # hardcoding one name is why this failed on Bookworm with "unable to locate
+  # package docker-compose-v2" — that name is Trixie's and Ubuntu 24.04's.
+  # Debian 12 has it in backports, and Docker's own repository calls it
+  # docker-compose-plugin. Ask apt what it actually has.
+  #
+  # v1 (`docker-compose`, the Python one) is deliberately not a candidate:
+  # everything here invokes `docker compose` as a subcommand, which v1 does
+  # not provide, and installing it would satisfy the check and fail later.
+  COMPOSE_PKG=""
+  apt-get update -qq
+  for candidate in docker-compose-v2 docker-compose-plugin; do
+    if apt-cache show "$candidate" >/dev/null 2>&1; then
+      COMPOSE_PKG="$candidate"; break
+    fi
+  done
+  if [ -n "$COMPOSE_PKG" ]; then
+    NEED="$NEED $COMPOSE_PKG"
+  elif docker compose version >/dev/null 2>&1; then
+    info "compose v2 already present, not from apt"
+  else
+    die "no Compose v2 package in this box's apt sources, and \`docker compose\`
+   does not work. On Debian 12 / Raspberry Pi OS Bookworm either enable
+   backports:
+
+     echo 'deb http://deb.debian.org/debian bookworm-backports main' \\
+       | sudo tee /etc/apt/sources.list.d/backports.list
+     sudo apt update && sudo apt install -y -t bookworm-backports docker-compose-v2
+
+   or install Docker's own packages from https://get.docker.com, which bring
+   docker-compose-plugin. Then run this again.
+
+   Or take the other path, which needs no Docker at all:
+     sudo $0 --platform $PLATFORM --path systemd"
+  fi
 else
   NEED="$NEED python3-venv"
 fi
@@ -201,7 +236,7 @@ for pkg in $NEED; do
 done
 if [ -n "$MISSING" ]; then
   info "installing:$MISSING"
-  apt-get update -qq
+  [ "$DEPLOY_PATH" = docker ] || apt-get update -qq
   # shellcheck disable=SC2086
   apt-get install -y -qq $MISSING >/dev/null
 else

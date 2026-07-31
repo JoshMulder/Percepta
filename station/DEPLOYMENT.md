@@ -151,7 +151,14 @@ Then, on the box:
 
 ```bash
 sudo apt update && sudo apt full-upgrade -y
-sudo apt install -y docker.io docker-compose-v2 chrony
+sudo apt install -y docker.io chrony
+# Compose v2, whichever name this release uses. `docker-compose-v2` is Trixie's
+# and Ubuntu 24.04's; on Bookworm it is in backports, and Docker's own
+# repository calls it docker-compose-plugin. Not `docker-compose`, which is v1
+# and has no `docker compose` subcommand.
+sudo apt install -y docker-compose-v2 \
+  || sudo apt install -y docker-compose-plugin \
+  || sudo apt install -y -t bookworm-backports docker-compose-v2
 sudo systemctl enable --now docker
 sudo raspi-config     # expand the filesystem; set the hostname and timezone
 ```
