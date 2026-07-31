@@ -244,19 +244,30 @@ export function EnrolmentCode({
             once.</strong> We keep only a hash of it and cannot show it again —
             if it is lost, issue another.
           </p>
+          {/* The combined string, not the bare code. It carries the code, this
+              platform's address and the CA fingerprint — all three had to
+              reach the box anyway, and the one easiest to skip was the
+              fingerprint, which is the one deciding whether the code is typed
+              into the real platform or into whatever answered. Falls back to
+              the bare code on a platform that pins no CA. */}
           <div className="token-value">
-            <code>{issued.token}</code>
+            <code>{issued.bootstrap || issued.token}</code>
             <button
               type="button"
               className="btn ghost"
               onClick={() => {
-                void navigator.clipboard?.writeText(issued.token);
+                void navigator.clipboard?.writeText(
+                  issued.bootstrap || issued.token,
+                );
                 setCopied(true);
               }}
             >
               {copied ? "Copied" : "Copy"}
             </button>
           </div>
+          <p className="settings-note">
+            On the box: <code>sudo station/deploy/bootstrap.sh --enrol …</code>
+          </p>
           <p className="settings-note">
             Expires {when(issued.expires_at)}
             {relative(issued.expires_at)}.

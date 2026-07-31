@@ -2,19 +2,21 @@
 
 ## The short way
 
-On the platform host, once, read the fingerprint of the CA every station pins:
-
-```bash
-openssl x509 -in ~/percepta/server/certs/ca.crt -noout -fingerprint -sha256
-```
-
-Then on the station:
+Issue an enrolment code in the console — Settings, Enrolment — and copy the
+one string it shows. Then on the station:
 
 ```bash
 git clone <repo> ~/percepta && cd ~/percepta
-sudo station/deploy/bootstrap.sh --platform 192.168.2.49 \
-  --fetch-ca --ca-fingerprint 57:65:71:3D:...
+sudo station/deploy/bootstrap.sh --enrol 'CZS2-JQFW-ZH6E@192.168.2.49#5765713d…'
 ```
+
+That string is the code, this platform's address and the fingerprint of the CA
+to pin. All three had to reach the box anyway; carrying them separately made
+the fingerprint the easy one to skip, and it is the one that decides whether
+the code is typed into the real platform or into whatever answered.
+
+The station fetches the CA from the platform's `/ca.crt` and refuses to go on
+unless it matches. Quote the string — `#` starts a comment in a shell.
 
 The platform serves its CA at `/ca.crt`, so nothing has to be copied by hand.
 The fetch itself is over TLS the station cannot yet verify — verifying it is

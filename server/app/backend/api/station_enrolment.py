@@ -10,7 +10,10 @@ onto our platform, and when" is the question this table exists to answer, and it
 is asked after something has already gone wrong.
 """
 
+import hashlib
+import ssl
 import uuid
+from pathlib import Path
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -32,10 +35,19 @@ router = APIRouter(prefix="/api/stations/{station_id}/enrolment", tags=["enrolme
 
 
 class IssuedToken(BaseModel):
-    """The plaintext appears here once and is never retrievable again."""
+    """The plaintext appears here once and is never retrievable again.
+
+    `bootstrap` is the same code with the two other facts a station needs
+    folded in: where this platform is, and which CA to pin. All three had to
+    reach the box anyway, by three routes, and the one that was easiest to skip
+    was the fingerprint — which is the one that decides whether the code is
+    typed into the real platform or into whatever answered.
+    """
 
     token: str
     expires_at: str
+    #: `CODE@host#sha256`, for `bootstrap.sh --enrol`.
+    bootstrap: str
 
 
 class EnrolmentStatus(BaseModel):
@@ -106,6 +118,43 @@ def get_status(
     )
 
 
+#: Where the CA lives inside the app container — the same file `/ca.crt`
+#: serves. Absent in a deployment behind a publicly trusted certificate, and
+#: then there is no fingerprint to carry and nothing to pin.
+CA_PATH = Path("/certs/ca.crt")
+
+
+def _ca_fingerprint() -> str:
+    """The SHA-256 of the pinned CA, lowercase and unpunctuated.
+
+    Read per call rather than cached: a CA rotation is rare but it is exactly
+    the moment a stale value would send a technician to site with a fingerprint
+    that no longer matches, and this is not a hot path.
+    """
+    if not CA_PATH.is_file():
+        return ""
+    der = ssl.PEM_cert_to_DER_cert(CA_PATH.read_text())
+    return hashlib.sha256(der).hexdigest()
+
+
+def _bootstrap_string(plaintext: str, request: Request) -> str:
+    """`CODE@host#fingerprint` — one thing for an installer to carry.
+
+    The host comes from the request, so it is whatever name the operator
+    actually reached this platform by. Deriving it from configuration instead
+    produced a string that was right in the deployment it was written in and
+    wrong behind every proxy.
+    """
+    host = request.headers.get("host", "").split(":")[0]
+    fingerprint = _ca_fingerprint()
+    out = plaintext
+    if host:
+        out += f"@{host}"
+    if fingerprint:
+        out += f"#{fingerprint}"
+    return out
+
+
 @router.post("/token", response_model=IssuedToken, status_code=201)
 def issue_token(
     station_id: uuid.UUID,
@@ -135,7 +184,11 @@ def issue_token(
         ip_address=request.client.host if request.client else None,
         detail={"expires_at": expires_at.isoformat()},
     )
-    return IssuedToken(token=plaintext, expires_at=expires_at.isoformat())
+    return IssuedToken(
+        token=plaintext,
+        expires_at=expires_at.isoformat(),
+        bootstrap=_bootstrap_string(plaintext, request),
+    )
 
 
 @router.delete("/token", status_code=200)

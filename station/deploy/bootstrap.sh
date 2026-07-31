@@ -31,6 +31,7 @@ PLATFORM=""
 CA_FILE=""
 FETCH_CA=0
 CA_FINGERPRINT=""
+ENROL_TOKEN=""
 DEMO=0
 LAN=1
 DEPLOY_PATH=""
@@ -86,6 +87,15 @@ preflight() {
   fi
 }
 
+enrol_now() {   # $1 = token
+  if [ "$DEPLOY_PATH" = docker ]; then
+    compose run --rm -T gsu enrol --token "$1"
+  else
+    sudo -u "$SERVICE_USER" env "$(grep -v '^#' "$ETC/gsu.env" | xargs)" \
+      "$PREFIX/.venv/bin/python" -m gsu enrol --token "$1"
+  fi
+}
+
 enrol_hint() {
   if [ "$DEPLOY_PATH" = docker ]; then
     echo "cd $PREFIX/deploy && sudo docker compose run --rm gsu enrol --token XXXX-XXXX-XXXX"
@@ -98,7 +108,13 @@ usage() {
   sed -n '3,6p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   cat <<'EOF'
 
-  --platform HOST     the platform's hostname or IP. Required.
+  --enrol CODE@host#fingerprint
+                      the one string the console shows when it issues an
+                      enrolment code. Carries the code, the platform and the
+                      CA to pin, so nothing else is needed and the fingerprint
+                      cannot be the step that gets skipped. Enrols at the end.
+  --platform HOST     the platform's hostname or IP. Required unless --enrol
+                      carries it.
   --ca FILE           the platform's CA certificate, to pin. Strongly advised
                       while the platform serves its own certificate.
   --fetch-ca          get it from the platform instead of copying it by hand.
@@ -128,6 +144,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --platform)  PLATFORM="${2:-}"; shift 2 ;;
     --ca)        CA_FILE="${2:-}"; shift 2 ;;
+    --enrol)     ENROL_BLOB="${2:-}"; shift 2 ;;
     --fetch-ca)  FETCH_CA=1; shift ;;
     --ca-fingerprint) CA_FINGERPRINT="${2:-}"; shift 2 ;;
     --demo)      DEMO=1; shift ;;
@@ -144,7 +161,25 @@ while [ $# -gt 0 ]; do
 done
 
 [ "$(id -u)" = 0 ] || die "run this with sudo."
-[ -n "$PLATFORM" ] || { usage; die "--platform is required."; }
+
+# `CODE@host#fingerprint`, any part after the code optional — a platform behind
+# a publicly trusted certificate has no fingerprint to give, and one reached by
+# a name this console does not know about can still be named with --platform.
+if [ -n "${ENROL_BLOB:-}" ]; then
+  ENROL_TOKEN="${ENROL_BLOB%%@*}"
+  rest="${ENROL_BLOB#"$ENROL_TOKEN"}"
+  case "$rest" in
+    @*) host_part="${rest#@}"; host_part="${host_part%%#*}"
+        [ -n "$host_part" ] && [ -z "$PLATFORM" ] && PLATFORM="$host_part" ;;
+  esac
+  case "$ENROL_BLOB" in
+    *#*) fp="${ENROL_BLOB##*#}"
+         [ -n "$fp" ] && [ -z "$CA_FINGERPRINT" ] && { CA_FINGERPRINT="$fp"; FETCH_CA=1; } ;;
+  esac
+  [ -n "$ENROL_TOKEN" ] || die "--enrol needs a code before the @."
+fi
+
+[ -n "$PLATFORM" ] || { usage; die "--platform is required (or use --enrol)."; }
 [ -f "$SRC/deploy/install.sh" ] || die "run this from a checkout: $SRC does not look like station/."
 
 # --- what this box is -------------------------------------------------------
@@ -470,6 +505,17 @@ if [ "$GENERATED" = 1 ]; then
   printf '   \033[1mSetup password: %s\033[0m\n' "$SETUP_PASSWORD"
   info "Written nowhere else. Note it down now."
 fi
-info ""
-info "Enrol it from that page, or with a token:"
-info "  $(enrol_hint)"
+if [ -n "$ENROL_TOKEN" ]; then
+  say "Enrolling"
+  if enrol_now "$ENROL_TOKEN"; then
+    info "enrolled."
+  else
+    warn "enrolment failed. The station is running; the code may have expired"
+    warn "or already been used. Issue another and:"
+    warn "  $(enrol_hint)"
+  fi
+else
+  info ""
+  info "Enrol it from that page, or with a token:"
+  info "  $(enrol_hint)"
+fi
