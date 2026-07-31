@@ -299,11 +299,30 @@ fi
 say "Installing"
 INSTALL_ARGS=(--path "$DEPLOY_PATH")
 if [ -n "$CA_FILE" ]; then
-  [ -f "$CA_FILE" ] || die "no such CA file: $CA_FILE"
+  # Nothing can fetch this for you. The platform sends only its leaf
+  # certificate, not the chain, so the CA is not on the wire — and a CA pulled
+  # from the thing it is meant to authenticate would not be worth pinning
+  # anyway. It has to be copied from the platform host.
+  [ -f "$CA_FILE" ] || die "no such CA file: $CA_FILE
+
+   Copy it from the platform host first, then run this again:
+
+     scp <you>@${PLATFORM}:~/percepta/server/certs/ca.crt $CA_FILE
+
+   Check it is the right one before trusting it — this should match what
+   the platform host prints for the same file:
+
+     openssl x509 -in $CA_FILE -noout -subject -fingerprint -sha256"
+  openssl x509 -in "$CA_FILE" -noout -subject >/dev/null 2>&1 \
+    || die "$CA_FILE is not a PEM certificate."
+  info "pinning $(openssl x509 -in "$CA_FILE" -noout -subject | sed 's/^subject=//')"
+  info "  $(openssl x509 -in "$CA_FILE" -noout -fingerprint -sha256 | cut -d= -f2)"
   INSTALL_ARGS+=(--api-ca "$CA_FILE")
 else
-  warn "no --ca given: this station will not pin the platform's certificate."
-  warn "Right only once the platform is behind a publicly trusted one."
+  warn "no --ca given, so this station trusts only the system CA store."
+  warn "If the platform serves its own certificate — which it does today —"
+  warn "every connection will fail TLS verification and the station will"
+  warn "look enrolled and mute. Right only behind a publicly trusted cert."
 fi
 "$SRC/deploy/install.sh" "${INSTALL_ARGS[@]}"
 

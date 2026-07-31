@@ -3,9 +3,18 @@
 ## The short way
 
 ```bash
+# The platform's CA, copied from the platform host. Nothing can fetch this for
+# you: the platform sends only its leaf certificate, so the CA is not on the
+# wire, and one pulled from the thing it authenticates would not be worth
+# pinning. Check the fingerprint against the platform host before trusting it.
+scp <you>@192.168.2.49:~/percepta/server/certs/ca.crt /tmp/platform-api-ca.pem
+
 git clone <repo> ~/percepta && cd ~/percepta
 sudo station/deploy/bootstrap.sh --platform 192.168.2.49 --ca /tmp/platform-api-ca.pem
 ```
+
+Run it from anywhere — it finds the checkout from its own path, not from the
+working directory.
 
 That is the whole thing on a box with no CSI camera. It checks the hardware and
 the OS, installs what the chosen path needs, blacklists the DVB driver if it
