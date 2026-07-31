@@ -1085,10 +1085,88 @@ class LocalStreamViewerTests(unittest.TestCase):
         from gsu.transport.stream import TeeUplink
         primary = Recording()
         tee = TeeUplink(primary)
+        self.assertTrue(tee.open())
         tee.add(LocalViewer())
         tee.begin("h264", b"INIT")
         tee.send(b"key", keyframe=True)
         self.assertEqual(primary.log, [("begin", b"INIT"), ("send", b"key")])
+
+    def test_the_setup_page_works_when_the_platform_link_is_down(self):
+        # The moment somebody most needs to aim a camera is the moment the box
+        # is not talking to the platform. A local preview that requires a
+        # working uplink is a preview that is missing whenever it is wanted.
+        from gsu.transport.stream import LocalViewer, StreamUplink, TeeUplink
+
+        class Refusing(StreamUplink):
+            name = "refusing"
+
+            def open(self):
+                self.reason = "no route to the platform"
+                return False
+
+            def begin(self, codec, init): raise AssertionError("not open")
+            def send(self, fragment, keyframe): raise AssertionError("not open")
+            def close(self): pass
+
+        tee = TeeUplink(Refusing(), require_primary=False)
+        self.assertTrue(tee.open(), "a local session must survive this")
+        viewer = LocalViewer()
+        tee.add(viewer)
+        tee.begin("h264", b"INIT")
+        tee.send(b"key", keyframe=True)
+        self.assertEqual(viewer.read(timeout=0.1), b"INIT")
+        self.assertEqual(viewer.read(timeout=0.1), b"key")
+        # And says so, rather than reporting a stream going somewhere.
+        self.assertFalse(tee.stats()["primary_open"])
+        self.assertIn("nowhere off-box", tee.describe())
+
+    def test_a_platform_stream_still_fails_when_it_cannot_send(self):
+        # The other half. An encoder running with nowhere to send is the
+        # expensive mistake this whole path exists to prevent, and a stream the
+        # platform asked for has nobody local to justify it.
+        from gsu.transport.stream import StreamUplink, TeeUplink
+
+        class Refusing(StreamUplink):
+            name = "refusing"
+
+            def open(self): return False
+            def begin(self, codec, init): return False
+            def send(self, fragment, keyframe): return False
+            def close(self): pass
+
+        self.assertFalse(TeeUplink(Refusing(), require_primary=True).open())
+
+    def test_the_platform_can_join_a_session_the_setup_page_started(self):
+        # The encoder is already running and the init segment is held, so there
+        # is nothing to restart — only a connection to make.
+        from gsu.transport.stream import StreamUplink, TeeUplink
+
+        class Late(StreamUplink):
+            name = "late"
+
+            def __init__(self):
+                super().__init__()
+                self.available = False
+                self.log = []
+
+            def open(self): return self.available
+            def begin(self, codec, init): self.log.append(init); return True
+            def send(self, fragment, keyframe): self.log.append(fragment); return True
+            def close(self): pass
+
+        primary = Late()
+        tee = TeeUplink(primary, require_primary=False)
+        self.assertTrue(tee.open())
+        tee.begin("h264", b"INIT")
+        tee.send(b"early", keyframe=True)
+        self.assertEqual(primary.log, [], "nothing should have gone out yet")
+
+        primary.available = True
+        self.assertTrue(tee.open_primary())
+        # Handed the init segment it missed, so it can decode what follows.
+        self.assertEqual(primary.log, [b"INIT"])
+        tee.send(b"later", keyframe=True)
+        self.assertEqual(primary.log, [b"INIT", b"later"])
 
     def test_the_uplink_says_who_is_watching(self):
         from gsu.transport.stream import LocalViewer

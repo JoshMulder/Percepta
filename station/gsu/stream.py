@@ -135,6 +135,14 @@ class StreamSession:
             self._local_only = False
 
         if self.state == "streaming":
+            # The setup page may have started this before the platform asked.
+            # The encoder is already running and the init segment is held, so
+            # the platform joins without restarting anything.
+            if not request.get("_local") and isinstance(self.uplink, TeeUplink):
+                if not self.uplink.open_primary():
+                    return (
+                        f"already streaming locally, but {self.uplink.reason}"
+                    )
             return (
                 f"already streaming; lease extended {lease:.0f}s, "
                 f"{self.viewers} viewer(s)"
@@ -158,9 +166,19 @@ class StreamSession:
         # camera is a single device with a single owner and this whole class is
         # built on there being exactly one encoder; giving the setup page its
         # own would be the two-readers bug arriving by a different door.
-        uplink = TeeUplink(build_uplink(
-            self.agent.config, self.agent.enrolment, trust=self.agent.api_trust,
-        ))
+        uplink = TeeUplink(
+            build_uplink(
+                self.agent.config, self.agent.enrolment,
+                trust=self.agent.api_trust,
+            ),
+            # A stream the setup page asked for does not need the platform's
+            # uplink to open. The moment somebody most needs to aim a camera is
+            # the moment the box is not talking to the platform, and a local
+            # preview that requires a working uplink is missing whenever it is
+            # wanted. A stream the platform asked for still needs it: an
+            # encoder running with nowhere to send is the expensive mistake.
+            require_primary=not (request or {}).get("_local"),
+        )
         self.uplink = uplink
         if not uplink.open():
             self.state = "unavailable"

@@ -448,9 +448,20 @@ class TeeUplink(StreamUplink):
 
     name = "tee"
 
-    def __init__(self, primary: StreamUplink) -> None:
+    def __init__(self, primary: StreamUplink,
+                 require_primary: bool = True) -> None:
         super().__init__()
         self.primary = primary
+        #: Whether the platform's uplink failing to open fails the session.
+        #:
+        #: True for a stream the platform asked for: an encoder running with
+        #: nowhere to send is the expensive mistake this whole file exists to
+        #: prevent. False for one the setup page asked for, because the moment
+        #: somebody most needs to aim a camera is the moment the box is not
+        #: talking to the platform — a local preview that requires a working
+        #: uplink is a preview that is missing whenever it is wanted.
+        self.require_primary = require_primary
+        self.primary_open = False
         self._viewers: set[LocalViewer] = set()
         self._lock = threading.Lock()
         self._codec = ""
@@ -478,7 +489,31 @@ class TeeUplink(StreamUplink):
     # --- the uplink itself ----------------------------------------------
 
     def open(self) -> bool:
-        return self.primary.open()
+        self.primary_open = self.primary.open()
+        if self.primary_open:
+            return True
+        self.reason = self.primary.reason or "the media uplink would not open"
+        return not self.require_primary
+
+    def open_primary(self) -> bool:
+        """Try the platform's uplink again, mid-session.
+
+        A local session may already be running when the platform asks to watch
+        — the setup page was open first. The encoder is right there; only the
+        connection is missing, and the init segment is held, so the platform
+        can be brought in without restarting anything.
+        """
+        if self.primary_open:
+            return True
+        self.primary_open = self.primary.open()
+        if not self.primary_open:
+            return False
+        self.require_primary = True
+        with self._lock:
+            codec, init = self._codec, self._init
+        if init is not None:
+            self.primary.begin(codec, init)
+        return True
 
     def begin(self, codec: str, init_segment: bytes) -> bool:
         with self._lock:
@@ -486,6 +521,8 @@ class TeeUplink(StreamUplink):
             viewers = list(self._viewers)
         for viewer in viewers:
             viewer.begin(init_segment)
+        if not self.primary_open:
+            return True
         return self.primary.begin(codec, init_segment)
 
     def send(self, fragment: bytes, keyframe: bool) -> bool:
@@ -493,6 +530,10 @@ class TeeUplink(StreamUplink):
             viewers = list(self._viewers)
         for viewer in viewers:
             viewer.feed(fragment, keyframe)
+        if not self.primary_open:
+            # Nobody off-box is watching, and that is not a dropped frame:
+            # `dropped` means the link could not take what it was offered.
+            return True
         # The primary's answer is the one that counts for the session's stats:
         # a browser that cannot keep up is that browser's problem, and must not
         # be reported as the platform link dropping frames.
@@ -508,14 +549,20 @@ class TeeUplink(StreamUplink):
 
     def describe(self) -> str:
         local = self.local_viewers
+        where = self.primary.describe() if self.primary_open else "nowhere off-box"
         if not local:
-            return self.primary.describe()
-        return f"{self.primary.describe()} + {local} on the setup page"
+            return where
+        return f"{where} + {local} on the setup page"
 
     def stats(self) -> dict:
         stats = self.primary.stats()
         stats["uplink"] = self.describe()
         stats["local_viewers"] = self.local_viewers
+        # Said plainly, because "streaming" with no uplink open is a state
+        # somebody will otherwise read as the platform receiving video.
+        stats["primary_open"] = self.primary_open
+        if not self.primary_open:
+            stats["reason"] = self.reason
         return stats
 
 
