@@ -986,3 +986,113 @@ class SimulatedPowerSizingTests(unittest.TestCase):
         # coming in.
         power = self.source(battery=False, solar_w=4000)
         self.assertEqual(power.read(1.0).battery_w, 0.0)
+
+
+class LocalStreamViewerTests(unittest.TestCase):
+    """The setup page watching the same encoder the platform watches.
+
+    The camera is a single device with a single owner. Serving the setup page
+    by starting a second encoder would be the two-readers bug that removed the
+    snapshot channel, arriving again by a different door — so these are mostly
+    tests that nothing forks.
+    """
+
+    def tee(self):
+        from gsu.transport.stream import NullUplink, TeeUplink
+        return TeeUplink(NullUplink())
+
+    def test_a_viewer_joining_late_still_gets_the_init_segment(self):
+        # The encoder emits one per session and will not produce another until
+        # its parameters change. Without it a decoder has nothing to decode
+        # against and the element sits black for as long as the session lasts.
+        tee = self.tee()
+        tee.begin("h264", b"INIT")
+        from gsu.transport.stream import LocalViewer
+        viewer = LocalViewer()
+        tee.add(viewer)
+        self.assertEqual(viewer.read(timeout=0.1), b"INIT")
+
+    def test_a_viewer_waits_for_a_keyframe_before_any_picture(self):
+        # A fragment that is not one decodes against a reference frame this
+        # viewer never received. The alternative to waiting is a few hundred
+        # milliseconds of macroblock soup, which reads as a broken camera.
+        from gsu.transport.stream import LocalViewer
+        tee = self.tee()
+        viewer = LocalViewer()
+        tee.add(viewer)
+        tee.begin("h264", b"INIT")
+        self.assertEqual(viewer.read(timeout=0.1), b"INIT")
+        tee.send(b"mid-gop", keyframe=False)
+        self.assertIsNone(viewer.read(timeout=0.05))
+        tee.send(b"keyframe", keyframe=True)
+        self.assertEqual(viewer.read(timeout=0.1), b"keyframe")
+
+    def test_a_stalled_viewer_is_dropped_not_queued(self):
+        # The same rule as everywhere else on this path: a buffered second of
+        # 1080p is several megabytes of a picture that is already out of date.
+        from gsu.transport.stream import LocalViewer
+        tee = self.tee()
+        viewer = LocalViewer()
+        tee.add(viewer)
+        tee.begin("h264", b"INIT")
+        tee.send(b"key", keyframe=True)
+        for i in range(LocalViewer.DEPTH * 3):
+            tee.send(f"f{i}".encode(), keyframe=False)
+        self.assertGreater(viewer.dropped, 0)
+        self.assertLessEqual(len(viewer._queue), LocalViewer.DEPTH)
+
+    def test_a_browser_falling_behind_is_not_the_platform_dropping_frames(self):
+        # The primary's answer is the session's answer. A slow tab must not be
+        # reported as the satellite link losing video.
+        from gsu.transport.stream import LocalViewer
+        tee = self.tee()
+        viewer = LocalViewer()
+        tee.add(viewer)
+        tee.begin("h264", b"INIT")
+        tee.send(b"key", keyframe=True)
+        for i in range(LocalViewer.DEPTH * 3):
+            tee.send(f"f{i}".encode(), keyframe=False)
+        self.assertEqual(tee.primary.dropped, 0)
+
+    def test_removing_a_viewer_closes_it(self):
+        from gsu.transport.stream import LocalViewer
+        tee = self.tee()
+        viewer = LocalViewer()
+        tee.add(viewer)
+        self.assertEqual(tee.local_viewers, 1)
+        tee.remove(viewer)
+        self.assertEqual(tee.local_viewers, 0)
+        self.assertTrue(viewer.closed)
+
+    def test_the_platform_still_gets_everything(self):
+        # The whole point of a tee: local viewers are additional, never
+        # instead. Both the init segment and every fragment reach the primary.
+        from gsu.transport.stream import LocalViewer, StreamUplink
+
+        class Recording(StreamUplink):
+            name = "recording"
+
+            def __init__(self):
+                super().__init__()
+                self.log = []
+
+            def open(self): return True
+            def begin(self, codec, init): self.log.append(("begin", init)); return True
+            def send(self, fragment, keyframe): self.log.append(("send", fragment)); return True
+            def close(self): self.log.append(("close", None))
+
+        from gsu.transport.stream import TeeUplink
+        primary = Recording()
+        tee = TeeUplink(primary)
+        tee.add(LocalViewer())
+        tee.begin("h264", b"INIT")
+        tee.send(b"key", keyframe=True)
+        self.assertEqual(primary.log, [("begin", b"INIT"), ("send", b"key")])
+
+    def test_the_uplink_says_who_is_watching(self):
+        from gsu.transport.stream import LocalViewer
+        tee = self.tee()
+        self.assertNotIn("setup page", tee.describe())
+        tee.add(LocalViewer())
+        self.assertIn("setup page", tee.describe())
+        self.assertEqual(tee.stats()["local_viewers"], 1)

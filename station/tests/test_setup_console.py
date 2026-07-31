@@ -533,19 +533,29 @@ class ServedPageTests(unittest.TestCase):
 
     # --- the camera preview ---
 
-    def test_the_camera_tab_shows_the_preview_and_then_the_frame(self):
-        # Before anything has been captured: an empty state, not a broken
-        # image, and the CSS-only zoom mechanism is already in place.
+    def test_the_camera_tab_offers_the_live_stream(self):
+        # This page is where somebody aims a camera, so the preview is the live
+        # encoder rather than a still: a frame up to two seconds old, fetched
+        # every two and a half, is three to five seconds behind the thing being
+        # pointed. The element is there before any capture has happened,
+        # because it does not depend on one — it opens the stream itself.
         _, body = self.request("GET", "/devices?slot=camera")
-        self.assertIn("no frame yet", body)
+        self.assertIn("<video id=preview src='/stream.mp4'", body)
+        self.assertIn("autoplay muted playsinline", body)
         self.assertIn("zoom-toggle", body)
-        self.assertNotIn("src='/frame.jpg'", body)
-        # After a capture: the picture and its age.
+
+    def test_the_still_frame_age_appears_once_there_is_one(self):
+        # The cached still has not gone away — /frame.jpg still serves it and
+        # its age is still stated. It is now a second opinion beside the live
+        # picture rather than the picture itself.
+        #
+        # No assertion that the age is absent beforehand: /status.json is the
+        # preview's demand signal, every other test in this class hits it, and
+        # the capture thread obliges. That made the negative a statement about
+        # test ordering rather than about the page.
         self.agent.video.cycle()
         _, body = self.request("GET", "/devices?slot=camera")
-        self.assertIn("src='/frame.jpg'", body)
         self.assertIn("s old", body)
-        self.assertNotIn("no frame yet", body)
         # And status.json carries what the refresher script needs.
         _, status = self.request("GET", "/status.json")
         video = json.loads(status)["video"]

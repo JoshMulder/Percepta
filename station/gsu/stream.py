@@ -43,7 +43,9 @@ from .camera.h264 import (
     split_annexb,
 )
 from .media.fmp4 import Fmp4Muxer
-from .transport.stream import build_uplink, media_url
+from .transport.stream import (
+    LocalViewer, TeeUplink, build_uplink, media_url,
+)
 
 log = logging.getLogger("gsu.stream")
 
@@ -99,6 +101,12 @@ class StreamSession:
         self._codec_mismatch = ""
         self._session_open = False
         self._last_frame_at: float | None = None
+        #: True while the only reason this encoder is running is somebody on
+        #: the station's own setup page. The platform never asked, so nothing
+        #: will ever renew the lease on its behalf and nothing will send a
+        #: `video.stop` — the last local viewer leaving has to end it, or the
+        #: camera stays busy until a lease nobody is holding runs out.
+        self._local_only = False
 
     # --- what the platform asks for -------------------------------------
 
@@ -121,6 +129,10 @@ class StreamSession:
         ))
         self.viewers = max(1, int(request.get("viewers", 1) or 1))
         self.expires_at = time.monotonic() + lease
+        if not request.get("_local"):
+            # The platform is watching now, so the session outlives the setup
+            # page and ends the way every other stream does.
+            self._local_only = False
 
         if self.state == "streaming":
             return (
@@ -142,9 +154,13 @@ class StreamSession:
         # `self.uplink` — it cannot null a local. The first real station
         # proved the race is real; reading the attribute "just once" only
         # narrowed it.
-        uplink = build_uplink(
+        # Wrapped in a tee so the setup page can watch the same encoder. The
+        # camera is a single device with a single owner and this whole class is
+        # built on there being exactly one encoder; giving the setup page its
+        # own would be the two-readers bug arriving by a different door.
+        uplink = TeeUplink(build_uplink(
             self.agent.config, self.agent.enrolment, trust=self.agent.api_trust,
-        )
+        ))
         self.uplink = uplink
         if not uplink.open():
             self.state = "unavailable"
@@ -266,11 +282,53 @@ class StreamSession:
             f"to {uplink_name}, lease {lease:.0f}s"
         )
 
+    # --- somebody on the station's own setup page -----------------------
+
+    def attach_local(self) -> LocalViewer | None:
+        """A viewer on the setup page, starting the encoder if it is idle.
+
+        Returns None if the stream cannot run at all, so the caller can say why
+        rather than serving an empty response that looks like a hung camera.
+        """
+        if self.state != "streaming":
+            was_idle = self.state == "idle"
+            self.start({"viewers": 1, "_local": True})
+            if self.state != "streaming":
+                return None
+            if was_idle:
+                self._local_only = True
+        uplink = self.uplink
+        if not isinstance(uplink, TeeUplink):
+            return None
+        viewer = LocalViewer()
+        uplink.add(viewer)
+        return viewer
+
+    def renew_local(self) -> None:
+        """Keep the session alive while a setup page is still reading it.
+
+        The lease is the same fail-closed mechanism the platform uses: a
+        browser that goes away without closing its socket stops renewing, and
+        the encoder stops on its own.
+        """
+        if self.state == "streaming":
+            self.expires_at = time.monotonic() + DEFAULT_LEASE_S
+
+    def detach_local(self, viewer: LocalViewer) -> None:
+        uplink = self.uplink
+        if isinstance(uplink, TeeUplink):
+            uplink.remove(viewer)
+            if self._local_only and uplink.local_viewers == 0:
+                self.stop("the setup page stopped watching")
+        else:
+            viewer.close()
+
     def stop(self, reason: str = "stopped by the platform") -> str:
         """`video.stop`, and every other way this ends. Safe to call at any
         time, including when nothing is running."""
         self.viewers = 0
         self.expires_at = None
+        self._local_only = False
         if self.state != "streaming":
             self.state = "idle"
             # Released even on this path. A start that got as far as taking the

@@ -40,6 +40,7 @@ import logging
 import os
 import threading
 from abc import ABC, abstractmethod
+from collections import deque
 
 from ..media.websocket import WebSocket, WebSocketError
 
@@ -350,6 +351,172 @@ def media_url(config, enrolment=None) -> str | None:
     if not separator or not rest:
         return None
     return f"{'wss' if scheme.lower() == 'https' else 'ws'}://{rest.rstrip('/')}{INGEST_PATH}"
+
+
+class LocalViewer:
+    """One browser on the station's own setup page, holding fMP4 for it.
+
+    Not a `StreamUplink`: an uplink is a connection this station opens and
+    owns, and this is the other direction — somebody has connected to *us* and
+    the console's HTTP thread is draining it. It is a queue with the same rule
+    as everything else on this path, which is that video is dropped rather
+    than queued. A buffered second of 1080p is several megabytes of a picture
+    that is already out of date, and on a page whose entire reason to exist is
+    "what is the camera seeing right now" it is worse than a gap.
+
+    **Starts at a keyframe, never before.** A fragment that is not one decodes
+    against parameter sets and a reference frame the viewer never received, so
+    a viewer that joins mid-GOP is shown nothing until the next keyframe. The
+    alternative is a few hundred milliseconds of macroblock soup, which reads
+    as a broken camera.
+    """
+
+    #: Fragments, not bytes. At a keyframe interval of one second this is a
+    #: couple of seconds of slack for a browser that stalls briefly, and a hard
+    #: stop for one that has gone away without closing the socket.
+    DEPTH = 8
+
+    def __init__(self) -> None:
+        self._queue: deque[bytes] = deque()
+        self._wake = threading.Event()
+        self._lock = threading.Lock()
+        self.closed = False
+        self.dropped = 0
+        #: Set once the init segment has been queued, and cleared whenever the
+        #: encoder's parameters change, because the viewer then needs a new one.
+        self._opened = False
+        self._waiting_for_keyframe = True
+
+    def begin(self, init_segment: bytes) -> None:
+        with self._lock:
+            self._queue.clear()
+            self._queue.append(init_segment)
+            self._opened = True
+            self._waiting_for_keyframe = True
+            self._wake.set()
+
+    def feed(self, fragment: bytes, keyframe: bool) -> None:
+        with self._lock:
+            if self.closed or not self._opened:
+                return
+            if self._waiting_for_keyframe:
+                if not keyframe:
+                    return
+                self._waiting_for_keyframe = False
+            if len(self._queue) >= self.DEPTH:
+                # Behind, so throw away what is stale and resynchronise on the
+                # next keyframe rather than delivering a growing delay.
+                self._queue.clear()
+                self._waiting_for_keyframe = True
+                self.dropped += 1
+                return
+            self._queue.append(fragment)
+            self._wake.set()
+
+    def read(self, timeout: float = 1.0) -> bytes | None:
+        """The next fragment, or None if nothing arrived before `timeout`.
+
+        A timeout rather than a blocking wait so the caller gets the chance to
+        notice the client has gone and to renew the session's lease.
+        """
+        self._wake.wait(timeout)
+        with self._lock:
+            self._wake.clear()
+            if self._queue:
+                return self._queue.popleft()
+        return None
+
+    def close(self) -> None:
+        with self._lock:
+            self.closed = True
+            self._queue.clear()
+            self._wake.set()
+
+
+class TeeUplink(StreamUplink):
+    """The platform's uplink and any local viewers, fed from one encoder.
+
+    The camera is a single device with a single owner, and the whole of
+    `stream.py` is built on there being exactly one encoder. Serving the setup
+    page by starting a second one would undo that — it is the bug that removed
+    the snapshot channel, arriving again by a different door. So the setup page
+    does not get its own stream; it gets a copy of the one that exists.
+
+    The init segment is held because a viewer that joins mid-session needs it
+    and the encoder will not produce another until its parameters change.
+    """
+
+    name = "tee"
+
+    def __init__(self, primary: StreamUplink) -> None:
+        super().__init__()
+        self.primary = primary
+        self._viewers: set[LocalViewer] = set()
+        self._lock = threading.Lock()
+        self._codec = ""
+        self._init: bytes | None = None
+
+    # --- local viewers --------------------------------------------------
+
+    def add(self, viewer: LocalViewer) -> None:
+        with self._lock:
+            self._viewers.add(viewer)
+            init = self._init
+        if init is not None:
+            viewer.begin(init)
+
+    def remove(self, viewer: LocalViewer) -> None:
+        with self._lock:
+            self._viewers.discard(viewer)
+        viewer.close()
+
+    @property
+    def local_viewers(self) -> int:
+        with self._lock:
+            return len(self._viewers)
+
+    # --- the uplink itself ----------------------------------------------
+
+    def open(self) -> bool:
+        return self.primary.open()
+
+    def begin(self, codec: str, init_segment: bytes) -> bool:
+        with self._lock:
+            self._codec, self._init = codec, init_segment
+            viewers = list(self._viewers)
+        for viewer in viewers:
+            viewer.begin(init_segment)
+        return self.primary.begin(codec, init_segment)
+
+    def send(self, fragment: bytes, keyframe: bool) -> bool:
+        with self._lock:
+            viewers = list(self._viewers)
+        for viewer in viewers:
+            viewer.feed(fragment, keyframe)
+        # The primary's answer is the one that counts for the session's stats:
+        # a browser that cannot keep up is that browser's problem, and must not
+        # be reported as the platform link dropping frames.
+        return self.primary.send(fragment, keyframe)
+
+    def close(self) -> None:
+        with self._lock:
+            viewers, self._viewers = list(self._viewers), set()
+            self._init = None
+        for viewer in viewers:
+            viewer.close()
+        self.primary.close()
+
+    def describe(self) -> str:
+        local = self.local_viewers
+        if not local:
+            return self.primary.describe()
+        return f"{self.primary.describe()} + {local} on the setup page"
+
+    def stats(self) -> dict:
+        stats = self.primary.stats()
+        stats["uplink"] = self.describe()
+        stats["local_viewers"] = self.local_viewers
+        return stats
 
 
 def build_uplink(config, enrolment=None, trust=None) -> StreamUplink:

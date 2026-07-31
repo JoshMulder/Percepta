@@ -99,6 +99,7 @@ WATCH_SECONDS = 5.0
 #: script poll status.json; it permits nothing off-box.
 CSP = (
     "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; "
+    "media-src 'self'; "
     "connect-src 'self'; form-action 'self'; base-uri 'none'; "
     "frame-ancestors 'none'"
 )
@@ -804,6 +805,8 @@ class Console:
                 return self._send_json(handler, self.agent.snapshot(), cookie)
             if path.startswith("/registry.json"):
                 return self._send_json(handler, self._registry_json(), cookie)
+            if path.startswith("/stream.mp4"):
+                return self._send_stream(handler, cookie)
             if path.startswith("/frame.jpg"):
                 return self._send_frame(handler, cookie)
             if path in ("/index.html", "/login"):
@@ -1121,12 +1124,21 @@ class Console:
             ],
         }
 
-    def _headers(self, handler, status: int, kind: str, length: int,
+    def _headers(self, handler, status: int, kind: str, length: int | None,
                  cookie: str | None, nonce: str | None = None,
                  extra: dict | None = None) -> None:
         handler.send_response(status)
         handler.send_header("Content-Type", kind)
-        handler.send_header("Content-Length", str(length))
+        if length is None:
+            # A body with no end: the live stream, which stops when the client
+            # goes away. Under HTTP/1.1 that has to be said, or the browser
+            # waits for a Content-Length that is never coming and shows
+            # nothing. `Connection: close` makes end-of-body mean
+            # end-of-connection, which is what this actually is.
+            handler.send_header("Connection", "close")
+            handler.close_connection = True
+        else:
+            handler.send_header("Content-Length", str(length))
         for name, value in (extra or {}).items():
             handler.send_header(name, value)
         # A setup page is state, and every one of these responses names devices,
@@ -1176,6 +1188,52 @@ class Console:
         self._headers(handler, 200, "image/jpeg", len(frame.jpeg), cookie,
                       extra={"X-Frame-Age": f"{age:.1f}"})
         handler.wfile.write(frame.jpeg)
+
+    def _send_stream(self, handler, cookie: str | None) -> None:
+        """The live encoder's fMP4, straight to a <video> on this page.
+
+        The setup page is where somebody aims a camera, and a still refreshed
+        every couple of seconds is the wrong instrument for that: the preview
+        caps captures at one per two seconds and the page asks for one every
+        two and a half, so the picture is three to five seconds behind the
+        thing being pointed. You cannot aim with that.
+
+        This is the *same encoder* the platform watches, never a second one —
+        see `TeeUplink`. Two readers of one sensor is what wedged this camera
+        before, and it is not a bug worth having twice.
+
+        Written as a chunked response rather than through MediaSource: an
+        `<video src>` pointed at a never-ending fMP4 body is a few lines of
+        HTML against a few hundred of JavaScript, and this page's whole design
+        is that it works without script.
+        """
+        stream = getattr(self.agent, "stream", None)
+        if stream is None:
+            return self._deny(handler, 503, "No stream on this station.")
+        viewer = stream.attach_local()
+        if viewer is None:
+            return self._deny(
+                handler, 503, stream.reason or "The camera will not stream.")
+        try:
+            # No Content-Length: this body ends when the client goes away.
+            self._headers(handler, 200, "video/mp4", None, cookie,
+                          extra={"Cache-Control": "no-store"})
+            while not viewer.closed:
+                fragment = viewer.read(timeout=1.0)
+                # Renewed on every pass, including the empty ones: the lease is
+                # the same fail-closed mechanism the platform uses, and a
+                # browser that vanished without closing its socket simply stops
+                # renewing. The write below is what discovers that.
+                stream.renew_local()
+                if fragment is None:
+                    continue
+                handler.wfile.write(fragment)
+                handler.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            # The tab was closed, which is the ordinary way this ends.
+            pass
+        finally:
+            stream.detach_local(viewer)
 
     def _send_json(self, handler, payload: dict, cookie: str | None = None) -> None:
         body = json.dumps(payload, indent=2, default=str).encode()
@@ -2096,21 +2154,29 @@ class Console:
             "<div class=field><label>Preview</label></div>",
             "<input type=checkbox id=zoom class=zoom-toggle>",
         ]
+        # Live, not a still. This page is where somebody aims a camera, and a
+        # frame up to two seconds old fetched every two and a half is three to
+        # five seconds behind the thing being pointed — you cannot aim with
+        # that. The <video> is the same encoder the platform watches; see
+        # `_send_stream` and `TeeUplink`.
+        #
+        # `muted` is not a preference: an autoplaying video with sound is
+        # blocked outright by every browser, and there is no audio on this
+        # stream to lose. `playsinline` stops iOS taking it fullscreen, which
+        # matters because the far more likely device in front of a station is
+        # a phone.
+        out.append(
+            "<label for=zoom class=preview id=preview-wrap>"
+            "<video id=preview src='/stream.mp4' autoplay muted playsinline>"
+            "</video></label>"
+        )
         if video.get("has_frame"):
             age = video.get("frame_age_s") or 0
             out.append(
-                "<label for=zoom class=preview id=preview-wrap>"
-                "<img id=preview src='/frame.jpg' alt='latest camera frame'>"
-                "</label>"
-            )
-            out.append(
-                f"<div class=muted id=preview-age>frame {age:.0f} s old</div>"
+                f"<div class=muted id=preview-age>still frame {age:.0f} s old"
+                "</div>"
             )
         else:
-            out.append(
-                "<label for=zoom class=preview id=preview-wrap>"
-                "<span class=muted>no frame yet</span></label>"
-            )
             out.append("<div class=muted id=preview-age></div>")
         return "".join(out)
 
