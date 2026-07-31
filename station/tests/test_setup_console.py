@@ -424,6 +424,28 @@ class ServedPageTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertIn(f"<strong>{SLOT_LABELS[registry.SLOTS[0]]}</strong>", body)
 
+    def test_picking_a_device_leaves_something_to_save(self):
+        # Picking only re-renders — it stores nothing, so that a device's
+        # parameters can be filled in before anything is written. The cost was
+        # that the act of picking left the save button disabled: the type is a
+        # hidden field, which the dirty check skips, and every visible field
+        # already equalled its freshly-rendered default. A device you could
+        # select and then not save, with nothing you could touch to release the
+        # button — which is how the radio got stuck on a dead receiver.
+        # Matched on the form tag, not anywhere in the page: the script that
+        # reads the attribute also contains its name.
+        _, body = self.request("GET", "/devices?slot=radio")
+        self.assertIn("data-device>", body)          # nothing picked yet
+
+        from gsu.devices import registry
+        other = next(d for d in registry.by_slot("radio"))
+        _, body = self.request("GET", f"/devices?slot=radio&type={other.id}")
+        self.assertIn("data-device data-changed>", body)
+
+        # The comparison is symmetric, so this covers un-fitting too: picking
+        # "— not fitted —" against a stored device is the same inequality, and
+        # un-fitting is exactly what people reach for when one has failed.
+
     def test_each_slot_tab_offers_its_own_devices_from_the_registry(self):
         from gsu.devices import registry
 

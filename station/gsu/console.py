@@ -1913,8 +1913,19 @@ class Console:
             "</select><button type=submit class=pick-go>Change</button></div></form>"
         )
 
+        # `data-changed` when the device on screen is not the device stored.
+        #
+        # Picking a device only re-renders — that is the whole point of the
+        # split above — so the act of picking leaves nothing for the dirty
+        # check to notice: the type lives in a hidden field, which the
+        # fingerprint skips, and every visible field already equals its
+        # freshly-rendered default. The result was a page offering a device
+        # you could select and then not save, with no field you could touch to
+        # release the button. Switching back to a demo device was impossible.
+        pending = chosen_id != ((entry.type_id or "") if entry else "")
         out.append(
-            f"<form method=post action='/device' data-device>"
+            f"<form method=post action='/device' data-device"
+            f"{' data-changed' if pending else ''}>"
             f"<input type=hidden name=slot value='{slot}'>"
             f"<input type=hidden name=type_id value='{html.escape(chosen_id)}'>"
         )
@@ -2146,8 +2157,12 @@ class Console:
       var button = form.querySelector("button[type=submit]");
       if (!button) return;
       var loaded = fingerprint(form);
-      button.disabled = true;
-      var update = function () { button.disabled = fingerprint(form) === loaded; };
+      // A pending device change is already a change, whatever the fields say.
+      var picked = form.hasAttribute("data-changed");
+      button.disabled = !picked;
+      var update = function () {
+        button.disabled = !picked && fingerprint(form) === loaded;
+      };
       form.addEventListener("input", update);
       form.addEventListener("change", update);
     })(forms[i]);
