@@ -120,36 +120,97 @@ class SimulatedWeather:
 
 
 class SimulatedPower:
-    """Solar, a battery, and a load that depends on what is switched on.
+    """Solar, a battery, AC mains, a backup generator, and a load.
 
-    The day cycle is fast enough to be visible in a demo and slow enough that
-    the console's low/critical thresholds mean something.
+    All four sources, because the point of a demo box is to exercise the
+    console's whole power display without anybody wiring a generator to a
+    bench. The day cycle is fast enough to be visible and slow enough that the
+    low and critical thresholds mean something.
+
+    **The interesting behaviour is the handover.** Mains occasionally drops —
+    that is what a remote site's grid does — and when it does the battery
+    starts carrying the load. If the state of charge then falls far enough the
+    generator starts, takes over, and charges the battery back up before
+    stopping. That sequence is the one an operator most needs to be able to
+    read at a glance, and it is the one a static demo never shows.
+
+    Priority when several sources are live: solar first because it is free,
+    then mains, then the generator. The battery makes up any shortfall and
+    absorbs any surplus.
     """
+
+    #: Mains fails roughly this often, in simulated seconds, and stays down for
+    #: a while. Frequent enough to see during a demo, rare enough that the
+    #: display is not permanently in a fault state.
+    MAINS_MTBF_S = 900.0
+    MAINS_OUTAGE_S = 240.0
+
+    #: The generator starts below this and stops once the battery is back above
+    #: the second. The gap is deliberate: a single threshold makes a generator
+    #: hunt on and off around it, which is hard on the machine and looks like a
+    #: fault on a graph.
+    GEN_START_SOC = 45.0
+    GEN_STOP_SOC = 70.0
+    GEN_OUTPUT_W = 1400.0
 
     def __init__(self, seed: int | None = None) -> None:
         self._rng = random.Random(seed)
         self._t = self._rng.uniform(0, 1000)
         self.soc = self._rng.uniform(62, 92)
+        self._mains_down_for = 0.0
+        self._gen_running = False
 
     def read(self, dt: float, extra_load_w: float = 0.0) -> PowerReading:
         self._t += dt
         day = (math.sin(self._t / 240) + 1) / 2
         pv_w = day * 780
         load_w = 120 + extra_load_w + self._rng.uniform(-8, 8)
-        net = pv_w - load_w
-        self.soc = max(2.0, min(100.0, self.soc + net * dt / 40000))
+
+        # The grid, and its habit of going away.
+        if self._mains_down_for > 0:
+            self._mains_down_for = max(0.0, self._mains_down_for - dt)
+        elif self._rng.random() < dt / self.MAINS_MTBF_S:
+            self._mains_down_for = self.MAINS_OUTAGE_S
+        mains_present = self._mains_down_for <= 0
+
+        # The generator, with hysteresis so it does not hunt.
+        if self._gen_running and self.soc >= self.GEN_STOP_SOC:
+            self._gen_running = False
+        elif not self._gen_running and self.soc <= self.GEN_START_SOC:
+            self._gen_running = True
+        gen_w = self.GEN_OUTPUT_W if self._gen_running else 0.0
+
+        # Solar first because it is free, then mains, then the generator; the
+        # battery takes whatever is left over in either direction.
+        remaining = max(0.0, load_w - pv_w)
+        mains_w = min(remaining, 2000.0) if mains_present else 0.0
+        remaining = max(0.0, remaining - mains_w)
+        gen_delivered = min(remaining, gen_w)
+
+        supplied = pv_w + mains_w + gen_w
+        battery_w = supplied - load_w
+        self.soc = max(2.0, min(100.0, self.soc + battery_w * dt / 40000))
+
         self._last_line = (
             f"soc {self.soc:.0f}%  {48.0 + (self.soc - 50) * 0.042:.1f} V  "
-            f"pv {pv_w:.0f} W  load {load_w:.0f} W"
+            f"pv {pv_w:.0f} W  mains {mains_w:.0f} W"
+            f"{'' if mains_present else ' (down)'}  "
+            f"gen {gen_w:.0f} W{' running' if self._gen_running else ''}  "
+            f"load {load_w:.0f} W  batt {battery_w:+.0f} W"
         )
         return PowerReading(
             soc_pct=self.soc,
             battery_v=48.0 + (self.soc - 50) * 0.042,
             pv_w=pv_w,
             load_w=load_w,
+            battery_w=battery_w,
             # Null while charging: an hours-remaining figure that means
             # "indefinitely" is worse than no figure.
-            runtime_h=None if net > 0 else self.soc * 0.42,
+            runtime_h=None if battery_w > 0 else self.soc * 0.42,
+            mains_w=mains_w,
+            mains_present=mains_present,
+            generator_w=gen_delivered,
+            generator_running=self._gen_running,
         )
 
     def raw_sample(self) -> list[str]:
@@ -161,7 +222,7 @@ class SimulatedPower:
             id="power",
             kind="charge-controller",
             present=True,
-            detail="simulated MPPT controller and 48 V bank",
+            detail="simulated MPPT, 48 V bank, AC mains and backup generator",
             simulated=True,
         )
 

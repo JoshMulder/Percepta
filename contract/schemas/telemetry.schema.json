@@ -407,6 +407,26 @@
             "stopped"
           ],
           "description": "The same fact as unavailable_reason, in one word a consumer can branch on. not_fitted is a complete station with nothing selected for this slot and is not a fault; not_detected and stopped both are. Carried on the stream rather than only in health because a console that has just connected or switched station would otherwise wait a full health period - 30 seconds - to tell an empty slot from a broken sensor, and must show something in the meantime. Absent means unknown, which consumers should treat as they did before this field existed."
+        },
+        "battery_w": {
+          "type": "number",
+          "description": "Signed battery power in watts: positive charging, negative discharging. Sent rather than left to be derived, because with four possible sources the console cannot work out the battery's direction from the others without knowing about conversion losses and which source is carrying the load. The station measures it; a consumer subtracting pv_w from load_w would be guessing."
+        },
+        "mains_w": {
+          "type": "number",
+          "description": "Watts drawn from the AC mains input. Present only when a mains input is fitted \u2014 a site with no grid connection omits this and mains_present entirely, the same way a weather head with no RH module omits humidity. Absent is 'no such source', which is different from 0 W."
+        },
+        "mains_present": {
+          "type": "boolean",
+          "description": "Whether the AC mains input has power. False on a fitted input means the grid is down, which is a fault worth acting on; the field being absent means there is no mains connection at this site and nothing is wrong. Collapsing the two would make every off-grid station look like it had lost power."
+        },
+        "generator_w": {
+          "type": "number",
+          "description": "Watts being delivered by the backup generator. Present only when one is fitted."
+        },
+        "generator_running": {
+          "type": "boolean",
+          "description": "Whether the generator is running. Present only when one is fitted. False and running-but-producing-nothing are different states: a generator that is running and delivering 0 W has started and failed to take the load, which is exactly the case somebody needs to be told about."
         }
       },
       "allOf": [

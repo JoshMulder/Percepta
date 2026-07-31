@@ -214,6 +214,20 @@ class WeatherStation(Protocol):
 
 @dataclass(frozen=True)
 class PowerReading:
+    """What is generating, what is consuming, and which way the battery is going.
+
+    Four possible sources — battery, solar, AC mains, a backup generator — and
+    one load. Not every site has all four, and the difference between "this
+    site has no grid connection" and "this site's grid is down" is the whole
+    reason the optional ones are *absent* rather than zero: a station reporting
+    `mains_w: 0` on a site that never had mains looks exactly like one whose
+    power has failed.
+
+    Same rule as a weather head with no humidity module. A source that is not
+    fitted is omitted; a source that is fitted reports, including reporting
+    zero, which is then a real measurement.
+    """
+
     soc_pct: float
     battery_v: float
     pv_w: float
@@ -222,15 +236,43 @@ class PowerReading:
     #: is not a number the console should have to special-case.
     runtime_h: float | None
 
+    #: Signed: positive charging, negative discharging. Measured rather than
+    #: left to be derived — with four sources a consumer cannot work out the
+    #: battery's direction from the others without knowing about conversion
+    #: losses and which source is carrying the load, so it would be guessing.
+    battery_w: float = 0.0
+
+    #: None means no mains input at this site. `mains_present` False on a
+    #: fitted input means the grid is down, which is a fault; the pair being
+    #: absent means nothing is wrong.
+    mains_w: float | None = None
+    mains_present: bool | None = None
+
+    #: None means no generator fitted. Running and delivering nothing is a
+    #: distinct state worth reporting: it has started and failed to take the
+    #: load, which is exactly what somebody needs to be told.
+    generator_w: float | None = None
+    generator_running: bool | None = None
+
     def to_payload(self) -> dict:
-        return {
+        payload = {
             "kind": "power",
             "soc_pct": round(min(100.0, max(0.0, self.soc_pct)), 1),
             "battery_v": round(self.battery_v, 2),
             "pv_w": round(self.pv_w, 1),
             "load_w": round(self.load_w, 1),
+            "battery_w": round(self.battery_w, 1),
             "runtime_h": None if self.runtime_h is None else round(self.runtime_h, 1),
         }
+        # Omitted, not nulled. Absent is "no such source at this site"; a
+        # number — including zero — is a measurement from something fitted.
+        if self.mains_present is not None:
+            payload["mains_present"] = self.mains_present
+            payload["mains_w"] = round(self.mains_w or 0.0, 1)
+        if self.generator_running is not None:
+            payload["generator_running"] = self.generator_running
+            payload["generator_w"] = round(self.generator_w or 0.0, 1)
+        return payload
 
 
 @runtime_checkable

@@ -5,6 +5,7 @@ lands as a test failure on this side rather than as a surprise in conformance.
 """
 
 import json
+import math
 import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
@@ -709,3 +710,123 @@ class DemoSensorStampTests(unittest.TestCase):
                 any(d.label.startswith("Demo") for d in demo),
                 f"{slot}'s demo sensor is not labelled Demo",
             )
+
+
+class PowerSourcesTests(unittest.TestCase):
+    """Four sources, and the difference between absent and zero.
+
+    A site with no grid connection and a site whose grid has failed are
+    completely different situations, and `mains_w: 0` describes both. So a
+    source that is not fitted is omitted entirely — the same rule a weather
+    head with no humidity module follows — and a source that is fitted reports,
+    including reporting zero, which is then a measurement.
+    """
+
+    def payload(self, **kwargs):
+        from gsu.sensors import PowerReading
+        base = dict(soc_pct=80.0, battery_v=49.2, pv_w=400.0, load_w=120.0,
+                    runtime_h=None)
+        return PowerReading(**{**base, **kwargs}).to_payload()
+
+    def test_a_site_with_no_grid_says_nothing_about_mains(self):
+        payload = self.payload()
+        self.assertNotIn("mains_w", payload)
+        self.assertNotIn("mains_present", payload)
+
+    def test_a_fitted_input_with_no_power_reports_zero_and_says_so(self):
+        # The fault case: there IS a grid connection and it is dead. A console
+        # cannot tell this from the absent case unless the station distinguishes
+        # them, and every off-grid station would look like it had lost power.
+        payload = self.payload(mains_present=False, mains_w=0.0)
+        self.assertIs(payload["mains_present"], False)
+        self.assertEqual(payload["mains_w"], 0.0)
+
+    def test_a_generator_running_and_delivering_nothing_is_reportable(self):
+        # It has started and failed to take the load, which is exactly the
+        # state somebody needs to be told about — and is not the same as off.
+        payload = self.payload(generator_running=True, generator_w=0.0)
+        self.assertIs(payload["generator_running"], True)
+        self.assertEqual(payload["generator_w"], 0.0)
+
+    def test_battery_direction_is_sent_not_inferred(self):
+        # With four sources a consumer cannot derive it without knowing about
+        # conversion losses and which source is carrying the load.
+        self.assertEqual(self.payload(battery_w=-240.0)["battery_w"], -240.0)
+        self.assertEqual(self.payload(battery_w=310.0)["battery_w"], 310.0)
+
+    def test_every_payload_validates(self):
+        for extra in (
+            {},
+            {"mains_present": True, "mains_w": 900.0},
+            {"generator_running": True, "generator_w": 1400.0},
+            {"mains_present": False, "mains_w": 0.0,
+             "generator_running": True, "generator_w": 1400.0},
+        ):
+            TELEMETRY.validate(self.payload(**extra))
+
+
+class SimulatedPowerHandoverTests(unittest.TestCase):
+    """The demo box has to show the sequence an operator most needs to read.
+
+    Mains drops, the battery carries the load, the state of charge falls, the
+    generator starts and takes over. A static demo never shows that, and it is
+    the whole reason the console's flow display exists.
+    """
+
+    def source(self):
+        from gsu.sensors.simulated import SimulatedPower
+        return SimulatedPower(seed=7)
+
+    def test_it_reports_all_four_sources(self):
+        payload = self.source().read(1.0).to_payload()
+        for field in ("pv_w", "load_w", "battery_w", "mains_w",
+                      "mains_present", "generator_w", "generator_running"):
+            self.assertIn(field, payload, field)
+
+    def test_the_generator_does_not_hunt_around_one_threshold(self):
+        # A single threshold makes a generator start and stop repeatedly around
+        # it, which is hard on the machine and reads as a fault on a graph.
+        from gsu.sensors.simulated import SimulatedPower
+        self.assertGreater(SimulatedPower.GEN_STOP_SOC,
+                           SimulatedPower.GEN_START_SOC)
+
+    def test_the_generator_starts_when_the_battery_gets_low(self):
+        power = self.source()
+        power.soc = SimulatedPowerHandoverTests._start_soc() - 1
+        reading = power.read(1.0)
+        self.assertIs(reading.generator_running, True)
+
+    def test_and_stops_once_it_has_charged_the_battery_back(self):
+        power = self.source()
+        power._gen_running = True
+        power.soc = SimulatedPowerHandoverTests._stop_soc() + 1
+        self.assertIs(power.read(1.0).generator_running, False)
+
+    @staticmethod
+    def _start_soc():
+        from gsu.sensors.simulated import SimulatedPower
+        return SimulatedPower.GEN_START_SOC
+
+    @staticmethod
+    def _stop_soc():
+        from gsu.sensors.simulated import SimulatedPower
+        return SimulatedPower.GEN_STOP_SOC
+
+    def test_the_battery_discharges_when_nothing_else_covers_the_load(self):
+        power = self.source()
+        power._mains_down_for = 100.0     # grid out
+        power._gen_running = False
+        # Solar is (sin(t/240) + 1) / 2, so it is dark at t/240 = 3π/2. The
+        # read below advances t by dt first, hence the offset.
+        power._t = 240 * (3 * math.pi / 2) - 1.0
+        reading = power.read(1.0)
+        self.assertLess(reading.battery_w, 0)
+        self.assertIsNotNone(reading.runtime_h)
+
+    def test_a_charging_battery_reports_no_runtime(self):
+        # "Indefinitely" is not a number the console should special-case.
+        power = self.source()
+        power._gen_running = True
+        reading = power.read(1.0)
+        self.assertGreater(reading.battery_w, 0)
+        self.assertIsNone(reading.runtime_h)
