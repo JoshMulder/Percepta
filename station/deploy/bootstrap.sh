@@ -29,6 +29,8 @@ set -euo pipefail
 
 PLATFORM=""
 CA_FILE=""
+FETCH_CA=0
+CA_FINGERPRINT=""
 DEMO=0
 LAN=1
 DEPLOY_PATH=""
@@ -99,6 +101,13 @@ usage() {
   --platform HOST     the platform's hostname or IP. Required.
   --ca FILE           the platform's CA certificate, to pin. Strongly advised
                       while the platform serves its own certificate.
+  --fetch-ca          get it from the platform instead of copying it by hand.
+                      Unverified on the way in, so pair it with the next
+                      option or check the fingerprint it prints.
+  --ca-fingerprint SHA256
+                      what --fetch-ca must match, carried from the platform
+                      host by some other route. This is what turns a fetch
+                      into a pin rather than a hope.
   --demo              provision as a demo box: every slot simulated.
   --loopback          keep the setup page on 127.0.0.1. Default is the LAN,
                       which is what a box on a bench is for.
@@ -119,6 +128,8 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --platform)  PLATFORM="${2:-}"; shift 2 ;;
     --ca)        CA_FILE="${2:-}"; shift 2 ;;
+    --fetch-ca)  FETCH_CA=1; shift ;;
+    --ca-fingerprint) CA_FINGERPRINT="${2:-}"; shift 2 ;;
     --demo)      DEMO=1; shift ;;
     --loopback)  LAN=0; shift ;;
     --lan)       LAN=1; shift ;;
@@ -298,6 +309,21 @@ fi
 
 say "Installing"
 INSTALL_ARGS=(--path "$DEPLOY_PATH")
+
+if [ "$FETCH_CA" = 1 ]; then
+  # Over TLS this station cannot yet verify, because verifying it is what the
+  # file is for. That is only acceptable because of what follows: the
+  # fingerprint is printed, and --ca-fingerprint checks it against one that
+  # travelled by another route. Without that this is trust-on-first-use on a
+  # network you are asserting is trustworthy.
+  [ -n "$CA_FILE" ] || CA_FILE=/tmp/platform-api-ca.pem
+  info "fetching the CA from ${PLATFORM}"
+  curl -fsSk "https://${PLATFORM}:8000/ca.crt" -o "$CA_FILE" \
+    || die "could not fetch https://${PLATFORM}:8000/ca.crt. Is the platform up?"
+  openssl x509 -in "$CA_FILE" -noout -subject >/dev/null 2>&1 \
+    || die "what came back from ${PLATFORM} is not a certificate."
+fi
+
 if [ -n "$CA_FILE" ]; then
   # Nothing can fetch this for you. The platform sends only its leaf
   # certificate, not the chain, so the CA is not on the wire — and a CA pulled
@@ -305,7 +331,11 @@ if [ -n "$CA_FILE" ]; then
   # anyway. It has to be copied from the platform host.
   [ -f "$CA_FILE" ] || die "no such CA file: $CA_FILE
 
-   Copy it from the platform host first, then run this again:
+   Let this fetch it from the platform:
+
+     --fetch-ca --ca-fingerprint <sha256 from the platform host>
+
+   or copy it across yourself:
 
      scp <you>@${PLATFORM}:~/percepta/server/certs/ca.crt $CA_FILE
 
@@ -315,8 +345,25 @@ if [ -n "$CA_FILE" ]; then
      openssl x509 -in $CA_FILE -noout -subject -fingerprint -sha256"
   openssl x509 -in "$CA_FILE" -noout -subject >/dev/null 2>&1 \
     || die "$CA_FILE is not a PEM certificate."
+  GOT=$(openssl x509 -in "$CA_FILE" -noout -fingerprint -sha256 | cut -d= -f2)
+  if [ -n "$CA_FINGERPRINT" ]; then
+    # Compared case- and colon-insensitively: people paste these from all
+    # sorts of places and a mismatch that is only punctuation would send
+    # somebody hunting a security problem that is not there.
+    want=$(printf '%s' "$CA_FINGERPRINT" | tr -d ': ' | tr 'A-F' 'a-f')
+    have=$(printf '%s' "$GOT" | tr -d ': ' | tr 'A-F' 'a-f')
+    [ "$want" = "$have" ] || die "the CA does not match --ca-fingerprint.
+
+   expected  $CA_FINGERPRINT
+   got       $GOT
+
+   Stopping. On a fetched CA this is what an interposed platform looks like."
+    info "CA fingerprint matches the one given"
+  fi
   info "pinning $(openssl x509 -in "$CA_FILE" -noout -subject | sed 's/^subject=//')"
-  info "  $(openssl x509 -in "$CA_FILE" -noout -fingerprint -sha256 | cut -d= -f2)"
+  info "  $GOT"
+  [ -n "$CA_FINGERPRINT" ] || [ "$FETCH_CA" = 0 ] \
+    || warn "fetched unverified. Check that against the platform host."
   INSTALL_ARGS+=(--api-ca "$CA_FILE")
 else
   warn "no --ca given, so this station trusts only the system CA store."

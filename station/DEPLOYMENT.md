@@ -2,16 +2,34 @@
 
 ## The short way
 
-```bash
-# The platform's CA, copied from the platform host. Nothing can fetch this for
-# you: the platform sends only its leaf certificate, so the CA is not on the
-# wire, and one pulled from the thing it authenticates would not be worth
-# pinning. Check the fingerprint against the platform host before trusting it.
-scp <you>@192.168.2.49:~/percepta/server/certs/ca.crt /tmp/platform-api-ca.pem
+On the platform host, once, read the fingerprint of the CA every station pins:
 
-git clone <repo> ~/percepta && cd ~/percepta
-sudo station/deploy/bootstrap.sh --platform 192.168.2.49 --ca /tmp/platform-api-ca.pem
+```bash
+openssl x509 -in ~/percepta/server/certs/ca.crt -noout -fingerprint -sha256
 ```
+
+Then on the station:
+
+```bash
+git clone <repo> ~/percepta && cd ~/percepta
+sudo station/deploy/bootstrap.sh --platform 192.168.2.49 \
+  --fetch-ca --ca-fingerprint 57:65:71:3D:...
+```
+
+The platform serves its CA at `/ca.crt`, so nothing has to be copied by hand.
+The fetch itself is over TLS the station cannot yet verify — verifying it is
+what the file is for — and `--ca-fingerprint` is what closes that: it is the
+one value that has to travel by some other route, and it turns a fetch into a
+pin rather than a hope. Omit it and bootstrap prints the fingerprint and warns
+that nothing checked it.
+
+`scp`-ing the file across and passing `--ca` still works and is equivalent.
+
+**The CA is not in the repository, deliberately.** The certificate is public —
+only `ca.key` is secret, and that is never mounted anywhere near the app — but
+it is generated per platform instance. A copy in source would be correct for
+one deployment and confidently wrong for every other, and the natural way to
+"fix" a station that will not verify is to turn verification off.
 
 Run it from anywhere — it finds the checkout from its own path, not from the
 working directory.

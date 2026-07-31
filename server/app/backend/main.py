@@ -3,7 +3,7 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import Response
 from starlette.types import Scope
@@ -92,6 +92,40 @@ app.include_router(station_config_router)
 app.include_router(station_enrolment_router)
 app.include_router(stations_router)
 app.include_router(tiles_router)
+
+
+# The CA a station has to pin, served to anyone who asks.
+#
+# A certificate authority's *certificate* is public by construction — it is
+# handed to every station and every browser that will ever talk to this
+# platform, and it authenticates nothing on its own. What must never leave the
+# host is `ca.key`, which is not mounted into this container at all.
+#
+# This exists because provisioning a station otherwise needs somebody to scp a
+# file from the platform host, and a manual step in a trust decision is a step
+# that gets skipped — the failure mode being an operator who turns verification
+# off instead. Fetching it here is trust-on-first-use, so `bootstrap.sh` prints
+# the fingerprint and takes `--ca-fingerprint` to check it against one carried
+# out of band, which is the part that makes it not TOFU.
+#
+# Deliberately NOT committed to the repository. This file is generated per
+# platform instance; a copy in source is correct for exactly one deployment and
+# confidently wrong for every other, including production.
+@app.get("/ca.crt", include_in_schema=False)
+async def certificate_authority() -> Response:
+    ca = Path("/certs/ca.crt")
+    if not ca.is_file():
+        raise HTTPException(status_code=404, detail="This platform pins no CA.")
+    return Response(
+        content=ca.read_bytes(),
+        media_type="application/x-pem-file",
+        headers={
+            "Content-Disposition": 'attachment; filename="platform-api-ca.pem"',
+            # It changes only when the CA is rotated, which is a thing an
+            # operator does deliberately and then re-provisions for.
+            "Cache-Control": "public, max-age=300",
+        },
+    )
 
 
 @app.get("/api/health")
