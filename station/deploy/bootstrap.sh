@@ -235,7 +235,9 @@ export DEBIAN_FRONTEND=noninteractive
 # chrony even though timesyncd is present: a GPS time source plugs into chrony,
 # so installing it now makes that upgrade a config file rather than a change of
 # daemon. DEPLOYMENT.md §11.
-NEED="chrony rsync"
+# curl fetches the CA below. Not on every minimal image, and its absence
+# looked exactly like the platform being down.
+NEED="chrony rsync curl"
 if [ "$DEPLOY_PATH" = docker ]; then
   NEED="$NEED docker.io"
   # Compose v2 is spelled differently depending on where it comes from, and
@@ -353,8 +355,22 @@ if [ "$FETCH_CA" = 1 ]; then
   # network you are asserting is trustworthy.
   [ -n "$CA_FILE" ] || CA_FILE=/tmp/platform-api-ca.pem
   info "fetching the CA from ${PLATFORM}"
-  curl -fsSk "https://${PLATFORM}:8000/ca.crt" -o "$CA_FILE" \
-    || die "could not fetch https://${PLATFORM}:8000/ca.crt. Is the platform up?"
+  command -v curl >/dev/null 2>&1 \
+    || die "curl is not installed, and it is what fetches the CA.
+   apt install -y curl, then run this again."
+  # curl's own words, not a guess dressed up as one. "Is the platform up?" was
+  # printed for a missing curl, a 404 and a refused connection alike — three
+  # different problems and one unhelpful sentence, which is the same mistake as
+  # hiding apt's output two commits ago.
+  if ! CURL_ERR=$(curl -fsS --insecure --connect-timeout 10 \
+                    "https://${PLATFORM}:8000/ca.crt" -o "$CA_FILE" 2>&1); then
+    die "could not fetch https://${PLATFORM}:8000/ca.crt
+
+   $CURL_ERR
+
+   A 404 here means the platform predates the /ca.crt endpoint — update it, or
+   copy the CA across yourself and pass --ca instead."
+  fi
   openssl x509 -in "$CA_FILE" -noout -subject >/dev/null 2>&1 \
     || die "what came back from ${PLATFORM} is not a certificate."
 fi
