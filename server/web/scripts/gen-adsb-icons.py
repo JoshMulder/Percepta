@@ -40,10 +40,22 @@ EMITTER_TO_CATEGORY = {
 # tar1090 maps no icon to a parachutist, though `para` is in the set; B7
 # (spacecraft) has no sensible shape and falls through to unknown.
 EXTRA = {"B3": ["para", 1.0]}
-# The set's only UAV shape is a fixed-wing silhouette. This platform exists to
-# watch drones, so B6 points at the quadcopter instead — which is also the one
-# file here that is CC0 rather than GPL.
-OVERRIDE = {"B6": ["quadcopter", 1.0]}
+# Where we depart from tar1090's own category table, and why.
+#
+#   B6  The set's only UAV shape is a fixed-wing silhouette. This platform
+#       exists to watch drones. The quadcopter is also the one file here that
+#       is CC0 rather than GPL.
+#   A2  `jet_swept` is a single-engine fighter planform; A2 "small" is the
+#       category a business jet or a light twin reports. `twin_large` reads as
+#       a twin at a glance, which is what is actually up there.
+#   A5  `heavy_2e` is a twin. A5 is the wake category behind the largest
+#       aircraft flying, and drawing it as a four-engine `a380` separates it
+#       from A3/A4 by shape rather than by four percent of scale.
+OVERRIDE = {
+    "B6": ["quadcopter", 1.0],
+    "A2": ["twin_large", 0.94],
+    "A5": ["a380", 0.92],
+}
 
 resolved: dict[str, list] = {}
 for cat in EMITTER_TO_CATEGORY.values():

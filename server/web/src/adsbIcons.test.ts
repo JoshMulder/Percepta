@@ -39,11 +39,19 @@ describe("picking a shape for what the transponder said", () => {
     expect(iconFor(undefined).name).toBe("unknown");
   });
 
-  it("separates the weight classes the way tar1090 does", () => {
+  it("separates the weight classes by silhouette", () => {
     expect(iconFor(1).name).toBe("cessna");      // A1 light
+    expect(iconFor(2).name).toBe("twin_large");  // A2 small
     expect(iconFor(3).name).toBe("airliner");    // A3 large
-    expect(iconFor(5).name).toBe("heavy_2e");    // A5 heavy
+    expect(iconFor(5).name).toBe("a380");        // A5 heavy
     expect(iconFor(7).name).toBe("helicopter");  // A7 rotorcraft
+  });
+
+  it("gives the heavy class a shape, not four percent of scale", () => {
+    // A3, A4 and A5 all drew a twin before, separated only by scale, which is
+    // invisible on a moving map. A five is now four-engined.
+    expect(iconFor(5).name).not.toBe(iconFor(3).name);
+    expect(iconFor(5).name).not.toBe(iconFor(4).name);
   });
 
   it("draws a UAV as a quadcopter, not as a small aeroplane", () => {
