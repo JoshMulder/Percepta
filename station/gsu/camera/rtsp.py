@@ -467,6 +467,12 @@ class RtspRemuxSource(ProcessEncoder):
 
     name = "rtsp-remux"
 
+    # The camera decided its resolution, rate and bitrate before this station
+    # connected, and `-c copy` changes none of them. Saying otherwise is how a
+    # log came to read "1920x1080 at 30 fps, 3000 kbit/s" for a camera sending
+    # 1080p at 5.
+    enforces_settings = False
+
     def __init__(self, settings: StreamSettings | None = None, *,
                  url: str, transport: str = "tcp", codec: str = "h264",
                  stream_fps: float | None = None) -> None:

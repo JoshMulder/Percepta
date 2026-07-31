@@ -601,6 +601,12 @@ class ProcessEncoder:
     """
 
     name = "process"
+
+    #: Whether the settings this station computed are things it actually
+    #: applies. True for anything that runs an encoder; False for a source that
+    #: copies somebody else's bitstream, where they are hints it cannot
+    #: enforce. Read before reporting them as though they were facts.
+    enforces_settings = True
     #: What a person should understand this to be, in telemetry and on the
     #: console. Not the tool — the *path*.
     kind = "unknown"

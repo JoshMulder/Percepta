@@ -1262,3 +1262,30 @@ class RadioAudioLatencyTests(unittest.TestCase):
             # Consumed, so a sweep with no pump behind it does not republish a
             # stale reading as though it were new.
             self.assertIsNone(agent._radio_telemetry)
+
+
+class StreamReportingHonestyTests(unittest.TestCase):
+    """A remux applies none of the settings this station computed.
+
+    The camera decided its resolution, rate and bitrate before the station
+    connected and `-c copy` changes none of them. Telemetry has reported
+    `requested` and `delivered` separately for a while; the log had not, and
+    said "1920x1080 at 30 fps, 3000 kbit/s target" for a real camera sending
+    1080p at 5.
+    """
+
+    def test_an_encoder_says_it_applies_its_settings(self):
+        from gsu.camera.h264 import ProcessEncoder
+        self.assertTrue(ProcessEncoder.enforces_settings)
+
+    def test_a_remux_says_it_does_not(self):
+        from gsu.camera.rtsp import RtspRemuxSource
+        self.assertFalse(RtspRemuxSource.enforces_settings)
+
+    def test_the_flag_survives_a_source_that_never_heard_of_it(self):
+        # Read with a default, because a third-party or future source that
+        # does not define it should be assumed to mean what it says rather
+        # than silently reported as a remux.
+        class Bare:
+            pass
+        self.assertTrue(getattr(Bare(), "enforces_settings", True))

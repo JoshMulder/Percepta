@@ -285,19 +285,43 @@ class StreamSession:
         # the first version of this fix, and it only made the window smaller;
         # tests/test_video.py holds the door open and slams it.)
         uplink_name = uplink.describe()
-        log.info(
-            "Streaming %dx%d at %d fps, %d kbit/s target, to %s. Lease %.0fs.",
-            settings.width, settings.height, settings.fps, settings.bitrate_kbps,
-            uplink_name, lease,
-        )
+        # What is happening, not what was asked for. Used by the log, the
+        # stored event and the sentence the command log shows, so that all
+        # three say the same thing — they did not, and the one an operator
+        # sees first was the one still quoting site policy.
+        if getattr(source, "enforces_settings", True):
+            shape = f"{settings.width}x{settings.height} at {settings.fps} fps"
+        else:
+            codec = getattr(source, "codec", "").upper() or "video"
+            shape = f"the camera's own {codec} at {self.paced_fps:.3g} fps"
+        # On a remux source the resolution, rate and bitrate belong to the
+        # camera and this station applies none of them, so stating them read as
+        # fact when it was site policy. Telemetry has reported `requested` and
+        # `delivered` separately for a while; this is everything an operator
+        # actually reads catching up.
+        if getattr(source, "enforces_settings", True):
+            log.info(
+                "Streaming %dx%d at %d fps, %d kbit/s target, to %s. "
+                "Lease %.0fs.",
+                settings.width, settings.height, settings.fps,
+                settings.bitrate_kbps, uplink_name, lease,
+            )
+        else:
+            log.info(
+                "Streaming the camera's own %s, paced at %.3g fps (%s), to %s. "
+                "Lease %.0fs. Site policy asks for %dx%d at %d fps and "
+                "%d kbit/s; a remux applies none of it.",
+                getattr(source, "codec", "").upper() or "video", self.paced_fps,
+                self.pacing_source or "unknown", uplink_name, lease,
+                settings.width, settings.height, settings.fps,
+                settings.bitrate_kbps,
+            )
         self.agent.store.record_event(
             "video.stream_started", "info",
-            f"Live stream started at {settings.width}x{settings.height}/"
-            f"{settings.fps} for {self.viewers} viewer(s).",
+            f"Live stream started at {shape} for {self.viewers} viewer(s).",
         )
         return (
-            f"streaming {settings.width}x{settings.height} at {settings.fps} fps "
-            f"to {uplink_name}, lease {lease:.0f}s"
+            f"streaming {shape} to {uplink_name}, lease {lease:.0f}s"
         )
 
     # --- somebody on the station's own setup page -----------------------
