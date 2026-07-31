@@ -1,5 +1,9 @@
 # A broker for developing a station against, with no dependency on the platform.
 #
+# NOT a deployment file, which is what it looked like when this was called
+# `docker-compose.yaml` and sat one directory above `deploy/docker-compose.yml`.
+# Nothing installs from here and no station runs from here.
+#
 # The conformance script talks to a broker, not to the platform - so a station
 # can be built, run and checked entirely on its own machine, publishing to this
 # and having the script read it back. Nothing here needs the server to exist or

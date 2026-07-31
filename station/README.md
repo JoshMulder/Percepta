@@ -55,7 +55,7 @@ The conformance script talks to *a* broker, not to the platform's. So bring up
 your own and develop against it with no network path to the platform at all:
 
 ```bash
-cd station && docker compose up -d          # a Redis on 127.0.0.1:6380
+cd station && docker compose -f dev-broker.compose.yml up -d   # Redis on :6380
 python ../contract/conformance/check_station.py --station <any-uuid>
 ```
 

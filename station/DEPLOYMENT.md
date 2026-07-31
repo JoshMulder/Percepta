@@ -1,5 +1,30 @@
 # Deploying a ground station
 
+## The short way
+
+```bash
+git clone <repo> ~/percepta && cd ~/percepta
+sudo station/deploy/bootstrap.sh --platform 192.168.2.49 --ca /tmp/platform-api-ca.pem
+```
+
+That is the whole thing on a box with no CSI camera. It checks the hardware and
+the OS, installs what the chosen path needs, blacklists the DVB driver if it
+sees an SDR, runs the installer, writes the configuration, generates and prints
+a setup password, publishes the setup page on the LAN, runs preflight and starts
+the station. It prints the URL to enrol from. It is idempotent — run it again to
+change your mind about a flag.
+
+`--demo` provisions a box whose every slot is simulated. `--loopback` keeps the
+setup page off the LAN. `--help` lists the rest.
+
+**A station with a CSI camera takes the systemd path**, and bootstrap detects
+one and switches by itself. §3 has the measurements behind that.
+
+The rest of this document is what bootstrap does and why, which is what you
+want when one of the steps does not work — or when you are doing it by hand,
+which remains entirely supported.
+
+
 From a clean Raspberry Pi to a station the platform accepts data from.
 
 This is the runbook. It assumes you are at a desk with the box in front of you
@@ -182,6 +207,26 @@ sudo /tmp/station/deploy/install.sh
 # The systemd path instead:
 sudo /tmp/station/deploy/install.sh --path systemd
 ```
+
+### Reaching the setup page from another machine
+
+The base compose file binds the setup page to `127.0.0.1`, which is right for a
+field station and wrong for a bench. `deploy/docker-compose.lan.yml` is an
+overlay that publishes it on every interface, and Compose picks it up from a
+`.env` in the project directory:
+
+```bash
+echo 'COMPOSE_FILE=docker-compose.yml:docker-compose.lan.yml' \
+  | sudo tee /opt/percepta/station/deploy/.env
+```
+
+`bootstrap.sh` writes that by default; `--loopback` stops it. Without it, and
+without a tunnel, the page answers only on the box itself — and nothing says
+so, which is a slow way to find out.
+
+Either way the page still needs `GSU_SETUP_PASSWORD_HASH`. Without one the
+agent demotes itself to loopback *inside* the container, and this mapping then
+publishes a socket that answers nothing useful.
 
 `--path docker` is the default. It builds the image, tags it
 `percepta/gsu:current`, installs both unit files but enables only the ones that

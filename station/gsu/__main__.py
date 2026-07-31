@@ -760,7 +760,7 @@ def _preflight(agent, config: AgentConfig, probe: bool) -> int:
     return 1 if failures else 0
 
 
-def _setup_password() -> int:
+def _setup_password(from_stdin: bool = False) -> int:
     """Turn a typed password into the line that goes in the environment file.
 
     The setup page will accept a plain `GSU_SETUP_PASSWORD`, and on a 0640
@@ -770,10 +770,25 @@ def _setup_password() -> int:
     the `gsu` group — and the page behaves identically either way.
 
     Read with `getpass`, so it is not in a shell history or in `ps`.
+
+    `--stdin` reads it from a pipe instead and prints the bare hash, for
+    provisioning: `bootstrap.sh` has to set this without a human at a terminal,
+    and a pipe keeps the password out of argv exactly as getpass keeps it out
+    of the history. No confirmation prompt on that path — there is nobody to
+    mistype it twice — and no banner, so the output is the hash and nothing
+    else.
     """
     import getpass
 
     from .setup_access import ITERATIONS, hash_password
+
+    if from_stdin:
+        password = sys.stdin.read().strip()
+        if len(password) < 10:
+            print("Too short: 10 characters or more.", file=sys.stderr)
+            return 1
+        print(hash_password(password))
+        return 0
 
     try:
         password = getpass.getpass("Setup password: ")
@@ -810,6 +825,9 @@ def main(argv: list[str] | None = None) -> int:
                                  "devices", "bench", "camera", "radio", "stream",
                                  "adsb", "setup-password"])
     parser.add_argument("--token", help="enrolment code, as issued (XXXX-XXXX-XXXX)")
+    parser.add_argument("--stdin", action="store_true",
+                        help="setup-password: read the password from a pipe and "
+                             "print the bare hash, for provisioning.")
     parser.add_argument("--probe", action="store_true",
                         help="preflight: open a TLS connection to the platform and "
                              "the broker and verify their certificates. Sends no "
@@ -847,7 +865,7 @@ def main(argv: list[str] | None = None) -> int:
         # Deliberately before an Agent exists: this command touches no state,
         # needs no station and must work on a laptop while an image is being
         # built, which is where the password is actually chosen.
-        return _setup_password()
+        return _setup_password(from_stdin=args.stdin)
 
     config = AgentConfig.from_env()
     agent = Agent(config)
