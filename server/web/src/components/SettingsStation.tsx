@@ -283,6 +283,7 @@ function StationConfigForm({
         timezone: config.timezone,
         latitude: config.latitude,
         longitude: config.longitude,
+        elevation_m: config.elevation_m,
         map_min_zoom: config.map_min_zoom,
         map_max_zoom: config.map_max_zoom,
         map_radius_km: config.map_radius_km,
@@ -329,6 +330,21 @@ function StationConfigForm({
             by whoever is standing at the site, reported up in the health
             frame, and written here. Two places to set one fact is two places
             for it to be wrong, and the one with a person at it wins. */}
+        {/* Elevation sits with the position because it is part of it: the
+            station's ADS-B barometric correction is computed from it, and a
+            correction referenced to the wrong height is out by that height on
+            every aircraft. Read-only here for the same reason the coordinates
+            are — settled at commissioning, frozen after enrolment. */}
+        <div className="field">
+          <span>Elevation</span>
+          <div className="reported-value">
+            {config.elevation_m === null ? (
+              <em>Not set. The altitude correction will not run.</em>
+            ) : (
+              <code>{config.elevation_m} m</code>
+            )}
+          </div>
+        </div>
         <div className="field">
           <span>Position</span>
           <div className="reported-value">

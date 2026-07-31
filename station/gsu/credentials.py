@@ -99,6 +99,11 @@ class Site:
     timezone: str
     latitude: float | None
     longitude: float | None
+    #: Metres. Part of the position, settled and frozen with it. The ADS-B
+    #: barometric correction is computed from this and refuses without it
+    #: rather than assuming sea level, which would put every corrected
+    #: altitude out by the height of the site.
+    elevation_m: float | None = None
     #: The tenant this box now belongs to, echoed back by the platform so the
     #: person who pasted the code can confirm they enrolled it into the right
     #: one. A code carries no visible clue whose it is.
@@ -150,6 +155,7 @@ class Enrolment:
                 timezone=station.get("timezone") or "UTC",
                 latitude=station.get("latitude"),
                 longitude=station.get("longitude"),
+                elevation_m=station.get("elevation_m"),
                 organization=station.get("organization"),
                 locality=station.get("locality"),
             ),

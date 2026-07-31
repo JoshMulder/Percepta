@@ -48,6 +48,9 @@ class StationConfigUpdate(BaseModel):
     timezone: str = Field(min_length=1, max_length=64)
     latitude: float | None = Field(default=None, ge=-90, le=90)
     longitude: float | None = Field(default=None, ge=-180, le=180)
+    # Bounded by the deepest mine and low earth orbit rather than by anything
+    # geodetic: the job is to reject a typo, not to police geography.
+    elevation_m: float | None = Field(default=None, ge=-500, le=100000)
     map_min_zoom: int = Field(ge=MIN_ZOOM_FLOOR, le=MAX_ZOOM_CEILING)
     map_max_zoom: int = Field(ge=MIN_ZOOM_FLOOR, le=MAX_ZOOM_CEILING)
     map_radius_km: float = Field(gt=0, le=MAX_RADIUS_KM)
@@ -60,6 +63,7 @@ class StationConfigOut(BaseModel):
     timezone: str
     latitude: float | None
     longitude: float | None
+    elevation_m: float | None
     map_min_zoom: int
     map_max_zoom: int
     map_radius_km: float
@@ -74,6 +78,7 @@ def _out(station: GroundStation) -> StationConfigOut:
         timezone=station.timezone,
         latitude=station.latitude,
         longitude=station.longitude,
+        elevation_m=station.elevation_m,
         map_min_zoom=station.map_min_zoom,
         map_max_zoom=station.map_max_zoom,
         map_radius_km=station.map_radius_km,
@@ -129,6 +134,7 @@ def update_config(
             "name": (station.name, body.name.strip()),
             "latitude": (station.latitude, body.latitude),
             "longitude": (station.longitude, body.longitude),
+            "elevation": (station.elevation_m, body.elevation_m),
         }
         changed_frozen = [k for k, (was, now) in frozen.items() if was != now]
         if changed_frozen:
@@ -170,6 +176,7 @@ def update_config(
     station.timezone = body.timezone
     station.latitude = body.latitude
     station.longitude = body.longitude
+    station.elevation_m = body.elevation_m
     station.map_min_zoom = body.map_min_zoom
     station.map_max_zoom = body.map_max_zoom
     station.map_radius_km = body.map_radius_km

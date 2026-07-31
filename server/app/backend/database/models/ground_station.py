@@ -44,6 +44,12 @@ class GroundStation(UUIDMixin, TimestampMixin, Base):
     #: never repeats.
     locality_for: Mapped[str | None] = mapped_column(String(48), nullable=True)
 
+    #: Metres. Set at commissioning with the coordinates and frozen with them.
+    #: Null is a real state: the ADS-B barometric correction is its only
+    #: consumer and refuses without one rather than assuming sea level, which
+    #: would put every corrected altitude out by the height of the site.
+    elevation_m: Mapped[float | None] = mapped_column(Float, nullable=True)
+
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
     # Whether this station's data is synthetic. Per-station rather than a

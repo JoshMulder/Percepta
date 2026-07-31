@@ -94,6 +94,10 @@ class StationOut(BaseModel):
     timezone: str
     latitude: float | None
     longitude: float | None
+    #: Metres. Part of the position, settled and frozen with it. The station's
+    #: ADS-B barometric correction is computed from this and refuses without
+    #: it rather than assuming sea level.
+    elevation_m: float | None = None
     #: Which tenant this box now belongs to, echoed back so the person standing
     #: at it can confirm they enrolled it into the right one. Enrolment is done
     #: by pasting a code, and a code carries no visible clue whose it is; the
@@ -191,6 +195,7 @@ def _response(issued: enrolment.IssuedCredential) -> EnrolResponse:
             timezone=station.timezone,
             latitude=station.latitude,
             longitude=station.longitude,
+            elevation_m=station.elevation_m,
             organization=_organization_name(station.organization_id),
             locality=", ".join(
                 part for part in (station.locality, station.region) if part

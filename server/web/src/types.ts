@@ -348,6 +348,7 @@ export interface StationConfig {
   latitude: number | null;
   longitude: number | null;
   map_min_zoom: number;
+  elevation_m: number | null;
   map_max_zoom: number;
   map_radius_km: number;
   is_simulated: boolean;

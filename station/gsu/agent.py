@@ -131,7 +131,8 @@ class Agent:
         # ADS-B altitude correction with it, and a receiver being rebuilt must
         # not lose the current pressure.
         self.baro = BarometricReference(
-            enabled=self.site.adsb_baro_correction, elevation_m=self.site.elevation_m
+            enabled=self.site.adsb_baro_correction,
+            elevation_m=self.effective_elevation_m(),
         )
         self.build_devices()
 
@@ -271,6 +272,20 @@ class Agent:
 
     # --- devices --------------------------------------------------------
 
+    def effective_elevation_m(self) -> float | None:
+        """The height the barometric correction is computed against.
+
+        Enrolment first, for the same reason the coordinates come from there:
+        it is part of the position, settled at commissioning and frozen with
+        it. A locally configured value is still honoured underneath, because a
+        box enrolled before the platform carried an elevation has nothing else
+        — but nothing sets it any more.
+        """
+        site = self.enrolment.site if self.enrolment else None
+        if site is not None and site.elevation_m is not None:
+            return site.elevation_m
+        return self.site.elevation_m
+
     def effective_position(self) -> tuple[float | None, float | None, str]:
         """Where this station is, and on whose word.
 
@@ -320,7 +335,7 @@ class Agent:
             # "Timaru District, Canterbury" can.
             "locality": site.locality if site else None,
             "organization": site.organization if site else None,
-            "elevation_m": self.site.elevation_m,
+            "elevation_m": self.effective_elevation_m(),
             "station": {
                 "latitude": self.site.latitude,
                 "longitude": self.site.longitude,
@@ -355,8 +370,9 @@ class Agent:
             # a fixed one the day a GPS is fitted (CONTRACT-QUESTIONS.md 16).
             "source": "configured",
         }
-        if self.site.elevation_m is not None:
-            position["elevation_m"] = self.site.elevation_m
+        elevation = self.effective_elevation_m()
+        if elevation is not None:
+            position["elevation_m"] = elevation
         return position
 
     def apply_position(self) -> None:
@@ -737,7 +753,8 @@ class Agent:
         # reset immediately, rather than showing the old world until a restart.
         self.site = SiteConfig.load(self.config.site_config_path)
         self.baro = BarometricReference(
-            enabled=self.site.adsb_baro_correction, elevation_m=self.site.elevation_m
+            enabled=self.site.adsb_baro_correction,
+            elevation_m=self.effective_elevation_m(),
         )
         self.store = LocalStore(self.config.store_path, self.config.recordings_dir)
         self.inventory = Inventory(self.config.devices_path,
@@ -959,7 +976,8 @@ class Agent:
         # kept using the previous pair would be wrong in exactly the way it is
         # supposed to refuse to be.
         self.baro.configure(
-            enabled=self.site.adsb_baro_correction, elevation_m=self.site.elevation_m
+            enabled=self.site.adsb_baro_correction,
+            elevation_m=self.effective_elevation_m(),
         )
         if self.weather is None:
             # No weather slot at all, so nothing may keep feeding the last

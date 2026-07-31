@@ -77,6 +77,7 @@ from urllib.parse import parse_qs, urlsplit
 from .camera.rtsp import split_credentials
 from .config import parse_elevation_m
 from .devices import registry
+from .radio.receiver import FREQ_MAX_HZ, FREQ_MIN_HZ
 from .setup_access import COOKIE_NAME, Gate, is_loopback_host
 
 log = logging.getLogger("gsu.console")
@@ -496,6 +497,7 @@ PAGES = {
 #: than read from the request, so there is no redirect an attacker can choose.
 POST_HOME = {
     "/reset": "/connection",
+    "/radio": "/devices?slot=radio",
     "/device": "/devices",
     "/enrol": "/connection",
     "/location": "/connection",
@@ -866,6 +868,8 @@ class Console:
                 self._enrol(form)
             elif path == "/location":
                 self._set_location(form)
+            elif path == "/radio":
+                self._set_radio(form)
             elif path == "/reset":
                 self._reset(form)
             else:  # /logout
@@ -944,67 +948,47 @@ class Console:
         )
 
     def _set_location(self, form: dict) -> None:
-        """The local half of where this station is.
+        """The one thing about this box's position that is still set here.
 
-        Latitude and longitude are **not** here any more. They are settled at
-        enrolment and frozen: a station that needs a different position has
-        physically moved, and a box that has moved needs commissioning at its
-        new site rather than a new number typed into a form. Letting one be
-        edited here would make the station's own history describe two places.
+        Coordinates and elevation are settled at commissioning and frozen with
+        the enrolment: a station that needs different ones has physically
+        moved, and a box that has moved is recommissioned rather than edited.
 
-        What remains is genuinely local. Elevation is measured at the mast, not
-        issued by the platform, and exists for the ADS-B barometric correction —
-        which is computed on this box, from this box's barometer. The switch for
-        that correction lives beside it because they are one decision.
-
-        Every refusal is a `ValueError` carrying a sentence, which `_handle`
-        turns into the red message inside the dialog. Nothing about a mistyped
-        elevation should produce a traceback in a log nobody on site can read.
+        What remains is whether to *use* the elevation — the ADS-B barometric
+        correction, which is computed on this box from this box's barometer.
+        That is a local behaviour switch rather than a fact about the site, and
+        it is the one thing here somebody at the mast might reasonably change
+        after the fact.
         """
-        raw = (form.get("elevation_m") or [""])[0].strip()
         # An unchecked checkbox sends nothing at all, so its absence from a
         # submission of *this* form is a real "off". That only holds because
         # the input is inside this form and always rendered.
         correction = bool(form.get("adsb_baro_correction"))
-
-        elevation = parse_elevation_m(raw) if raw else None
-        if correction and elevation is None:
-            # Refused rather than accepted-and-idle. The correction cannot run
-            # without an elevation, and a checkbox that stays ticked while
-            # nothing happens is how somebody comes to trust a number that was
-            # never computed.
+        if correction and self.agent.effective_elevation_m() is None:
+            # Refused rather than accepted-and-idle. A checkbox that stays
+            # ticked while nothing happens is how somebody comes to trust a
+            # number that was never computed — and the fix is not here, it is
+            # on the platform, so the message has to say so.
             raise ValueError(
-                "Elevation is needed for the altitude correction. "
-                "Set one, or clear the correction."
+                "This station has no elevation, so altitudes cannot be "
+                "corrected. Set one on the platform and re-enrol."
             )
-
-        # The position arguments keep this station's own coordinates exactly as
-        # they are. On a box enrolled from here on they are None and stay None;
-        # on one enrolled before this changed they are its only position, and
-        # clearing them from an elevation form would take its range and bearing
-        # away without anybody asking for that.
-        self.agent.set_location(
-            self.agent.site.latitude,
-            self.agent.site.longitude,
-            elevation,
-            baro_correction=correction,
-        )
+        self.agent.site.adsb_baro_correction = correction
+        self.agent.site.save(self.agent.config.site_config_path)
         self.message = ("good", "Saved.")
 
     def _reset(self, form: dict) -> None:
         """Return the box to how it shipped.
 
-        Two clicks rather than a typed confirmation. The owner's reasoning, and
-        it holds: this page is on the local network only, behind a password,
-        inside a time-boxed window — anybody who can see this button is already
-        standing at the hardware with the intent to reprovision it. A typed
-        station name would be ceremony aimed at a mistake that cannot easily be
-        made from here, and the thing being destroyed is a box's *configuration*,
-        not a customer's records, which live on the platform.
+        Two clicks rather than a typed confirmation. This page answers only on
+        the local network, behind a password, inside a time-boxed window, so
+        anybody who can see the button is at the hardware intending to
+        reprovision it — and what is destroyed is a box's configuration, not a
+        customer's records, which live on the platform.
 
         The second click is still required, because "everything" includes the
-        credential — and a station that has to be re-enrolled is a phone call
-        to whoever holds the codes.
+        credential, and a station that has to be re-enrolled is a phone call to
+        whoever holds the codes.
         """
         if (form.get("confirm") or [""])[0] != "yes":
             raise ValueError("Reset not confirmed.")
@@ -1525,14 +1509,21 @@ class Console:
                 f"<span class='{css}'>{html.escape(str(value))}</span></div>"
             )
         out.append(banner)
-        out.append(f"<form method=post action='/location'>{self._csrf_field(csrf)}")
+        # Elevation is a row, not a field. It is part of the position — the
+        # correction below is computed from it, and a correction referenced to
+        # the wrong height is out by that height on every aircraft — so it is
+        # set at commissioning with the coordinates and frozen with them.
         out.append(
-            "<div class=field><label for='elevation_m'>Elevation</label>"
-            "<input type=number step=any min='-500' max='100000' "
-            "id='elevation_m' name='elevation_m' inputmode=text "
-            f"placeholder='metres' value='{html.escape(_degrees(elevation))}'>"
-            "</div>"
+            "<div class=row><span class=k>Elevation</span>"
+            + (f"<span class=ok>{html.escape(_degrees(elevation))} m</span>"
+               if elevation is not None
+               else "<span class=warn>not set</span>")
+            + "</div>"
         )
+        # No banner here. It existed to put a refusal *inside* the dialog;
+        # with the dialog gone the page's own banner is the only one, and
+        # emitting it twice is how a single refusal read as two.
+        out.append(f"<form method=post action='/location'>{self._csrf_field(csrf)}")
         checked = " checked" if station.get("adsb_baro_correction") else ""
         out.append(
             "<div class=field><label for='adsb_baro_correction'>"
@@ -2035,6 +2026,23 @@ class Console:
             # number in a list cannot show them a carrier appearing. Fixed
             # size, refreshed from status.json by the nonce'd script; with no
             # script it is a still of the moment the page was rendered.
+            radio = self.agent.radio
+            out.append(
+                f"<form method=post action='/radio'>{self._csrf_field(csrf)}"
+                "<div class=field><label for='freq_mhz'>Frequency</label>"
+                "<input type=number step='0.001' id='freq_mhz' name='freq_mhz' "
+                f"inputmode=decimal placeholder='MHz' value='"
+                f"{radio.freq_hz / 1e6:.3f}" if radio else ""
+            )
+            out.append(
+                "'></div>"
+                "<div class=field><label for='monitor'>Hold gate open</label>"
+                "<input type=checkbox id='monitor' name='monitor' value='1'"
+                + (" checked" if radio and radio.monitor else "")
+                + "><span class=muted>Bypasses the squelch, for bringing an "
+                "antenna up.</span></div>"
+                "<div class=field><button type=submit>Apply</button></div></form>"
+            )
             out.append("<div class=field><label>Spectrum</label></div>")
             out.append(
                 "<canvas id=spectrum class=spectrum width=512 height=110></canvas>"
