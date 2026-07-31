@@ -1564,6 +1564,13 @@ class Agent:
                 "squelch_open": self.radio.squelch_open if self.radio else False,
                 "auto": self.radio.auto_squelch if self.radio else False,
                 "threshold_db": round(self.radio.last_threshold_db, 1) if self.radio else None,
+                # Unconditionally here, unlike the telemetry frame, and that is
+                # the whole difference: this is served over loopback or the
+                # local network to somebody standing at the box, so 128 small
+                # integers every 2.5 seconds costs nothing. The metered link
+                # is what the demand window on the telemetry side is for.
+                "spectrum": self.radio.spectrum_for_display() if self.radio else [],
+                "span_hz": self.radio.spectrum_span_hz() if self.radio else 0,
             },
             # The preview fields ride only here: the setup page needs them,
             # the health frame pays for its bytes on a metered link and the

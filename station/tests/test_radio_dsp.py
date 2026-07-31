@@ -8,7 +8,9 @@ place the behaviour is checked.
 """
 
 import math
+import time
 import unittest
+from unittest import mock
 
 from gsu.radio import dsp
 from gsu.radio.receiver import RadioController
@@ -142,3 +144,82 @@ class SquelchTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SpectrumPublishingTests(unittest.TestCase):
+    """The spectrum goes out only while somebody is looking at it.
+
+    241 bins of float at 1 Hz is roughly 150 MB a day on a link that is metered
+    and shared with video, for a display that is open for minutes at
+    commissioning. So it is demand-driven, the same shape as the camera
+    preview: a station nobody is watching sends nothing at all.
+    """
+
+    def controller(self):
+        from gsu.radio.receiver import RadioController
+        from gsu.radio.simulated import SimulatedFrontEnd
+        return RadioController(SimulatedFrontEnd())
+
+    def frame(self, radio, ticks=3):
+        payload = None
+        for _ in range(ticks):
+            payload, _ = radio.tick(1.0)
+        return payload
+
+    def test_nobody_watching_costs_nothing(self):
+        payload = self.frame(self.controller())
+        self.assertNotIn("spectrum", payload)
+        self.assertNotIn("span_hz", payload)
+
+    def test_asking_for_it_produces_it(self):
+        radio = self.controller()
+        radio.want_spectrum(True)
+        payload = self.frame(radio)
+        self.assertIn("spectrum", payload)
+        self.assertIn("span_hz", payload)
+        self.assertTrue(payload["spectrum"])
+
+    def test_it_stops_when_the_window_lapses(self):
+        # Re-requested rather than held open: a console that crashes or a lid
+        # that closes stops the traffic without sending a goodbye.
+        from gsu.radio import receiver
+        radio = self.controller()
+        radio.want_spectrum(True)
+        self.assertIn("spectrum", self.frame(radio))
+        with mock.patch.object(
+            receiver.time, "monotonic",
+            return_value=time.monotonic() + receiver.SPECTRUM_WINDOW_S + 1,
+        ):
+            self.assertNotIn("spectrum", self.frame(radio, ticks=1))
+
+    def test_turning_it_off_is_immediate(self):
+        radio = self.controller()
+        radio.want_spectrum(True)
+        self.assertIn("spectrum", self.frame(radio))
+        radio.want_spectrum(False)
+        self.assertNotIn("spectrum", self.frame(radio, ticks=1))
+
+    def test_it_is_bounded_and_integral(self):
+        from gsu.radio.receiver import SPECTRUM_BINS
+        radio = self.controller()
+        radio.want_spectrum(True)
+        spectrum = self.frame(radio)["spectrum"]
+        self.assertLessEqual(len(spectrum), SPECTRUM_BINS)
+        for value in spectrum:
+            self.assertIsInstance(value, int)
+
+    def test_decimation_keeps_peaks_not_averages(self):
+        # An airband channel is 25 kHz — a handful of 500 Hz bins — and
+        # averaging it with the quiet either side buries the one feature this
+        # display exists to show.
+        from gsu.radio.receiver import _decimate_db
+        bins = [-100.0] * 40
+        bins[17] = -30.0
+        out = _decimate_db(bins, 8)
+        self.assertEqual(len(out), 8)
+        self.assertIn(-30, out, "the carrier must survive decimation")
+
+    def test_decimation_leaves_a_short_spectrum_alone(self):
+        from gsu.radio.receiver import _decimate_db
+        self.assertEqual(_decimate_db([-1.4, -2.6], 128), [-1, -3])
+        self.assertEqual(_decimate_db([], 128), [])

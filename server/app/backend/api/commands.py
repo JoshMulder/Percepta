@@ -61,6 +61,10 @@ class GainRequest(BaseModel):
     gain: str | float
 
 
+class SpectrumRequest(BaseModel):
+    on: bool = True
+
+
 class PpmRequest(BaseModel):
     ppm: int = Field(ge=-1000, le=1000)
 
@@ -231,6 +235,33 @@ def ppm(
         request=request, identity=identity, station_id=station_id,
         action="radio_ppm", detail={"ppm": body.ppm},
     )
+    return {"accepted": True}
+
+
+@router.post("/radio/spectrum", status_code=202)
+def spectrum(
+    station_id: uuid.UUID,
+    body: SpectrumRequest,
+    identity: Identity = Depends(require_capability(Capability.RADIO_LISTEN)),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Ask a station to include its spectrum in radio telemetry, or stop.
+
+    Demand-driven because the array is around 150 MB a day at the radio
+    stream's rate, on a link that is metered and shared with video, for a
+    display that is open for minutes at commissioning. The console re-asks
+    while the page is open and simply stops when it is closed; the station's
+    window lapses on its own, so a console that crashes costs nothing.
+
+    Behind radio.listen rather than config.write: this changes what is sent to
+    the person asking, not what the receiver does. Nothing about the radio is
+    reconfigured and no other viewer is affected.
+
+    Not audited. It is a subscription to a diagnostic, several times a minute
+    while a settings page is open, and recording it would bury the entries that
+    matter — the ones where somebody changed something.
+    """
+    _dispatch(station_id, {"kind": "radio.spectrum", "on": body.on})
     return {"accepted": True}
 
 

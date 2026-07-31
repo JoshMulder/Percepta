@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../api";
 import type { Capability, RadioPayload } from "../types";
+import { Spectrum } from "./Spectrum";
 
 /**
  * Receiver setup, squelch, and the signal meter.
@@ -26,6 +27,15 @@ import type { Capability, RadioPayload } from "../types";
 // scale the front panel used, so the bar an operator learned to read there
 // means the same thing here.
 const pct = (db: number) => Math.max(0, Math.min(100, ((db + 90) / 80) * 100));
+
+/** Airband channel spacing. Click-to-tune snaps to it, as Remote-Radio does,
+ *  so a click lands on a channel rather than between two. */
+const STEP_HZ = 25_000;
+
+/** How often the console re-asks for the spectrum. Shorter than the station's
+ *  window so an open page never gaps, and the request stops the moment this
+ *  component unmounts — a page nobody has open costs nothing. */
+const SPECTRUM_REFRESH_MS = 6_000;
 
 function has(caps: Capability[], c: Capability): boolean {
   return caps.includes(c);
@@ -60,6 +70,28 @@ export function SettingsRadio({
   const onGain = (g: string | number) =>
     send("Gain", () => api.setGain(stationId!, g));
   const canControl = has(caps, "radio.control");
+
+  /* Ask for the spectrum while this page is open, and only while it is.
+     Re-asked rather than held open by a connection: the station's window
+     lapses on its own, so a crashed console or a closed lid stops the traffic
+     without needing to say goodbye. The array is around 150 MB a day at the
+     radio stream's rate, on a link that is metered and shared with video. */
+  useEffect(() => {
+    if (!stationId) return;
+    let live = true;
+    const ask = (on: boolean) => {
+      if (!live && on) return;
+      api.wantSpectrum(stationId, on).catch(() => {});
+    };
+    ask(true);
+    const timer = window.setInterval(() => ask(true), SPECTRUM_REFRESH_MS);
+    return () => {
+      live = false;
+      window.clearInterval(timer);
+      // Best effort. If it does not arrive the window lapses anyway.
+      ask(false);
+    };
+  }, [stationId]);
   const canConfigure = has(caps, "config.write");
   const auto = radio?.auto_squelch ?? true;
   const threshold = radio?.threshold_db ?? -70;
@@ -77,6 +109,21 @@ export function SettingsRadio({
 
   return (
     <div className="settings-sections">
+      <section className="settings-section">
+        <h3>Spectrum</h3>
+        <Spectrum
+          radio={radio}
+          onTune={
+            canControl
+              ? (hz) =>
+                  send("Tune", () =>
+                    api.tune(stationId!, Math.round(hz / STEP_HZ) * STEP_HZ),
+                  )
+              : undefined
+          }
+        />
+      </section>
+
       <section className="settings-section">
         <h3>Squelch</h3>
 

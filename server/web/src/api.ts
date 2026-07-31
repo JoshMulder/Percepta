@@ -119,6 +119,15 @@ export const api = {
       body: JSON.stringify({ gain }),
     }),
 
+  /** Ask a station to include its spectrum in radio telemetry, or stop. Must
+   *  be re-sent while the display is open; the station's window lapses on its
+   *  own so a console that crashes stops the traffic without saying goodbye. */
+  wantSpectrum: (id: string, on: boolean) =>
+    request<{ accepted: boolean }>(`/api/stations/${id}/radio/spectrum`, {
+      method: "POST",
+      body: JSON.stringify({ on }),
+    }),
+
   setPpm: (id: string, ppm: number) =>
     request<{ accepted: boolean }>(`/api/stations/${id}/radio/ppm`, {
       method: "POST",

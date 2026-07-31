@@ -243,6 +243,12 @@ export interface RadioPayload extends Availability {
   auto_squelch: boolean;
   /** Squelch defeated by an operator holding monitor. */
   monitor?: boolean;
+  /** Per-bin power in dBFS across `span_hz`, centred on `freq_hz`. Present
+   *  only while a console has asked for it — the array is around 150 MB a day
+   *  at this stream's rate on a metered link, for a display open for minutes
+   *  at commissioning. */
+  spectrum?: number[];
+  span_hz?: number;
   /** Tuner gain: "auto" or a fixed dB value, and what the hardware offers. */
   gain?: string | number;
   gains?: number[];

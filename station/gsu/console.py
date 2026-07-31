@@ -411,6 +411,11 @@ STYLE = """
    overscroll-behavior: contain; }
  ul.log li { margin: .15rem 0; }
 
+ /* Fixed size, and deliberately not responsive: an earlier version of this
+    sized itself to its container and re-measured on every telemetry frame. */
+ .spectrum { display: block; max-width: 100%; background: var(--panel-2);
+   border: 1px solid var(--line); border-radius: .375rem; margin-bottom: .6rem; }
+
  pre.raw { font: .8rem ui-monospace, monospace; color: var(--text);
    background: var(--panel-2); border: 1px solid var(--line-soft);
    border-radius: .375rem; padding: .55rem .7rem; margin: .4rem 0 .6rem;
@@ -2024,6 +2029,22 @@ class Console:
             # (/frame.jpg — never a fresh capture), and the checkbox is the
             # whole zoom mechanism, so expanding works with scripts blocked.
             out.append(self._preview(state.get("video") or {}))
+        elif slot == "radio":
+            # The same spectrum the console draws, on the box itself — this is
+            # the page somebody has open while pointing an antenna, and a
+            # number in a list cannot show them a carrier appearing. Fixed
+            # size, refreshed from status.json by the nonce'd script; with no
+            # script it is a still of the moment the page was rendered.
+            out.append("<div class=field><label>Spectrum</label></div>")
+            out.append(
+                "<canvas id=spectrum class=spectrum width=512 height=110></canvas>"
+            )
+            lines = (state.get("raw_samples") or {}).get(slot) or []
+            out.append("<div class=field><label>Data</label></div>")
+            out.append(
+                f"<pre class=raw id=raw data-slot='{slot}'>"
+                + html.escape("\n".join(lines)) + "</pre>"
+            )
         else:
             # Empty when nothing is connected. The nonce'd script refreshes it
             # from status.json; without script it is the state at render time,
@@ -2123,14 +2144,64 @@ class Console:
       form.addEventListener("change", update);
     })(forms[i]);
   }
+  // The spectrum. Same scale and furniture as the console's canvas: a dashed
+  // squelch line, a centre marker on the tuned channel, a filled trace and the
+  // window's edge frequencies. Fixed size, so nothing it draws can resize
+  // anything around it.
+  var spec = document.getElementById("spectrum");
+  var drawSpectrum = function (radio) {
+    if (!spec || !radio || !radio.spectrum || !radio.spectrum.length) return;
+    var ctx = spec.getContext("2d");
+    var W = spec.width, H = spec.height;
+    var MIN = -110, MAX = -10;
+    var y = function (db) {
+      return H - ((Math.max(MIN, Math.min(MAX, db)) - MIN) / (MAX - MIN)) * H;
+    };
+    ctx.clearRect(0, 0, W, H);
+    if (typeof radio.threshold_db === "number") {
+      ctx.strokeStyle = "rgba(0,160,220,.5)";
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      ctx.moveTo(0, y(radio.threshold_db));
+      ctx.lineTo(W, y(radio.threshold_db));
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    ctx.strokeStyle = "rgba(221,230,237,.35)";
+    ctx.beginPath(); ctx.moveTo(W / 2, 0); ctx.lineTo(W / 2, H); ctx.stroke();
+    var s = radio.spectrum, n = s.length;
+    ctx.beginPath(); ctx.moveTo(0, H);
+    for (var i = 0; i < n; i++) ctx.lineTo((i / (n - 1)) * W, y(s[i]));
+    ctx.lineTo(W, H); ctx.closePath();
+    ctx.fillStyle = "rgba(53,196,138,.18)"; ctx.fill();
+    ctx.beginPath();
+    for (var j = 0; j < n; j++) {
+      var px = (j / (n - 1)) * W;
+      if (j === 0) ctx.moveTo(px, y(s[j])); else ctx.lineTo(px, y(s[j]));
+    }
+    ctx.strokeStyle = "#35c48a"; ctx.lineWidth = 1.5; ctx.stroke();
+    var half = (radio.span_hz || 240000) / 2;
+    var mhz = (radio.freq_mhz || 0) * 1e6;
+    ctx.fillStyle = "rgba(127,146,159,.9)";
+    ctx.font = "10px ui-monospace, monospace";
+    ctx.textBaseline = "bottom";
+    ctx.textAlign = "left";
+    ctx.fillText(((mhz - half) / 1e6).toFixed(3), 4, H - 3);
+    ctx.textAlign = "center";
+    ctx.fillText((mhz / 1e6).toFixed(3), W / 2, H - 3);
+    ctx.textAlign = "right";
+    ctx.fillText(((mhz + half) / 1e6).toFixed(3), W - 4, H - 3);
+  };
+
   var raw = document.getElementById("raw");
   var wrap = document.getElementById("preview-wrap");
-  if (raw || wrap) {
+  if (raw || wrap || spec) {
     var poll = function () {
       fetch("/status.json", { credentials: "same-origin" })
         .then(function (r) { return r.ok ? r.json() : null; })
         .then(function (s) {
           if (!s) return;
+          if (spec && s.radio) drawSpectrum(s.radio);
           if (raw && s.raw_samples) {
             var lines = s.raw_samples[raw.getAttribute("data-slot")] || [];
             raw.textContent = lines.join("\\n");

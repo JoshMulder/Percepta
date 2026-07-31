@@ -3255,3 +3255,30 @@ body {
   cursor: pointer;
 }
 .alerts-clear:hover { color: var(--text); border-color: var(--muted); }
+
+
+/* The spectrum canvas. Fixed size on purpose — an earlier version sized itself
+   to its container, so every telemetry frame re-measured it and re-triggered
+   the fit that scales the whole console. Nothing here consults its parent, and
+   it lives on the settings page where there is no fit to disturb anyway. */
+.spectrum-wrap {
+  position: relative;
+  max-width: 100%;
+  overflow-x: auto;
+}
+.spectrum {
+  display: block;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 0.375rem;
+}
+.spectrum[role="button"] { cursor: crosshair; }
+.spectrum-waiting {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font: 0.72rem var(--mono);
+  color: var(--dim);
+  pointer-events: none;
+}

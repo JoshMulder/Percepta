@@ -115,6 +115,18 @@ def build_handlers(radio, light, on_config, stream=None) -> dict[str, Handler]:
         radio.set_gain(payload["gain"])
         return f"gain {radio.gain}"                      # -> radio.gain
 
+    def spectrum(payload: dict) -> str:
+        """Ask for the spectrum, or stop asking.
+
+        Demand-driven because 241 bins at 1 Hz is roughly 150 MB a day on a
+        metered link, for a display that is open for minutes at commissioning.
+        Re-requested periodically rather than held open, so a console that
+        crashes stops the traffic without having to say goodbye.
+        """
+        on = bool(payload.get("on", True))
+        radio.want_spectrum(on)
+        return "spectrum on" if on else "spectrum off"
+
     def ppm(payload: dict) -> str:
         radio.set_ppm(int(payload["ppm"]))
         return f"ppm {radio.ppm}"                        # -> radio.ppm
@@ -133,6 +145,7 @@ def build_handlers(radio, light, on_config, stream=None) -> dict[str, Handler]:
             "radio.monitor": monitor,
             "radio.gain": gain,
             "radio.ppm": ppm,
+            "radio.spectrum": spectrum,
         })
     else:
         log.warning("No receiver fitted: radio commands will be ignored and logged.")

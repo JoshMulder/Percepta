@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,12 +39,45 @@ from .audio import AUDIO_RATE, audio_payload, to_pcm16
 
 log = logging.getLogger("gsu.radio")
 
+#: Bins sent to the console. The receiver measures 241 across a 120 kHz span;
+#: a canvas a few hundred pixels wide cannot show that and a metered link
+#: should not carry it. Decimated by taking the strongest bin in each group,
+#: never the mean: a 25 kHz channel is a handful of bins wide and averaging
+#: buries a real carrier in the noise either side of it, which is the one thing
+#: this display exists to show.
+SPECTRUM_BINS = 128
+
+#: How long one request keeps the spectrum coming. Longer than the console's
+#: refresh interval so an open page never flickers, short enough that closing
+#: the tab stops the traffic within a few seconds.
+SPECTRUM_WINDOW_S = 12.0
+
 FREQ_MIN_HZ = 108_000_000
 FREQ_MAX_HZ = 137_000_000
 
 #: The gate stays open briefly after a signal drops, so a transmission with a
 #: gap in it does not arrive as two clipped fragments. Every receiver does this.
 HANG_SECONDS = 0.6
+
+
+def _decimate_db(bins: list[float], target: int) -> list[int]:
+    """Fewer bins, rounded to whole dB, keeping the peaks.
+
+    Max rather than mean per group: an airband channel is 25 kHz — a handful of
+    500 Hz bins — and averaging it with the quiet either side flattens the one
+    feature the display exists to show. Whole dB because the canvas cannot
+    render a tenth and the link should not carry one.
+    """
+    if not bins:
+        return []
+    if len(bins) <= target:
+        return [round(value) for value in bins]
+    out: list[int] = []
+    for index in range(target):
+        start = index * len(bins) // target
+        end = max(start + 1, (index + 1) * len(bins) // target)
+        out.append(round(max(bins[start:end])))
+    return out
 
 
 @dataclass(frozen=True)
@@ -116,6 +150,13 @@ class RadioController:
         self._rssi_db = -100.0
         self._floor_db = -100.0
         self._open = False
+        #: The most recent per-bin power, kept so the spectrum can be published
+        #: without recomputing it — the receiver already measures this every
+        #: block for RSSI and the noise floor.
+        self._last_spectrum: list[float] = []
+        #: Monotonic time until which somebody is watching the spectrum. Zero
+        #: means nobody, and nobody is the normal case.
+        self._spectrum_until = 0.0
         # The last few measurement lines for the setup page's datastream
         # field: what the receiver is hearing, in the terms the console's own
         # radio panel uses. Bounded — a tap, never a history.
@@ -196,6 +237,28 @@ class RadioController:
         self.front_end.set_gain(self.gain)
         self._save()
 
+    def spectrum_for_display(self) -> list[int]:
+        """The spectrum for the station's own setup page.
+
+        No demand window: that exists because the telemetry frame crosses a
+        metered link, and this is served to a laptop on the same bench.
+        """
+        return _decimate_db(self._last_spectrum, SPECTRUM_BINS)
+
+    def spectrum_span_hz(self) -> int:
+        return round(len(self._last_spectrum) * dsp.BIN_HZ)
+
+    def want_spectrum(self, on: bool = True) -> None:
+        """Somebody is looking at the spectrum, or has stopped.
+
+        Re-requested periodically rather than held open by a connection: a
+        console that crashes or a laptop lid that closes should stop the
+        traffic on its own, and neither sends a goodbye.
+        """
+        self._spectrum_until = (
+            time.monotonic() + SPECTRUM_WINDOW_S if on else 0.0
+        )
+
     def set_ppm(self, ppm: int) -> None:
         self.ppm = int(ppm)
         self.front_end.set_ppm(self.ppm)
@@ -212,6 +275,7 @@ class RadioController:
         decides and it is this one.
         """
         block = self.front_end.read(dt)
+        self._last_spectrum = block.spectrum_db
         self._rssi_db = dsp.in_channel_power_db(block.spectrum_db, block.bin_hz)
         self._floor_db = dsp.noise_floor_db(block.spectrum_db, block.bin_hz)
 
@@ -244,6 +308,19 @@ class RadioController:
             # there is no transmit path in this station to enable.
             "tx_capable": False,
         }
+
+        # The spectrum rides the same frame, but only while somebody is looking.
+        #
+        # 241 bins of float at 1 Hz is roughly 150 MB a day on a link that is
+        # metered and shared with video, for a display that is open for a few
+        # minutes at commissioning. So it is demand-driven, the same shape as
+        # the camera preview: the console asks, the answer lasts a few seconds,
+        # and a station nobody is watching sends nothing at all.
+        if time.monotonic() < self._spectrum_until:
+            spectrum = self._last_spectrum
+            if spectrum:
+                telemetry["spectrum"] = _decimate_db(spectrum, SPECTRUM_BINS)
+                telemetry["span_hz"] = round(len(spectrum) * dsp.BIN_HZ)
 
         self._raw.append(
             f"{self.freq_hz / 1e6:.3f} MHz  rssi {self._rssi_db:.1f} dB  "
