@@ -47,8 +47,22 @@ ENV PYTHONUNBUFFERED=1 \
 # dependency tail is the cost, measured in the build log rather than guessed.
 #
 # Placed above the code COPY so a code update still ships one small layer.
+#
+# librtlsdr0 is the radio slot, and it belongs here for a reason worth
+# recording: it was installed on the *host* when the first SDR was brought up,
+# which made the radio work from a shell on that box and not at all from the
+# agent, because on this hardware the agent is in a container and the host's
+# packages are invisible to it. The symptom is a receiver reporting itself
+# absent while `rtl_test` on the same machine is perfectly happy, and no
+# restart or rebuild touches it, because nothing about it is wrong except
+# where the package is.
+#
+# The library only, not the `rtl-sdr` tools: the station drives the device
+# through libusb via ctypes and never shells out to rtl_fm or rtl_tcp.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ffmpeg \
+ && apt-get install -y --no-install-recommends \
+      ffmpeg \
+      librtlsdr0 \
  && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --system --gid 10001 gsu \
@@ -59,11 +73,22 @@ RUN groupadd --system --gid 10001 gsu \
 
 WORKDIR /opt/percepta/station
 
-# Requirements first, so a code change does not re-resolve the dependency. One
-# runtime dependency, pure Python — nothing compiles, so no build toolchain is
-# needed and an ARMv7 build is not meaningfully slower than an x86 one.
+# Requirements first, so a code change does not re-resolve them.
+#
+# numpy is the radio's other half — the receiver refuses to start without it,
+# and says so, because 240 000 samples a second is not something CPython can
+# filter in real time. It comes from pip and NOT from apt's python3-numpy: this
+# base is python:3.11-slim, whose interpreter lives in /usr/local and does not
+# read the distribution's /usr/lib/python3/dist-packages. An apt numpy installs
+# perfectly and is then invisible to the only Python in the image, which is the
+# same class of mistake as installing it on the host.
+#
+# On arm64 and amd64 this is a wheel and nothing compiles. An armv7 build would
+# have to compile it, because numpy publishes no 32-bit ARM wheels — that is a
+# real cost, and it is why the 2B runs the agent under systemd against the
+# system numpy rather than out of this image.
 COPY requirements.txt ./
-RUN pip install --no-cache-dir "redis>=5.0"
+RUN pip install --no-cache-dir "redis>=5.0" "numpy>=1.24"
 
 # Docs before code, so that the last layer in the image is the one that changes
 # most often. A code-only update then ships **one 91 KB layer** and nothing

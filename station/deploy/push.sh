@@ -23,10 +23,19 @@
 #   192.168.2.132  Station1     Pi 2B  systemd unit, host venv, CSI camera
 #   192.168.2.133  PerceptaGSU  Pi 5   docker compose, RTSP camera
 #
-# Only gsu/ is pushed. Anything under deploy/ — the unit file, the Dockerfile,
-# the udev rules — changes how the box is *built*, not what it runs, and
-# copying those silently is how a box ends up in a state no installer would
-# ever produce. Change one of those and run install.sh.
+# WHAT TRAVELS, AND WHAT DOES NOT
+#
+# gsu/ always. Plus, for the Pi 5 only, deploy/Dockerfile and the compose
+# files — on that box those are build input: `docker compose build` reads them
+# off the Pi, so a dependency added to the Dockerfile here reaches nothing
+# until they go too. That is not a hypothetical. librtlsdr and numpy were
+# installed on the host when the first SDR was brought up, which made the
+# radio work from a shell there and not at all from the containerised agent,
+# and no amount of pushing gsu/ was ever going to fix it.
+#
+# The 2B's unit file and the udev rules stay put. Those are system state that
+# install.sh owns, and copying them in behind it is how a box reaches a
+# configuration no installer would produce. Change one and run install.sh.
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -62,15 +71,26 @@ stage() {   # $1 = host
     -e "ssh ${SSHOPT[*]}" gsu/ "pi@$1:/tmp/gsu-new/"
 }
 
+# The Pi 5's build inputs, staged separately so the gsu/ sync stays a clean
+# mirror of one directory.
+stage_build() {   # $1 = host
+  rsync -az -e "ssh ${SSHOPT[*]}" \
+    deploy/Dockerfile deploy/docker-compose.yml deploy/docker-compose.lan.yml \
+    "pi@$1:/tmp/gsu-build/"
+}
+
 # --delete, so a file deleted in the repo is deleted on the box. Without it a
 # module that was removed keeps being importable there and the Pi runs code
 # that no longer exists anywhere else.
 push_pi5() {
   stage "$PI5"
+  ssh -n "${SSHOPT[@]}" "pi@$PI5" 'mkdir -p /tmp/gsu-build'
+  stage_build "$PI5"
   info "installing on the Pi 5 (docker)"
   ssh -n "${SSHOPT[@]}" "pi@$PI5" '
     sudo rsync -a --delete --exclude __pycache__ /tmp/gsu-new/ \
       /opt/percepta/station/gsu/ && rm -rf /tmp/gsu-new
+    sudo rsync -a /tmp/gsu-build/ /opt/percepta/station/deploy/ && rm -rf /tmp/gsu-build
     cd /opt/percepta/station/deploy
     sudo docker compose build 2>&1 | tail -1
     sudo docker compose up -d 2>&1 | tail -1'
@@ -92,13 +112,21 @@ push_2b() {
 
 # Answering on :8088 is the only check worth making from here. "The service is
 # active" is what a container says while publishing nothing.
+#
+# Given up to 40s, because a fresh container takes a few seconds to bind and
+# asking once immediately after `up -d` reports a failure that is only the
+# question being early — which is worse than no check at all, since it teaches
+# you to ignore it.
 verify() {   # $1 = host, $2 = label
   local code
-  code=$(curl -s -o /dev/null -m 6 -w '%{http_code}' "http://$1:8088/" || true)
-  case "$code" in
-    200|401|403) info "$2 console answering ($code)" ;;
-    *)           info "$2 console NOT answering (${code:-no response})" ;;
-  esac
+  for _ in $(seq 20); do
+    code=$(curl -s -o /dev/null -m 3 -w '%{http_code}' "http://$1:8088/" || true)
+    case "$code" in
+      200|401|403) info "$2 console answering ($code)"; return ;;
+    esac
+    sleep 2
+  done
+  info "$2 console NOT answering after 40s (${code:-no response})"
 }
 
 case "${1:-all}" in

@@ -219,9 +219,40 @@ export function PowerFlow({ power }: { power: PowerPayload | null }) {
   // last exactly the battery's — nothing else is attached beyond them to add
   // or take any. Each therefore joins its own stub as one continuous path,
   // and what is left in `middle` is rail shared by more than one thing.
-  const loadRail = segments[0].to;
-  const batteryRail = segments[segments.length - 1].from;
-  const middle = segments.slice(1, -1);
+  // How far a stub's bend eats into the rail beside it.
+  const R = 9;
+
+  // Which way each source leans into the rail: toward whichever side takes
+  // more of what it makes.
+  //
+  // A source is a T, not a corner — power arrives down the stub and can leave
+  // both ways at once — so unlike the load and the battery this cannot be one
+  // continuous path. What it can do is stop looking like a pipe butted into
+  // another pipe. The stub curves into the direction carrying the majority,
+  // and the rail gives up that corner; the minority side keeps its run all the
+  // way to the tap, so it visibly leaves from directly under the node, which
+  // is exactly where the split happens.
+  const leanAt = new Map<number, 1 | -1>();
+  taps.forEach((tap, i) => {
+    if (i === 0 || i === taps.length - 1) return;   // the load and the battery
+    const outLeft = Math.max(0, -(segments[i - 1]?.flow ?? 0));
+    const outRight = Math.max(0, segments[i]?.flow ?? 0);
+    leanAt.set(tap.x, outRight >= outLeft ? 1 : -1);
+  });
+
+  /** A rail span's ends, pulled back wherever a stub's bend now occupies the
+   *  corner. Without this the curve and the rail overlap for R units and two
+   *  dash patterns beat against each other. */
+  const railEnds = (i: number) => ({
+    from: taps[i].x + (leanAt.get(taps[i].x) === 1 ? R : 0),
+    to: taps[i + 1].x - (leanAt.get(taps[i + 1].x) === -1 ? R : 0),
+  });
+
+  const loadRail = railEnds(0).to;
+  const batteryRail = railEnds(segments.length - 1).from;
+  const middle = segments.slice(1, -1).map((seg, i) => ({
+    ...seg, ...railEnds(i + 1),
+  }));
 
   return (
     <svg
@@ -238,8 +269,12 @@ export function PowerFlow({ power }: { power: PowerPayload | null }) {
         const x = step * (i + 1);
         return (
           <g key={s.key}>
+            {/* Down from the node and round into the rail. The quadratic's
+                control point sits on the corner, which makes the curve leave
+                the node vertically and meet the rail horizontally — so the
+                dashes arrive already travelling the way the rail runs. */}
             <Link
-              d={`M ${x} 36 L ${x} ${busY}`}
+              d={`M ${x} 36 Q ${x} ${busY} ${x + (leanAt.get(x) ?? 1) * R} ${busY}`}
               watts={s.idle ? 0 : s.watts}
               tone={s.key}
             />

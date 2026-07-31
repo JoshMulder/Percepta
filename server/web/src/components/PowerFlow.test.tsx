@@ -199,8 +199,13 @@ describe("the bus, which is where the arithmetic lives", () => {
    *  Not just `.pf-bus`. The runs at either end are part of the load and
    *  battery paths so that the flow turns their corners in one animation, so
    *  asking the rail what it carries means asking those too. */
+  /** Source stubs curve into the rail, so their last two points sit on it —
+   *  but a stub is not rail traffic and must not be counted as a span. */
+  const STUB = ["pf-solar", "pf-mains", "pf-gen"];
+
   function railRuns() {
     return Array.from(document.querySelectorAll(".pf-link")).flatMap((g) => {
+      if (STUB.some((c) => g.classList.contains(c))) return [];
       const on = pointsOf(g).filter(([, y]) => Math.abs(y - BUS_Y) < 0.001);
       if (on.length < 2 || on[0][0] === on[on.length - 1][0]) return [];
       const from = on[0][0];
@@ -296,6 +301,31 @@ describe("the bus, which is where the arithmetic lives", () => {
     );
     expect(railRuns().filter((s) => s.moving).some((s) => s.rightward))
       .toBe(true);
+  });
+
+  it("bends a source into the side taking most of what it makes", () => {
+    // Solar sends 120 W left to the load and 280 W right to the battery, so it
+    // leans right; the leftward run keeps its full length to the tap, which is
+    // where the split actually happens.
+    render(
+      <PowerFlow power={payload({ pv_w: 400, load_w: 120, battery_w: 280 })} />,
+    );
+    const stub = pathPoints(".pf-link.pf-solar");
+    const [nodeX] = stub[0];
+    expect(stub[stub.length - 1][0]).toBeGreaterThan(nodeX);
+    // And the run it bends into starts short of the tap, so the curve and the
+    // rail do not lie on top of each other.
+    const bendEnd = stub[stub.length - 1][0];
+    const rail = pathPoints(".pf-link.pf-battery");
+    expect(Math.min(...rail.map(([x]) => x))).toBeCloseTo(bendEnd, 5);
+  });
+
+  it("leans the other way when the load is taking most of it", () => {
+    render(
+      <PowerFlow power={payload({ pv_w: 400, load_w: 380, battery_w: 20 })} />,
+    );
+    const stub = pathPoints(".pf-link.pf-solar");
+    expect(stub[stub.length - 1][0]).toBeLessThan(stub[0][0]);
   });
 
   it("does not animate a run nothing crosses", () => {
