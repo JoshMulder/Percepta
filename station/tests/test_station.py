@@ -881,29 +881,83 @@ class SimulatedPowerSizingTests(unittest.TestCase):
     def test_a_site_with_no_generator_reports_none_at_all(self):
         # Absent and idle are different statements, and a diagram showing a
         # generator that never starts is inventing hardware.
-        payload = self.source(generator_w=0).read(1.0).to_payload()
+        payload = self.source(generator=False).read(1.0).to_payload()
         self.assertNotIn("generator_w", payload)
         self.assertNotIn("generator_running", payload)
 
     def test_a_site_with_one_reports_it_even_while_stopped(self):
-        payload = self.source(generator_w=900).read(1.0).to_payload()
+        payload = self.source(generator=True).read(1.0).to_payload()
         self.assertIn("generator_running", payload)
 
-    def test_the_generator_delivers_what_it_is_sized_for(self):
-        power = self.source(generator_w=3000, solar_w=0, max_load_w=400)
+    def test_the_generator_carries_the_load_and_the_charge(self):
+        # Neither grid source has a size: both are specified to carry the
+        # site, so what the generator delivers is set by demand, not rating.
+        power = self.source(solar=False, max_load_w=400, max_charge_w=1500)
         power._mains_down_for = 500.0
         power.soc = 10.0
-        # It delivers what the load needs; the surplus goes to the battery
-        # rather than vanishing.
         reading = power.read(1.0)
-        self.assertAlmostEqual(reading.generator_w, reading.load_w, places=3)
-        self.assertGreater(reading.battery_w, 2000.0)
+        self.assertAlmostEqual(reading.battery_w, 1500.0, places=3)
+        self.assertAlmostEqual(
+            reading.generator_w, reading.load_w + 1500.0, places=3,
+        )
 
-    def test_mains_is_a_constant_not_a_parameter(self):
-        # Every site with a grid has one that will supply far more than a
-        # ground station can use, so the number is never the interesting part.
-        from gsu.sensors.simulated import SimulatedPower
-        self.assertEqual(SimulatedPower.MAINS_CAPACITY_W, 2400.0)
+    def test_a_grid_source_charges_the_bank_at_its_full_rate(self):
+        # The rule, and the reason the charge rate is the only size that
+        # matters now: with mains or the generator up, what limits a recharge
+        # is what the bank will accept, never what the supply can deliver.
+        for off in ({"mains": True, "generator": False},
+                    {"mains": False, "generator": True}):
+            power = self.source(solar=False, max_charge_w=450, **off)
+            power.soc = 30.0  # Low enough that the generator starts too.
+            reading = power.read(1.0)
+            self.assertAlmostEqual(reading.battery_w, 450.0, places=3, msg=off)
+
+    def test_a_full_bank_takes_nothing_and_the_array_backs_off(self):
+        # Curtailment, not spillage. Reporting the array's potential as though
+        # it were flowing would put watts on the diagram that go nowhere.
+        power = self.source(solar_w=2000, max_load_w=300)
+        power.soc = 100.0
+        reading = power.read(1.0)
+        self.assertEqual(reading.battery_w, 0.0)
+        self.assertLessEqual(reading.pv_w, reading.load_w + 1e-6)
+
+    def test_on_solar_alone_the_bank_only_gets_the_surplus(self):
+        # No grid source, so the charge rate is a ceiling rather than a target.
+        power = self.source(mains=False, generator=False, solar_w=2000,
+                            max_load_w=300, max_charge_w=100_000)
+        power.soc = 50.0
+        reading = power.read(1.0)
+        self.assertAlmostEqual(
+            reading.battery_w, reading.pv_w - reading.load_w, places=3,
+        )
+
+    def test_every_watt_is_accounted_for(self):
+        # The console draws a conserved quantity: sources in must equal the
+        # load plus whatever the battery takes. A shape that does not balance
+        # is a diagram with power appearing from nowhere.
+        shapes = (
+            {}, {"solar": False}, {"mains": False}, {"generator": False},
+            {"battery": False}, {"mains": False, "generator": False},
+            {"max_charge_w": 0}, {"max_charge_w": 5000},
+        )
+        for shape in shapes:
+            for soc in (10.0, 60.0, 100.0):
+                power = self.source(**shape)
+                power.soc = soc
+                r = power.read(1.0)
+                supplied = r.pv_w + (r.mains_w or 0.0) + (r.generator_w or 0.0)
+                self.assertAlmostEqual(
+                    supplied, r.load_w + r.battery_w, places=6,
+                    msg=f"{shape} at {soc}%",
+                )
+
+    def test_neither_grid_source_has_a_size(self):
+        # Both are specified to carry the site, so the interesting number is
+        # what the bank will accept from them - which belongs to the battery.
+        from gsu.devices import registry
+        params = {p.name: p for p in registry.get("simulated-power").parameters}
+        self.assertNotIn("mains_w", params)
+        self.assertNotIn("generator_w", params)
 
     def test_the_registry_offers_a_switch_and_a_size_per_source(self):
         from gsu.devices import registry
@@ -912,11 +966,8 @@ class SimulatedPowerSizingTests(unittest.TestCase):
         # the site, not something to say by setting an output to zero.
         for name in ("solar", "battery", "mains", "generator"):
             self.assertEqual(params[name].type, "bool", name)
-        for name in ("solar_w", "battery_wh", "generator_w", "max_load_w"):
+        for name in ("solar_w", "battery_wh", "max_charge_w", "max_load_w"):
             self.assertEqual(params[name].type, "number", name)
-        # Mains has no size. Every site with a grid has more than a station
-        # can use, so the number would be a question with no useful answer.
-        self.assertNotIn("mains_w", params)
 
     def test_a_source_can_be_switched_off_entirely(self):
         for off, absent in (
