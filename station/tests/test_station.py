@@ -7,6 +7,7 @@ lands as a test failure on this side rather than as a surprise in conformance.
 import json
 import math
 import tempfile
+import types
 import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1096,3 +1097,90 @@ class LocalStreamViewerTests(unittest.TestCase):
         tee.add(LocalViewer())
         self.assertIn("setup page", tee.describe())
         self.assertEqual(tee.stats()["local_viewers"], 1)
+
+
+class RadioAudioLatencyTests(unittest.TestCase):
+    """Audio is a stream; everything else on the sensing loop is a reading.
+
+    At the sweep's one second the receiver was handed a whole second to
+    demodulate at once — a second of latency before a syllable could leave the
+    box, and the console's prebuffer then sized itself from the chunk it
+    received, costing another 1.25 on top.
+    """
+
+    def test_the_sub_tick_is_well_inside_what_anybody_hears(self):
+        from gsu.agent import AUDIO_TICK_S
+        self.assertLessEqual(AUDIO_TICK_S, 0.2)
+        # And not so small that the per-chunk overhead — a payload, a base64
+        # encode, a broker publish — costs more than the latency it saves.
+        self.assertGreaterEqual(AUDIO_TICK_S, 0.05)
+
+    def test_a_chunk_is_a_sub_tick_of_audio_not_a_whole_second(self):
+        # What actually reaches the console, in samples. The prebuffer over
+        # there is 1.25x whatever arrives, so this number is most of the
+        # latency budget.
+        from gsu.agent import AUDIO_TICK_S
+        from gsu.radio.audio import AUDIO_RATE
+        self.assertLessEqual(AUDIO_TICK_S * AUDIO_RATE, 0.2 * AUDIO_RATE)
+
+    def test_only_one_of_the_two_callers_reads_the_front_end(self):
+        # The front end is a single device with a single reader. A sub-tick
+        # having read it must stop the sweep reading it again, or the receiver
+        # is asked for two seconds of samples in every one.
+        #
+        # Against the real Agent.step, not a stand-in for it: the whole claim
+        # is about what that method does, and a stub of it would pass while it
+        # drifted.
+        reads: list[float] = []
+
+        class Counting:
+            freq_hz = 121_500_000
+
+            def tick(self, dt):
+                reads.append(dt)
+                return {"freq_hz": self.freq_hz}, None
+
+        with tempfile.TemporaryDirectory() as directory:
+            agent = agent_in(directory)
+            agent._publish = lambda topic, payload: True
+            agent.radio = Counting()
+            agent._radio_telemetry = None
+            agent._radio_pumped = False
+
+            agent._pump_radio(0.125)
+            self.assertEqual(reads, [0.125])
+            agent.step(1.0, weather_due=False, health_due=False)
+            self.assertEqual(reads, [0.125], "the sweep read the front end again")
+            # And with nothing having pumped, the sweep reads it itself: `step`
+            # has to stand on its own, because it is what a single-shot run and
+            # every other test in this file drive.
+            agent.step(1.0, weather_due=False, health_due=False)
+            self.assertEqual(reads, [0.125, 1.0])
+
+    def test_the_sweep_publishes_the_newest_reading_the_pump_left(self):
+        class Counting:
+            freq_hz = 121_500_000
+
+            def __init__(self):
+                self.n = 0
+
+            def tick(self, dt):
+                self.n += 1
+                return {"freq_hz": self.freq_hz, "n": self.n}, None
+
+        with tempfile.TemporaryDirectory() as directory:
+            sent: list[dict] = []
+            agent = agent_in(directory)
+            agent._publish = lambda topic, payload: sent.append(payload) or True
+            agent.radio = Counting()
+            agent._radio_telemetry = None
+            agent._radio_pumped = False
+            for _ in range(4):
+                agent._pump_radio(0.125)
+            self.assertEqual(agent._radio_telemetry["n"], 4)
+            agent.step(1.0, weather_due=False, health_due=False)
+            self.assertTrue(any(p.get("n") == 4 for p in sent),
+                            "the newest reading was not the one published")
+            # Consumed, so a sweep with no pump behind it does not republish a
+            # stale reading as though it were new.
+            self.assertIsNone(agent._radio_telemetry)

@@ -77,6 +77,20 @@ REASON_LIMIT = 200
 #: own: nobody is there to restart anything.
 REDISCOVER_SECONDS = 30.0
 
+#: How often the receiver is read between full sensor sweeps.
+#:
+#: Audio is a stream and everything else on this loop is a reading, so the two
+#: do not want the same cadence. At the sweep's one second the receiver was
+#: handed a whole second to demodulate at once — a second of latency before a
+#: syllable could leave the box, and the console's prebuffer then sizes itself
+#: from the chunk it receives, so that one-second chunk cost another 1.25 on
+#: top. Squelch opening and audio arriving two seconds later is not a radio.
+#:
+#: 125 ms rather than smaller: below about 100 ms the per-chunk overhead — a
+#: payload, a base64 encode, a broker publish — starts to matter more than the
+#: latency it saves, and 8 Hz is already inside what anybody hears as instant.
+AUDIO_TICK_S = 0.125
+
 #: How long after the floodlight's commanded state changes before the measured
 #: current is allowed to contradict it. A contactor takes a moment to move and
 #: some lamps draw oddly while striking; judging inside that window turns
@@ -117,6 +131,13 @@ class Agent:
         self.camera = None
         self.radio: RadioController | None = None
         self._last_discovery = 0.0
+        #: The newest radio telemetry a pump produced, waiting for the next
+        #: full sweep to publish it. See `_pump_radio`.
+        self._radio_telemetry: dict | None = None
+        #: Whether a sub-tick has read the receiver since the last sweep. The
+        #: front end is a single device with a single reader, so exactly one of
+        #: the two callers may read it in any given interval.
+        self._radio_pumped = False
         # Who owns the camera, for the life of this process. Built before the
         # devices are, handed to every camera driver through device_context(),
         # and deliberately NOT rebuilt by rediscovery: an arbiter that is
@@ -888,6 +909,20 @@ class Agent:
                     self.step(tick, weather_due <= 0, health_due <= 0)
                 except Exception:  # noqa: BLE001 - a loop that dies is a dead site
                     log.exception("Tick failed; continuing.")
+                # Audio is a stream and everything else here is a reading, so
+                # between full sweeps the radio is pumped on its own. At one
+                # tick per second the receiver was handed a whole second to
+                # demodulate at once, which is a whole second of latency before
+                # a syllable can even leave the box — and the console's
+                # prebuffer then sizes itself from the chunk it receives, so a
+                # one-second chunk cost another 1.25 on top. Squelch opening
+                # and audio arriving two seconds later is not a radio.
+                #
+                # Not a thread. The front end is a single device with a single
+                # reader, and a second thread reading it is the bug that has
+                # already cost this project a camera and a snapshot channel.
+                # Sub-ticking on the same thread keeps one reader; the total
+                # sample rate is unchanged, only the granularity.
                 weather_due = (
                     self.site.weather_period_s if weather_due <= 0 else weather_due - tick
                 )
@@ -914,11 +949,11 @@ class Agent:
                 # Absolute schedule rather than sleep(tick): a slow tick must
                 # not make the cadence drift away from 1 Hz for ever.
                 next_tick += tick
-                delay = next_tick - time.monotonic()
-                if delay < -tick:
+                # Overran by more than a whole period: give up on catching up
+                # rather than running a burst of sweeps back to back.
+                if next_tick - time.monotonic() < -tick:
                     next_tick = time.monotonic()
-                    delay = 0
-                self._stop.wait(max(0.0, delay))
+                self._sleep_pumping_radio(next_tick)
         finally:
             if console is not None:
                 console.stop()
@@ -1009,18 +1044,19 @@ class Agent:
 
         contacts = self.adsb.poll(dt) if self.adsb is not None else None
 
-        radio_payload = audio_payload = None
-        if self.radio is not None:
-            radio_payload, audio_payload = self.radio.tick(dt)
-
-        if audio_payload is not None:
-            # Recorded whether or not it can be sent. A transmission during an
-            # outage is not simply gone.
-            self.store.write_audio(
-                base64.b64decode(audio_payload["pcm"]),
-                audio_payload["rate"],
-                label=f"{self.radio.freq_hz // 1000}kHz",
-            )
+        # Normally the sub-ticks between sweeps have already read the
+        # receiver and left their telemetry here — the front end is a single
+        # device with a single reader, so asking it for another second of
+        # samples now would be asking for two seconds in every one.
+        #
+        # But `step` has to stand on its own: it is the unit the tests drive
+        # and the unit a single-shot run executes, and a radio that only works
+        # when the outer loop happens to be sleeping is a radio that works by
+        # accident. So if nothing has pumped, this does.
+        if not self._radio_pumped:
+            self._pump_radio(dt)
+        self._radio_pumped = False
+        radio_payload, self._radio_telemetry = self._radio_telemetry, None
 
         # The fail-closed half of the live stream: an expired lease, the
         # ceiling, or an encoder that has died stops it here rather than needing
@@ -1070,12 +1106,58 @@ class Agent:
             )
         if health_due:
             self._publish_telemetry(self.health_payload())
-        if audio_payload is not None:
-            self._publish(
-                self.enrolment.broker.audio_topic if self.enrolment else None, audio_payload
-            )
 
         self._update_link_state()
+
+    def _pump_radio(self, dt: float) -> dict | None:
+        """Read the receiver once, publish any audio, keep the telemetry.
+
+        The single reader of the front end. Audio goes out the moment it
+        exists, because it is a stream; the telemetry waits for the next sweep,
+        because a signal level is a reading and eight a second is seven more
+        than anybody needs.
+        """
+        if self.radio is None:
+            return None
+        telemetry, audio = self.radio.tick(dt)
+        self._radio_telemetry = telemetry
+        self._radio_pumped = True
+        if audio is None:
+            return None
+        # Recorded whether or not it can be sent. A transmission during an
+        # outage is not simply gone.
+        self.store.write_audio(
+            base64.b64decode(audio["pcm"]), audio["rate"],
+            label=f"{self.radio.freq_hz // 1000}kHz",
+        )
+        self._publish(
+            self.enrolment.broker.audio_topic if self.enrolment else None, audio,
+        )
+        return audio
+
+    def _sleep_pumping_radio(self, until: float) -> None:
+        """Wait for the next full sweep, running the radio at AUDIO_TICK_S.
+
+        The radio's own telemetry is not published here — that stays on the
+        one-second cadence with every other reading, because a signal level is
+        a reading and nobody needs it eight times a second. Only the audio goes
+        out, and only when the squelch is open, which is the same gate as
+        before and the reason this costs nothing on a quiet channel.
+        """
+        while not self._stop.is_set():
+            remaining = until - time.monotonic()
+            if remaining <= 0:
+                return
+            if self.radio is None:
+                self._stop.wait(remaining)
+                return
+            slice_s = min(AUDIO_TICK_S, remaining)
+            if self._stop.wait(slice_s):
+                return
+            try:
+                self._pump_radio(slice_s)
+            except Exception:  # noqa: BLE001 - a dead loop is a dead site
+                log.exception("Radio sub-tick failed; continuing.")
 
     def video_state(self) -> dict:
         """What the camera is doing, in one place.
