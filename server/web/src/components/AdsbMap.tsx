@@ -90,11 +90,18 @@ function AdsbMapInner({
    *  re-reads the live array every render: a selected aircraft is still moving,
    *  and a panel frozen at the values it had when clicked would quietly become
    *  wrong while being read. */
-  const [selected, setSelected] = useState<string | null>(null);
-  /** So the marker click handlers, which are created once per contact and live
+  const [pinned, setPinned] = useState<string | null>(null);
+  /** The contact under the pointer. Separate from `pinned` so that reading a
+   *  panel you deliberately opened is not interrupted by the pointer crossing
+   *  something else on the way to it — a pin wins until it is dismissed. */
+  const [hovered, setHovered] = useState<string | null>(null);
+  const selected = pinned ?? hovered;
+  /** So the marker handlers, which are created once per contact and live
    *  outside React, can set state without being rebuilt on every selection. */
-  const selectRef = useRef(setSelected);
-  selectRef.current = setSelected;
+  const pinRef = useRef(setPinned);
+  pinRef.current = setPinned;
+  const hoverRef = useRef(setHovered);
+  hoverRef.current = setHovered;
   /** Where the open panel should sit, in screen pixels.
    *
    *  The panel used to be pinned bottom-left, which meant that on a map with
@@ -339,12 +346,24 @@ function AdsbMapInner({
         if (!compact) {
           el.classList.add("clickable");
           const glyph = el.querySelector("svg");
-          // Clicking selects rather than toggling: a second click on an
-          // already-open contact is far more often a missed drag than a
-          // request to close, and Close is right there.
+          // Hover shows, click keeps. Reading a contact is by far the common
+          // case and asking for a click first made it a two-step; committing
+          // to one so it survives the pointer moving away is the rarer
+          // intent, so that is what the click is for.
+          glyph?.addEventListener("pointerenter", () => {
+            hoverRef.current(contact.icao);
+          });
+          glyph?.addEventListener("pointerleave", () => {
+            // Only clears if it is still this contact: pointing straight from
+            // one aircraft to another fires the leave after the next enter.
+            hoverRef.current((h) => (h === contact.icao ? null : h));
+          });
+          // Clicking pins rather than toggling: a second click on an already
+          // open contact is far more often a missed drag than a request to
+          // close, and Close is right there.
           glyph?.addEventListener("click", (e) => {
             e.stopPropagation();
-            selectRef.current(contact.icao);
+            pinRef.current(contact.icao);
           });
         }
         marker = new maplibregl.Marker({ element: el }).setLngLat(pos).addTo(map);
@@ -409,7 +428,10 @@ function AdsbMapInner({
    *  values behind that no longer describe anything. Handled here rather than
    *  in the marker loop so it also fires when the whole stream goes away. */
   useEffect(() => {
-    if (selected && !aircraft.some((c) => c.icao === selected)) setSelected(null);
+    if (selected && !aircraft.some((c) => c.icao === selected)) {
+      setPinned(null);
+      setHovered(null);
+    }
   }, [aircraft, selected]);
 
   /** Keep the panel over its aircraft.
@@ -462,7 +484,10 @@ function AdsbMapInner({
   useEffect(() => {
     if (!selected) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setSelected(null);
+      if (e.key === "Escape") {
+        setPinned(null);
+        setHovered(null);
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -483,7 +508,7 @@ function AdsbMapInner({
       <div
         ref={holderRef}
         className="map-canvas"
-        onClick={() => setSelected(null)}
+        onClick={() => setPinned(null)}
       />
       {!compact && config.basemaps.length > 1 && (
         <div className="basemap-switch" role="group" aria-label="Basemap">
@@ -508,6 +533,12 @@ function AdsbMapInner({
           className={`contact-anchor${anchor.below ? " below" : ""}${
             anchor.left ? " left" : ""
           }`}
+          // The panel counts as part of what is being hovered. Without this,
+          // moving the pointer off the aircraft to read the panel dismissed
+          // the panel on the way — the usual hover-menu gap, and the reason a
+          // hover-opened panel has to hold itself open.
+          onPointerEnter={() => setHovered(openContact.icao)}
+          onPointerLeave={() => setHovered(null)}
           // Offset clear of the glyph so the panel does not cover the aircraft
           // it describes, on whichever side has the room — see `below`/`left`
           // above. `translate(-50%)` is deliberately not used: the panel is
@@ -520,7 +551,10 @@ function AdsbMapInner({
         >
           <ContactDetail
             contact={openContact}
-            onClose={() => setSelected(null)}
+            onClose={() => {
+              setPinned(null);
+              setHovered(null);
+            }}
           />
         </div>
       )}

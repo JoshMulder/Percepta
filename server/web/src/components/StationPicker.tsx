@@ -62,6 +62,10 @@ export function StationPicker({
 
   return (
     <div className="station-switch" ref={wrap}>
+      {/* The control shows a site's name, and a site name on its own says
+          nothing about what picking it does. `aria-label` already said it to a
+          screen reader; this says it to everybody else. */}
+      <span className="station-switch-label" aria-hidden>Station</span>
       <button
         ref={trigger}
         type="button"

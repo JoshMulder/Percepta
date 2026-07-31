@@ -2887,6 +2887,15 @@ body {
   position: relative;
   display: flex;
   align-items: center;
+  gap: 0.5rem;
+}
+/* Quieter than the name it introduces: this is furniture, and the site is the
+   thing being read. */
+.station-switch-label {
+  font-size: 0.75rem;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+  white-space: nowrap;
 }
 .station-trigger {
   display: flex;
@@ -3036,8 +3045,23 @@ body {
 }
 .map-contact span {
   font: 0.6rem var(--mono);
-  text-shadow: 0 0 0.2rem #000, 0 0 0.2rem #000;
   white-space: nowrap;
+  /* A backdrop rather than a glow. Two stacked text-shadows were enough over
+     water and open country and lost badly against a white rooftop or a
+     motorway, which is exactly where the aircraft worth reading tend to be.
+
+     Deliberately NOT backdrop-filter: this sits directly on the map's WebGL
+     canvas, which repaints continuously, and a filter over it costs a
+     full-screen GPU readback every frame — the fault that made scrolling the
+     settings pane lag the whole machine. A flat translucent fill costs
+     nothing and reads better anyway.
+
+     A faint shadow stays for the case where the label overhangs its own
+     backdrop by a pixel of antialiasing. */
+  background: rgba(4, 10, 14, 0.66);
+  border-radius: 0.15rem;
+  padding: 0.05rem 0.22rem;
+  text-shadow: 0 0 0.15rem rgba(0, 0, 0, 0.9);
 }
 .map-contact.alert svg { filter: drop-shadow(0 0 0.3rem rgba(255, 122, 69, 0.9)); }
 /* Only the glyph is clickable. The marker as a whole keeps pointer-events off
