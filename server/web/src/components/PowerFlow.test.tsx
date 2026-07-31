@@ -172,15 +172,24 @@ describe("what animates", () => {
     }
   });
 
-  it("runs faster for a bigger flow", () => {
-    render(<PowerFlow power={payload({ pv_w: 100 })} />);
-    const slow = (document.querySelector(".pf-solar .pf-dash") as HTMLElement)
-      .style.animationDuration;
-    cleanup();
-    render(<PowerFlow power={payload({ pv_w: 900 })} />);
-    const fast = (document.querySelector(".pf-solar .pf-dash") as HTMLElement)
-      .style.animationDuration;
-    expect(parseFloat(fast)).toBeLessThan(parseFloat(slow));
+  it("runs at one rate whatever the flow", () => {
+    // Deliberately not proportional to watts any more. Dashes arriving at a
+    // junction at one rate and leaving at another have to bunch or tear, so no
+    // two connected links could stay in step and the flow appeared to stop at
+    // every joint. How much is moving is on the nodes in watts.
+    render(
+      <PowerFlow
+        power={payload({
+          pv_w: 900, load_w: 20, battery_w: 880,
+          mains_present: true, mains_w: 40,
+        })}
+      />,
+    );
+    const rates = Array.from(document.querySelectorAll(".pf-dash")).map(
+      (el) => (el as HTMLElement).style.animationDuration,
+    );
+    expect(rates.length).toBeGreaterThan(2);
+    expect(new Set(rates).size).toBe(1);
   });
 });
 
@@ -303,29 +312,55 @@ describe("the bus, which is where the arithmetic lives", () => {
       .toBe(true);
   });
 
-  it("bends a source into the side taking most of what it makes", () => {
-    // Solar sends 120 W left to the load and 280 W right to the battery, so it
-    // leans right; the leftward run keeps its full length to the tap, which is
-    // where the split actually happens.
+  /** How far into the dash pattern a run starts, recovered from the negative
+   *  animation delay that puts it there. In user units, same as the path. */
+  function advanceOf(selector: string): number {
+    const el = document.querySelector(`${selector} .pf-dash`) as HTMLElement;
+    const delay = parseFloat(el.style.animationDelay);
+    const seconds = parseFloat(el.style.animationDuration);
+    return (-delay / seconds) * 16;
+  }
+
+  const wrap = (n: number) => ((n % 16) + 16) % 16;
+
+  it("hands the dash pattern across a junction in step", () => {
+    // The whole point. A run picks the pattern up exactly where its neighbour
+    // put it down, so the dashes cross the joint without vanishing and
+    // reappearing out of phase. Solar's stub is 22 long (36 down to the rail
+    // at 58) and feeds the battery run, so the battery run must start 22
+    // further through the pattern than the stub did.
     render(
       <PowerFlow power={payload({ pv_w: 400, load_w: 120, battery_w: 280 })} />,
     );
-    const stub = pathPoints(".pf-link.pf-solar");
-    const [nodeX] = stub[0];
-    expect(stub[stub.length - 1][0]).toBeGreaterThan(nodeX);
-    // And the run it bends into starts short of the tap, so the curve and the
-    // rail do not lie on top of each other.
-    const bendEnd = stub[stub.length - 1][0];
-    const rail = pathPoints(".pf-link.pf-battery");
-    expect(Math.min(...rail.map(([x]) => x))).toBeCloseTo(bendEnd, 5);
+    expect(wrap(advanceOf(".pf-link.pf-solar") - 22))
+      .toBeCloseTo(wrap(advanceOf(".pf-link.pf-battery")), 6);
   });
 
-  it("leans the other way when the load is taking most of it", () => {
+  it("keeps two rail runs continuous where they meet", () => {
+    // Solar and mains both feeding right: the run between them ends where the
+    // next begins, and the pattern must not restart there either.
     render(
-      <PowerFlow power={payload({ pv_w: 400, load_w: 380, battery_w: 20 })} />,
+      <PowerFlow
+        power={payload({
+          pv_w: 700, load_w: 100, battery_w: 800,
+          mains_present: true, mains_w: 200,
+        })}
+      />,
     );
-    const stub = pathPoints(".pf-link.pf-solar");
-    expect(stub[stub.length - 1][0]).toBeLessThan(stub[0][0]);
+    const runs = Array.from(document.querySelectorAll(".pf-bus"));
+    expect(runs.length).toBeGreaterThan(0);
+    for (const g of runs) {
+      const pts = pointsOf(g);
+      const [x1] = pts[0];
+      const [x2] = pts[pts.length - 1];
+      const el = g.querySelector(".pf-dash") as HTMLElement | null;
+      if (!el) continue;
+      const advance = (-parseFloat(el.style.animationDelay)
+        / parseFloat(el.style.animationDuration)) * 16;
+      // Screen-space phase: a rightward run starts at -x, a leftward one at +x.
+      const expected = wrap(x2 > x1 ? -x1 : x1);
+      expect(wrap(advance)).toBeCloseTo(expected, 6);
+    }
   });
 
   it("does not animate a run nothing crosses", () => {

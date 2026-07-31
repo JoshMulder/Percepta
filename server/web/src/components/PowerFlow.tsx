@@ -42,12 +42,44 @@ type Flow = {
   idle: boolean;
 };
 
-/** Seconds per dash cycle: bigger flows animate faster. Clamped at both ends —
- *  too slow reads as stopped, too fast reads as a glitch. */
-function speed(watts: number): number {
-  const w = Math.abs(watts);
-  if (w < IDLE_W) return 0;
-  return Math.max(0.35, Math.min(3, 900 / w));
+/** 5 on, 11 off — the dash pattern repeats every 16 user units. */
+const DASH_PERIOD = 16;
+
+/**
+ * Seconds per dash cycle. **One rate for every link in the diagram**, and that
+ * is the whole point rather than a simplification.
+ *
+ * The rate used to be a function of watts, so a trickle crawled and a surge
+ * raced. It read as broken, and the reason is arithmetic: dashes arriving at a
+ * junction at one rate and leaving at another must either bunch up or tear
+ * apart, so no two connected links could ever stay in step. The flow appeared
+ * to stop at every joint and start again out of phase.
+ *
+ * With one rate the pattern is continuous everywhere it should be, and nothing
+ * is actually lost: how much is moving is written in watts on the node at each
+ * end, which is a better answer than a speed the eye has to calibrate. What
+ * the animation says is *which way*, and whether anything is moving at all.
+ */
+const DASH_SECONDS = 1.1;
+
+/**
+ * Where a run picks the dash pattern up, in user units along its own path.
+ *
+ * Rail runs all share one pattern laid out in *screen* space, so wherever two
+ * of them meet the marks already line up and neither has to know the other
+ * exists. `dir` is the direction of travel, and the mirror it applies is what
+ * keeps two leftward runs continuous with each other rather than only two
+ * rightward ones.
+ */
+function railPhase(startX: number, dir: 1 | -1): number {
+  return -dir * startX;
+}
+
+/** Arc length of one rounded corner of radius `r`, near enough: the quadratic's
+ *  chord and control polygon averaged the usual way. Used to carry a phase
+ *  across a bend, so a percent or two is invisible. */
+function cornerLength(r: number): number {
+  return 1.61 * r;
 }
 
 function Node({
@@ -96,12 +128,20 @@ function Node({
  * @param x      the corner, directly above or below the node
  * @param toY    the node end
  */
+/** Clamped to both legs: an arc bigger than the run it turns out of would
+ *  double back, which happens for real when a source sits close to an end.
+ *  Lifted out of `elbow` because the phase calculation needs the same number —
+ *  two copies of it would be two chances to disagree. */
+function elbowRadius(
+  railX: number, x: number, busY: number, toY: number,
+): number {
+  return Math.min(9, Math.abs(x - railX) / 2, Math.abs(toY - busY) / 2);
+}
+
 function elbow(
   railX: number, x: number, busY: number, toY: number, reversed: boolean,
 ): string {
-  // Clamped to both legs: an arc bigger than the run it turns out of would
-  // double back, which happens for real when a source sits close to an end.
-  const r = Math.min(9, Math.abs(x - railX) / 2, Math.abs(toY - busY) / 2);
+  const r = elbowRadius(railX, x, busY, toY);
   const approach = x - Math.sign(x - railX) * r;
   const corner = `Q ${x} ${busY} `;
   return reversed
@@ -112,19 +152,27 @@ function elbow(
 }
 
 function Link({
-  d, watts, tone,
+  d, watts, tone, phase = 0,
 }: {
   d: string; watts: number; tone: string;
+  /** How far into the pattern this run starts, in user units. A negative
+   *  animation delay puts the animation that far through its first cycle,
+   *  which is how one run picks up exactly where its neighbour left off. */
+  phase?: number;
 }) {
-  const seconds = speed(watts);
+  const moving = Math.abs(watts) >= IDLE_W;
+  const advance = ((phase % DASH_PERIOD) + DASH_PERIOD) % DASH_PERIOD;
   return (
-    <g className={`pf-link pf-${tone}${seconds ? "" : " idle"}`}>
+    <g className={`pf-link pf-${tone}${moving ? "" : " idle"}`}>
       <path className="pf-track" d={d} />
-      {seconds > 0 && (
+      {moving && (
         <path
           className="pf-dash"
           d={d}
-          style={{ animationDuration: `${seconds}s` }}
+          style={{
+            animationDuration: `${DASH_SECONDS}s`,
+            animationDelay: `${-(advance / DASH_PERIOD) * DASH_SECONDS}s`,
+          }}
         />
       )}
     </g>
@@ -219,40 +267,25 @@ export function PowerFlow({ power }: { power: PowerPayload | null }) {
   // last exactly the battery's — nothing else is attached beyond them to add
   // or take any. Each therefore joins its own stub as one continuous path,
   // and what is left in `middle` is rail shared by more than one thing.
-  // How far a stub's bend eats into the rail beside it.
-  const R = 9;
-
-  // Which way each source leans into the rail: toward whichever side takes
-  // more of what it makes.
+  // A source is a T, not a corner: power arrives down the stub and can leave
+  // both ways at once, so unlike the load and the battery it cannot be one
+  // continuous path without lying about where the split happens. The stub
+  // stays a straight drop onto the rail. What makes the junction read is not
+  // its shape but the dashes crossing it in step, which is what `phase` does.
   //
-  // A source is a T, not a corner — power arrives down the stub and can leave
-  // both ways at once — so unlike the load and the battery this cannot be one
-  // continuous path. What it can do is stop looking like a pipe butted into
-  // another pipe. The stub curves into the direction carrying the majority,
-  // and the rail gives up that corner; the minority side keeps its run all the
-  // way to the tap, so it visibly leaves from directly under the node, which
-  // is exactly where the split happens.
-  const leanAt = new Map<number, 1 | -1>();
+  // Which side the stub hands its pattern to: the one taking more of what the
+  // source makes, because that is the stream the eye follows through.
+  const feeds = new Map<number, 1 | -1>();
   taps.forEach((tap, i) => {
     if (i === 0 || i === taps.length - 1) return;   // the load and the battery
     const outLeft = Math.max(0, -(segments[i - 1]?.flow ?? 0));
     const outRight = Math.max(0, segments[i]?.flow ?? 0);
-    leanAt.set(tap.x, outRight >= outLeft ? 1 : -1);
+    feeds.set(tap.x, outRight >= outLeft ? 1 : -1);
   });
 
-  /** A rail span's ends, pulled back wherever a stub's bend now occupies the
-   *  corner. Without this the curve and the rail overlap for R units and two
-   *  dash patterns beat against each other. */
-  const railEnds = (i: number) => ({
-    from: taps[i].x + (leanAt.get(taps[i].x) === 1 ? R : 0),
-    to: taps[i + 1].x - (leanAt.get(taps[i + 1].x) === -1 ? R : 0),
-  });
-
-  const loadRail = railEnds(0).to;
-  const batteryRail = railEnds(segments.length - 1).from;
-  const middle = segments.slice(1, -1).map((seg, i) => ({
-    ...seg, ...railEnds(i + 1),
-  }));
+  const loadRail = segments[0].to;
+  const batteryRail = segments[segments.length - 1].from;
+  const middle = segments.slice(1, -1);
 
   return (
     <svg
@@ -269,14 +302,17 @@ export function PowerFlow({ power }: { power: PowerPayload | null }) {
         const x = step * (i + 1);
         return (
           <g key={s.key}>
-            {/* Down from the node and round into the rail. The quadratic's
-                control point sits on the corner, which makes the curve leave
-                the node vertically and meet the rail horizontally — so the
-                dashes arrive already travelling the way the rail runs. */}
+            {/* Straight down onto the rail. The phase is set so the pattern
+                arriving at the bottom of the stub is the one the rail is
+                already carrying at that point: the dashes turn the corner
+                without a jump, which is the only thing a T can offer.
+                `busY - 36` is the stub's own length — the distance the pattern
+                travels before it gets there. */}
             <Link
-              d={`M ${x} 36 Q ${x} ${busY} ${x + (leanAt.get(x) ?? 1) * R} ${busY}`}
+              d={`M ${x} 36 L ${x} ${busY}`}
               watts={s.idle ? 0 : s.watts}
               tone={s.key}
+              phase={(busY - 36) + railPhase(x, feeds.get(x) ?? 1)}
             />
             <Node
               x={x}
@@ -309,18 +345,20 @@ export function PowerFlow({ power }: { power: PowerPayload | null }) {
           Only the spans between two sources are drawn here. The runs at either
           end are part of the load and battery paths below, so that the flow
           turns their corners instead of stopping at them. */}
-      {middle.map((seg) => (
-        <Link
-          key={`bus-${seg.from}`}
-          d={
-            seg.flow >= 0
-              ? `M ${seg.from} ${busY} L ${seg.to} ${busY}`
-              : `M ${seg.to} ${busY} L ${seg.from} ${busY}`
-          }
-          watts={seg.flow}
-          tone="bus"
-        />
-      ))}
+      {middle.map((seg) => {
+        const dir = seg.flow >= 0 ? 1 : -1;
+        const start = dir === 1 ? seg.from : seg.to;
+        const end = dir === 1 ? seg.to : seg.from;
+        return (
+          <Link
+            key={`bus-${seg.from}`}
+            d={`M ${start} ${busY} L ${end} ${busY}`}
+            watts={seg.flow}
+            tone="bus"
+            phase={railPhase(start, dir)}
+          />
+        );
+      })}
 
       {/* Battery. Drawn to the right of the bus, and the only link whose
           direction changes — taken from the station's signed measurement, not
@@ -338,6 +376,22 @@ export function PowerFlow({ power }: { power: PowerPayload | null }) {
         d={elbow(batteryRail, batteryX, busY, 68, !charging)}
         watts={charging || discharging ? batteryW : 0}
         tone="battery"
+        // Charging, the path starts on the rail and takes the rail's phase
+        // directly. Discharging it starts at the battery and only reaches the
+        // rail after the stub and the bend, so that distance is added: the
+        // pattern has to already be that far along by the time it gets there.
+        phase={(() => {
+          // Charging, the path starts on the rail and simply takes the rail's
+          // phase. Discharging it starts at the battery, so the pattern has to
+          // already be past the stub and the bend by the time it reaches the
+          // rail — and the bend's arc is longer than the horizontal distance it
+          // covers, which is the term that is easy to forget and lands as a
+          // visible step in the middle of a run.
+          if (charging) return railPhase(batteryRail, 1);
+          const r = elbowRadius(batteryRail, batteryX, busY, 68);
+          const toRail = (68 - busY - r) + cornerLength(r);
+          return railPhase(batteryX - r, -1) + toRail;
+        })()}
       />
       <Node
         x={batteryX}
@@ -356,6 +410,7 @@ export function PowerFlow({ power }: { power: PowerPayload | null }) {
         d={elbow(loadRail, 46, busY, 74, false)}
         watts={power.load_w}
         tone="load"
+        phase={railPhase(loadRail, -1)}
       />
       <Node
         x={46}
