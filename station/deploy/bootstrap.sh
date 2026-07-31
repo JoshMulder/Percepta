@@ -347,6 +347,36 @@ fi
 say "Installing"
 INSTALL_ARGS=(--path "$DEPLOY_PATH")
 
+# Where the platform actually is, and whether anything needs pinning.
+#
+# Both were hardcoded — https://host:8000 and a private CA — which is the dev
+# bench and nothing else. Behind a proxy the API is on 443, 8000 is closed, and
+# the certificate is publicly trusted; pinning the private CA that host still
+# serves at /ca.crt would break every connection the station makes, because the
+# live certificate does not chain to it.
+say "Finding the platform"
+PLATFORM_URL=""
+for candidate in "https://${PLATFORM}" "https://${PLATFORM}:8000"; do
+  if curl -fsSk --connect-timeout 8 -o /dev/null "${candidate}/api/health" 2>/dev/null; then
+    PLATFORM_URL="$candidate"; break
+  fi
+done
+[ -n "$PLATFORM_URL" ] || die "nothing answering /api/health at https://${PLATFORM} or :8000.
+   Check the address, and that this box can route to it."
+info "API at $PLATFORM_URL"
+
+# Verification without pinning anything. If that works the certificate is
+# publicly trusted and a private CA is not merely unnecessary but wrong.
+if curl -fsS --connect-timeout 8 -o /dev/null "${PLATFORM_URL}/api/health" 2>/dev/null; then
+  info "its certificate is publicly trusted; nothing to pin"
+  if [ "$FETCH_CA" = 1 ] || [ -n "$CA_FILE" ] || [ -n "$CA_FINGERPRINT" ]; then
+    warn "ignoring the CA you gave: this platform does not need one, and"
+    warn "pinning a private CA against a public certificate fails every"
+    warn "connection. The enrolment code still applies."
+  fi
+  FETCH_CA=0; CA_FILE=""; CA_FINGERPRINT=""
+fi
+
 if [ "$FETCH_CA" = 1 ]; then
   # Over TLS this station cannot yet verify, because verifying it is what the
   # file is for. That is only acceptable because of what follows: the
@@ -444,7 +474,7 @@ set_env() {
   chown root:gsu "$file"; chmod 0640 "$file"
 }
 
-set_env GSU_PLATFORM_URL "https://${PLATFORM}:8000"
+set_env GSU_PLATFORM_URL "$PLATFORM_URL"
 set_env GSU_BROKER_URL   "rediss://${PLATFORM}:6380/0"
 set_env GSU_DEMO         "$DEMO"
 # On the container path this is the *container's* namespace, and what the
@@ -457,9 +487,26 @@ if [ "$DEPLOY_PATH" = docker ] || [ "$LAN" = 1 ]; then
 else
   set_env GSU_SETUP_HOST 127.0.0.1
 fi
-[ -n "$CA_FILE" ] && set_env GSU_API_CA_FILE "$ETC/platform-api-ca.pem"
-info "platform: https://${PLATFORM}:8000"
+if [ -n "$CA_FILE" ]; then
+  set_env GSU_API_CA_FILE "$ETC/platform-api-ca.pem"
+else
+  # Cleared, not left: an upgrade from a pinned deployment to a publicly
+  # trusted one would otherwise keep verifying against a CA that no longer
+  # signs anything.
+  set_env GSU_API_CA_FILE ""
+fi
+info "platform: $PLATFORM_URL"
 info "broker:   rediss://${PLATFORM}:6380/0"
+# The broker is a separate port and a separate reachability question, and a
+# station that enrols and then publishes nothing looks like a station that
+# works. Say it here rather than leaving it to be discovered from an empty
+# console.
+if ! timeout 8 bash -c "cat < /dev/null > /dev/tcp/${PLATFORM}/6380" 2>/dev/null; then
+  warn "port 6380 on ${PLATFORM} is not reachable from this box."
+  warn "The station will enrol over the API and then publish no telemetry."
+  warn "Behind a proxy that exposes only 443 the broker needs tunnelling;"
+  warn "that work is not done. On the bench, open 6380 or use the LAN address."
+fi
 [ "$DEMO" = 1 ] && info "demo box: every slot simulated"
 
 # The setup page refuses to bind anywhere but loopback without a password hash,
