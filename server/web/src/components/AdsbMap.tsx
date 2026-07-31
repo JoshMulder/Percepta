@@ -98,7 +98,9 @@ function AdsbMapInner({
    *  dot you had clicked. Anchored to the target it is unambiguous, and it has
    *  to keep up: the aircraft moves every second and the map moves on every
    *  zoom. */
-  const [anchor, setAnchor] = useState<{ x: number; y: number } | null>(null);
+  const [anchor, setAnchor] = useState<
+    { x: number; y: number; below: boolean; left: boolean } | null
+  >(null);
 
   const basemap =
     config.basemaps.find((b) => b.key === style) ?? config.basemaps[0];
@@ -425,7 +427,23 @@ function AdsbMapInner({
         return;
       }
       const point = map.project([contact.longitude, contact.latitude]);
-      setAnchor({ x: point.x, y: point.y });
+      // Which side of the target the panel hangs from. Fixed at "above and to
+      // the right" it went off the top of the map for anything in the upper
+      // part of the sky, and the header — the callsign, the thing you clicked
+      // to find out — was the first part to be lost.
+      //
+      // The map holder is the frame, so the decision is made against it rather
+      // than the window: the compact viewer and the full page are different
+      // sizes and a panel that fits one escapes the other.
+      const frame = map.getContainer().getBoundingClientRect();
+      setAnchor({
+        x: point.x,
+        y: point.y,
+        below: point.y < frame.height / 2,
+        // Later than half: the panel is much wider than it is off-centre, so
+        // flipping at the midpoint sent it left while there was still room.
+        left: point.x > frame.width * 0.62,
+      });
     };
     place();
     map.on("move", place);
@@ -483,12 +501,14 @@ function AdsbMapInner({
           a contact there is not offered rather than offered and useless. */}
       {!compact && openContact && anchor && (
         <div
-          className="contact-anchor"
-          // Offset up and right of the glyph so the panel does not cover the
-          // aircraft it describes. `translate(-50%)` is deliberately not used:
-          // the panel is wider than most of the map and centring it on a
-          // contact near an edge pushes half of it off screen. `max-width`
-          // and the clamp below keep it inside instead.
+          className={`contact-anchor${anchor.below ? " below" : ""}${
+            anchor.left ? " left" : ""
+          }`}
+          // Offset clear of the glyph so the panel does not cover the aircraft
+          // it describes, on whichever side has the room — see `below`/`left`
+          // above. `translate(-50%)` is deliberately not used: the panel is
+          // wider than most of the map and centring it on a contact near an
+          // edge pushes half of it off screen.
           style={{
             left: `${Math.round(anchor.x)}px`,
             top: `${Math.round(anchor.y)}px`,

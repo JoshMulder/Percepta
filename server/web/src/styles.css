@@ -1967,9 +1967,12 @@ body {
   justify-content: center;
   gap: var(--s1);
   flex: none;
-  /* Matches .rose - the two are the bookends of a centred row and any
-     difference between them reads as the row leaning. */
-  width: 8.75rem;
+  /* Matches .rose - the two are the bookends of a centred row, and the readout
+     between them is only centred in the panel while they are equal. This was
+     left at 8.75rem when the dial went up to 10.05, and the 1.3rem difference
+     put the wind speed - the largest thing on the panel - half of that off the
+     centreline. */
+  width: 10.05rem;
   /* No padding to reserve, because there is no label under the icon any more.
      It used to sit here and the glyph needed matching space above it to stay
      centred against the dial — so one line of text cost the row twice its own
@@ -3065,11 +3068,22 @@ body {
   z-index: 5;
   pointer-events: none;
 }
+/* The panel hangs off the anchor point on whichever side has room. Four
+   corners, set by the two classes: without them a target in the top of the
+   frame put the panel's header off the top of the map. */
 .contact-anchor > * {
   pointer-events: auto;
   position: absolute;
   left: 0.9rem;
   bottom: 0.9rem;
+}
+.contact-anchor.below > * {
+  bottom: auto;
+  top: 0.9rem;
+}
+.contact-anchor.left > * {
+  left: auto;
+  right: 0.9rem;
 }
 
 .contact-detail {
@@ -3081,7 +3095,10 @@ body {
      is the constraint instead, applied below. */
   width: 19rem;
   max-width: 90vw;
-  max-height: 60vh;
+  /* Under half the map's height, because that is the room flipping to the
+     other side of the target actually buys. At 60vh a tall panel overhung the
+     frame again on the side it had just been moved to. */
+  max-height: 42vh;
   overflow-y: auto;
   padding: 0.75rem 0.875rem 0.875rem;
   border: 1px solid var(--line);
@@ -3381,27 +3398,27 @@ body {
   .pf-dash { animation: none; }
 }
 
-.pf-solar .pf-dash { stroke: #e8b04b; }
+/* One colour for everything moving. A dash per source in its own hue was
+   colouring the wrong thing: what travels the rail is a mixture that belongs
+   to no single source, and the segments changing colour along their length
+   read as different substances rather than the one quantity being conserved.
+   Where the power came from is already said by which stub is lit. */
+.pf-dash { stroke: var(--accent); }
+
 .pf-solar .pf-node rect { stroke: rgba(232, 176, 75, 0.5); }
-.pf-mains .pf-dash { stroke: #00a0dc; }
 .pf-mains .pf-node rect { stroke: rgba(0, 160, 220, 0.5); }
-.pf-gen .pf-dash { stroke: #b98cf0; }
 .pf-gen .pf-node rect { stroke: rgba(185, 140, 240, 0.5); }
-.pf-battery .pf-dash { stroke: var(--accent); }
 .pf-battery .pf-node rect { stroke: rgba(53, 196, 138, 0.5); }
 /* The same thresholds the station duty-cycles on, so the battery reads as a
-   worry before the site starts shedding load rather than after. */
+   worry before the site starts shedding load rather than after. The state of
+   charge carries this, not the flow: a battery can be nearly flat and
+   charging hard, and colouring that link red would say the opposite. */
 .pf-battery-low .pf-node rect { stroke: rgba(232, 176, 75, 0.6); }
 .pf-battery-low .pf-value { fill: var(--warn); }
-.pf-battery-low .pf-dash { stroke: var(--warn); }
 .pf-battery-critical .pf-node rect { stroke: rgba(255, 122, 69, 0.7); }
 .pf-battery-critical .pf-value { fill: var(--danger); }
-.pf-battery-critical .pf-dash { stroke: var(--danger); }
-.pf-load .pf-dash { stroke: var(--text); }
-/* The rail itself. Neutral, because what travels along it is a mixture of
-   whatever the sources are contributing and belongs to no one of them. */
+/* The rail itself. */
 .pf-bus .pf-track { stroke: var(--line); }
-.pf-bus .pf-dash { stroke: var(--muted); }
 
 /* The history, behind a button. It is what somebody opens to see how the day
    went, not what they read at a glance, so it stops competing for panel space

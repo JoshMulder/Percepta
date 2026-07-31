@@ -151,6 +151,11 @@ export function PowerFlow({ power }: { power: PowerPayload | null }) {
   // half the width and drew everything half-size for no reason.
   const width = 420;
   const busY = 58;
+  // The battery box is the widest of them - a percentage over a wattage - and
+  // is centred on its tap, so the tap has to sit a full half-width plus a
+  // margin in from the edge or the box is clipped by the viewBox.
+  const batteryHalf = 52;
+  const batteryX = width - batteryHalf - 4;
   const step = width / (sources.length + 1);
   // Fit the boxes to the gaps rather than the other way round, with a little
   // air between them.
@@ -163,7 +168,7 @@ export function PowerFlow({ power }: { power: PowerPayload | null }) {
     ...sources.map((s, i) => ({ x: step * (i + 1), w: s.idle ? 0 : s.watts })),
     // Charging absorbs, discharging supplies — one expression because
     // `battery_w` already carries the sign the station measured.
-    { x: width - 46, w: -batteryW },
+    { x: batteryX, w: -batteryW },
   ].sort((a, b) => a.x - b.x);
 
   // What crosses each span between neighbours: everything to its left, summed.
@@ -251,16 +256,16 @@ export function PowerFlow({ power }: { power: PowerPayload | null }) {
       <Link
         d={
           charging
-            ? `M ${width - 46} ${busY} L ${width - 46} 68`
-            : `M ${width - 46} 68 L ${width - 46} ${busY}`
+            ? `M ${batteryX} ${busY} L ${batteryX} 68`
+            : `M ${batteryX} 68 L ${batteryX} ${busY}`
         }
         watts={charging || discharging ? batteryW : 0}
         tone="battery"
       />
       <Node
-        x={width - 46}
+        x={batteryX}
         y={92}
-        half={52}
+        half={batteryHalf}
         label="Battery"
         value={soc === null ? "--" : `${Math.round(soc)}%`}
         sub={charging || discharging ? W(batteryW) : "idle"}
