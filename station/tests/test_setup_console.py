@@ -442,9 +442,18 @@ class ServedPageTests(unittest.TestCase):
         _, body = self.request("GET", f"/devices?slot=radio&type={other.id}")
         self.assertIn("data-device data-changed>", body)
 
-        # The comparison is symmetric, so this covers un-fitting too: picking
-        # "— not fitted —" against a stored device is the same inequality, and
-        # un-fitting is exactly what people reach for when one has failed.
+    def test_un_fitting_a_slot_is_selectable_at_all(self):
+        # "— not fitted —" posts `type=` with nothing after it. parse_qs drops
+        # a blank value unless told otherwise, so the picker used to fall back
+        # to the stored device and the option did nothing — silently, which is
+        # the worst way for the one control you reach for when a device has
+        # died to not work.
+        from gsu.devices import registry
+        fitted = next(d for d in registry.by_slot("radio"))
+        _, body = self.request("GET", f"/devices?slot=radio&type={fitted.id}")
+        self.assertIn(f"value='{fitted.id}' selected", body)
+        _, body = self.request("GET", "/devices?slot=radio&type=")
+        self.assertIn("<option value='' selected>", body)
 
     def test_each_slot_tab_offers_its_own_devices_from_the_registry(self):
         from gsu.devices import registry

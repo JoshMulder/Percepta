@@ -824,7 +824,13 @@ class Console:
                 if path == "/devices":
                     # One sub-tab per slot; the query names it and anything
                     # unrecognised lands on the first tab rather than erroring.
-                    query = parse_qs(urlsplit(handler.path).query)
+                    # keep_blank_values, because "— not fitted —" posts
+                    # `type=` with nothing after it. Dropped as blank, the
+                    # picker fell back to the stored device and un-fitting a
+                    # slot was silently impossible — which is the one thing
+                    # you reach for when a device has failed.
+                    query = parse_qs(urlsplit(handler.path).query,
+                                     keep_blank_values=True)
                     slot = (query.get("slot") or [""])[0]
                     if slot not in registry.SLOTS:
                         slot = registry.SLOTS[0]
