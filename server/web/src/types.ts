@@ -228,6 +228,24 @@ export interface PowerPayload extends Availability {
   load_w: number;
   /** Hours of runtime left at the current draw, null while charging. */
   runtime_h: number | null;
+
+  /** Signed: positive charging, negative discharging. Sent by the station
+   *  rather than derived here — with four sources the console cannot work out
+   *  the battery's direction without knowing conversion losses and which
+   *  source is carrying the load, so anything it computed would be a guess. */
+  battery_w?: number;
+
+  /* Mains and generator are **absent when not fitted**, never zero. A site
+     with no grid connection and a site whose grid has failed are completely
+     different situations and `mains_w: 0` describes both — so `undefined` here
+     means "no such source at this site" and a number, including zero, is a
+     measurement from something that exists. Checking these with `??` or a
+     falsy test collapses the distinction and makes every off-grid station look
+     like it has lost power. */
+  mains_w?: number;
+  mains_present?: boolean;
+  generator_w?: number;
+  generator_running?: boolean;
 }
 
 export interface RadioPayload extends Availability {

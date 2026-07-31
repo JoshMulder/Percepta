@@ -3282,3 +3282,126 @@ body {
   color: var(--dim);
   pointer-events: none;
 }
+
+/* ------------------------------------------------------- power flow ----- */
+/* Where the site's power is coming from and going. Fixed viewBox for the same
+   reason as the spectrum: this panel is inside the sidebar the console scales
+   to fit, and anything that measures its own container re-triggers that fit. */
+/* A fixed height, and the placeholder is the same height.
+
+   Two reasons, and the second is the one that bit. `height: auto` on a
+   full-width SVG with a 2:1 viewBox made this seventeen rem tall inside a
+   36.5rem sidebar — far larger than intended. And because the placeholder was
+   a different height from the drawing, the panel *grew when the first frame
+   arrived*, which breaks the invariant the whole sidebar depends on: the fit
+   that scales the console measures once and only re-runs on resize, precisely
+   because re-measuring on every telemetry update is what made an earlier
+   version of the spectrum unusable. A panel that changes height when data
+   lands silently leaves the stack overflowing. */
+.power-flow,
+.pf-empty {
+  display: block;
+  width: 100%;
+  height: 8rem;
+  margin: 0.35rem 0 0.5rem;
+}
+
+.pf-node rect {
+  fill: var(--panel-2);
+  stroke: var(--line);
+  stroke-width: 1;
+}
+.pf-label {
+  font: 0.5rem var(--mono);
+  fill: var(--muted);
+  text-anchor: middle;
+}
+.pf-value {
+  font: 600 0.66rem var(--mono);
+  fill: var(--text);
+  text-anchor: middle;
+}
+/* Fitted and contributing nothing. Dim, not hidden — a mains input at 0 W may
+   be a grid failure, which is the opposite of nothing to report. A source that
+   is *not fitted* is never drawn at all. */
+.pf-node.dim rect { opacity: 0.5; }
+.pf-node.dim .pf-value { fill: var(--dim); }
+
+.pf-bus {
+  stroke: var(--line);
+  stroke-width: 1.5;
+  fill: none;
+}
+.pf-track {
+  stroke: var(--line-soft);
+  stroke-width: 2.5;
+  fill: none;
+}
+/* The moving part. stroke-dashoffset on a fixed path — no layout, no repaint
+   of anything else, and it keeps running without JavaScript touching it. */
+.pf-dash {
+  fill: none;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  stroke-dasharray: 5 11;
+  animation: pf-move linear infinite;
+}
+@keyframes pf-move {
+  to { stroke-dashoffset: -16; }
+}
+/* Respect a system preference for less motion: the diagram still reads,
+   because the numbers and the dim/bright states carry the same information. */
+@media (prefers-reduced-motion: reduce) {
+  .pf-dash { animation: none; }
+}
+
+.pf-solar .pf-dash { stroke: #e8b04b; }
+.pf-solar .pf-node rect { stroke: rgba(232, 176, 75, 0.5); }
+.pf-mains .pf-dash { stroke: #00a0dc; }
+.pf-mains .pf-node rect { stroke: rgba(0, 160, 220, 0.5); }
+.pf-gen .pf-dash { stroke: #b98cf0; }
+.pf-gen .pf-node rect { stroke: rgba(185, 140, 240, 0.5); }
+.pf-battery .pf-dash { stroke: var(--accent); }
+.pf-battery .pf-node rect { stroke: rgba(53, 196, 138, 0.5); }
+.pf-load .pf-dash { stroke: var(--text); }
+
+/* The history, behind a button. It is what somebody opens to see how the day
+   went, not what they read at a glance, so it stops competing for panel space
+   with the flow. */
+.power-detail-btn {
+  flex: none;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 0.25rem;
+  color: var(--muted);
+  padding: 0.15rem 0.25rem;
+  cursor: pointer;
+  line-height: 0;
+}
+.power-detail-btn:hover { color: var(--text); border-color: var(--line); }
+.power-detail-btn .icon { width: 1.05em; height: 1.05em; }
+
+.power-detail-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 1500;
+  background: rgba(3, 6, 9, 0.86);
+  display: grid;
+  place-items: center;
+}
+.power-detail {
+  width: min(46rem, calc(100vw - 3rem));
+  padding: 1rem 1.1rem 1.2rem;
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  background: var(--panel);
+  box-shadow: 0 1rem 3rem rgba(0, 0, 0, 0.6);
+}
+.power-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+.power-detail-head h4 { margin: 0; font-size: 0.875rem; }
+.power-detail-head .window-switch { margin-left: auto; }

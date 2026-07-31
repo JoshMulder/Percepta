@@ -242,6 +242,17 @@ export const SKY_LABEL: Record<string, string> = {
   fog: "Fog",
 };
 
+export function IconChart({ className = "icon" }: Props) {
+  // Axes and a trace: the battery history this opens. Two strokes, because at
+  // the size a panel-corner button gets, anything with more in it is a smudge.
+  return (
+    <svg {...base} className={className}>
+      <path d="M4 4v15.5h16" />
+      <path d="M7.5 15.5 11 11l3 2.6 4.5-6.4" />
+    </svg>
+  );
+}
+
 export function IconSettings({ className = "icon" }: Props) {
   // Eight straight teeth and a hub, not the usual many-curved cog. These icons
   // render at 1.15em - about 14px - with a 1.8 stroke, and at that size the

@@ -1,6 +1,8 @@
-import { memo, useEffect, useRef } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import type { Capability, LightPayload, PowerPayload } from "../types";
 import { DemoCamera } from "./DemoCamera";
+import { PowerFlow } from "./PowerFlow";
+import { IconChart } from "./Icons";
 import type { StreamState } from "../useVideoStream";
 import type { VideoPayload } from "../types";
 import {
@@ -178,6 +180,7 @@ function PowerPanelInner({
   windowKey: SocWindowKey;
   onWindowChange: (key: SocWindowKey) => void;
 }) {
+  const [detailOpen, setDetailOpen] = useState(false);
   const soc = power?.soc_pct ?? null;
   // Thresholds match the station's own duty-cycling policy: below 20% the site
   // starts shedding load, so the console should look worried before it does.
@@ -195,36 +198,27 @@ function PowerPanelInner({
         <div className="soc-value">
           {soc === null ? "--" : `${soc.toFixed(0)}%`}
         </div>
+        {/* The history moved behind this. With four sources the panel had run
+            out of room, and of the two things competing for it the flow is
+            what somebody reads at a glance and the chart is what they open
+            when they want to know how the day went. */}
+        <button
+          type="button"
+          className="power-detail-btn"
+          onClick={() => setDetailOpen(true)}
+          title="Battery history"
+          aria-label="Battery history"
+        >
+          <IconChart />
+        </button>
       </div>
-      <div className="chart-head">
-        <span className="muted">Battery level</span>
-        <div className="window-switch" role="group" aria-label="Chart period">
-          {SOC_WINDOWS.map((w) => (
-            <button
-              key={w.key}
-              type="button"
-              className={`window-btn${w.key === windowKey ? " active" : ""}`}
-              onClick={() => onWindowChange(w.key)}
-            >
-              {w.label}
-            </button>
-          ))}
-        </div>
-      </div>
-      <BatteryChart samples={history} loading={historyLoading} />
+
+      <PowerFlow power={power} />
 
       <dl className="stats">
         <div>
           <dt>Battery</dt>
           <dd>{power ? `${power.battery_v.toFixed(1)} V` : "--"}</dd>
-        </div>
-        <div>
-          <dt>Solar in</dt>
-          <dd>{power ? `${power.pv_w.toFixed(0)} W` : "--"}</dd>
-        </div>
-        <div>
-          <dt>Load</dt>
-          <dd>{power ? `${power.load_w.toFixed(0)} W` : "--"}</dd>
         </div>
         <div>
           <dt>Runtime</dt>
@@ -237,6 +231,46 @@ function PowerPanelInner({
           </dd>
         </div>
       </dl>
+
+      {detailOpen && (
+        <div
+          className="power-detail-scrim"
+          onClick={() => setDetailOpen(false)}
+          role="presentation"
+        >
+          <div
+            className="power-detail"
+            role="dialog"
+            aria-label="Battery history"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="power-detail-head">
+              <h4>Battery level</h4>
+              <div className="window-switch" role="group" aria-label="Chart period">
+                {SOC_WINDOWS.map((w) => (
+                  <button
+                    key={w.key}
+                    type="button"
+                    className={`window-btn${w.key === windowKey ? " active" : ""}`}
+                    onClick={() => onWindowChange(w.key)}
+                  >
+                    {w.label}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                className="contact-close"
+                onClick={() => setDetailOpen(false)}
+                aria-label="Close"
+              >
+                ×
+              </button>
+            </div>
+            <BatteryChart samples={history} loading={historyLoading} />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
