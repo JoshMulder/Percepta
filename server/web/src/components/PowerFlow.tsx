@@ -79,6 +79,38 @@ function Node({
   );
 }
 
+/**
+ * An L from a point on the rail, round the bend, to a node above or below it.
+ *
+ * Drawn as one path rather than a horizontal and a vertical meeting at a right
+ * angle, because the dash animation follows a path: two paths meant two
+ * animations, and the flow stopped dead at the corner and started again on the
+ * other side. One path carries the dashes round the bend.
+ *
+ * This only works where the corner is a genuine corner — everything arriving
+ * leaves the same way. That is true at exactly two places, which is why only
+ * two of these exist: the load and the battery are the outermost attachments,
+ * so the rail beyond each of them carries their power and nothing else.
+ *
+ * @param railX  where on the rail the run starts
+ * @param x      the corner, directly above or below the node
+ * @param toY    the node end
+ */
+function elbow(
+  railX: number, x: number, busY: number, toY: number, reversed: boolean,
+): string {
+  // Clamped to both legs: an arc bigger than the run it turns out of would
+  // double back, which happens for real when a source sits close to an end.
+  const r = Math.min(9, Math.abs(x - railX) / 2, Math.abs(toY - busY) / 2);
+  const approach = x - Math.sign(x - railX) * r;
+  const corner = `Q ${x} ${busY} `;
+  return reversed
+    ? `M ${x} ${toY} L ${x} ${busY + r} ${corner}${approach} ${busY} `
+      + `L ${railX} ${busY}`
+    : `M ${railX} ${busY} L ${approach} ${busY} ${corner}${x} ${busY + r} `
+      + `L ${x} ${toY}`;
+}
+
 function Link({
   d, watts, tone,
 }: {
@@ -181,6 +213,16 @@ export function PowerFlow({ power }: { power: PowerPayload | null }) {
     segments.push({ from: taps[i].x, to: taps[i + 1].x, flow: running });
   }
 
+  // The two end runs belong to the load and the battery, not to the rail. The
+  // load is always the leftmost attachment and the battery the rightmost, so
+  // the sum above makes the first span carry exactly the load's power and the
+  // last exactly the battery's — nothing else is attached beyond them to add
+  // or take any. Each therefore joins its own stub as one continuous path,
+  // and what is left in `middle` is rail shared by more than one thing.
+  const loadRail = segments[0].to;
+  const batteryRail = segments[segments.length - 1].from;
+  const middle = segments.slice(1, -1);
+
   return (
     <svg
       className="power-flow"
@@ -227,8 +269,12 @@ export function PowerFlow({ power }: { power: PowerPayload | null }) {
           the power is travelling right, negative left. Because the station's
           sources balance its sinks, the running total is zero at both ends and
           only the middle carries anything — which is the truthful picture, and
-          it falls out of the arithmetic rather than being drawn on top of it. */}
-      {segments.map((seg) => (
+          it falls out of the arithmetic rather than being drawn on top of it.
+
+          Only the spans between two sources are drawn here. The runs at either
+          end are part of the load and battery paths below, so that the flow
+          turns their corners instead of stopping at them. */}
+      {middle.map((seg) => (
         <Link
           key={`bus-${seg.from}`}
           d={
@@ -249,16 +295,12 @@ export function PowerFlow({ power }: { power: PowerPayload | null }) {
           already does, by running the other way, and a word repeating what the
           picture shows is a word competing with the two numbers that are only
           available here: the state of charge and what is going in or out. */}
-      {/* Down into the battery when charging, up out of it when discharging.
-          The path's own direction is what the dash animation follows, so the
-          arrow is the geometry rather than a separate flag that could
-          disagree with it. */}
+      {/* Along the rail and down into the battery when charging, up and back
+          along it when discharging. The path's own direction is what the dash
+          animation follows, so the arrow is the geometry rather than a
+          separate flag that could disagree with it. */}
       <Link
-        d={
-          charging
-            ? `M ${batteryX} ${busY} L ${batteryX} 68`
-            : `M ${batteryX} 68 L ${batteryX} ${busY}`
-        }
+        d={elbow(batteryRail, batteryX, busY, 68, !charging)}
         watts={charging || discharging ? batteryW : 0}
         tone="battery"
       />
@@ -273,8 +315,10 @@ export function PowerFlow({ power }: { power: PowerPayload | null }) {
         dim={false}
       />
 
+      {/* Always inbound: a load is the one thing here that cannot give power
+          back, so this path only ever runs rail-to-node. */}
       <Link
-        d={`M 46 ${busY} L 46 74`}
+        d={elbow(loadRail, 46, busY, 74, false)}
         watts={power.load_w}
         tone="load"
       />

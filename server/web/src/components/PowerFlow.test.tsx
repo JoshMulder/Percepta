@@ -42,6 +42,20 @@ function nodeFor(label: string): Element | undefined {
   );
 }
 
+/** The rail's y in the drawing's own coordinates. */
+const BUS_Y = 58;
+
+/** Every coordinate pair in an element's path, in order. */
+function pointsOf(g: Element): [number, number][] {
+  const d = g.querySelector("path")!.getAttribute("d")!;
+  return Array.from(d.matchAll(/(-?[\d.]+) (-?[\d.]+)/g))
+    .map((m) => [Number(m[1]), Number(m[2])]);
+}
+
+function pathPoints(selector: string): [number, number][] {
+  return pointsOf(document.querySelector(selector)!);
+}
+
 describe("sources that do not exist", () => {
   it("draws no mains at a site with no grid connection", () => {
     render(<PowerFlow power={payload()} />);
@@ -91,13 +105,12 @@ describe("sources that exist but are giving nothing", () => {
 });
 
 describe("the battery, which is the only reversible link", () => {
-  /** Which way the battery's own stub runs: down into it, or up out of it. */
+  /** Which way the battery's link runs: towards the node, or away from it.
+   *  Read from the ends of the whole path, because it now turns a corner and
+   *  the first two points are the run along the rail. */
   function batteryStubIsInbound() {
-    const g = document.querySelector(".pf-battery, .pf-battery-low, .pf-battery-critical");
-    const d = g!.querySelector("path")!.getAttribute("d")!;
-    const [, , y1, , y2] = d.match(/M ([\d.]+) ([\d.]+) L ([\d.]+) ([\d.]+)/)!
-      .map(Number);
-    return y2 > y1;
+    const points = pathPoints(".pf-link.pf-battery");
+    return points[points.length - 1][1] > points[0][1];
   }
 
   it("shows the state of charge, not the word charging", () => {
@@ -181,19 +194,49 @@ describe("no telemetry yet", () => {
 });
 
 describe("the bus, which is where the arithmetic lives", () => {
-  /** Direction and magnitude of each animated rail segment, left to right. */
-  function busSegments() {
-    return Array.from(document.querySelectorAll(".pf-bus")).map((g) => {
-      const d = g.querySelector("path")!.getAttribute("d")!;
-      const [, x1, , x2] = d.match(/M ([\d.]+) ([\d.]+) L ([\d.]+)/)!.map(Number);
-      const dash = g.querySelector(".pf-dash");
-      return { rightward: x2 > x1, moving: Boolean(dash) };
-    });
+  /** Every path that travels along the rail: which way, and whether it moves.
+   *
+   *  Not just `.pf-bus`. The runs at either end are part of the load and
+   *  battery paths so that the flow turns their corners in one animation, so
+   *  asking the rail what it carries means asking those too. */
+  function railRuns() {
+    return Array.from(document.querySelectorAll(".pf-link")).flatMap((g) => {
+      const on = pointsOf(g).filter(([, y]) => Math.abs(y - BUS_Y) < 0.001);
+      if (on.length < 2 || on[0][0] === on[on.length - 1][0]) return [];
+      const from = on[0][0];
+      const to = on[on.length - 1][0];
+      return [{
+        rightward: to > from,
+        moving: Boolean(g.querySelector(".pf-dash")),
+        at: Math.min(from, to),
+      }];
+    // Left to right along the rail. Document order puts the two elbows last,
+    // because they are drawn after the sources they take power from.
+    }).sort((a, b) => a.at - b.at);
   }
+
+  it("turns the corner in a single path rather than two meeting at one", () => {
+    // The fix this block exists for. A horizontal and a vertical meeting at a
+    // right angle are two paths, so they are two animations: the flow stopped
+    // dead at the corner and started again on the other side of it.
+    render(
+      <PowerFlow power={payload({ pv_w: 400, load_w: 120, battery_w: 280 })} />,
+    );
+    for (const tone of ["pf-load", "pf-battery"]) {
+      const d = document.querySelector(`.pf-link.${tone} path`)!
+        .getAttribute("d")!;
+      expect(d, tone).toContain("Q");           // one rounded bend
+      expect(d.match(/M/g)!.length, tone).toBe(1);  // and one path, not two
+      const ys = pointsOf(document.querySelector(`.pf-link.${tone}`)!)
+        .map(([, y]) => y);
+      expect(Math.min(...ys), tone).toBe(BUS_Y);      // reaches the rail
+      expect(Math.max(...ys), tone).toBeGreaterThan(BUS_Y); // and the node
+    }
+  });
 
   it("splits at every attachment rather than running end to end", () => {
     // One animation along the whole rail is what made a 0 W mains input look
-    // like it was pouring power out. There is a span between each neighbouring
+    // like it was pouring power out. There is a run between each neighbouring
     // pair and each carries its own answer.
     render(
       <PowerFlow
@@ -203,8 +246,8 @@ describe("the bus, which is where the arithmetic lives", () => {
         })}
       />,
     );
-    // load, solar, mains, battery -> three spans between four attachments.
-    expect(busSegments().length).toBe(3);
+    // load, solar, mains, battery -> three runs between four attachments.
+    expect(railRuns().length).toBe(3);
   });
 
   it("sends solar left to the load and the surplus right to the battery", () => {
@@ -213,10 +256,10 @@ describe("the bus, which is where the arithmetic lives", () => {
     render(
       <PowerFlow power={payload({ pv_w: 400, load_w: 120, battery_w: 280 })} />,
     );
-    const segs = busSegments();
-    expect(segs.length).toBe(2);
-    expect(segs[0]).toMatchObject({ rightward: false, moving: true });
-    expect(segs[1]).toMatchObject({ rightward: true, moving: true });
+    const runs = railRuns();
+    expect(runs.length).toBe(2);
+    expect(runs[0]).toMatchObject({ rightward: false, moving: true });
+    expect(runs[1]).toMatchObject({ rightward: true, moving: true });
   });
 
   it("moves power from a source towards the load that needs it", () => {
@@ -224,20 +267,20 @@ describe("the bus, which is where the arithmetic lives", () => {
     render(
       <PowerFlow power={payload({ pv_w: 120, load_w: 120, battery_w: 0 })} />,
     );
-    const moving = busSegments().filter((s) => s.moving);
+    const moving = railRuns().filter((s) => s.moving);
     expect(moving.length).toBeGreaterThan(0);
     expect(moving.every((s) => !s.rightward)).toBe(true);
   });
 
   it("runs the other way when the battery is the one supplying", () => {
     // Battery on the right discharging into the load on the left: still
-    // leftward, but now the span past solar carries it too.
+    // leftward, and now it is the battery's own path carrying it.
     render(
       <PowerFlow
         power={payload({ pv_w: 0, load_w: 200, battery_w: -200 })}
       />,
     );
-    expect(busSegments().filter((s) => s.moving).every((s) => !s.rightward))
+    expect(railRuns().filter((s) => s.moving).every((s) => !s.rightward))
       .toBe(true);
   });
 
@@ -251,16 +294,16 @@ describe("the bus, which is where the arithmetic lives", () => {
         })}
       />,
     );
-    const moving = busSegments().filter((s) => s.moving);
-    expect(moving.some((s) => s.rightward)).toBe(true);
+    expect(railRuns().filter((s) => s.moving).some((s) => s.rightward))
+      .toBe(true);
   });
 
-  it("does not animate a span nothing crosses", () => {
-    // A site running entirely off solar with a flat battery: the rail beyond
+  it("does not animate a run nothing crosses", () => {
+    // A site running entirely off solar with a full battery: the rail beyond
     // the array carries nothing, however much the array is making.
     render(
       <PowerFlow power={payload({ pv_w: 300, load_w: 300, battery_w: 0 })} />,
     );
-    expect(busSegments().some((s) => !s.moving)).toBe(true);
+    expect(railRuns().some((s) => !s.moving)).toBe(true);
   });
 });
