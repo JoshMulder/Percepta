@@ -1,12 +1,6 @@
 import maplibregl from "maplibre-gl";
 import { memo, useEffect, useRef, useState } from "react";
-import {
-  emitterKind,
-  glyphPath,
-  glyphSize,
-  isStroked,
-  rotates,
-} from "../emitters";
+import { iconFor } from "../adsbIcons";
 import type { Aircraft, MapConfig } from "../types";
 import { ContactDetail } from "./ContactDetail";
 
@@ -62,6 +56,17 @@ function ringCoords(lat: number, lon: number, km: number, points = 128): number[
  * else is a map an operator has to re-orient before they can read it, which is
  * the wrong thing to be doing when something is happening.
  */
+/** Flightradar24's aircraft gold. Matched deliberately: it is the colour
+ *  anyone who has looked at a tracking map already reads as "aircraft", and
+ *  this panel is not the place to be original. */
+const CONTACT_COLOUR = "#f5c518";
+/** Alerting contacts break that convention on purpose. */
+const ALERT_COLOUR = "#ff7a45";
+
+/** Applied on top of tar1090's per-shape scale. Their sizes assume a map that
+ *  fills a screen; this one is often a third of one. */
+const DISPLAY_SCALE = 0.9;
+
 function AdsbMapInner({
   stationId,
   config,
@@ -314,18 +319,15 @@ function AdsbMapInner({
       seen.add(contact.icao);
 
       const pos: [number, number] = [contact.longitude, contact.latitude];
-      const colour = contact.alert ? "#ff7a45" : "#e8b04b";
+      const colour = contact.alert ? ALERT_COLOUR : CONTACT_COLOUR;
       const label = contact.callsign?.trim() || contact.icao;
-      const kind = emitterKind(contact.emitter_type);
+      const icon = iconFor(contact.emitter_type);
 
       let marker = existing.get(contact.icao);
       if (!marker) {
         const el = document.createElement("div");
         el.className = "map-contact";
-        el.innerHTML =
-          '<svg viewBox="0 0 18 18" width="18" height="18">' +
-          '<path stroke="#0b0f13" stroke-width="0.8"/>' +
-          "</svg><span></span>";
+        el.innerHTML = "<svg></svg><span></span>";
         // Pointer events are off for the marker as a whole (see STYLE) so the
         // label never eats a click meant for the map behind it; the glyph opts
         // back in — but only where there is a panel to open. In the mini
@@ -359,31 +361,33 @@ function AdsbMapInner({
       // to be heading north — `track ?? 0` would have invented a heading.
       const svg = el.querySelector("svg") as SVGElement | null;
       if (svg) {
-        const track = rotates(kind) && contact.track !== null ? contact.track : 0;
-        svg.style.transform = `rotate(${track}deg)`;
-      }
-      if (svg) {
-        // Size carries the weight class; see glyphSize. Set on the element
-        // rather than in CSS because it varies per contact and can change if a
-        // transponder starts reporting a category it was not reporting before.
-        const size = String(glyphSize(kind));
-        svg.setAttribute("width", size);
-        svg.setAttribute("height", size);
-      }
-      const path = el.querySelector("path");
-      if (path) {
-        path.setAttribute("d", glyphPath(kind));
-        if (isStroked(kind)) {
-          path.setAttribute("fill", "none");
-          path.setAttribute("stroke", colour);
-          path.setAttribute("stroke-width", "1.5");
-          path.setAttribute("stroke-linejoin", "round");
-          path.setAttribute("stroke-linecap", "round");
-        } else {
-          path.setAttribute("fill", colour);
-          path.setAttribute("stroke", "#0b0f13");
-          path.setAttribute("stroke-width", "0.8");
+        // Rebuilt only when the silhouette itself changes, which is rare: a
+        // transponder can begin reporting a category it was not reporting
+        // before, but not on most frames. Re-parsing this markup for every
+        // contact on every update is the expensive thing on this path.
+        if (el.dataset.shape !== icon.name) {
+          el.dataset.shape = icon.name;
+          svg.setAttribute("viewBox", icon.viewBox);
+          svg.innerHTML = icon.body;
         }
+        // tar1090's own per-category scale, so a light aircraft is not drawn
+        // the size of a widebody. `w` and `h` are the shape's natural display
+        // size and are not equal — a ground vehicle seen from above is 7.2 by
+        // 18 — so squaring them off turns the vans into slivers. The viewBox is
+        // a different coordinate space again; see IconShape.
+        const k = icon.scale * DISPLAY_SCALE;
+        svg.setAttribute("width", String(Math.round(icon.w * k)));
+        svg.setAttribute("height", String(Math.round(icon.h * k)));
+        // Ground furniture and balloons have no meaningful heading, and a
+        // contact that sent no track is left pointing north rather than being
+        // asserted to be heading north — `track ?? 0` would invent a heading.
+        const track =
+          !icon.noRotate && contact.track !== null ? contact.track : 0;
+        svg.style.transform = `rotate(${track}deg)`;
+        // One property tints the whole silhouette: the shapes fill with
+        // `currentColor` and keep their own dark outline, which is what makes
+        // them legible over a city on satellite imagery.
+        svg.style.color = colour;
       }
       const span = el.querySelector("span");
       if (span) {
