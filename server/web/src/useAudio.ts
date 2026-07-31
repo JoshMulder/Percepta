@@ -179,10 +179,14 @@ export function useAudio(enabled: boolean) {
     source.buffer = buffer;
     source.connect(gain);
 
-    // ~140 ms of lead, enough to absorb the jitter a Starlink link produces
-    // without the delay being noticeable on voice.
+    // Lead sized from the chunk, for the same reason as the worklet: a fixed
+    // 140 ms was ported from a client that received small chunks many times a
+    // second, and this station sends one second of audio once a second. A lead
+    // shorter than a chunk underruns on the first scrap of jitter and then
+    // re-establishes the same too-short lead, so it never recovers.
+    const lead = Math.max(0.14, buffer.duration * 1.25);
     const now = ctx.currentTime;
-    if (nextTimeRef.current < now + 0.02) nextTimeRef.current = now + 0.14;
+    if (nextTimeRef.current < now + 0.02) nextTimeRef.current = now + lead;
     source.start(nextTimeRef.current);
     nextTimeRef.current += buffer.duration;
   }, []);
