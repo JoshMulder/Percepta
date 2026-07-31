@@ -235,10 +235,38 @@ for pkg in $NEED; do
   dpkg -s "$pkg" >/dev/null 2>&1 || MISSING="$MISSING $pkg"
 done
 if [ -n "$MISSING" ]; then
+  # A half-configured package from an earlier interrupted install makes every
+  # subsequent apt fail with "dpkg returned an error code (1)" and nothing
+  # about the actual cause. Clearing it first is what the error would have told
+  # you to do, three screens up.
+  if dpkg --audit 2>/dev/null | grep -q .; then
+    info "finishing an interrupted package install first"
+    dpkg --configure -a || true
+  fi
+
+  # Disk, before rather than after. A Pi that fills up mid-unpack leaves dpkg
+  # in exactly the state above, and the message it gives is about dpkg.
+  FREE_MB=$(df -Pm / | awk 'NR==2 {print $4}')
+  [ "${FREE_MB:-0}" -ge 1200 ] || die "only ${FREE_MB} MB free on /. Docker and its
+   dependencies need more than that, and running out part-way leaves dpkg
+   half-configured. Expand the filesystem (\`sudo raspi-config\`) or clear space."
+
   info "installing:$MISSING"
   [ "$DEPLOY_PATH" = docker ] || apt-get update -qq
+  # NOT quiet. This used to be `-qq >/dev/null`, which turned a package
+  # conflict into six words with the explanation discarded — the one thing you
+  # need when an install fails is what apt said about it.
   # shellcheck disable=SC2086
-  apt-get install -y -qq $MISSING >/dev/null
+  if ! apt-get install -y $MISSING; then
+    printf '\n'
+    warn "that install failed; the reason is in apt's output above."
+    if dpkg -l docker-ce 2>/dev/null | grep -q '^ii'; then
+      warn "docker-ce is installed. It conflicts with Debian's docker.io and"
+      warn "with containerd — you already have Docker, so re-run with:"
+      warn "  --path docker   (skipping docker.io: apt install -y chrony rsync)"
+    fi
+    die "packages not installed; nothing else was changed."
+  fi
 else
   info "already present"
 fi
