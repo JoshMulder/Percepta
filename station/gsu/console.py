@@ -69,6 +69,7 @@ import json
 import logging
 import secrets
 import threading
+import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -97,9 +98,25 @@ WATCH_SECONDS = 5.0
 #: response (`_headers`) — a stored-XSS payload cannot know it, and no other
 #: script source is ever valid. `connect-src 'self'` is what lets the Devices
 #: script poll status.json; it permits nothing off-box.
+def _chunk(handler, data: bytes) -> None:
+    """One HTTP chunk. `http.server` does not frame these for us."""
+    handler.wfile.write(f"{len(data):X}\r\n".encode("ascii"))
+    handler.wfile.write(data)
+    handler.wfile.write(b"\r\n")
+    handler.wfile.flush()
+
+
+#: How long to wait for the first fragment before giving up on a stream.
+#:
+#: A cold start has to spawn an encoder, take the sensor and reach a keyframe,
+#: and on a Pi 2B that is not instant. Long enough to cover it; short enough
+#: that a camera which will never produce anything says so rather than leaving
+#: a spinner up for ever.
+FIRST_FRAGMENT_WAIT_S = 12.0
+
 CSP = (
     "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; "
-    "media-src 'self'; "
+    "media-src 'self' blob:; "
     "connect-src 'self'; form-action 'self'; base-uri 'none'; "
     "frame-ancestors 'none'"
 )
@@ -429,15 +446,21 @@ STYLE = """
     :checked pins the label over the whole viewport. */
  .zoom-toggle { display: none; }
  .preview { display: block; margin: .4rem 0 .6rem; }
- .preview img { display: block; max-width: 100%; border: 1px solid var(--line-soft);
-   border-radius: .375rem; cursor: zoom-in; }
+ /* The live element and the still fallback share this: the <video> arrives
+    with a 1920x1080 intrinsic size and, without a cap, renders at it and
+    overflows the card. `height: auto` keeps the aspect from the stream rather
+    than from anything this page assumes about the camera. */
+ .preview img, .preview video { display: block; max-width: 100%; height: auto;
+   border: 1px solid var(--line-soft);
+   border-radius: .375rem; cursor: zoom-in; background: #000; }
  .preview > span { display: block; padding: .55rem .7rem; min-height: 1.3rem;
    background: var(--panel-2); border: 1px solid var(--line-soft);
    border-radius: .375rem; font-size: .8rem; }
  .zoom-toggle:checked ~ .preview { position: fixed; inset: 0; z-index: 10;
    margin: 0; display: grid; place-items: center; padding: 1.5rem;
    background: rgba(7,11,15,.94); cursor: zoom-out; }
- .zoom-toggle:checked ~ .preview img { max-width: 100%; max-height: 100%;
+ .zoom-toggle:checked ~ .preview img,
+ .zoom-toggle:checked ~ .preview video { max-width: 100%; max-height: 100%;
    border: 0; cursor: zoom-out; }
  /* The pop-out editor, on the same no-script principle as the zoom above but
     driven by :target rather than a checkbox, because this one has to be
@@ -1131,12 +1154,16 @@ class Console:
         handler.send_header("Content-Type", kind)
         if length is None:
             # A body with no end: the live stream, which stops when the client
-            # goes away. Under HTTP/1.1 that has to be said, or the browser
-            # waits for a Content-Length that is never coming and shows
-            # nothing. `Connection: close` makes end-of-body mean
-            # end-of-connection, which is what this actually is.
-            handler.send_header("Connection", "close")
-            handler.close_connection = True
+            # goes away.
+            #
+            # Chunked rather than `Connection: close`. Both are legal ways to
+            # say "no length", but a media element is not a byte sink — it has
+            # to decide it can demux what is arriving, and Chromium refuses a
+            # progressive video body whose framing is end-of-connection with
+            # MEDIA_ERR_SRC_NOT_SUPPORTED before it parses a single box. With
+            # chunked framing each fragment arrives as a delimited unit and it
+            # plays.
+            handler.send_header("Transfer-Encoding", "chunked")
         else:
             handler.send_header("Content-Length", str(length))
         for name, value in (extra or {}).items():
@@ -1214,10 +1241,34 @@ class Console:
         if viewer is None:
             return self._deny(
                 handler, 503, stream.reason or "The camera will not stream.")
+
+        # Nothing is committed until there is something to send.
+        #
+        # Sending the headers first and then waiting looked harmless and was
+        # not: a cold start spawns an encoder and then waits for its first
+        # keyframe, and a <video> given a 200 with no bytes behind it decides
+        # the source is unsupported and gives up — `NotSupportedError: The
+        # element has no supported sources`, before a single frame arrives.
+        # The station meanwhile logged a perfectly healthy stream starting and
+        # then stopping again because "the setup page stopped watching".
+        first = None
+        deadline = time.monotonic() + FIRST_FRAGMENT_WAIT_S
+        while first is None and not viewer.closed:
+            if time.monotonic() > deadline:
+                stream.detach_local(viewer)
+                return self._deny(
+                    handler, 503,
+                    stream.reason
+                    or "The camera did not produce a picture in time.",
+                )
+            first = viewer.read(timeout=0.5)
+            stream.renew_local()
+
         try:
             # No Content-Length: this body ends when the client goes away.
             self._headers(handler, 200, "video/mp4", None, cookie,
                           extra={"Cache-Control": "no-store"})
+            _chunk(handler, first)
             while not viewer.closed:
                 fragment = viewer.read(timeout=1.0)
                 # Renewed on every pass, including the empty ones: the lease is
@@ -1227,8 +1278,7 @@ class Console:
                 stream.renew_local()
                 if fragment is None:
                     continue
-                handler.wfile.write(fragment)
-                handler.wfile.flush()
+                _chunk(handler, fragment)
         except (BrokenPipeError, ConnectionResetError, OSError):
             # The tab was closed, which is the ordinary way this ends.
             pass
@@ -2165,10 +2215,16 @@ class Console:
         # stream to lose. `playsinline` stops iOS taking it fullscreen, which
         # matters because the far more likely device in front of a station is
         # a phone.
+        # No `src` in the markup. The script attaches the stream, through
+        # Media Source Extensions where they exist and progressively where they
+        # do not. Leaving a src here meant Chromium began a progressive load it
+        # cannot finish — which spawns an encoder on this box and abandons it
+        # seconds later — before the script replaced it. One request, always.
         out.append(
             "<label for=zoom class=preview id=preview-wrap>"
-            "<video id=preview src='/stream.mp4' autoplay muted playsinline>"
-            "</video></label>"
+            "<video id=preview autoplay muted playsinline></video>"
+            "<noscript>The live preview needs JavaScript. "
+            "<a href='/frame.jpg'>Latest still</a></noscript></label>"
         )
         if video.get("has_frame"):
             age = video.get("frame_age_s") or 0
@@ -2239,6 +2295,126 @@ class Console:
       form.addEventListener("change", update);
     })(forms[i]);
   }
+  // The live camera, through Media Source Extensions.
+  //
+  // Not `<video src="/stream.mp4">`, which was tried first and is what the
+  // markup still looks like as a fallback. Chromium parses the stream that way
+  // — correct dimensions, readyState 3, no error — and then will not play it:
+  // its progressive demuxer wants range requests on a resource that has no
+  // length and cannot serve them, so the element sits at currentTime 0 and the
+  // buffer empties. MSE is the path browsers actually support for live fMP4.
+  //
+  // The codec comes out of the init segment rather than from the server. It is
+  // three bytes in the avcC box and the station would otherwise have to tell
+  // us twice, in two places that could disagree.
+  var live = document.getElementById("preview");
+  if (live && live.tagName === "VIDEO") {
+    // Progressive where MSE is missing: Safari and Firefox handle a live fMP4
+    // body that way, and it is Chromium specifically that will not.
+    if (window.MediaSource) startLive(live);
+    else live.src = "/stream.mp4";
+  }
+
+  function codecOf(bytes) {
+    // An avcC box is: 4-byte size, 4-byte type, then a payload beginning with
+    // configurationVersion. The three bytes that name the codec — profile,
+    // profile-compatibility, level — come *after* that version byte, so from
+    // the type at `i` they are i+5, i+6, i+7.
+    //
+    // Reading them one byte early produced a plausible-looking string that no
+    // decoder accepts, addSourceBuffer threw, and the picture never appeared.
+    for (var i = 0; i + 12 < bytes.length; i++) {
+      var tag = String.fromCharCode(bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]);
+      if (tag !== "avcC" && tag !== "hvcC") continue;
+      var hex = "";
+      for (var j = 1; j <= 3; j++) {
+        hex += ("0" + bytes[i + 4 + j].toString(16)).slice(-2);
+      }
+      return (tag === "avcC" ? "avc1." : "hvc1.") + hex;
+    }
+    return null;
+  }
+
+  function startLive(v) {
+    fetch("/stream.mp4").then(function (res) {
+      if (!res.ok || !res.body) {
+        return res.text().then(function (why) {
+          console.error("live preview: " + (why || res.status));
+          var age = document.getElementById("preview-age");
+          if (age) age.textContent = why || ("stream refused: " + res.status);
+        });
+      }
+      var reader = res.body.getReader();
+      var head = [], headLen = 0, codec = null, ms = null, sb = null;
+      var queue = [], ended = false;
+
+      function flush() {
+        if (!sb || sb.updating || !queue.length) return;
+        try { sb.appendBuffer(queue.shift()); }
+        catch (e) { ended = true; fail("appending video failed: " + e.message); }
+      }
+
+      // Said out loud. Every failure on this path was swallowed, so an
+      // off-by-one in the codec string looked exactly like a camera with
+      // nothing to send.
+      function fail(why) {
+        console.error("live preview: " + why);
+        var age = document.getElementById("preview-age");
+        if (age) age.textContent = why;
+      }
+
+      function attach() {
+        ms = new MediaSource();
+        v.src = URL.createObjectURL(ms);
+        ms.addEventListener("sourceopen", function () {
+          try { sb = ms.addSourceBuffer('video/mp4; codecs="' + codec + '"'); }
+          catch (e) {
+            ended = true;
+            fail("this browser will not decode " + codec);
+            return;
+          }
+          sb.mode = "segments";
+          sb.addEventListener("updateend", function () {
+            // Keep the picture at the live edge and the buffer bounded. A
+            // preview left running all afternoon is otherwise an afternoon of
+            // video in memory, and a decoder minutes behind the camera.
+            if (sb.buffered.length) {
+              var end = sb.buffered.end(sb.buffered.length - 1);
+              if (v.currentTime < end - 1.5) v.currentTime = end - 0.3;
+              var start = sb.buffered.start(0);
+              if (end - start > 12 && !sb.updating) {
+                try { sb.remove(start, end - 6); } catch (e) {}
+              }
+            }
+            if (v.paused) v.play().catch(function () {});
+            flush();
+          });
+          queue = head.concat(queue);
+          head = [];
+          flush();
+        });
+      }
+
+      function pump(r) {
+        if (r.done || ended) return;
+        var bytes = r.value;
+        if (!codec) {
+          head.push(bytes);
+          headLen += bytes.length;
+          var joined = new Uint8Array(headLen), at = 0;
+          head.forEach(function (b) { joined.set(b, at); at += b.length; });
+          codec = codecOf(joined);
+          if (codec) { head = [joined]; attach(); }
+        } else {
+          queue.push(bytes);
+          flush();
+        }
+        return reader.read().then(pump);
+      }
+      reader.read().then(pump);
+    }).catch(function (e) { console.error("live preview: " + e.message); });
+  }
+
   // The spectrum. Same scale and furniture as the console's canvas: a dashed
   // squelch line, a centre marker on the tuned channel, a filled trace and the
   // window's edge frequencies. Fixed size, so nothing it draws can resize
@@ -2302,18 +2478,28 @@ class Console:
             raw.textContent = lines.join("\\n");
           }
           if (wrap && s.video && s.video.has_frame) {
-            var img = document.getElementById("preview");
-            if (!img) {
-              wrap.textContent = "";
-              img = document.createElement("img");
-              img.id = "preview";
-              img.alt = "latest camera frame";
-              wrap.appendChild(img);
+            var shown = document.getElementById("preview");
+            // The live element owns this id now, and this poll used to assign
+            // /frame.jpg to whatever it found — a JPEG as a video source, over
+            // the top of the stream, every 2.5 seconds. The element reported
+            // MEDIA_ERR_SRC_NOT_SUPPORTED and nothing ever played.
+            var playing = shown && shown.tagName === "VIDEO" && !shown.error;
+            if (!playing) {
+              // No live picture: fall back to the still, which is what this
+              // did before and is better than an empty box.
+              if (!shown || shown.tagName === "VIDEO") {
+                wrap.textContent = "";
+                shown = document.createElement("img");
+                shown.id = "preview";
+                shown.alt = "latest camera frame";
+                wrap.appendChild(shown);
+              }
+              shown.src = "/frame.jpg?t=" + Date.now();
             }
-            img.src = "/frame.jpg?t=" + Date.now();
             var age = document.getElementById("preview-age");
             if (age && typeof s.video.frame_age_s === "number") {
-              age.textContent = "frame " + Math.round(s.video.frame_age_s) + " s old";
+              age.textContent = (playing ? "still " : "frame ")
+                + Math.round(s.video.frame_age_s) + " s old";
             }
           }
         })

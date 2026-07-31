@@ -540,9 +540,14 @@ class ServedPageTests(unittest.TestCase):
         # pointed. The element is there before any capture has happened,
         # because it does not depend on one — it opens the stream itself.
         _, body = self.request("GET", "/devices?slot=camera")
-        self.assertIn("<video id=preview src='/stream.mp4'", body)
+        self.assertIn("<video id=preview", body)
         self.assertIn("autoplay muted playsinline", body)
         self.assertIn("zoom-toggle", body)
+        # No src in the markup: the script attaches it, so a browser that
+        # cannot finish a progressive load does not start one and strand an
+        # encoder on this box. See `_preview`.
+        self.assertNotIn("<video id=preview src=", body)
+        self.assertIn("startLive", body)
 
     def test_the_still_frame_age_appears_once_there_is_one(self):
         # The cached still has not gone away — /frame.jpg still serves it and
