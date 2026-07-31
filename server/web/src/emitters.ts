@@ -180,7 +180,16 @@ export function isStroked(kind: EmitterKind): boolean {
  * the contacts around it, and size stops meaning weight and starts meaning
  * importance.
  */
+/** Everything scaled together. The glyphs were drawn to be legible at a glance
+ *  and were still too small against satellite imagery — half again as large
+ *  keeps every ratio between the weight classes and just makes them findable. */
+const SCALE = 1.5;
+
 export function glyphSize(kind: EmitterKind): number {
+  return Math.round(baseGlyphSize(kind) * SCALE);
+}
+
+function baseGlyphSize(kind: EmitterKind): number {
   switch (kind) {
     case "light":
       return 14;

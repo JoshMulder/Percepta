@@ -183,12 +183,15 @@ describe("size carries the weight class", () => {
   });
 
   it("keeps the range narrow enough that size still means weight", () => {
-    // Much beyond this and a heavy starts obscuring the contacts around it,
-    // at which point size reads as importance rather than as weight.
+    // The ratio is the property; the absolute bounds are a sanity check that
+    // moved when everything was scaled up by half for legibility over
+    // satellite imagery. Much beyond a factor of two and a heavy starts
+    // obscuring the contacts around it, at which point size reads as
+    // importance rather than as weight.
     const sizes = ALL_KINDS.map(glyphSize);
-    expect(Math.min(...sizes)).toBeGreaterThanOrEqual(12);
-    expect(Math.max(...sizes)).toBeLessThanOrEqual(26);
     expect(Math.max(...sizes) / Math.min(...sizes)).toBeLessThan(2);
+    expect(Math.min(...sizes)).toBeGreaterThanOrEqual(18);
+    expect(Math.max(...sizes)).toBeLessThanOrEqual(40);
   });
 
   it("keeps the fast, small things under the airliners", () => {

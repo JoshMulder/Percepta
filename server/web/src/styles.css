@@ -908,9 +908,14 @@ body {
      set this panel's height, and it was the tallest in the stack with a band
      of dead space under the row - height the power panel's figures wanted
      more than the ornaments did. The number between them still leads at
-     4.125rem. */
-  width: 8.75rem;
-  height: 8.75rem;
+     4.125rem.
+
+     10.05rem is 8.75 plus about 15%: the dial carries the eight compass points
+     and a needle, and at the smaller size the lettering was the first thing to
+     go soft on a wall display. The sky icon matches it so the two ornaments
+     stay the same weight either side of the number. */
+  width: 10.05rem;
+  height: 10.05rem;
   flex: none;
 }
 .rose-ring {
@@ -985,6 +990,11 @@ body {
   grid-template-columns: 1fr auto 1fr;
   align-items: baseline;
   width: 100%;
+  /* Dropped a little against the dials beside it. The digits are cap-height
+     with no descenders, so optically they sat high on a line the rose and the
+     sky icon fill to their full circle; matching the boxes left the number
+     looking lifted. */
+  margin-top: 0.45rem;
 }
 .wind-speed .num {
   grid-column: 2;
@@ -1175,6 +1185,8 @@ body {
    size and the channel light sits at the far right end, so the readout - the
    thing being read - is what grows. */
 .freq-display {
+  /* Clickable across its whole area; see the handler in RadioPanel. */
+  cursor: text;
   flex: 1;
   display: flex;
   align-items: baseline;
@@ -1968,8 +1980,9 @@ body {
    lopsided rather than balanced, and matching the dial is what was actually
    wanted. The two are the panel's anchors, one at each end. */
 .sky-icon {
-  width: 8.75rem;
-  height: 8.75rem;
+  /* Matched to .rose so the row stays symmetrical. */
+  width: 10.05rem;
+  height: 10.05rem;
   color: var(--muted);
   stroke-width: 1.6;
 }
@@ -3021,13 +3034,36 @@ body {
    thing the operator is looking at. Bottom-left is the emptiest corner of a
    station-centred map — the basemap switch is top-left and the rings label due
    north. */
-.contact-detail {
+/* The panel travels with its aircraft. AdsbMap positions this wrapper on the
+   contact's projected coordinates every frame the map or the telemetry moves;
+   the panel itself hangs off it up and to the right, so the glyph it describes
+   stays visible.
+
+   `translate` rather than another absolute offset so the two never disagree
+   about where the anchor is, and a viewport-relative clamp so a contact near
+   the right or bottom edge folds the panel back inside instead of off screen. */
+.contact-anchor {
   position: absolute;
-  left: 0.75rem;
-  bottom: 0.75rem;
   z-index: 5;
-  width: min(19rem, calc(100% - 1.5rem));
-  max-height: calc(100% - 1.5rem);
+  pointer-events: none;
+}
+.contact-anchor > * {
+  pointer-events: auto;
+  position: absolute;
+  left: 0.9rem;
+  bottom: 0.9rem;
+}
+
+.contact-detail {
+  z-index: 5;
+  /* A fixed width, not a percentage. The anchor it now hangs from is a
+     zero-size point on the map, so `100%` resolved to nothing and the panel
+     collapsed to a sliver — percentages need a parent with a size, and the
+     whole point of the anchor is that it does not have one. The map viewport
+     is the constraint instead, applied below. */
+  width: 19rem;
+  max-width: 90vw;
+  max-height: 60vh;
   overflow-y: auto;
   padding: 0.75rem 0.875rem 0.875rem;
   border: 1px solid var(--line);
@@ -3194,3 +3230,28 @@ body {
   font: 0.812rem var(--sans);
 }
 
+
+
+/* The alerts drawer's header: a count and a way to empty it. Clearing removes
+   what has been read, not the conditions behind it — a station condition that
+   is still true is re-raised by the next health frame, so this cannot hide
+   anything that is still happening. */
+.alerts-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0 0 0.5rem;
+  margin-bottom: 0.25rem;
+  border-bottom: 1px solid var(--line-soft);
+}
+.alerts-clear {
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 0.25rem;
+  color: var(--muted);
+  font: 0.7rem var(--mono);
+  padding: 0.2rem 0.55rem;
+  cursor: pointer;
+}
+.alerts-clear:hover { color: var(--text); border-color: var(--muted); }

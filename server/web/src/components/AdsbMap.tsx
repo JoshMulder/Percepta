@@ -90,6 +90,15 @@ function AdsbMapInner({
    *  outside React, can set state without being rebuilt on every selection. */
   const selectRef = useRef(setSelected);
   selectRef.current = setSelected;
+  /** Where the open panel should sit, in screen pixels.
+   *
+   *  The panel used to be pinned bottom-left, which meant that on a map with
+   *  several contacts nothing tied the numbers to the aircraft they described
+   *  — you clicked one, read a panel in the corner, and had to remember which
+   *  dot you had clicked. Anchored to the target it is unambiguous, and it has
+   *  to keep up: the aircraft moves every second and the map moves on every
+   *  zoom. */
+  const [anchor, setAnchor] = useState<{ x: number; y: number } | null>(null);
 
   const basemap =
     config.basemaps.find((b) => b.key === style) ?? config.basemaps[0];
@@ -397,6 +406,34 @@ function AdsbMapInner({
     if (selected && !aircraft.some((c) => c.icao === selected)) setSelected(null);
   }, [aircraft, selected]);
 
+  /** Keep the panel over its aircraft.
+   *
+   *  Recomputed from the contact's own coordinates rather than from the
+   *  marker's current screen position, so a telemetry update and a zoom are
+   *  the same event to this. `move` covers zooming — the map cannot be panned,
+   *  so that is the only way the projection changes without new telemetry. */
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !selected) {
+      setAnchor(null);
+      return;
+    }
+    const place = () => {
+      const contact = aircraft.find((c) => c.icao === selected);
+      if (!contact || contact.latitude === null || contact.longitude === null) {
+        setAnchor(null);
+        return;
+      }
+      const point = map.project([contact.longitude, contact.latitude]);
+      setAnchor({ x: point.x, y: point.y });
+    };
+    place();
+    map.on("move", place);
+    return () => {
+      map.off("move", place);
+    };
+  }, [selected, aircraft]);
+
   // Escape closes it, like every other overlay in the console. Bound only while
   // something is open so the console is not carrying a key listener per map for
   // the 99% of the time nothing is selected.
@@ -444,11 +481,24 @@ function AdsbMapInner({
       {/* Not in compact: the mini viewer is a thumbnail, and a detail panel
           over it would cover most of the airspace it exists to show. Clicking
           a contact there is not offered rather than offered and useless. */}
-      {!compact && openContact && (
-        <ContactDetail
-          contact={openContact}
-          onClose={() => setSelected(null)}
-        />
+      {!compact && openContact && anchor && (
+        <div
+          className="contact-anchor"
+          // Offset up and right of the glyph so the panel does not cover the
+          // aircraft it describes. `translate(-50%)` is deliberately not used:
+          // the panel is wider than most of the map and centring it on a
+          // contact near an edge pushes half of it off screen. `max-width`
+          // and the clamp below keep it inside instead.
+          style={{
+            left: `${Math.round(anchor.x)}px`,
+            top: `${Math.round(anchor.y)}px`,
+          }}
+        >
+          <ContactDetail
+            contact={openContact}
+            onClose={() => setSelected(null)}
+          />
+        </div>
       )}
     </div>
   );

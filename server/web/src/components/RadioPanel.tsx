@@ -302,7 +302,23 @@ function RadioPanelInner({
                   disabled={!canControl} onClick={() => step(-1e6)}>▼</button>
         </div>
 
-        <div className="freq-display">
+        {/* The whole box is the target, not just the digits. The input is
+            narrower than the panel it sits in and the "MHz" beside it looked
+            like part of the same control — clicking there, or on the padding,
+            did nothing. A div rather than a <label> because the unit is not a
+            name for the field, and a label wrapping it would be read out as
+            one. */}
+        <div
+          className="freq-display"
+          onMouseDown={(e) => {
+            if (!canControl) return;
+            if (e.target === freqInput.current) return;
+            // Before focus moves anywhere else, so the click does not land on
+            // the div and then blur straight back out of the input.
+            e.preventDefault();
+            freqInput.current?.focus();
+          }}
+        >
           <input
             ref={freqInput}
             className="freq-input"

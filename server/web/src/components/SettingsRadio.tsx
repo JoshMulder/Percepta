@@ -59,14 +59,12 @@ export function SettingsRadio({
     send("Auto squelch", () => api.autoSquelch(stationId!, on));
   const onGain = (g: string | number) =>
     send("Gain", () => api.setGain(stationId!, g));
-  const onPpm = (v: number) => send("Correction", () => api.setPpm(stationId!, v));
   const canControl = has(caps, "radio.control");
   const canConfigure = has(caps, "config.write");
   const auto = radio?.auto_squelch ?? true;
   const threshold = radio?.threshold_db ?? -70;
   const gains = radio?.gains ?? [];
   const gain = radio?.gain ?? "auto";
-  const ppm = radio?.ppm ?? 0;
 
   if (!radio) {
     return (
@@ -162,22 +160,11 @@ export function SettingsRadio({
             </small>
           </label>
 
-          <label className="field">
-            <span>Crystal correction (ppm)</span>
-            <input
-              type="number"
-              min={-1000}
-              max={1000}
-              step={1}
-              value={ppm}
-              onChange={(e) => onPpm(Number(e.target.value))}
-            />
-            <small>
-              Trimmed once at commissioning. There is no calibrate routine: it
-              existed to work around a cheap SDR, and a certified receiver does
-              not need someone standing at the site keying a carrier.
-            </small>
-          </label>
+          {/* No crystal correction here. It is trimmed once at commissioning
+              from the receiver's own settings on the station, and a value that
+              can be retyped from a console — by somebody who is not at the
+              site and cannot hear the result — is one that will be wrong
+              without anybody noticing. */}
         </section>
       )}
     </div>

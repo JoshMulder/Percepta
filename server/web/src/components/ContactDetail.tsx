@@ -1,4 +1,3 @@
-import { emitterLabel } from "../emitters";
 import type { Aircraft } from "../types";
 
 /**
@@ -72,7 +71,6 @@ export function ContactDetail({
     range_km,
     bearing,
     squawk,
-    emitter_type,
     seconds_since_contact,
     on_ground,
     simulated,
@@ -195,10 +193,11 @@ export function ContactDetail({
             : squawk.toString().padStart(4, "0")}
         </Row>
 
-        {/* Not `wide`: the longest label here — "not set by the transponder" —
-            wraps to two lines in the value column and still reads better
-            aligned with the rows above it than promoted to its own line. */}
-        <Row label="Type">{emitterLabel(emitter_type)}</Row>
+        {/* No Type row. The panel is opened by clicking the aircraft's own
+            glyph, and that glyph *is* the type — a row naming it again is the
+            same fact twice, one of them redundant the moment you know how the
+            icons read. The mapping is still in emitters.ts and still worth
+            keeping honest; it simply does not need a line here. */}
 
         {on_ground !== null && on_ground !== undefined && (
           <Row label="State">{on_ground ? "on the ground" : "airborne"}</Row>

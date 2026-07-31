@@ -317,9 +317,14 @@ STYLE = """
  /* Hard against the right edge, and the sign-out is laid out by the same
     flex line as the tabs rather than being a block with its own padding —
     which is what left it sitting a couple of pixels low against them. */
+ /* Hard against the window's right edge, mirroring the mark on the left.
+    It used to end at the 54rem content column's gutter, which on a wide screen
+    left the tabs floating in the middle of the bar with a hand's width of
+    empty to their right — the bar is full-bleed and its contents should reach
+    its ends. */
  .topbar-right { display: flex; align-items: center; align-self: stretch;
    justify-content: flex-end; min-width: max-content; gap: .25rem;
-   padding-right: max(.75rem, calc((100vw - 54rem) / 2)); }
+   padding-right: 1.25rem; }
  .topbar .pagetabs { position: static; height: auto; border-bottom: 0;
    background: none; padding: 0; overflow: visible; align-items: center; }
  /* Looks like the muted key it replaces until you point at it — a row of

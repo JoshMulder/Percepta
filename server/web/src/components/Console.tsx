@@ -657,6 +657,30 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
 
   const alertList = (
     <div className="alerts">
+      {alerts.length > 0 && (
+        <div className="alerts-head">
+          <span className="muted">
+            {alerts.length} {alerts.length === 1 ? "alert" : "alerts"}
+          </span>
+          {/* Clears the list an operator has read, not the conditions behind
+              it. A station condition that is still true is re-raised by the
+              next health frame, which is the point: this dismisses what has
+              been seen and cannot hide anything that is still happening. */}
+          <button
+            type="button"
+            className="alerts-clear"
+            onClick={() => {
+              setAlerts([]);
+              // Forget what has been reported, so a condition that is still
+              // true comes back rather than being swallowed as a duplicate.
+              raisedConditions.current = new Set();
+              setSeenAlerts(0);
+            }}
+          >
+            Clear
+          </button>
+        </div>
+      )}
       {alerts.length === 0 && <div className="muted">Nothing to report</div>}
       {alerts.map((a) => (
         <div key={a.id} className={`alert ${a.severity}`}>
