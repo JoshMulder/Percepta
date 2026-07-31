@@ -101,14 +101,23 @@ export function emitterLabel(code: number | null | undefined): string {
  * is a cross with a disc, not a helicopter.
  */
 const GLYPH: Record<EmitterKind, string> = {
-  // Fixed wing, in three weights. Sweep and span carry the size class, so a
-  // heavy reads as bigger than a light without a legend.
-  light: "M9 2 L10.4 8 L15 10.6 L15 12 L10.4 10.8 L10.4 14 L12 15.6 L12 16.6 L9 15.6 L6 16.6 L6 15.6 L7.6 14 L7.6 10.8 L3 12 L3 10.6 L7.6 8 Z",
-  small: "M9 1.4 L10.6 7.6 L16 10.4 L16 12 L10.6 10.6 L10.6 14 L12.4 15.8 L12.4 16.8 L9 15.8 L5.6 16.8 L5.6 15.8 L7.4 14 L7.4 10.6 L2 12 L2 10.4 L7.4 7.6 Z",
-  large: "M9 1 L10.9 7.4 L16.6 10.2 L16.6 12.1 L10.9 10.5 L10.9 14.2 L13 16.2 L13 17.2 L9 16 L5 17.2 L5 16.2 L7.1 14.2 L7.1 10.5 L1.4 12.1 L1.4 10.2 L7.1 7.4 Z",
-  heavy: "M9 0.8 L11.2 7.2 L17.2 10 L17.2 12.2 L11.2 10.4 L11.2 14.4 L13.6 16.5 L13.6 17.5 L9 16.2 L4.4 17.5 L4.4 16.5 L6.8 14.4 L6.8 10.4 L0.8 12.2 L0.8 10 L6.8 7.2 Z",
-  // Delta. Fast and manoeuvrable reads as a dart, not a wing.
-  agile: "M9 1 L14.5 16 L9 12.4 L3.5 16 Z",
+  // Fixed wing, in four weights.
+  //
+  // Engine count is what separates them, because span and sweep alone did not:
+  // the four were one silhouette at four scales, and scale is exactly the cue
+  // that disappears when the glyph is 18px and the aircraft beside it is at a
+  // different zoom. So a light is a straight-winged single with no nacelles, a
+  // small has two tucked against the fuselage, a large has two slung out on a
+  // swept wing, and a heavy has four. That is the convention every flight
+  // tracker uses, and it is the reason people can read those maps at a glance.
+  light: "M9 3.4 Q9.6 4.1 9.6 5.7 L9.6 7.6 L14.7 8.4 L14.7 9.5 L9.6 9.7 L9.6 12.8 L11.4 14.2 L11.4 15.1 L9 14.4 L6.6 15.1 L6.6 14.2 L8.4 12.8 L8.4 9.7 L3.3 9.5 L3.3 8.4 L8.4 7.6 L8.4 5.7 Q8.4 4.1 9 3.4 Z",
+  small: "M9 2.4 Q9.7 3.2 9.7 5.3 L9.7 7.4 L15.4 10.2 L15.4 11.4 L9.7 10.0 L9.7 13.6 L11.8 15.2 L11.8 16.1 L9 15.3 L6.2 16.1 L6.2 15.2 L8.3 13.6 L8.3 10.0 L2.6 11.4 L2.6 10.2 L8.3 7.4 L8.3 5.3 Q8.3 3.2 9 2.4 Z M10.4 7.7 h1.3 v3.0 h-1.3 Z M6.3 7.7 h1.3 v3.0 h-1.3 Z",
+  large: "M9 1.6 Q9.9 2.5 9.9 4.9 L9.9 7.0 L16.8 10.6 L16.8 11.9 L9.9 10.2 L9.9 14.0 L12.4 15.9 L12.4 16.9 L9 15.9 L5.6 16.9 L5.6 15.9 L8.1 14.0 L8.1 10.2 L1.2 11.9 L1.2 10.6 L8.1 7.0 L8.1 4.9 Q8.1 2.5 9 1.6 Z M11.6 7.9 h1.5 v3.4 h-1.5 Z M4.9 7.9 h1.5 v3.4 h-1.5 Z",
+  heavy: "M9 1.1 Q10.0 2.1 10.0 4.6 L10.0 6.8 L17.4 10.6 L17.4 12.0 L10.0 10.3 L10.0 14.2 L12.8 16.2 L12.8 17.3 L9 16.1 L5.2 17.3 L5.2 16.2 L8.0 14.2 L8.0 10.3 L0.6 12.0 L0.6 10.6 L8.0 6.8 L8.0 4.6 Q8.0 2.1 9 1.1 Z M11.2 7.4 h1.3 v3.3 h-1.3 Z M13.9 8.8 h1.3 v3.1 h-1.3 Z M5.5 7.4 h1.3 v3.3 h-1.3 Z M2.8 8.8 h1.3 v3.1 h-1.3 Z",
+  // Delta with twin tails. The plain dart it replaces was the ultralight glyph
+  // with a notch, and two categories sharing a silhouette looks like
+  // information without being any.
+  agile: "M9 0.9 L9.8 6.0 L14.9 13.4 L14.9 14.9 L10.3 13.0 L10.3 14.6 L11.0 16.6 L10.1 16.6 L9 14.2 L7.9 16.6 L7.0 16.6 L7.7 14.6 L7.7 13.0 L3.1 14.9 L3.1 13.4 L8.2 6.0 Z",
   // Top-down helicopter: a long main rotor across a slim fuselage with a tail
   // boom. The first attempt was a filled rotor disc over a body, which at 18px
   // collapsed into a lightbulb — a disc and a stub read as one blob at that
