@@ -354,13 +354,10 @@ These need a human, and the station agent should not invent answers.
 - `scripts/verify_enrolment.py` exercises the lifecycle against a running stack
 
 **Platform — still owed**
-- **Locking down the broker's default user.** Per-station principals exist and
-  are enforced *for anyone who uses them*; Redis' `default` user is still open
-  and unauthenticated, so the pinning is not yet a boundary. This is the last
-  gap between the model described here and reality
-- Console UI for issuing codes — the API is there, nothing renders it
-- Configuration delivery (§7). `config_version` is issued; `config.set` is not
-- mTLS, and the CA to go with it (§3)
+- ~~Locking down the broker's default user.~~ **Done** —
+  `server/docker-compose.yaml` passes `--requirepass` and the stack will not
+  start without it, so per-station principals are a second layer rather than
+  the only one.
 
 **Station**
 - Keypair or credential generation, and secure local storage

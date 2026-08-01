@@ -57,11 +57,17 @@ six hours of expiry. If boxes are shipped and installed a fortnight later,
 
 ### 4. Broker: managed or self-hosted (§9.4)
 
-Still unanswered, and **still open despite TLS landing.** Redis now speaks TLS
-with a private CA, which answers "is the transport encrypted" but not "who runs
-the broker in production". **MQTT remains unimplemented**: `transport/mqtt.py`
-is a stub carrying the requirements — now including that it must use the same
-`Trust` object and refuse the same downgrades — rather than a plausible-looking
+**Answered on 2026-08-01 — see item 47.** Production is a WebSocket relay on
+the platform's own 443 (`transport/relay.py`), because the port is the whole
+problem: 6380 and 8883 are both shut wherever a reverse proxy is. MQTT was
+priced and dropped, and `transport/mqtt.py` is deleted. What follows is the
+original entry, kept because the reasoning that led here is worth reading.
+
+Redis now speaks TLS with a private CA, which answers "is the transport
+encrypted" but not "who runs the broker in production". MQTT remains
+unimplemented: `transport/mqtt.py` is a stub carrying the requirements — now
+including that it must use the same `Trust` object and refuse the same
+downgrades — rather than a plausible-looking
 client that has never connected to anything. The transport interface is the only
 place that knows the broker is Redis; swapping it is one class and a URL scheme.
 

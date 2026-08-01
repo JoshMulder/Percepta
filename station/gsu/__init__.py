@@ -8,7 +8,8 @@ telemetry and audio on `gsu/{station_id}/…` and subscribes to
 Layout, and why it is cut this way:
 
     transport/   the only code that knows the broker is Redis. Production is
-                 MQTT over TLS and the contract requires that difference to be
+                 a WebSocket relay on 443, and the contract requires that
+                 difference to be
                  confined to one place; this is that place.
     sensors/     interfaces first, simulated implementations behind them. No
                  real hardware is attached to this machine and nothing here

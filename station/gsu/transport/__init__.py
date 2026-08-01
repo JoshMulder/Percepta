@@ -1,8 +1,9 @@
 """The only part of this station that knows what the broker is.
 
-`contract/transport.md`: Redis pub/sub today, MQTT over TLS in production, and
-the difference is to be confined to one place. This is that place, and the
-interface is deliberately narrow enough that it can be: publish a JSON payload
+`contract/transport.md`: a WebSocket relay on 443 in production, Redis pub/sub
+direct on a bench, and the difference confined to one place. This is that
+place, and the interface is deliberately narrow enough that it can be: publish
+a JSON payload
 to a topic, subscribe to a topic, and say whether the link is up.
 
 Both transports are fire-and-forget from the station's point of view and the

@@ -5,7 +5,8 @@ something at the transport: a station authenticates to the broker as itself and
 is pinned to `gsu/{id}/…` and `cmd/gsu/{id}`, so a compromised unit cannot
 publish as another org's hardware or listen to commands meant for it.
 
-Redis today, MQTT in production. The shape is deliberately the same in both -
+Redis behind the relay, and directly on a bench. The shape is the same either
+way -
 one principal per station, channel patterns derived from the station id - so
 this becomes a different client library rather than a different design.
 
@@ -66,7 +67,7 @@ def _channels(station_id: uuid.UUID | str) -> list[str]:
     Redis channel patterns do not distinguish publish from subscribe, so this
     also lets a station publish onto its own command channel - it can issue
     commands to itself and to nothing else, which is not worth a second
-    mechanism to prevent. MQTT ACLs are directional and should be written that
+    mechanism to prevent. Directional ACLs should be written that
     way when the transport moves.
     """
     return [

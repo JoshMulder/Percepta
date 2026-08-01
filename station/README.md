@@ -88,7 +88,8 @@ than assumed:
   code** for it — the platform resolves the organisation from that id, and drops
   everything from a station that is not enrolled or whose credential was revoked
 
-Production is MQTT over TLS with a per-station client certificate. Development
+Production is a WebSocket relay on the platform's own 443 (DECISIONS.md item
+47). Development
 is Redis, and the difference is deliberately confined to one place in your code:
 keep the transport behind a small interface and none of the rest cares.
 

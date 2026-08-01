@@ -56,6 +56,15 @@ Talks to all local hardware over LAN/serial. Responsibilities:
 - Operator video and radio session brokering
 
 ### Transport between tiers
+
+> **Superseded 2026-08-01.** Production is a WebSocket relay on the platform's
+> own 443 — `server/app/backend/api/broker.py`, `station/gsu/transport/relay.py`.
+> MQTT was priced again and dropped: it needs port 8883, which is shut wherever
+> 6380 is, and Redis stays regardless for the console bus and media relay, so it
+> would have been a second broker rather than a replacement. The reasoning below
+> is kept because it was right about the protocol and wrong about the
+> constraint. `station/DECISIONS.md` item 47 has the full comparison.
+
 MQTT over TLS with persistent sessions and QoS 1 remains a good fit — it survives
 intermittent links and handles store-and-forward cleanly.
 

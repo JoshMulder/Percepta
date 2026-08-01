@@ -46,12 +46,12 @@ without `--legacy`.
 before anything it publishes reaches a subscriber; revoking one stops its data
 within about thirty seconds, whether or not the broker noticed. Enrolment is
 built — see `enrolment.md` — and issues each station a broker principal
-(`gsu/{station_id}`) pinned to exactly the three channels above.
+(`gsu:{station_id}`) pinned to exactly the three channels above.
 
-One thing that pinning does **not** yet do: Redis' `default` user is still open
-on the development stack, so an unauthenticated client can publish anywhere. The
-per-station principals are real and enforced for anyone using them; closing
-`default` is a deployment change and is the last gap on this boundary.
+Redis' `default` user is closed: `server/docker-compose.yaml` passes
+`--requirepass` and the stack refuses to start without it, so a process that
+reaches the port still has no identity. Per-station ACLs are the second layer,
+not the only one.
 
 ## Video
 
@@ -166,11 +166,13 @@ station's point of view, and the contract assumes nothing stronger:
 
 ## Identity
 
-Each station authenticates with its own credential — mTLS client certificate
-preferred over a bearer token — and the broker ACL pins that identity to
-`gsu/{station_id}/#` and `cmd/gsu/{station_id}`.
+Each station authenticates with its own credential — a bearer token today, with
+mTLS client certificates still to come (`enrolment.md` §3) — and the broker ACL
+pins that identity to `gsu/{station_id}/#` and `cmd/gsu/{station_id}`.
 
-Enrolment (issuing the id and credential) is not built yet on either side.
+Enrolment is built on both sides: `server/app/backend/api/enrolment.py` and
+`station/gsu/enrolment.py`. This line used to say it was not, in the same file
+that documents it two sections earlier.
 
 ## Cadence and bandwidth
 

@@ -93,7 +93,7 @@ def command_channel(station_id) -> str:
     listen to commands meant for another org's hardware.
     """
     # Slash-separated to match contract/transport.md, and because the intended
-    # production transport is MQTT where this is a topic path. Redis does not
+    # relay carries this as a topic path rather than a key. Redis does not
     # care; the contract does.
     return f"cmd/gsu/{station_id}"
 
