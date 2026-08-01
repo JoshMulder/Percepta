@@ -31,6 +31,7 @@ import inspect
 import json
 import os
 import logging
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -38,6 +39,11 @@ from . import registry
 from .serialio import SerialPort, list_ports
 
 log = logging.getLogger("gsu.inventory")
+
+#: How long detection results are reused. Short enough that plugging something
+#: in is still seen on the next 2.5s poll of the setup page; long enough that
+#: one render does not repeat the same sysfs walk three times.
+DETECTION_TTL_S = 1.0
 
 #: Realtek RTL2832U, which is what an RTL2838 dongle enumerates as.
 RTLSDR_IDS = {("0bda", "2838"), ("0bda", "2832")}
@@ -90,12 +96,24 @@ class SlotReport:
         return data
 
 
+_scan_cache: tuple[float, list[Resource]] | None = None
+
+
 def scan_rtlsdr() -> list[Resource]:
     """Find RTL-SDR dongles from sysfs, with their serial numbers.
 
     sysfs rather than `lsusb` so it works on a box with no usbutils installed,
     which a minimal image will not have.
+
+    Cached for `DETECTION_TTL_S`: this walks every device on the USB bus and
+    was being run three times per setup-page poll. A dongle that is replugged
+    — the known fault on this hardware — appears within a second, which is far
+    inside how long it takes to reach the socket.
     """
+    global _scan_cache
+    now = time.monotonic()
+    if _scan_cache is not None and now < _scan_cache[0]:
+        return list(_scan_cache[1])
     found: list[Resource] = []
     root = Path("/sys/bus/usb/devices")
     if not root.exists():
@@ -129,7 +147,8 @@ def scan_rtlsdr() -> list[Resource]:
                        "fitting a second",
             )
         )
-    return found
+    _scan_cache = (now + DETECTION_TTL_S, found)
+    return list(found)
 
 
 class Inventory:
@@ -325,7 +344,18 @@ class Inventory:
 
     def report(self) -> list[SlotReport]:
         """Intent against fact, per slot. This is what goes out in telemetry and
-        what the local console renders."""
+        what the local console renders.
+
+        **Deliberately not cached**, though it is called six times per
+        `snapshot()` and the setup page polls every 2.5s. Caching it for a
+        second halved that render and broke rediscovery: `_anything_missing`
+        reads this, and a stale report is a station that decides a device has
+        appeared or vanished on out-of-date evidence. The expensive part is
+        the USB walk underneath, and `scan_rtlsdr` caches that instead — it is
+        pure hardware detection with no intent mixed in, so a stale answer
+        there is only ever a second old and cannot contradict what an operator
+        just configured.
+        """
         reports: list[SlotReport] = []
         for slot in registry.SLOTS:
             entry = self.fitted.get(slot) or Fitted()

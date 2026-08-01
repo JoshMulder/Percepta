@@ -77,6 +77,15 @@ class AccessUnit:
     #: Parameter sets seen so far, so a viewer joining mid-stream can be sent
     #: them without waiting for the next keyframe.
     parameter_sets: bytes = b""
+    #: The NAL units `data` was joined from, carried rather than discarded.
+    #:
+    #: The reader has this list in hand and used to throw it away, and the
+    #: consumer immediately rebuilt it with `split_annexb` — a Python loop over
+    #: every byte of the frame, three subscripts a byte. At 1080p30 and
+    #: 3000 kbit/s that is ~375 kB/s through the loop for a list that already
+    #: existed. Empty on an AccessUnit built by hand; `split_annexb` remains
+    #: the answer for a caller that only has bytes.
+    nals: tuple[bytes, ...] = ()
 
     @property
     def bytes(self) -> int:
@@ -530,6 +539,7 @@ class AnnexBReader:
             captured_at=clock.now(),
             keyframe=any(rules.nal_type(nal) in rules.keyframes for nal in nals),
             parameter_sets=bytes(self.parameter_sets),
+            nals=tuple(nals),
         )
 
 

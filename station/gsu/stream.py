@@ -516,11 +516,12 @@ class StreamSession:
         uplink, muxer = self.uplink, self.muxer
         if uplink is None or muxer is None:
             return
-        # Split once, used twice. `split_annexb` walks every byte of the frame
-        # in Python; on a 4K stream that is tens of milliseconds per frame on a
-        # Pi 2B, and doing it again for the codec check would have been a real
-        # cost for a check that is otherwise a few byte comparisons.
-        nals = split_annexb(unit.data)
+        # From the reader, which had the list before it joined the bytes.
+        # `split_annexb` walks every byte of the frame in Python — on a 4K
+        # stream tens of milliseconds a frame on a Pi 2B — and it was being run
+        # here to rebuild exactly what `AnnexBReader._emit` had just discarded.
+        # The fallback is for an AccessUnit that did not come from the reader.
+        nals = list(unit.nals) or split_annexb(unit.data)
         if not self._codec_agrees(nals, muxer):
             return
 
