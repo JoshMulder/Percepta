@@ -37,9 +37,15 @@ function relative(value: string | null): string {
 export function SettingsEnrolment({
   stationId,
   stationName,
+  onCredentialChanged,
 }: {
   stationId: string;
   stationName: string | null;
+  /** Called after anything that changes whether a credential is live. The
+   *  Delete section is a sibling that decides whether to offer itself from
+   *  this same status, and it only asked once, on mount — so revoking left it
+   *  showing the answer from before, until the page was left and re-entered. */
+  onCredentialChanged?: () => void;
 }) {
   const [status, setStatus] = useState<EnrolmentStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -66,6 +72,9 @@ export function SettingsEnrolment({
     try {
       await action();
       await load();
+      // Issue, cancel and revoke all run through here, so the sibling that
+      // cares needs telling in exactly one place.
+      onCredentialChanged?.();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "That did not work.");
     } finally {

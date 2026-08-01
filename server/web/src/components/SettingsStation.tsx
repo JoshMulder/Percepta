@@ -25,6 +25,10 @@ export function SettingsStation({
   const [selected, setSelected] = useState<string | null>(initialStationId);
   const [adding, setAdding] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
+  // Bumped whenever the enrolment section changes a credential, so the Delete
+  // section re-asks whether it should be showing. The two are siblings reading
+  // the same status, and only one of them was refetching it.
+  const [credentialSeq, setCredentialSeq] = useState(0);
 
   const loadStations = useCallback(async (prefer?: string) => {
     try {
@@ -99,9 +103,14 @@ export function SettingsStation({
             stationId={station.id}
             onSaved={onSaved}
           />
-          <SettingsEnrolment stationId={station.id} stationName={station.name} />
+          <SettingsEnrolment
+            stationId={station.id}
+            stationName={station.name}
+            onCredentialChanged={() => setCredentialSeq((n) => n + 1)}
+          />
           <DeleteStation
             key={`del-${station.id}`}
+            credentialSeq={credentialSeq}
             station={station}
             onDeleted={async () => {
               await loadStations();
@@ -444,11 +453,17 @@ function StationConfigForm({
  * the affordance, not the enforcement.
  */
 function DeleteStation({
+  credentialSeq,
   station,
   onDeleted,
 }: {
   station: StationSummary;
   onDeleted: () => void | Promise<void>;
+  /** Bumped by the enrolment section whenever it changes a credential. Only a
+   *  trigger — the value is never read. Whether this section offers itself is
+   *  an answer that goes stale the moment somebody revokes, and it was only
+   *  ever computed on mount. */
+  credentialSeq: number;
 }) {
   const [enrolled, setEnrolled] = useState<boolean | null>(null);
   const [confirming, setConfirming] = useState(false);
@@ -469,7 +484,7 @@ function DeleteStation({
     return () => {
       cancelled = true;
     };
-  }, [station.id]);
+  }, [station.id, credentialSeq]);
 
   if (enrolled !== false) return null;
 

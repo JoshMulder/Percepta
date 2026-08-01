@@ -25,6 +25,7 @@ from backend.auth.identity import Identity
 from backend.database.dependencies import get_db
 from backend.database.models.ground_station import GroundStation
 from backend.database.models.station_credential import StationCredential
+from backend.services import enrolment
 from backend.services import geocode
 from backend.services.audit import record
 
@@ -229,6 +230,30 @@ def update_config(
     return result
 
 
+def _has_live_credential(db: Session, station_id: uuid.UUID) -> bool:
+    """Whether a credential exists that a box could still authenticate with.
+
+    Distinct from `_has_enrolled`, and the distinction is the whole of the
+    delete rule. Revocation does not remove the credential row, it stamps
+    `revoked_at` — so "a credential row exists" stays true for ever and delete
+    was refused permanently, while the message told the operator to revoke and
+    try again. The console meanwhile offers delete when `enrolled_at` is null,
+    which revocation clears. Three views of "enrolled", disagreeing.
+
+    This is the one that matches what delete is actually protecting: a box on a
+    hill that can still publish. Once nothing can authenticate, the row behind
+    the station is inert and there is nothing to protect.
+
+    `enrolment.is_valid` rather than a fourth predicate — it is what
+    `credential_valid` reports to the console, and the two must not drift.
+    """
+    credentials = db.execute(
+        select(StationCredential)
+        .where(StationCredential.ground_station_id == station_id)
+    ).scalars().all()
+    return any(enrolment.is_valid(c) for c in credentials)
+
+
 def _has_enrolled(db: Session, station_id: uuid.UUID) -> bool:
     """Whether a credential has ever been issued for this station.
 
@@ -252,7 +277,7 @@ def delete_station(
 ) -> Response:
     """Remove a station record that never became a station.
 
-    **Only before it has ever enrolled.** A record is created in the console
+    **Only while nothing can authenticate as it.** A record is created in the console
     before anyone is standing at the hardware, so typos, abandoned plans and
     duplicates accumulate — and until a credential has been issued there is
     nothing behind the row: no telemetry, no history, nothing a person will
@@ -265,20 +290,28 @@ def delete_station(
     that revokes first and preserves the audit trail — deliberately not this,
     and refused here rather than half-done.
 
-    The test is a credential ever issued, not `last_seen_at`. A station that
-    enrolled and has not reported since is exactly the case where somebody
-    reaches for delete, and it is exactly the case where the box may be sitting
-    on a hill with a working credential.
+    The test is a *live* credential, not `last_seen_at` and not "a credential
+    was ever issued". Not `last_seen_at`, because a station that enrolled and
+    has gone quiet is exactly when somebody reaches for delete and exactly when
+    a box may be sitting on a hill still able to publish. And not "ever
+    issued", because revocation stamps `revoked_at` rather than removing the
+    row: that test stayed true for ever, so delete was refused permanently
+    while this endpoint's own message told the operator to revoke and retry.
+
+    Revoking is therefore the decommissioning step the paragraph above asks
+    for. Once it has happened nothing can authenticate, the audit trail is
+    intact, and what is left is the tidying this endpoint is for.
     """
     station = db.get(GroundStation, station_id)
     if station is None:
         raise HTTPException(status_code=404, detail="Station not available")
 
-    if _has_enrolled(db, station_id):
+    if _has_live_credential(db, station_id):
         raise HTTPException(
             status_code=409,
             detail=(
-                "This station has enrolled, so it cannot be deleted here. "
+                "This station has a live credential, so it cannot be deleted "
+                "here. "
                 "Revoke its credential first."
             ),
         )
