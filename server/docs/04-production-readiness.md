@@ -2,18 +2,33 @@
 
 Things flagged during the build that are fine for development and are not fine
 for a customer deployment. Written as they came up rather than assembled at the
-end, so nothing here is speculative — each item is something that is currently
-true of this codebase.
+end.
+
+**Last verified against the code: 2026-08-01.** This used to claim that nothing
+in it was speculative and that every item was currently true. It was a running
+log that nobody re-read, so eight items went on being listed after they were
+built — including MFA, platform admin, the media pipeline and scheduled
+backups. A readiness list that is wrong in the *reassuring* direction is worse
+than no list, because it is used to decide what is left.
+
+Resolved items are struck through rather than deleted: what mattered and why is
+worth keeping, and a reader can see the list is maintained. Anything not struck
+through was checked on the date above.
 
 ## Blocking
 
-**Basemap attribution is not displayed.** Removed from the map on request. Esri's
+**Basemap attribution is not displayed, and cannot be.** Removed from the map on
+request — and the one place that renders it, the basemap switcher's tooltip, is
+inside a block that only mounts when more than one basemap exists. There is one.
+So the notice is unreachable rather than merely hidden. Esri's
 and OpenStreetMap's terms both require their notice to be shown, so this needs
 resolving alongside the tile sourcing below — either by restoring attribution or
 by moving to a provider whose terms do not require it.
 
-**Basemap tile licensing.** `services/basemaps.py` points at the same public
-endpoints DroneOps uses: Esri World Imagery, OpenStreetMap, OpenTopoMap. Serving
+**Basemap tile licensing.** `services/basemaps.py` points at a public endpoint:
+Esri World Imagery. (OpenStreetMap and OpenTopoMap were dropped when the console
+went to satellite-only; the licensing problem is unchanged for the one that is
+left.) Serving
 them through our cache-through proxy is far gentler than pointing every browser
 at them, but `scripts/cache_map.py` bulk-prefetches, and OSM's tile usage policy
 prohibits that outright. Move to a provider whose terms permit offline caching,
@@ -28,7 +43,10 @@ sent in clear.
 that terminates TLS, and bind the app to loopback (`docker-compose.yaml` has the
 line commented, next to the current one).
 
-**No database backups.** DroneOps runs a `postgres-backup-local` container on a
+~~**No database backups.**~~ **Done** — `docker-compose.yaml` runs a scheduled
+`backup` service (`BACKUP_INTERVAL_HOURS`, default 6) writing to `server/backups/`.
+What is still true is that they do not leave the host; see the entry below.
+The original note: DroneOps runs a `postgres-backup-local` container on a
 daily schedule; Percepta has nothing equivalent. The Postgres volume is the only
 copy of every org, grant and audit record.
 
@@ -79,7 +97,10 @@ signal — it should be an alert.
 
 These are absences, not defects, but they are load-bearing for the product:
 
-- **PTZ commands.** Radio tuning, squelch and the floodlight now go through
+- ~~**PTZ commands.**~~ Still unbuilt, and now not rendered either: the `canPtz`
+  prop is declared and never read, because no fitted camera has a mount. The
+  capability keeps meaning what it meant. Radio tuning, squelch and the
+  floodlight go through
   `api/commands.py` with capability checks and an audit entry each. PTZ still
   renders without doing anything.
 - ~~Exclusive lease for contended hardware~~ — **decided against** on
@@ -88,7 +109,8 @@ These are absences, not defects, but they are load-bearing for the product:
   `radio.control` can tune at will; the audit log answers "who moved it".
   Revisit only for `radio.transmit`, where two transmitters on one channel is a
   real problem rather than a UX one.
-- **Media pipeline.** No video ingest, relay or stream tickets. The design is in
+- ~~**Media pipeline.**~~ **Built** — `api/media.py` has ingest, view and
+  tickets, and a station streams H.264 on demand. The design is in
   `03-realtime-isolation.md` §7.
 - **The ingest is single-instance by lease, and untested above one worker.**
   `station_ingest.py` republishes, so two running at once would double every
@@ -97,7 +119,7 @@ These are absences, not defects, but they are load-bearing for the product:
   hand, but the container still runs a single uvicorn worker, so a real
   multi-worker failover has never happened. Exercise it before scaling out, and
   expect a gap of up to one lease period (15s) when a leader dies.
-- **Backups are not scheduled and do not leave the host.**
+- **Backups do not leave the host.** (Scheduling is done — see Blocking.)
   `scripts/backup.sh` works and the restore has been rehearsed
   (`06-backup-and-restore.md`), but nothing runs it on a timer, nothing alerts
   if it stops producing files, and the dumps sit on the same disk as the
@@ -132,7 +154,8 @@ These are absences, not defects, but they are load-bearing for the product:
   bootstrap command that takes a password from the environment and prints
   nothing. Until that exists, standing up a real deployment means either running
   the dev seed (wrong) or inserting a user by hand (undocumented).
-- **Enrolment gaps.** No console UI for issuing codes (the API exists at
+- ~~**Enrolment gaps.**~~ **Built** — `web/src/components/SettingsEnrolment.tsx`
+  issues, cancels and revokes. The API is at
   `/api/stations/{id}/enrolment`, nothing renders it). No configuration
   delivery - `config_version` is issued at enrolment but `config.set` is not
   implemented. No mTLS or CA; credentials are bearer secrets, which
@@ -140,9 +163,11 @@ These are absences, not defects, but they are load-bearing for the product:
   destination. Credentials expire after 90 days and nothing yet alerts on a
   station that has stopped renewing, which §6 is explicit is how remote sites
   fail.
-- **MFA.** The `mfa_required` / `mfa_secret` columns and `pyotp` are present;
+- ~~**MFA.**~~ **Enforced at login** (`api/auth.py`). The original note: the
+  `mfa_required` / `mfa_secret` columns and `pyotp` are present;
   the login flow does not enforce them.
-- **Platform admin.** Modelled in the design, not implemented — no cross-org
+- ~~**Platform admin.**~~ **Built** — `api/platform.py`, five routes. The
+  original note: modelled in the design, not implemented — no cross-org
   read path exists.
 - **Real radio hardware.** The `audio` stream carries simulated airband from
   `services/airband_demo.py`; no dongle is integrated. Audio is squelch-gated

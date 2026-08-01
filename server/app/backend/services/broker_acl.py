@@ -73,7 +73,6 @@ def _channels(station_id: uuid.UUID | str) -> list[str]:
     return [
         f"&gsu/{station_id}/telemetry",
         f"&gsu/{station_id}/audio",
-        f"&gsu/{station_id}/video",
         f"&cmd/gsu/{station_id}",
     ]
 

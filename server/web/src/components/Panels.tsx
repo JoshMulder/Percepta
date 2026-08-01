@@ -4,7 +4,6 @@ import { DemoCamera } from "./DemoCamera";
 import { PowerFlow } from "./PowerFlow";
 import { IconChart } from "./Icons";
 import type { StreamState } from "../useVideoStream";
-import type { VideoPayload } from "../types";
 import {
   BatteryChart,
   SOC_WINDOWS,
@@ -28,7 +27,7 @@ export function NotPermitted({ what }: { what: string }) {
 function VideoPanelInner({
   compact,
   streaming,
-  frame,
+  fitted,
   online,
   demo,
   lightOn,
@@ -41,8 +40,16 @@ function VideoPanelInner({
   live?: boolean;
   compact?: boolean;
   streaming: boolean;
-  /** Latest frame from the station, if any. */
-  frame?: VideoPayload | null;
+  /** Whether the station reports a camera in its camera slot: true, false, or
+   *  undefined before the first health frame. Absence of evidence is not
+   *  evidence of absence, so undefined renders neither state.
+   *
+   *  This used to be read off a `VideoPayload` on the broker's video channel.
+   *  Nothing has published there since the station's periodic JPEG publisher
+   *  was removed, so `frame` was permanently null and this panel could not
+   *  report "no camera" at all — the one thing it most needed to say. It now
+   *  comes from `health.devices`, the same statement every other panel uses. */
+  fitted?: boolean;
   /** Held in the contract and still granted per station, but no longer drawn:
    *  the pad moved nothing, because no fitted camera has a mount. It comes
    *  back when one does, and the capability keeps meaning what it meant. */
@@ -87,25 +94,13 @@ function VideoPanelInner({
             <span className="video-live-dot" />
             live
           </div>
-        ) : frame?.available === false ? (
+        ) : fitted === false ? (
           // A camera that is not fitted is not a camera that has failed, and an
           // operator does different things about each.
           <div className="video-idle">
             <span className="no-source-badge">NO CAMERA</span>
-            <span>{frame.unavailable_reason ?? "No camera on this station"}</span>
+            <span>No camera on this station</span>
           </div>
-        ) : frame?.jpeg ? (
-          <>
-            <img
-              className="video-frame"
-              src={`data:image/jpeg;base64,${frame.jpeg}`}
-              alt="Camera view"
-            />
-            <div className="video-live">
-              <span className="video-live-dot" />
-              {compact ? "live" : <FrameAge capturedAt={frame.captured_at} />}
-            </div>
-          </>
         ) : demo ? (
           <>
             <DemoCamera lightOn={lightOn ?? false} compact={compact} />
@@ -262,20 +257,3 @@ export const FloodlightPanel = memo(FloodlightPanelInner);
 export const VideoPanel = memo(VideoPanelInner);
 
 
-/**
- * How old the picture is, not when it arrived.
- *
- * On a link that buffers and drops, an operator looking at a still image will
- * assume it is current unless told otherwise - and a frozen frame from four
- * minutes ago is exactly the thing that gets acted on wrongly. The station
- * timestamps at capture for this reason.
- */
-function FrameAge({ capturedAt }: { capturedAt?: string }) {
-  if (!capturedAt) return <>live</>;
-  const ms = Date.now() - new Date(capturedAt).getTime();
-  if (Number.isNaN(ms)) return <>live</>;
-  const seconds = Math.max(0, Math.round(ms / 1000));
-  if (seconds < 5) return <>live</>;
-  if (seconds < 90) return <>{seconds}s old</>;
-  return <>{Math.round(seconds / 60)} min old</>;
-}

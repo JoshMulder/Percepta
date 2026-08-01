@@ -10,7 +10,6 @@ talks to a browser (`server/docs/00-topology.md`, rule 8).
 |---|---|---|
 | station → platform | `gsu/{station_id}/telemetry` | one telemetry object, JSON |
 | station → platform | `gsu/{station_id}/audio` | one audio object, JSON |
-| station → platform | `gsu/{station_id}/video` | one MJPEG frame, JSON |
 | platform → station | `cmd/gsu/{station_id}` | one command object, JSON |
 
 `{station_id}` is the UUID the platform issued at enrolment. A station publishes
@@ -55,21 +54,23 @@ not the only one.
 
 ## Video
 
-Motion JPEG, one whole frame per message, on `gsu/{station_id}/video`. See
-`schemas/video.schema.json` - the reasoning for independent frames over an
-encoded stream is written there, and it is a decision about *this* camera on
-*this* link rather than a general preference.
+**There is no video channel.** `gsu/{station_id}/video` carried one MJPEG frame
+per message and is gone, along with `schemas/video.schema.json`.
 
-It is the heaviest thing a station sends. 640x480 at 2 fps is roughly half a
-megabit per second sustained, which is significant on a metered link, so the
-rate is low by default. Publishing continuously to a console nobody is watching
-is waste, and asking for video on demand is the intended next step - it needs a
-command, and that is an open contract question rather than something to invent.
+It was removed at the station and for a reason worth keeping: the camera is a
+single device with a single owner, and a periodic snapshot publisher competing
+with the live encoder for it is what wedged a real camera —
+`station/gsu/video.py` has the full account. Removing one of the two readers
+does not narrow that class of fault, it deletes it.
 
-`captured_at` is when the frame was **taken**. An operator looking at a still
-image assumes it is current unless told otherwise, and a frozen frame from four
-minutes ago is exactly what gets acted on wrongly.
+Live video goes over the media WebSocket instead (`WS /media/ingest`), started
+only while somebody is watching. What is left on the station is a preview that
+publishes nothing at all: it serves the newest frame it has to the local setup
+page, over loopback, so an installer can aim a camera.
 
+A station's camera state — fitted or not, which capture path, who holds the
+sensor — is reported in the health frame, which is where a console should read
+it.
 ## The live video stream
 
 Separate from the snapshot channel and from the broker entirely. Video is bulk

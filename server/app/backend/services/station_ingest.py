@@ -4,9 +4,12 @@ This is the boundary described in `contract/transport.md`. A station publishes
 to channels named for itself and knows nothing about organisations, groups or
 subscribers. Everything on the platform side of that line happens here.
 
-    gsu/{station_id}/telemetry  ─┐
-    gsu/{station_id}/audio      ─┤
-    gsu/{station_id}/video      ─┴─► ingest ─► org:{org}:gsu:{station}:{stream}
+    gsu/{station_id}/telemetry  ─┬─► ingest ─► org:{org}:gsu:{station}:{stream}
+    gsu/{station_id}/audio      ─┘
+
+Video is not here. The station's periodic JPEG channel was removed because two
+readers of one sensor wedged the camera (station/gsu/video.py); live video goes
+over the media WebSocket, which has its own relay.
 
 **The organisation is resolved here, from the device registry, keyed on the
 station id — never from anything the station sent.** That single rule is what
@@ -57,7 +60,6 @@ log = logging.getLogger(__name__)
 
 TELEMETRY_PATTERN = "gsu/*/telemetry"
 AUDIO_PATTERN = "gsu/*/audio"
-VIDEO_PATTERN = "gsu/*/video"
 
 #: Payload kinds the platform understands. Anything else is dropped rather than
 #: rejected: a station may legitimately be newer than the platform, and the
@@ -139,7 +141,7 @@ class StationIngest:
                     await asyncio.sleep(CONTEND_SECONDS)
                 log.info(
                     "Station ingest leading (%s); listening on %s, %s and %s.",
-                    self._token, TELEMETRY_PATTERN, AUDIO_PATTERN, VIDEO_PATTERN,
+                    self._token, TELEMETRY_PATTERN, AUDIO_PATTERN,
                 )
                 try:
                     await self._lead()
@@ -158,7 +160,12 @@ class StationIngest:
         """
         assert self._redis is not None
         pubsub = self._redis.pubsub()
-        await pubsub.psubscribe(TELEMETRY_PATTERN, AUDIO_PATTERN, VIDEO_PATTERN)
+        # No video pattern. The station's periodic JPEG channel was removed
+        # because two readers of one sensor wedged the camera
+        # (station/gsu/video.py); live video goes over the media WebSocket
+        # instead. Nothing has published here for some time, and subscribing to
+        # it suggested otherwise.
+        await pubsub.psubscribe(TELEMETRY_PATTERN, AUDIO_PATTERN)
         try:
             next_renew = time.monotonic() + RENEW_SECONDS
             while True:

@@ -56,7 +56,6 @@ def _permitted(station_id: uuid.UUID) -> frozenset[str]:
     return frozenset({
         f"gsu/{station_id}/telemetry",
         f"gsu/{station_id}/audio",
-        f"gsu/{station_id}/video",
     })
 
 

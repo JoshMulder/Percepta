@@ -3,7 +3,6 @@ import { api } from "../api";
 import type {
   AdsbPayload,
   HealthPayload,
-  VideoPayload,
   Capability,
   LightPayload,
   MapConfig,
@@ -147,10 +146,6 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
   const [radio, setRadio] = useState<RadioPayload | null>(null);
   const [light, setLight] = useState<LightPayload | null>(null);
   const [health, setHealth] = useState<HealthPayload | null>(null);
-  // Only the most recent frame is kept. Video is current state, not a
-  // recording: a queue of stale frames replayed after a dropout is worse than a
-  // gap, which is the same rule the contract applies to telemetry.
-  const [frame, setFrame] = useState<VideoPayload | null>(null);
   // Conditions already raised, so one that stays true for hours does not refill
   // the drawer once a second. A ref rather than state: it is bookkeeping, and
   // nothing renders from it.
@@ -296,9 +291,6 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
       case "radio":
         setRadio(message.payload as RadioPayload);
         break;
-      case "video":
-        setFrame(message.payload as VideoPayload);
-        break;
       case "health": {
         const h = message.payload as HealthPayload;
         setHealth(h);
@@ -405,7 +397,6 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
     setMapConfig(null);
     setAdsb(null);
     setHealth(null);
-    setFrame(null);
     raisedConditions.current = new Set();
     setUnavailable({});
     setUnfitted({});
@@ -452,8 +443,7 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
     setStreamsSince((current) => current ?? Date.now());
     if (has(caps, "station.view")) socket.subscribe("status");
     if (has(caps, "telemetry.view")) socket.subscribe("telemetry");
-    if (has(caps, "video.view")) socket.subscribe("video");
-    if (has(caps, "radio.listen")) socket.subscribe("audio");
+      if (has(caps, "radio.listen")) socket.subscribe("audio");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [socket.state, caps.join(",")]);
 
@@ -561,10 +551,14 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
    * because it does not have a panel — it draws on the map, which is always
    * rendered and carries its own fault indication in the contact count.
    */
-  const fittedFor = (kind: StreamKind): boolean | undefined => {
+  // Takes a slot name, not a stream name. They were the same word for every
+  // panel — except the camera, whose slot is `camera` while its stream was
+  // `video`. That stream is gone, so the distinction is visible here instead of
+  // hidden behind two names that happened to coincide.
+  const fittedFor = (slotName: StreamKind | "camera"): boolean | undefined => {
     const slots = health?.devices;
     if (!slots) return undefined;
-    const slot = slots.find((d) => d.slot === kind);
+    const slot = slots.find((d) => d.slot === slotName);
     // A slot the station does not report at all is not evidence of absence.
     return slot ? slot.status !== "not_fitted" : undefined;
   };
@@ -628,7 +622,7 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
     ) : canVideo ? (
       <VideoPanel
         compact={small}
-        frame={frame}
+        fitted={fittedFor("camera")}
         stationId={stationId}
         // Live wherever the panel is mounted - main stage, sidebar preview,
         // or a phone's camera tab. Attaching is what starts the station
@@ -640,7 +634,7 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
         // compact layout unmounts hidden tabs - and the lease still stops the
         // encoder when the console closes.
         live
-        streaming={frame?.jpeg != null}
+        streaming={streamState === "playing"}
         videoEl={videoElRef.current}
         streamState={streamState}
         canPtz={!small && has(caps, "video.ptz")}

@@ -190,7 +190,6 @@ def _broker(station_id: uuid.UUID, request: Request | None = None) -> BrokerOut:
         ca_pem=_broker_ca(request),
         telemetry_topic=f"gsu/{station_id}/telemetry",
         audio_topic=f"gsu/{station_id}/audio",
-        video_topic=f"gsu/{station_id}/video",
         command_topic=f"cmd/gsu/{station_id}",
         username=broker_acl.principal(station_id),
     )

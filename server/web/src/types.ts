@@ -68,7 +68,7 @@ export type ClientMessage =
   | { type: "unsubscribe"; stream: StreamName }
   | { type: "ping" };
 
-export type StreamName = "status" | "telemetry" | "video" | "audio";
+export type StreamName = "status" | "telemetry" | "audio";
 
 export type ServerMessage =
   | { type: "hello"; user_id: string; organization_id: string; stations: string[] }

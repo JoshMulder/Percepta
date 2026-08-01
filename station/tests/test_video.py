@@ -1,6 +1,6 @@
 """The video channel: the payload, the picture, and the rules about both.
 
-Everything here runs offline against `contract/schemas/video.schema.json`, like
+Everything here runs offline, like
 the rest of `tests/`, so a schema change lands as a failure on this side rather
 than as a surprise on a console.
 
@@ -43,19 +43,17 @@ from gsu.devices import registry
 from gsu.video import CameraPreview  # noqa: F401 - imported to pin the name
 
 SCHEMAS = Path(__file__).resolve().parent.parent.parent / "contract" / "schemas"
-VIDEO = Draft202012Validator(json.loads((SCHEMAS / "video.schema.json").read_text()))
 
 STATION = "29ed8568-999e-4725-8daa-3ee3cea1751e"
 
 
-def broker(video_topic: str | None = None) -> Broker:
+def broker() -> Broker:
     return Broker(
         url="rediss://broker:6380/0",
         username=f"gsu:{STATION}",
         telemetry_topic=f"gsu/{STATION}/telemetry",
         audio_topic=f"gsu/{STATION}/audio",
         command_topic=f"cmd/gsu/{STATION}",
-        video_topic=video_topic,
     )
 
 
@@ -448,22 +446,11 @@ class RefusedChannelTests(AgentFixture):
         self.assertTrue(transport.publish(f"gsu/{STATION}/telemetry", {"kind": "power"}))
 
 
-class TopicTests(unittest.TestCase):
-    """Where video goes, and why the station derives it at all."""
-
-    def test_the_platform_names_it_when_it_can(self):
-        self.assertEqual(broker("gsu/x/vid").resolve_video_topic(), "gsu/x/vid")
-
-    def test_otherwise_it_follows_telemetry_into_the_same_namespace(self):
-        self.assertEqual(broker().resolve_video_topic(), f"gsu/{STATION}/video")
-
-    def test_a_credential_stored_before_the_field_existed_still_loads(self):
-        from gsu.credentials import Enrolment
-
-        stored = json.loads(_enrolment().to_json())
-        stored["broker"].pop("video_topic")
-        loaded = Enrolment.from_json(json.dumps(stored))
-        self.assertEqual(loaded.broker.resolve_video_topic(), f"gsu/{STATION}/video")
+# TopicTests is gone with `resolve_video_topic`. It covered a helper that
+# derived `gsu/{station_id}/video` when the platform did not name it — and both
+# the helper and the channel are removed: the periodic JPEG publisher that used
+# it was what wedged the camera, and live video is the media WebSocket's job.
+# See station/gsu/video.py and contract/transport.md.
 
 
 # --- the picture ---------------------------------------------------------

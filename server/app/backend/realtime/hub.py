@@ -36,7 +36,6 @@ log = logging.getLogger(__name__)
 STREAM_CAPABILITY: dict[str, Capability] = {
     "status": Capability.STATION_VIEW,
     "telemetry": Capability.TELEMETRY_VIEW,
-    "video": Capability.VIDEO_VIEW,
     "audio": Capability.RADIO_LISTEN,
 }
 
