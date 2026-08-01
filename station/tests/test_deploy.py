@@ -274,7 +274,16 @@ class UnitFileTests(unittest.TestCase):
         env = (DEPLOY / "gsu.env.example").read_text()
         self.assertIn("GSU_REQUIRE_TLS=1", env)
         self.assertRegex(env, r"GSU_PLATFORM_URL=https://")
-        self.assertRegex(env, r"GSU_BROKER_URL=rediss://")
+        # GSU_BROKER_URL ships empty: the platform states the broker address at
+        # enrolment, and it is the relay on the platform's own host. What still
+        # has to hold is that nothing here suggests a plaintext one — the
+        # assertion used to be `rediss://`, which stopped being true when the
+        # setting stopped having a default at all, and asserting the old
+        # literal would have meant shipping a default that is wrong behind a
+        # proxy just to keep a test green.
+        for scheme in ("redis://", "ws://", "http://", "mqtt://"):
+            self.assertNotRegex(
+                env, rf"^GSU_\w+={scheme}", f"a plaintext {scheme} default")
         # The setup page must not be shipped bound to anything routable. It
         # now has authentication, but the shipped default is still the one
         # that is safe on a box whose address is public.
