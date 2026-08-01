@@ -363,9 +363,17 @@ class ContainerTests(unittest.TestCase):
         # on where the paragraph happened to break.
         runbook = " ".join((DEPLOY.parent / "DEPLOYMENT.md").read_text().split())
         self.assertIn("The station runs as a container", runbook)
-        self.assertIn("Appendix B: running it as a plain systemd service", runbook)
         # The trade is stated, not glossed.
         self.assertIn("Isolation was traded away deliberately", runbook)
+
+    def test_the_runbook_does_not_describe_a_path_that_is_gone(self):
+        # A runbook is followed rather than read, so a stale one sends somebody
+        # to a site and leaves them there. This used to assert the *presence*
+        # of the systemd appendix.
+        runbook = " ".join((DEPLOY.parent / "DEPLOYMENT.md").read_text().split())
+        for gone in ("--path systemd", "the systemd path", "gsu.service",
+                     ".venv/bin/python"):
+            self.assertNotIn(gone, runbook, f"the runbook still mentions {gone}")
 
     def test_the_base_image_is_pinned_by_digest(self):
         # An unpinned base is a different station every time it is rebuilt.

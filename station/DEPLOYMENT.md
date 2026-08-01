@@ -1205,8 +1205,7 @@ technician's browser.
 Every request then arrives from the bridge gateway, which is inside 172.16/12,
 so the source-address check passes for everyone. On the container path the
 password and the window are the only two controls left. Publish the port to a
-specific LAN address rather than `0.0.0.0` if you use it, or use the systemd
-path, which is the recommended one for camera-equipped stations anyway.
+specific LAN address rather than `0.0.0.0` if you use it.
 
 ---
 
