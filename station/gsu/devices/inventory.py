@@ -29,6 +29,7 @@ from __future__ import annotations
 import importlib
 import inspect
 import json
+import os
 import logging
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -166,11 +167,30 @@ class Inventory:
                 )
 
     def save(self) -> None:
+        """Persist what is fitted. 0600, because this file holds secrets.
+
+        A camera's RTSP password lives in `params` (`registry.py`, the `rtsp`
+        type), so this is not inventory — it is inventory *and credentials*.
+        `Path.write_text` uses the umask and produced 0644 on the bench: the
+        state directory is 0700 so nothing else on the box could read it, but
+        the threat model here is a stolen station, and defence in depth is the
+        whole reason that directory is 0700 rather than the only reason.
+
+        0600 from the first byte rather than chmod-ed afterwards, for the same
+        reason `credentials.py` and `tls.py` both go out of their way to do it:
+        the window in between is small and completely avoidable.
+        """
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.path.parent.chmod(0o700)
+        except OSError:
+            pass
         payload = {"fitted": {slot: asdict(entry) for slot, entry in self.fitted.items()}}
         tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True))
-        tmp.replace(self.path)
+        handle = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(handle, "w") as file:
+            file.write(json.dumps(payload, indent=2, sort_keys=True))
+        os.replace(tmp, self.path)
 
     def set_device(self, slot: str, type_id: str, params: dict | None = None,
                    resource: str | None = None) -> None:

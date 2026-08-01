@@ -34,7 +34,6 @@ CA_FINGERPRINT=""
 ENROL_TOKEN=""
 DEMO=0
 LAN=1
-DEPLOY_PATH=""
 SETUP_PASSWORD=""
 BLACKLIST_SDR=""
 ASSUME_YES=0
@@ -43,7 +42,6 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)   # …/station/deploy
 SRC=$(cd "$HERE/.." && pwd)                          # …/station
 PREFIX=/opt/percepta/station
 ETC=/etc/percepta
-SERVICE_USER=gsu
 
 say()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 info() { printf '   %s\n' "$*"; }
@@ -52,8 +50,10 @@ die()  { printf '\n\033[31mbootstrap: %s\033[0m\n' "$*" >&2; exit 1; }
 
 # --- the three things that differ between the two paths ---------------------
 #
-# Kept together rather than scattered through the script, so "what does the
-# systemd path do differently" has one answer you can read in one place.
+# Docker is the only path. The station ran as a plain systemd service too until
+# the CSI camera stopped being a requirement, which was the only thing that
+# needed it — rpicam-vid bus-errors in the container image, so a camera on a
+# ribbon could not stream from one. Nothing here branches any more.
 
 compose() {
   docker compose --project-directory "$PREFIX/deploy" "$@"
@@ -62,46 +62,23 @@ compose() {
 # The password, hashed by the agent's own code so the algorithm cannot drift
 # apart from the one that checks it. Piped, never in argv.
 hash_password() {   # password on stdin
-  if [ "$DEPLOY_PATH" = docker ]; then
-    compose run --rm -T gsu setup-password --stdin
-  else
-    sudo -u "$SERVICE_USER" "$PREFIX/.venv/bin/python" -m gsu setup-password --stdin
-  fi
+  compose run --rm -T gsu setup-password --stdin
 }
 
 start_station() {
-  if [ "$DEPLOY_PATH" = docker ]; then
-    compose up -d
-  else
-    systemctl enable --now gsu.service
-    systemctl restart gsu.service
-  fi
+  compose up -d
 }
 
 preflight() {
-  if [ "$DEPLOY_PATH" = docker ]; then
-    compose run --rm -T gsu preflight || true
-  else
-    sudo -u "$SERVICE_USER" env "$(grep -v '^#' "$ETC/gsu.env" | xargs)" \
-      "$PREFIX/.venv/bin/python" -m gsu preflight || true
-  fi
+  compose run --rm -T gsu preflight || true
 }
 
 enrol_now() {   # $1 = token
-  if [ "$DEPLOY_PATH" = docker ]; then
-    compose run --rm -T gsu enrol --token "$1"
-  else
-    sudo -u "$SERVICE_USER" env "$(grep -v '^#' "$ETC/gsu.env" | xargs)" \
-      "$PREFIX/.venv/bin/python" -m gsu enrol --token "$1"
-  fi
+  compose run --rm -T gsu enrol --token "$1"
 }
 
 enrol_hint() {
-  if [ "$DEPLOY_PATH" = docker ]; then
-    echo "cd $PREFIX/deploy && sudo docker compose run --rm gsu enrol --token XXXX-XXXX-XXXX"
-  else
-    echo "sudo -u $SERVICE_USER $PREFIX/.venv/bin/python -m gsu enrol --token XXXX-XXXX-XXXX"
-  fi
+  echo "cd $PREFIX/deploy && sudo docker compose run --rm gsu enrol --token XXXX-XXXX-XXXX"
 }
 
 usage() {
@@ -127,10 +104,6 @@ usage() {
   --demo              provision as a demo box: every slot simulated.
   --loopback          keep the setup page on 127.0.0.1. Default is the LAN,
                       which is what a box on a bench is for.
-  --path docker|systemd
-                      default docker. A station with a CSI camera must use
-                      systemd — see DEPLOYMENT.md §3 — and this detects one
-                      and refuses to give you the wrong answer silently.
   --password PASS     the setup page's password. Generated and printed if
                       you do not choose one.
   --sdr / --no-sdr    blacklist the kernel's DVB driver, which grabs RTL2832U
@@ -150,7 +123,6 @@ while [ $# -gt 0 ]; do
     --demo)      DEMO=1; shift ;;
     --loopback)  LAN=0; shift ;;
     --lan)       LAN=1; shift ;;
-    --path)      DEPLOY_PATH="${2:-}"; shift 2 ;;
     --password)  SETUP_PASSWORD="${2:-}"; shift 2 ;;
     --sdr)       BLACKLIST_SDR=1; shift ;;
     --no-sdr)    BLACKLIST_SDR=0; shift ;;
@@ -195,24 +167,15 @@ MODEL=$(tr -d '\0' < /proc/device-tree/model 2>/dev/null || echo "unknown hardwa
 info "$MODEL"
 info "$(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME") on $(uname -m)"
 
-# A CSI camera decides the deployment path, and it is a measurement rather than
-# a preference: rpicam-vid takes a bus error inside the container image and the
-# live stream never produces a frame. DEPLOYMENT.md §3 has the numbers.
-HAS_CSI=0
-if [ -e /dev/video0 ] && command -v rpicam-jpeg >/dev/null 2>&1; then HAS_CSI=1; fi
-if [ -z "$DEPLOY_PATH" ]; then
-  if [ "$HAS_CSI" = 1 ]; then
-    DEPLOY_PATH=systemd
-    info "CSI camera present, so taking the systemd path (DEPLOYMENT.md §3)."
-  else
-    DEPLOY_PATH=docker
-  fi
-elif [ "$DEPLOY_PATH" = docker ] && [ "$HAS_CSI" = 1 ]; then
-  warn "a CSI camera is fitted and you asked for the container path."
-  warn "Stills may work; the live stream will not — rpicam-vid bus-errors in"
-  warn "that image. DEPLOYMENT.md §3. Continuing because you were explicit."
+# A CSI camera on the ribbon used to force the systemd path here, because
+# rpicam-vid bus-errors inside the container image and the live stream never
+# produces a frame. CSI is no longer a supported camera — use a network camera
+# — so that branch is gone and there is one path.
+if [ -e /dev/video0 ] && command -v rpicam-jpeg >/dev/null 2>&1; then
+  warn "a CSI camera appears to be on the ribbon. It will not stream:"
+  warn "rpicam-vid bus-errors in this image and the station has no path"
+  warn "around it. Fit a network camera instead (ONVIF/RTSP)."
 fi
-info "deployment path: $DEPLOY_PATH"
 
 if [ -z "$BLACKLIST_SDR" ]; then
   BLACKLIST_SDR=0
@@ -237,31 +200,29 @@ export DEBIAN_FRONTEND=noninteractive
 # daemon. DEPLOYMENT.md §11.
 # curl fetches the CA below. Not on every minimal image, and its absence
 # looked exactly like the platform being down.
-NEED="chrony rsync curl"
-if [ "$DEPLOY_PATH" = docker ]; then
-  NEED="$NEED docker.io"
-  # Compose v2 is spelled differently depending on where it comes from, and
-  # hardcoding one name is why this failed on Bookworm with "unable to locate
-  # package docker-compose-v2" — that name is Trixie's and Ubuntu 24.04's.
-  # Debian 12 has it in backports, and Docker's own repository calls it
-  # docker-compose-plugin. Ask apt what it actually has.
-  #
-  # v1 (`docker-compose`, the Python one) is deliberately not a candidate:
-  # everything here invokes `docker compose` as a subcommand, which v1 does
-  # not provide, and installing it would satisfy the check and fail later.
-  COMPOSE_PKG=""
-  apt-get update -qq
-  for candidate in docker-compose-v2 docker-compose-plugin; do
-    if apt-cache show "$candidate" >/dev/null 2>&1; then
-      COMPOSE_PKG="$candidate"; break
-    fi
-  done
-  if [ -n "$COMPOSE_PKG" ]; then
-    NEED="$NEED $COMPOSE_PKG"
-  elif docker compose version >/dev/null 2>&1; then
-    info "compose v2 already present, not from apt"
-  else
-    die "no Compose v2 package in this box's apt sources, and \`docker compose\`
+NEED="chrony rsync curl docker.io"
+# Compose v2 is spelled differently depending on where it comes from, and
+# hardcoding one name is why this failed on Bookworm with "unable to locate
+# package docker-compose-v2" — that name is Trixie's and Ubuntu 24.04's.
+# Debian 12 has it in backports, and Docker's own repository calls it
+# docker-compose-plugin. Ask apt what it actually has.
+#
+# v1 (`docker-compose`, the Python one) is deliberately not a candidate:
+# everything here invokes `docker compose` as a subcommand, which v1 does
+# not provide, and installing it would satisfy the check and fail later.
+COMPOSE_PKG=""
+apt-get update -qq
+for candidate in docker-compose-v2 docker-compose-plugin; do
+  if apt-cache show "$candidate" >/dev/null 2>&1; then
+    COMPOSE_PKG="$candidate"; break
+  fi
+done
+if [ -n "$COMPOSE_PKG" ]; then
+  NEED="$NEED $COMPOSE_PKG"
+elif docker compose version >/dev/null 2>&1; then
+  info "compose v2 already present, not from apt"
+else
+  die "no Compose v2 package in this box's apt sources, and \`docker compose\`
    does not work. On Debian 12 / Raspberry Pi OS Bookworm either enable
    backports:
 
@@ -270,13 +231,7 @@ if [ "$DEPLOY_PATH" = docker ]; then
      sudo apt update && sudo apt install -y -t bookworm-backports docker-compose-v2
 
    or install Docker's own packages from https://get.docker.com, which bring
-   docker-compose-plugin. Then run this again.
-
-   Or take the other path, which needs no Docker at all:
-     sudo $0 --platform $PLATFORM --path systemd"
-  fi
-else
-  NEED="$NEED python3-venv"
+   docker-compose-plugin. Then run this again."
 fi
 MISSING=""
 for pkg in $NEED; do
@@ -300,7 +255,6 @@ if [ -n "$MISSING" ]; then
    half-configured. Expand the filesystem (\`sudo raspi-config\`) or clear space."
 
   info "installing:$MISSING"
-  [ "$DEPLOY_PATH" = docker ] || apt-get update -qq
   # NOT quiet. This used to be `-qq >/dev/null`, which turned a package
   # conflict into six words with the explanation discarded — the one thing you
   # need when an install fails is what apt said about it.
@@ -311,14 +265,14 @@ if [ -n "$MISSING" ]; then
     if dpkg -l docker-ce 2>/dev/null | grep -q '^ii'; then
       warn "docker-ce is installed. It conflicts with Debian's docker.io and"
       warn "with containerd — you already have Docker, so re-run with:"
-      warn "  --path docker   (skipping docker.io: apt install -y chrony rsync)"
+      warn "  sudo apt-get install -y chrony rsync curl   (skipping docker.io)"
     fi
     die "packages not installed; nothing else was changed."
   fi
 else
   info "already present"
 fi
-[ "$DEPLOY_PATH" = docker ] && systemctl enable --now docker >/dev/null 2>&1 || true
+systemctl enable --now docker >/dev/null 2>&1 || true
 
 # The SD card is the most likely hardware failure at a remote site, and this box
 # writes an event database and audio continuously. These are the largest
@@ -345,7 +299,7 @@ fi
 # --- install ----------------------------------------------------------------
 
 say "Installing"
-INSTALL_ARGS=(--path "$DEPLOY_PATH")
+INSTALL_ARGS=()
 
 # Where the platform actually is, and whether anything needs pinning.
 #
@@ -481,16 +435,10 @@ set_env GSU_PLATFORM_URL "$PLATFORM_URL"
 # pointed at a port a proxy has closed.
 set_env GSU_BROKER_URL   ""
 set_env GSU_DEMO         "$DEMO"
-# On the container path this is the *container's* namespace, and what the
-# outside world can reach is decided by the port mapping below — so it is
-# always 0.0.0.0 and --loopback is expressed by dropping the LAN overlay. On
-# the systemd path there is no mapping and no namespace: this binding is the
-# whole of the exposure, so --loopback has to be said here instead.
-if [ "$DEPLOY_PATH" = docker ] || [ "$LAN" = 1 ]; then
-  set_env GSU_SETUP_HOST 0.0.0.0
-else
-  set_env GSU_SETUP_HOST 127.0.0.1
-fi
+# This is the *container's* namespace, and what the outside world can reach is
+# decided by the port mapping below — so it is always 0.0.0.0, and --loopback
+# is expressed by dropping the LAN overlay rather than by binding differently.
+set_env GSU_SETUP_HOST 0.0.0.0
 if [ -n "$CA_FILE" ]; then
   set_env GSU_API_CA_FILE "$ETC/platform-api-ca.pem"
 else
@@ -525,19 +473,17 @@ else
   info "setup password already set; left alone."
 fi
 
-if [ "$DEPLOY_PATH" = docker ]; then
-  # Compose reads this from the project directory, so it survives every later
-  # `docker compose up` without anybody having to remember a -f. Its absence
-  # is what leaves a bench station's setup page bound to loopback and
-  # unreachable, with nothing anywhere saying why.
-  if [ "$LAN" = 1 ]; then
-    printf 'COMPOSE_FILE=docker-compose.yml:docker-compose.lan.yml\n' \
-      > "$PREFIX/deploy/.env"
-    info "setup page published on the LAN"
-  else
-    rm -f "$PREFIX/deploy/.env"
-    info "setup page on loopback only"
-  fi
+# Compose reads this from the project directory, so it survives every later
+# `docker compose up` without anybody having to remember a -f. Its absence is
+# what leaves a bench station's setup page bound to loopback and unreachable,
+# with nothing anywhere saying why.
+if [ "$LAN" = 1 ]; then
+  printf 'COMPOSE_FILE=docker-compose.yml:docker-compose.lan.yml\n' \
+    > "$PREFIX/deploy/.env"
+  info "setup page published on the LAN"
+else
+  rm -f "$PREFIX/deploy/.env"
+  info "setup page on loopback only"
 fi
 
 # --- start ------------------------------------------------------------------

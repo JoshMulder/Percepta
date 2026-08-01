@@ -22,10 +22,9 @@
 #   192.168.2.133  PerceptaGSU  Pi 5   docker compose, RTSP camera
 #
 # The Pi 2B (192.168.2.132, systemd unit, host venv, CSI camera) was dropped
-# from the bench. Its recipe is gone from here; the systemd path it used is
-# NOT — see bootstrap.sh, where a CSI camera still selects it, because
-# rpicam-vid bus-errors in the container image and the live stream never
-# produces a frame (DEPLOYMENT.md §3).
+# from the bench, and the systemd path with it: it existed because a CSI
+# camera cannot stream from the container image, and CSI is no longer a
+# supported camera. One box, one path.
 #
 # WHAT TRAVELS, AND WHAT DOES NOT
 #

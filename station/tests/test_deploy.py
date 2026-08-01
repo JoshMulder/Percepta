@@ -194,81 +194,41 @@ class ShippedInventoryTests(unittest.TestCase):
         self.assertIn("rtlsdr", conflicts[0])
 
 
-class UnitFileTests(unittest.TestCase):
-    """The systemd unit, checked for the lines that are easy to lose."""
+class InstallerTests(unittest.TestCase):
+    """The installer and the environment it ships.
+
+    This was UnitFileTests, holding `gsu.service` to the directives that were
+    easy to lose. The unit is gone: the station ran as a plain systemd service
+    only because a CSI camera could not stream from the container image, and
+    CSI is no longer supported. What survives here is everything that was
+    never really about the unit — the paths, and the shipped defaults.
+    """
 
     @classmethod
     def setUpClass(cls):
-        cls.unit = (DEPLOY / "gsu.service").read_text()
-        # The comments explain what is *not* there, so the directives have to be
-        # read on their own or every explanation reads as a violation.
-        cls.directives = "\n".join(
-            line for line in cls.unit.splitlines()
-            if line.strip() and not line.lstrip().startswith("#")
-        )
         cls.install = (DEPLOY / "install.sh").read_text()
 
-    def test_it_does_not_wait_for_the_network(self):
-        # The whole design keeps working with the link down; a unit ordered
-        # after network-online would not start at all on a site with no signal.
-        self.assertNotIn("network-online.target", self.directives)
-        # ...and not after time-sync either, which waits on the network in turn.
-        self.assertNotIn("time-sync.target", self.directives)
-        self.assertIn("After=local-fs.target network.target", self.directives)
+    def test_the_unit_file_is_gone(self):
+        self.assertFalse(
+            (DEPLOY / "gsu.service").exists(),
+            "gsu.service is back; there is one deployment path and it is the "
+            "container",
+        )
 
-    def test_it_restarts_for_ever(self):
-        self.assertIn("Restart=always", self.unit)
-        self.assertIn("StartLimitIntervalSec=0", self.unit)
-
-    def test_it_refuses_to_start_where_it_is_not_the_deployment_path(self):
-        # Restarting for ever is right on a remote site and dangerous on a
-        # container box, where this unit's interpreter does not exist: one
-        # `systemctl restart gsu` becomes an unbounded crash loop beside a
-        # healthy container. The assertion is what makes the two compatible.
-        assertion = re.search(r"AssertPathExists=(\S+)", self.directives)
-        self.assertIsNotNone(assertion, "the unit must assert its own venv")
-        exec_start = re.search(r"ExecStart=(\S+)", self.unit).group(1)
-        # Not merely present — asserting the wrong path would be worse than
-        # asserting nothing, because it would refuse on the systemd path too.
-        self.assertEqual(assertion.group(1), exec_start)
-
-    def test_a_failed_start_on_the_container_path_cannot_loop(self):
-        # Assert, not Condition: a condition skips quietly, and a station that
-        # does nothing when told to start hides the mistake instead of naming
-        # it. Neither triggers Restart=, which is the property that matters.
-        self.assertNotIn("ConditionPathExists=/opt/percepta/station/.venv",
-                         self.directives)
-        # And the installer must not leave a box that is already looping, or
-        # already failed from one, in that state across a re-install.
+    def test_the_installer_removes_a_unit_left_by_an_older_install(self):
+        # Not merely stops installing it. A box upgraded from the systemd path
+        # has an enabled unit pointing at a venv this installer no longer
+        # builds; left in place that is two agents on one channel, and the
+        # console alternating between two independent worlds reads as a
+        # platform bug rather than as a stale unit.
+        self.assertIn('rm -f "/etc/systemd/system/$UNIT"', self.install)
+        self.assertIn('systemctl disable --now "$UNIT"', self.install)
+        # And a box already looping or parked in `failed` must not stay there.
         self.assertIn("systemctl reset-failed", self.install)
 
-    def test_the_hardening_the_brief_asked_for_is_present(self):
-        for directive in ("NoNewPrivileges=yes", "PrivateTmp=yes",
-                          "ProtectSystem=strict", "User=gsu", "ProtectHome=yes",
-                          "CapabilityBoundingSet=", "SystemCallFilter=@system-service"):
-            self.assertIn(directive, self.unit)
-
-    def test_it_keeps_the_device_access_the_hardware_needs(self):
-        # PrivateDevices=yes would take away the UARTs and the SDR.
-        self.assertNotIn("PrivateDevices=yes", self.directives)
-        self.assertIn("SupplementaryGroups=dialout", self.unit)
-        self.assertIn("AF_NETLINK", self.unit)   # or DNS resolution breaks
-
-    def test_the_radio_is_given_time_to_shut_down_gracefully(self):
-        # A dongle killed mid-transfer needs a physical replug, which here is a
-        # truck (server/docs/05-radio-integration.md).
-        self.assertIn("KillSignal=SIGTERM", self.unit)
-        timeout = re.search(r"TimeoutStopSec=(\d+)", self.unit)
-        self.assertTrue(timeout and int(timeout.group(1)) >= 30)
-
-    def test_the_paths_in_the_unit_and_the_installer_agree(self):
-        exec_start = re.search(r"ExecStart=(\S+)", self.unit).group(1)
-        self.assertTrue(exec_start.startswith("/opt/percepta/station"))
-        self.assertIn("PREFIX=/opt/percepta/station", self.install)
-        state = re.search(r"StateDirectory=(\S+)", self.unit).group(1)
-        self.assertIn(f"STATE=/var/lib/{state}", self.install)
-        self.assertIn(f"GSU_HOME=/var/lib/{state}",
-                      (DEPLOY / "gsu.env.example").read_text())
+    def test_the_installer_offers_no_second_path(self):
+        for gone in ("--path", "DEPLOY_PATH", "python3 -m venv"):
+            self.assertNotIn(gone, self.install, f"{gone} survived")
 
     def test_the_shipped_environment_requires_tls(self):
         env = (DEPLOY / "gsu.env.example").read_text()
@@ -469,20 +429,20 @@ class ContainerTests(unittest.TestCase):
 
 
 class ServiceAccountTests(unittest.TestCase):
-    """One uid on both paths — the convention the first real Pi forced.
+    """One uid for the host account and the image — the convention the first
+    real Pi forced.
 
     The installer used to let `useradd --system` pick a floating uid while the
-    image pinned 10001, so a bind-mounted state directory was readable on one
-    path and not the other, and flipping paths needed a manual `chown -R`.
-    These tests hold the three files to one number and the compose file to not
-    contradicting enrolment.
+    image pinned 10001, so the bind-mounted state directory was readable by one
+    and not the other. The host account outlived the systemd path: the
+    container runs as that uid, and the state directory is bind-mounted into
+    it, so the two still have to agree.
     """
 
     @classmethod
     def setUpClass(cls):
         cls.install = (DEPLOY / "install.sh").read_text()
         cls.dockerfile = (DEPLOY / "Dockerfile").read_text()
-        cls.camera = (DEPLOY / "Dockerfile.camera").read_text()
         cls.compose = (DEPLOY / "docker-compose.yml").read_text()
         cls.compose_directives = "\n".join(
             line for line in cls.compose.splitlines()
@@ -496,10 +456,10 @@ class ServiceAccountTests(unittest.TestCase):
         installer = re.search(r"^SERVICE_UID=(\d+)", self.install, re.M)
         self.assertIsNotNone(installer, "install.sh no longer pins the uid")
         uid = installer.group(1)
-        for name, text in (("Dockerfile", self.dockerfile),
-                           ("Dockerfile.camera", self.camera)):
-            self.assertIn(f"--uid {uid}", text, f"{name} pins a different uid")
-            self.assertIn(f"--gid {uid}", text, f"{name} pins a different gid")
+        self.assertIn(f"--uid {uid}", self.dockerfile,
+                      "Dockerfile pins a different uid")
+        self.assertIn(f"--gid {uid}", self.dockerfile,
+                      "Dockerfile pins a different gid")
 
     def test_the_installer_creates_the_account_with_the_pinned_uid(self):
         # `useradd --system` with no --uid picks a floating number, which is

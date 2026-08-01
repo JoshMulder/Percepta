@@ -2,15 +2,16 @@
 #
 # Install the Percepta ground station agent on Raspberry Pi OS.
 #
-#   sudo ./deploy/install.sh [--path docker|systemd] [--broker-ca FILE]
-#                            [--api-ca FILE] [--offline]
+#   sudo ./deploy/install.sh [--broker-ca FILE] [--api-ca FILE] [--offline]
 #
-# --path docker   (default) the container, with the health-gated updater and
-#                 its timer. This is the deployment path: an update is atomic
-#                 and a rollback is a tag already on the disk, which is what
-#                 matters on a station that is hard to reach.
-# --path systemd  the agent as a plain systemd service, no Docker. The
-#                 documented alternative; DEPLOYMENT.md Appendix B.
+# The container, with the health-gated updater and its timer. An update is
+# atomic and a rollback is a tag already on the disk, which is what matters on
+# a station that is hard to reach.
+#
+# There used to be a second path — the agent as a plain systemd service, no
+# Docker — kept for one reason: a CSI camera cannot stream from the container
+# image (rpicam-vid bus-errors in it). CSI is no longer a supported camera, so
+# the reason is gone and so is the path.
 #
 # Two CAs, because the station verifies two things against two roots:
 #   --broker-ca  the broker's private CA. Optional: it normally arrives in the
@@ -43,7 +44,6 @@ UNIT=gsu.service
 BROKER_CA=""
 API_CA=""
 OFFLINE=0
-DEPLOY_PATH=docker
 # Python 3.11 or newer: the code uses datetime.UTC, which arrived in 3.11.
 # Raspberry Pi OS Bookworm (12) ships 3.11.2 and Trixie (13) ships 3.13; both
 # are fine. Bullseye ships 3.9 and will not run this — that is an OS upgrade,
@@ -68,7 +68,6 @@ while [ $# -gt 0 ]; do
    separate trust roots. Use --broker-ca (the broker's private CA, usually
    delivered by enrolment) or --api-ca (pins the platform API). See
    DEPLOYMENT.md §4." ;;
-    --path)      DEPLOY_PATH="${2:-}"; shift 2 ;;
     --offline)   OFFLINE=1; shift ;;
     -h|--help)   sed -n '2,48p' "$0"; exit 0 ;;
     *)           die "unknown option: $1" ;;
@@ -76,10 +75,6 @@ while [ $# -gt 0 ]; do
 done
 
 [ "$(id -u)" -eq 0 ] || die "run this with sudo."
-case "$DEPLOY_PATH" in
-  docker|systemd) ;;
-  *) die "--path must be 'docker' (default) or 'systemd', not '$DEPLOY_PATH'." ;;
-esac
 
 # --- 1. what is this box ---------------------------------------------------
 say "Checking the machine"
@@ -104,18 +99,12 @@ sys.exit(0 if sys.version_info[:2] >= need else 1)
 PY
 info "python: $PY_VER — ok"
 
-if [ "$DEPLOY_PATH" = "docker" ]; then
-  command -v docker >/dev/null || die \
-    "docker is not installed. Either:
-     sudo apt install -y docker.io docker-compose-v2
-   or install the systemd path instead: sudo $0 --path systemd"
-  docker compose version >/dev/null 2>&1 || die \
-    "the docker compose plugin is missing. Install docker-compose-v2."
-  info "docker: $(docker --version 2>/dev/null | head -1)"
-else
-  python3 -c 'import venv' 2>/dev/null || die \
-    "python3-venv is missing. Install it: apt install python3-venv"
-fi
+command -v docker >/dev/null || die \
+  "docker is not installed:
+     sudo apt install -y docker.io docker-compose-v2"
+docker compose version >/dev/null 2>&1 || die \
+  "the docker compose plugin is missing. Install docker-compose-v2."
+info "docker: $(docker --version 2>/dev/null | head -1)"
 
 if [ ! -f /sys/class/rtc/rtc0/name ]; then
   info "no hardware RTC: this box boots with no idea of the time."
@@ -210,44 +199,7 @@ info "agent cannot rewrite the agent."
 
 chmod +x "$PREFIX/deploy/gsu-update.sh" 2>/dev/null || true
 
-if [ "$DEPLOY_PATH" = "systemd" ]; then
-  say "Python environment"
-  if [ ! -x "$PREFIX/.venv/bin/python" ]; then
-    # --system-site-packages, deliberately, and for one reason: `picamera2` is
-    # a Debian package on Raspberry Pi OS (`python3-picamera2`) and cannot be
-    # pip-installed — it is bound to the system's libcamera build. A venv
-    # without this flag cannot import it however well it is installed, and the
-    # camera driver silently falls back to a subprocess per frame, which looks
-    # exactly like a slow camera rather than like a packaging choice.
-    #
-    # What it costs: the venv also sees every other system package. That is a
-    # real trade and it is made knowingly — this box runs one application, the
-    # agent has exactly one pip dependency, and a venv's own site-packages
-    # still take precedence over the system's.
-    python3 -m venv --system-site-packages "$PREFIX/.venv"
-    info "created $PREFIX/.venv (--system-site-packages, so python3-picamera2"
-    info "is importable; see DEPLOYMENT.md §3)"
-  elif ! grep -q 'include-system-site-packages *= *true' "$PREFIX/.venv/pyvenv.cfg" 2>/dev/null; then
-    warn "$PREFIX/.venv was created without --system-site-packages, so"
-    warn "python3-picamera2 cannot be imported and the camera will use the"
-    warn "slower rpicam-jpeg path. The station reports which path it took and"
-    warn "why. To switch: rm -rf $PREFIX/.venv and re-run this installer."
-  fi
-  PIP_ARGS=(--disable-pip-version-check)
-  if [ "$OFFLINE" -eq 1 ]; then
-    [ -d "$SRC/deploy/wheels" ] || die \
-      "--offline needs pre-downloaded wheels in deploy/wheels. On a machine with
-   a network: pip download -r requirements.txt -d deploy/wheels"
-    PIP_ARGS+=(--no-index --find-links "$SRC/deploy/wheels")
-  fi
-  # One runtime dependency, and it is pure Python — there is nothing to compile
-  # on ARMv7 and no toolchain needed.
-  "$PREFIX/.venv/bin/pip" install "${PIP_ARGS[@]}" -q redis'>=5.0' \
-    || die "could not install the redis client. With no network, re-run with --offline."
-  info "redis client: $("$PREFIX/.venv/bin/python" -c 'import redis; print(redis.__version__)')"
-else
-  info "no host venv needed: the image carries its own interpreter and dependency."
-fi
+info "no host venv needed: the image carries its own interpreter and dependency."
 
 # --- 4. configuration ------------------------------------------------------
 say "Configuration"
@@ -369,91 +321,62 @@ timedatectl 2>/dev/null | sed 's/^/      /' || true
 # ffmpeg is what reads a network (RTSP) camera: one frame per snapshot, and
 # the live stream remuxed without re-encoding (gsu/camera/rtsp.py). Advisory
 # rather than fatal — a CSI-only or camera-less station does not need it, and
-# the driver reports its absence in the device inventory in exactly these
-# words. The camera container image installs it unconditionally
-# (Dockerfile.camera); this covers the systemd path.
-if [ "$DEPLOY_PATH" = "systemd" ] && ! command -v ffmpeg >/dev/null 2>&1; then
-  info "ffmpeg is not installed. Only needed for a network (RTSP) camera:"
-  info "  apt install ffmpeg"
-fi
 
 # --- 8. the service --------------------------------------------------------
-# Both unit files are installed either way, so switching paths later is one
-# systemctl command rather than another install. **Only one is ever enabled**:
-# two agents publishing independent worlds onto one channel makes the console
-# alternate between them and looks like a platform bug.
+# The agent is the container; systemd's only job here is the update timer.
 #
-# Disabling is not the whole of that guarantee, and used to be treated as if it
-# were. It governs boot; it says nothing about `systemctl restart gsu` typed by
-# somebody debugging a container box, which starts a unit whose interpreter is
-# not installed and — correctly, for a remote site — retries for ever. The unit
-# asserts its own interpreter for that reason; this section only has to leave
-# the state clean.
+# gsu.service is actively removed rather than merely not installed. A box that
+# ran the old systemd path has an enabled unit pointing at a venv this script
+# no longer builds, and leaving it would give that box two agents on one
+# channel — the console then alternates between two independent worlds and it
+# reads as a platform bug.
 say "Service"
-install -m 0644 "$SRC/deploy/$UNIT" "/etc/systemd/system/$UNIT"
 install -m 0644 "$SRC/deploy/gsu-update.service" /etc/systemd/system/
 install -m 0644 "$SRC/deploy/gsu-update.timer" /etc/systemd/system/
+
+if [ -f "/etc/systemd/system/$UNIT" ]; then
+  systemctl disable --now "$UNIT" >/dev/null 2>&1 || true
+  # An earlier install may have left it in a crash loop, or parked in `failed`
+  # from one. Neither should survive into this install.
+  systemctl reset-failed "$UNIT" >/dev/null 2>&1 || true
+  rm -f "/etc/systemd/system/$UNIT"
+  info "removed the old $UNIT: the agent runs in the container now."
+fi
 systemctl daemon-reload
 
-if [ "$DEPLOY_PATH" = "docker" ]; then
-  systemctl disable --now "$UNIT" >/dev/null 2>&1 || true
-  # An earlier install of this script left the unit startable, so a box being
-  # re-installed may be sitting in a crash loop right now — or parked in
-  # `failed` from one. Neither should survive into the new install.
-  systemctl reset-failed "$UNIT" >/dev/null 2>&1 || true
-  info "container path: $UNIT installed but DISABLED, and inert if started"
-  info "  by hand: it asserts a venv that only the systemd path builds."
-  info "  Control the agent with docker, not systemctl:"
-  info "    sudo docker compose -f $PREFIX/deploy/docker-compose.yml restart"
-
-  say "Building the image"
-  if docker compose -f "$PREFIX/deploy/docker-compose.yml" build 2>&1 | tail -3; then
-    # `current` is the tag compose runs and the updater moves. Point it at what
-    # was just built so the first start has something to run.
-    docker tag percepta/gsu:current percepta/gsu:previous 2>/dev/null || true
-    info "built, tagged percepta/gsu:current"
-  else
-    info "BUILD FAILED. Fix it before starting: the container has nothing to run."
-  fi
-
-  say "Update timer"
-  if grep -q '^GSU_UPDATE_REF=.\+' "$ETC/gsu.env" 2>/dev/null; then
-    systemctl enable --now gsu-update.timer >/dev/null
-    info "gsu-update.timer enabled — checks every 6h with up to 2h of jitter."
-  else
-    systemctl enable gsu-update.timer >/dev/null
-    info "gsu-update.timer enabled but GSU_UPDATE_REF is unset, so it will do"
-    info "  nothing. Set it in $ETC/gsu.env when there is a registry to track."
-  fi
-  info "A bad image is rolled back automatically: see 'gsu-update.sh --status'."
+say "Building the image"
+if docker compose -f "$PREFIX/deploy/docker-compose.yml" build 2>&1 | tail -3; then
+  # `current` is the tag compose runs and the updater moves. Point it at what
+  # was just built so the first start has something to run.
+  docker tag percepta/gsu:current percepta/gsu:previous 2>/dev/null || true
+  info "built, tagged percepta/gsu:current"
 else
-  systemctl disable --now gsu-update.timer >/dev/null 2>&1 || true
-  systemctl enable "$UNIT" >/dev/null
-  info "systemd path: $UNIT installed and enabled (not started — see below)."
-  info "  The update timer is disabled: it updates a container, and there"
-  info "  isn't one. Upgrade with rsync + re-running this script."
+  info "BUILD FAILED. Fix it before starting: the container has nothing to run."
 fi
+
+say "Update timer"
+if grep -q '^GSU_UPDATE_REF=.\+' "$ETC/gsu.env" 2>/dev/null; then
+  systemctl enable --now gsu-update.timer >/dev/null
+  info "gsu-update.timer enabled — checks every 6h with up to 2h of jitter."
+else
+  systemctl enable gsu-update.timer >/dev/null
+  info "gsu-update.timer enabled but GSU_UPDATE_REF is unset, so it will do"
+  info "  nothing. Set it in $ETC/gsu.env when there is a registry to track."
+fi
+info "A bad image is rolled back automatically: see 'gsu-update.sh --status'."
 
 # --- done ------------------------------------------------------------------
-if [ "$DEPLOY_PATH" = "docker" ]; then
-  COMPOSE="docker compose -f $PREFIX/deploy/docker-compose.yml"
-  PREFLIGHT="sudo $COMPOSE run --rm gsu preflight --probe"
-  START="sudo $COMPOSE up -d"
-  LOGS="sudo $COMPOSE logs -f"
-  # Named explicitly because the wrong answer is the one people already know.
-  # `systemctl restart gsu` is the reflex on a Pi, and on this path it restarts
-  # nothing while looking like it should have.
-  RESTART="sudo $COMPOSE restart"
-else
-  PREFLIGHT="sudo -u $SERVICE_USER $PREFIX/.venv/bin/python -m gsu preflight --probe"
-  START="sudo systemctl start $UNIT"
-  LOGS="journalctl -u $UNIT -f"
-  RESTART="sudo systemctl restart $UNIT"
-fi
+COMPOSE="docker compose -f $PREFIX/deploy/docker-compose.yml"
+PREFLIGHT="sudo $COMPOSE run --rm gsu preflight --probe"
+START="sudo $COMPOSE up -d"
+LOGS="sudo $COMPOSE logs -f"
+# Named explicitly because the wrong answer is the one people already know.
+# `systemctl restart gsu` is the reflex on a Pi and now restarts nothing.
+RESTART="sudo $COMPOSE restart"
 
 cat <<EOF
 
-$(printf '\033[1m==> Installed (%s path). Three things left, in order:\033[0m' "$DEPLOY_PATH")
+$(printf '\033[1m==> Installed. Three things left, in order:\033[0m')
 
   1. Edit the addresses, and the trust settings if the platform is not yet
      behind a proxy with a public certificate:

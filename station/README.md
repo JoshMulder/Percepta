@@ -227,9 +227,11 @@ whether the camera and the encoder work.
 
 **To put one on a Raspberry Pi, read `DEPLOYMENT.md`.** It goes from a blank SD
 card to an enrolled station, running as a **container** (`deploy/install.sh`,
-`deploy/Dockerfile`, `deploy/docker-compose.yml`). Running it as a plain systemd
-service is fully supported too — `install.sh --path systemd`, DEPLOYMENT.md
-Appendix B.
+`deploy/Dockerfile`, `deploy/docker-compose.yml`). That is the only path. The
+agent also ran as a plain systemd service until the CSI camera stopped being a
+requirement — that was the one thing the container could not do, because
+`rpicam-vid` bus-errors inside the image — and carrying two deployment shapes
+for a camera nobody fits was the larger cost.
 
 Containers won on one constraint: these stations are hard to reach physically,
 so an update is the riskiest routine operation there is. `deploy/gsu-update.sh`
