@@ -46,8 +46,8 @@ change your mind about a flag.
 `--demo` provisions a box whose every slot is simulated. `--loopback` keeps the
 setup page off the LAN. `--help` lists the rest.
 
-**A station with a CSI camera takes the systemd path**, and bootstrap detects
-one and switches by itself. §3 has the measurements behind that.
+**Fit a network camera.** A CSI camera on the ribbon will not stream — §3 has
+the measurement. bootstrap warns if it finds one.
 
 The rest of this document is what bootstrap does and why, which is what you
 want when one of the steps does not work — or when you are doing it by hand,
@@ -117,9 +117,8 @@ One more, only for a **network (RTSP) camera**: **`ffmpeg`**. It is what the
 station reads an RTSP camera with — one decoded frame per snapshot, and the
 live stream remuxed from the camera's own H.264 without re-encoding
 (`gsu/camera/rtsp.py`). The camera container image installs it
-unconditionally; on the systemd path `apt install ffmpeg`. Without it the
-camera slot reports exactly that sentence rather than a hardware fault. A
-CSI-only station does not need it.
+unconditionally, so there is nothing to install. Without it the camera slot
+reports exactly that sentence rather than a hardware fault.
 
 **From the platform admin, before you go anywhere**
 
@@ -142,16 +141,16 @@ response and is pinned from then on.
 
 You never type the station's UUID. It comes back in the enrolment response.
 
-**The station runs as a container.** That is the deployment path and this
-runbook is it. Running it as a plain systemd service is fully supported and
-documented in **Appendix B**; use that if you would rather not have Docker on
-the box.
+**The station runs as a container.** That is the only deployment path and this
+runbook is it. It also ran as a plain systemd service until the CSI camera
+stopped being a requirement — that was the one thing the container could not
+do — and carrying two deployment shapes for a camera nobody fits cost more
+than the camera was worth.
 
-> **If this station has a camera, use the systemd path (Appendix B).** Measured
-> on the first real Pi, not reasoned: the slim image has no camera stack at
-> all, and the camera image gets snapshots but its `rpicam-vid` dies with a
-> bus error before the first live-stream frame. The host runs the full
-> pipeline. §3 has the measurements, and the route to a camera-capable image
+> **A CSI camera will not stream — fit a network camera.** Measured on the
+> first real Pi, not reasoned: the slim image has no camera stack at all, and
+> the camera image gets snapshots but its `rpicam-vid` dies with a bus error
+> before the first live-stream frame. §3 has the measurements, and the route
 > if one is ever worth building. Everything else in this runbook applies to
 > both paths.
 
@@ -191,8 +190,6 @@ sudo apt install -y docker-compose-v2 \
 sudo systemctl enable --now docker
 sudo raspi-config     # expand the filesystem; set the hostname and timezone
 ```
-
-(For the systemd path instead, install `python3-venv` rather than Docker.)
 
 **Time.** Install `chrony` even though `systemd-timesyncd` is present — chrony
 is what a GPS time source will later plug into, so putting it in now means the
@@ -240,8 +237,6 @@ sudo /tmp/station/deploy/install.sh --api-ca /tmp/platform-api-ca.pem
 # Once it is behind a proxy with a public certificate:
 sudo /tmp/station/deploy/install.sh
 
-# The systemd path instead:
-sudo /tmp/station/deploy/install.sh --path systemd
 ```
 
 ### Reaching the setup page from another machine
@@ -280,9 +275,8 @@ What it does:
 | `/etc/percepta/gsu.env` | configuration, `0640 root:gsu` |
 | `/etc/percepta/platform-api-ca.pem` | the API's CA, if you pinned it |
 | `/var/lib/percepta-gsu` | state: credential, pinned broker CA, inventory, events, recordings. `0700 gsu` |
-| user `gsu` | system account, **uid 10001** — the same number the image pins, so state and configuration read correctly on either path and flipping paths moves no files. An older install's floating-uid `gsu` is migrated on re-run. No login; in `dialout`, `video`, `plugdev` |
+| user `gsu` | system account, **uid 10001** — the same number the image pins, so the bind-mounted state and configuration read correctly inside the container. An older install's floating-uid `gsu` is migrated on re-run. No login; in `dialout`, `video`, `plugdev` |
 | `/etc/systemd/system/gsu-update.{service,timer}` | the update check, timer enabled |
-| `/etc/systemd/system/gsu.service` | the systemd path, installed but **disabled** |
 | `/etc/udev/rules.d/99-percepta-sdr.rules` | so the SDR is readable without root |
 
 **Check any CA fingerprint it prints against the one you were told.** This is
@@ -292,72 +286,25 @@ what follows rests on it.
 No network at the site? `pip download -r requirements.txt -d deploy/wheels` on a
 machine that has one, copy `deploy/wheels` across, and use `--offline`.
 
-### The camera decides which path this station takes
+### CSI cameras are not supported
 
-**A camera-equipped station takes the systemd path.** This used to be a
-recommendation reasoned from a desk; it is now a measurement. The first real
-station — a Pi 2B rev 1.1 on Raspberry Pi OS 13 (Trixie), armhf, with an
-ov5647 on the ribbon — ran both paths, and the result splits cleanly: **the
-host runs the full pipeline** (804 KB of 1080p30 H.264 in a 3-second test, and
-the live stream verified end to end in a real browser), while **the camera
-container gets snapshots but not the stream**.
+**Fit a network camera (ONVIF/RTSP).** A camera on the Pi's ribbon connector
+will not stream, and this is a measurement rather than a preference. The first
+real station — a Pi 2B rev 1.1 on Raspberry Pi OS 13 (Trixie), armhf, with an
+ov5647 on the ribbon — ran the sensor from a container and `rpicam-vid` took a
+**bus error in the encoder path and died before one frame**. Debian armhf
+userland against a Raspbian host: it spawns cleanly and dies asynchronously, so
+retrying never helps, and the identical command on the host encodes 1080p30
+through `/dev/video11`. The fault is the image's userland, not the kernel, not
+device access, not the compose overlay.
 
-**Why the slim image cannot see a camera.** It is `python:3.11-slim-bookworm`
-plus one pip dependency. There is no libcamera in it, no `rpicam-jpeg` and no
-`rpicam-vid`. `gsu/camera/picsi.py` needs the first and the live stream needs
-the second, so the camera is reported unavailable with *"no CSI camera support
-on this box: no rpicam-jpeg was found"* — accurate, and still no picture. That is not a bug in the image; the image was sized for an
-update layer of 91 KB over a metered link, and a camera stack is hundreds of
-megabytes.
+`deploy/Dockerfile.camera` was built specifically to settle this and settled it
+the wrong way. The route past it is a Raspbian-based image; nobody built one.
 
-**What the camera image actually does on real hardware.**
-`deploy/Dockerfile.camera` and `deploy/docker-compose.camera.yml` have now been
-built and run on the Pi 2B (the image builds at 271 MB):
-
-| | Measured |
-|---|---|
-| Sensor enumeration | **Works.** The ov5647 enumerates inside the container — under exactly the overlay's constraints: `/run/udev` mounted read-only, the device cgroup widened to all character devices, the `render` gid added. Every one of those was needed |
-| Stills | **Was working, now unverified.** picamera2 inside the container captured frames from the real sensor — but the station no longer uses picamera2, and capture is now `rpicam-jpeg`, whose sibling `rpicam-vid` is the binary that bus-errors in this image. The bus error was in the *encoder* path, which a still capture does not use, so it may well be fine. Nobody has run it. `deploy/Dockerfile.camera` carries the one command that settles it |
-| The live stream | **Fails.** `rpicam-vid` takes a **bus error in the encoder path** and dies before producing one frame — Debian armhf userland running against a Raspbian host. It spawns cleanly and dies asynchronously, so retrying the spawn never helps (`gsu/stream.py` says the same thing in code). The identical command on the host encodes 1080p30 through `/dev/video11`, so the fault is the image's userland — not the kernel, not device access, not the overlay |
-| The stack | `rpicam-apps` from the Raspberry Pi archive, which is not Debian proper (`python3-picamera2` was dropped from the image along with the station's use of it). Build with `--build-arg SUITE=` matching the host's release. The archive keyring is vendored at `deploy/raspberrypi-archive-keyring.pgp` — the key on the website carries a SHA-1 binding signature that Trixie's Sequoia policy rejects outright, so fetching it at build time reads as an unsigned repository |
-
-**Conclusion, as deployed: camera stations run systemd; the container path is
-fine for everything else.** On the systemd path the coupling that produced the
-bus error does not exist — the host's own libcamera and `rpicam-apps` are
-built for the kernel they are running on, and they are updated with it.
-
-**The route past the bus error is a Raspbian-based image, and it has not been
-attempted.** There is no official Raspbian Trixie Docker base image, so the
-plausible routes are these, written down so the option is a plan rather than a
-hunch:
-
-1. **debootstrap a Raspbian rootfs** (from the Raspbian mirror plus
-   `archive.raspberrypi.com`) and import it as the base. Costs: you become the
-   maintainer of a base image nobody publishes — its security update cadence,
-   its provenance (nothing vouches for the rootfs beyond the archive keyrings),
-   and keeping its suite in lockstep with the host's release.
-2. **Use the host's own rootfs as the base** — a pristine Raspberry Pi OS Lite
-   image's root filesystem, `docker import`ed. This guarantees the exact
-   userland the host already proved works. Costs: the image is per-OS-release
-   and must be rebuilt on every host upgrade or the coupling returns as
-   staleness; and a rootfs taken from a *live* box rather than a pristine
-   image would carry that box's identity (host keys, machine-id) into an
-   image, which must not happen.
-
-Either route keeps the overlay unchanged — udev, the cgroup widening and the
-`render` gid were proven right by the snapshots working. Both break the
-91 KB-update-layer economics (DECISIONS.md item 40) as thoroughly as the Debian
-camera image does. Until a second camera station makes that maintenance worth
-buying, the answer stays systemd.
-
-**Superseded:** the installer creates the venv with `--system-site-packages`,
-and that used to matter a great deal — `python3-picamera2` is a Debian package
-bound to the system's libcamera build, so a venv without the flag could not
-import it and the driver silently fell back to a subprocess per frame. **The
-station no longer imports picamera2 at all**, so the flag no longer changes
-what the camera does. It is kept because other system packages may want it and
-because changing the installer to save a flag is not worth a re-run on every
-box. Nothing is lost by leaving an existing install alone.
+The station carried a whole second deployment shape — the agent as a plain
+systemd service, outside Docker — for this one case. Two deployment paths for a
+camera nobody fits cost more than the camera was worth, so both the second path
+and the CSI-detection that silently chose it for you are gone.
 
 ---
 
@@ -526,7 +473,7 @@ gave a password to cannot end up serving an open form on a public address.
 On the box, once, when it is built:
 
 ```bash
-sudo -u gsu /opt/percepta/station/.venv/bin/python -m gsu setup-password
+sudo docker compose -f /opt/percepta/station/deploy/docker-compose.yml run --rm gsu setup-password
 ```
 
 Paste the `GSU_SETUP_PASSWORD_HASH=…` line it prints into
@@ -688,9 +635,10 @@ two processes cannot read one UART, and the command refuses rather than
 competing:
 
 ```bash
-sudo systemctl stop gsu
-sudo -u gsu /opt/percepta/station/.venv/bin/python -m gsu adsb --seconds 20
-sudo systemctl start gsu
+cd /opt/percepta/station/deploy
+sudo docker compose stop gsu
+sudo docker compose run --rm gsu adsb --seconds 20
+sudo docker compose start gsu
 ```
 
 It prints one JSON object per contact, exactly as it would be published, plus
@@ -727,7 +675,7 @@ each one needs less of the world than the one after it.
 enrolment. On a camera station — which runs systemd, §3:
 
 ```bash
-sudo -u gsu /opt/percepta/station/.venv/bin/python -m gsu camera --frames 3 --out /tmp/frame.jpg
+sudo docker compose -f /opt/percepta/station/deploy/docker-compose.yml run --rm gsu camera --frames 3 --out /tmp/frame.jpg
 ```
 
 or, on the container path (where snapshots work; the live stream does not — §3):
@@ -765,7 +713,7 @@ run on the host — inside the container `rpicam-vid` takes a bus error before
 its first frame (§3):
 
 ```bash
-sudo -u gsu /opt/percepta/station/.venv/bin/python -m gsu stream --seconds 30
+sudo docker compose -f /opt/percepta/station/deploy/docker-compose.yml run --rm gsu stream --seconds 30
 ```
 
 It prints which encoders this board has, then measured frames per second,
@@ -935,8 +883,7 @@ sudo /opt/percepta/station/deploy/gsu-update.sh --status
 Container logs are rotated at 10 MB × 3 by the compose file. Docker's default
 is **no rotation at all**, which on a station that logs for months fills the SD
 card and takes the site down — a slow failure with an annoying cause, and the
-one thing the container path needs configured that the systemd path gets free
-from journald.
+one thing the container needs configured that journald would have given free.
 
 The lines that matter are health conditions. Each is raised once with a
 severity, kept while it persists — the age of a problem is the useful number —
@@ -1300,7 +1247,6 @@ field.
   recordings/                            audio
   update/rejected                        digests that failed their gate
 /etc/systemd/system/gsu-update.timer     the update check (container path)
-/etc/systemd/system/gsu.service          the systemd path (disabled by default)
 
 # images
 percepta/gsu:current                     what runs. The updater moves this tag
@@ -1328,85 +1274,7 @@ journalctl -u gsu-update -n 50           what it last decided
 
 ---
 
-## Appendix B: running it as a plain systemd service instead
-
-Fully supported, and the right choice if you would rather not have Docker on the
-box. What you give up is §14 — atomic updates and a rollback that is already on
-disk — which is the reason it is not the default, not a defect in this path.
-
-Everything from §4 (configuration) onwards is identical. The differences:
-
-```bash
-sudo apt install -y python3-venv chrony          # instead of docker
-sudo /tmp/station/deploy/install.sh --path systemd --api-ca /tmp/platform-api-ca.pem
-
-# preflight, start, logs
-cd /opt/percepta/station
-sudo -u gsu env $(grep -v '^#' /etc/percepta/gsu.env | xargs) \
-  .venv/bin/python -m gsu preflight --probe
-sudo systemctl start gsu
-journalctl -u gsu -f
-
-# enrol headless
-sudo -u gsu env $(grep -v '^#' /etc/percepta/gsu.env | xargs) \
-  .venv/bin/python -m gsu enrol --token XXXX-XXXX-XXXX
-```
-
-`--path systemd` disables the update timer, because it updates a container and
-there is not one.
-
-**Upgrading is manual**, and this is the trade:
-
-```bash
-rsync -a --exclude var/ --exclude .venv/ ~/percepta/station/ pi@<box>:/tmp/station/
-sudo /tmp/station/deploy/install.sh --path systemd
-sudo systemctl restart gsu
-```
-
-Configuration, state and the device inventory survive. There is **no health gate
-and no automatic rollback** — if the new code does not work, somebody has to
-notice and put the old code back by hand, over a link that may be why they
-noticed. On a site that is hours away, that is the risk §14 exists to remove.
-
-### What this path is better at
-
-Three things, honestly:
-
-- **The camera works fully here and only partly in the container — measured,
-  not reasoned (§3).** The host has libcamera and `rpicam-apps` built for the
-  kernel and firmware they are running on and updated with them; on the first
-  real Pi this path ran 1080p30 through the hardware encoder end to end. The
-  camera image enumerates the sensor, but `rpicam-vid` dies with a bus error
-  before its first frame, and whether `rpicam-jpeg` shares the fault is now an
-  open question rather than a settled one — see §3. **For a station with a
-  camera, this is the path.**
-- **A missing device was never a problem here.** The unit has no device list to
-  be wrong; the agent opens what it finds and reports what it cannot. The
-  container path only matches this because its device mapping was made
-  permissive (`DECISIONS.md` item 35c).
-- **Tighter sandboxing.** `ProtectSystem=strict`, an empty
-  `CapabilityBoundingSet`, a `@system-service` syscall filter and a
-  `DeviceAllow` list, against a container that has the host's whole `/dev`. That
-  difference does not matter on a box where nothing else runs — which is the
-  owner's position and the reason the trade was made — but it is real and it
-  should be stated rather than glossed.
-
-### The hardening in the unit, and two lines that could bite
-
-- **`MemoryDenyWriteExecute=yes`** — CPython and the one pure-Python dependency
-  do not need writable-executable pages. If a native extension is ever added and
-  the service will not start, this is the first line to remove, and the reason
-  should be written down when it is.
-- **`RestrictAddressFamilies` includes `AF_NETLINK`**, which looks removable and
-  is not: glibc's `getaddrinfo()` uses it to enumerate local addresses, so
-  dropping it breaks DNS and the station cannot find the broker.
-
-`PrivateDevices` is deliberately not set — it would take away the UARTs and the
-SDR. A `DeviceAllow` list is used instead.
-
----
-
-## Appendix C: what has actually been run, and what has not
+## Appendix B: what has actually been run, and what has not
 
 The distinction matters more than usual here, because the deployment path
 changed twice — and because the register below was written before any of it
