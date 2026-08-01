@@ -240,8 +240,15 @@ class SerialPort:
 
 
 class FileByteSource:
-    """A recorded capture, replayed. Used by the tests, and the sane way to
-    reproduce a field fault: capture the port, replay it here."""
+    """A recorded capture, replayed: the sane way to reproduce a field fault —
+    capture the port with `cat /dev/ttyUSB0 > capture.bin` and replay it here.
+
+    Nothing imports this. Kept because a recorded capture is the only way to
+    debug a serial device you do not have on your desk, and writing it again
+    under pressure is worse than carrying it. Its docstring used to claim the
+    tests used it, which was false and is the kind of claim that stops anyone
+    checking.
+    """
 
     def __init__(self, path: str | Path, chunk: int = 512, loop: bool = False) -> None:
         self._file = open(path, "rb")

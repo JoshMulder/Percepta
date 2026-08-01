@@ -52,9 +52,13 @@ NAL_NON_IDR = 1
 NAL_SEI = 6
 NAL_AUD = 9
 
-#: How long to wait for the first frame before calling the camera dead. A cold
-#: libcamera pipeline takes a second or two; ten is generous and bounded.
-FIRST_FRAME_TIMEOUT_S = 10.0
+# There is deliberately no first-frame deadline here any more. A constant named
+# FIRST_FRAME_TIMEOUT_S sat here documenting one, and nothing implemented it —
+# so the file said a dead camera would be called dead within ten seconds and it
+# never was. What actually catches it is `stream.py`'s silent-connection cap
+# plus the health frame reporting `video.sensor`, both of which are real. A
+# constant describing behaviour that does not exist is worse than no constant:
+# it stops anyone looking for the behaviour.
 
 
 @dataclass

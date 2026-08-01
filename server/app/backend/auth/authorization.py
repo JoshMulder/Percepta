@@ -20,7 +20,6 @@ import uuid
 from sqlalchemy.orm import Session
 
 from backend.auth.capabilities import (
-    ACTUATOR_CAPABILITIES,
     GRANTABLE_CAPABILITIES,
     READ_CAPABILITIES,
     Capability,
@@ -140,22 +139,6 @@ def capabilities_for(
 _VALID_VALUES = {c.value for c in Capability}
 
 
-def has_capability(
-    db: Session,
-    *,
-    user_id: uuid.UUID,
-    organization_id: uuid.UUID,
-    ground_station_id: uuid.UUID,
-    capability: Capability,
-) -> bool:
-    return capability in capabilities_for(
-        db,
-        user_id=user_id,
-        organization_id=organization_id,
-        ground_station_id=ground_station_id,
-    )
-
-
 def visible_station_ids(
     db: Session, *, user_id: uuid.UUID, organization_id: uuid.UUID
 ) -> set[uuid.UUID]:
@@ -230,9 +213,3 @@ def assert_grantable(capabilities: list[str]) -> None:
             "radio.transmit is reserved until certified transmit hardware and "
             "operator licensing are in place."
         )
-
-
-def actuator_capabilities(granted: frozenset[Capability]) -> frozenset[Capability]:
-    """The subset with a physical effect at the station. Every use of one of
-    these is audited."""
-    return granted & ACTUATOR_CAPABILITIES

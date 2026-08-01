@@ -264,17 +264,6 @@ body {
 .link-state.unauthenticated {
   color: var(--danger);
 }
-
-.weather-strip {
-  display: flex;
-  gap: 1rem;
-  font: 0.75rem var(--mono);
-  color: var(--muted);
-}
-.weather-strip b {
-  color: var(--text);
-  font-weight: 600;
-}
 .weather-strip .gust {
   color: var(--warn);
 }
@@ -308,20 +297,11 @@ body {
   min-height: 0;
   border-right: 1px solid var(--line);
 }
-.alert-pip {
-  color: var(--danger);
-}
 .panel-body {
   flex: 1;
   min-height: 0;
   position: relative;
   display: flex;
-}
-
-.scope-canvas {
-  display: block;
-  width: 100%;
-  height: 100%;
 }
 
 /* ---------------------------------------------------------------- sidebar */
@@ -448,12 +428,6 @@ body {
 .swap-preview:hover .swap-hint {
   color: var(--brand);
   border-color: var(--brand);
-}
-.alerts-card {
-  flex: none;
-  min-height: 8.75rem;
-  display: flex;
-  flex-direction: column;
 }
 .alerts-card .card-body {
   flex: 1;
@@ -582,53 +556,11 @@ body {
   align-items: baseline;
   gap: 0.375rem;
 }
-.radio-mhz {
-  font: 600 1.625rem var(--mono);
-  letter-spacing: 0.02em;
-}
-.radio-unit {
-  color: var(--muted);
-  font-size: 0.75rem;
-}
-.radio-meter {
-  margin: 0.75rem 0 0.625rem;
-}
-.radio-meter-track {
-  position: relative;
-  height: 0.438rem;
-  background: #0a1015;
-  border: 1px solid var(--line);
-  border-radius: 0.25rem;
-  overflow: hidden;
-}
-.radio-meter-fill {
-  height: 100%;
-  background: var(--dim);
-  transition: width 120ms linear;
-}
 .radio-meter-fill.open {
   background: var(--accent);
 }
-.radio-meter-threshold {
-  position: absolute;
-  top: -2px;
-  bottom: -2px;
-  width: 2px;
-  background: #5aa9ff;
-}
-.radio-meter-labels {
-  display: flex;
-  justify-content: space-between;
-  margin-top: 0.312rem;
-  font: 0.688rem var(--mono);
-  color: var(--muted);
-}
 .sql.open {
   color: var(--accent);
-}
-.radio-controls {
-  display: flex;
-  gap: 0.5rem;
 }
 .radio-controls .btn {
   flex: 1;
@@ -689,29 +621,11 @@ body {
   align-items: center;
   gap: 0.625rem;
 }
-.soc-bar {
-  flex: 1;
-  height: 0.85rem;
-  background: #0a1015;
-  border: 1px solid var(--line);
-  border-radius: 0.312rem;
-  overflow: hidden;
-}
-.soc-fill {
-  height: 100%;
-  background: var(--accent);
-  transition: width 300ms ease;
-}
 .soc-fill.low {
   background: var(--warn);
 }
 .soc-fill.critical {
   background: var(--danger);
-}
-.soc-value {
-  font: 600 1.25rem var(--mono);
-  min-width: 3.4rem;
-  text-align: right;
 }
 .stats {
   display: grid;
@@ -828,56 +742,8 @@ body {
   width: 100%;
   height: 100%;
 }
-
-/* Leaflet ships a light theme. These consoles are watched at night, so the
-   chrome is darkened to match rather than punching a white hole in the UI. */
-
-/* Street and terrain tiles are drawn for white paper. Inverting and rotating
-   the hue gives a dark basemap without needing a second dark tile set, which
-   would double what has to be cached.
-
-   Applied per layer, NOT to the whole tile pane: satellite imagery must never
-   be inverted - it would render vegetation magenta and water orange, and an
-   operator would not trust anything on the screen after seeing it. */
-
-.aircraft-icon {
-  background: none;
-  border: none;
-}
-.aircraft-label {
-  background: rgba(11, 15, 19, 0.82);
-  border: none;
-  border-radius: 0.188rem;
-  color: #9aa8b2;
-  font: 0.625rem var(--mono);
-  padding: 1px 0.312rem;
-  box-shadow: none;
-  white-space: nowrap;
-}
 .aircraft-label.alert {
   color: #ffb08a;
-}
-.aircraft-label::before {
-  display: none;
-}
-
-.map-notice {
-  position: absolute;
-  left: 50%;
-  bottom: 0.875rem;
-  transform: translateX(-50%);
-  z-index: 500;
-  background: rgba(11, 15, 19, 0.9);
-  border: 1px solid var(--line);
-  border-radius: 0.312rem;
-  padding: 0.375rem 0.688rem;
-  color: var(--warn);
-  font-size: 0.688rem;
-  white-space: nowrap;
-}
-.map-uncached code {
-  font: 0.688rem var(--mono);
-  color: var(--text);
 }
 
 /* ---------------------------------------------------------------- weather */
@@ -1299,21 +1165,6 @@ body {
   opacity: 0.4;
   cursor: not-allowed;
 }
-
-.meter-label {
-  display: flex;
-  align-items: center;
-  gap: var(--s3);
-  margin: 0;
-  flex: none;
-  font: 0.72rem var(--mono);
-  color: var(--muted);
-  letter-spacing: 0.06em;
-}
-.meter-label .rssi {
-  margin-left: auto;
-  color: var(--text);
-}
 .meter-label .floor b {
   color: var(--text);
   font-weight: 600;
@@ -1510,19 +1361,6 @@ body {
   padding: var(--s4);
 }
 
-/* ----------------------------------------------------------- map labels */
-
-.range-label {
-  color: rgba(255, 255, 255, 0.5);
-  font: 0.65rem var(--mono);
-  text-align: center;
-  line-height: 0.9rem;
-  text-shadow: 0 0 0.2rem #000, 0 0 0.4rem #000;
-  pointer-events: none;
-  background: none;
-  border: none;
-}
-
 
 /* ------------------------------------------------------------- alerts drawer */
 
@@ -1641,16 +1479,6 @@ body {
   display: flex;
   flex-direction: column;
 }
-
-/* --------------------------------------------------- skeletons and faults */
-
-.panel-loading {
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  height: 100%;
-  min-height: 0;
-}
 .skeleton {
   display: block;
   background: linear-gradient(
@@ -1678,34 +1506,6 @@ body {
     animation: none;
     background: var(--line-soft);
   }
-}
-
-.skeleton-stack {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s3);
-  width: 100%;
-}
-.skeleton-row {
-  display: flex;
-  gap: var(--s2);
-  width: 100%;
-}
-.skeleton-row > * {
-  flex: 1;
-}
-.skeleton-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--s3);
-}
-.skeleton-weather {
-  display: flex;
-  align-items: center;
-  gap: var(--s5);
-}
-.skeleton-weather .skeleton-stack {
-  flex: 1;
 }
 .skeleton-map {
   width: 100%;
@@ -1770,15 +1570,6 @@ body {
   border: 1px solid var(--warn);
   border-radius: var(--s1);
   padding: 0.05rem var(--s2);
-}
-
-/* ---------------------------------------------------------- battery chart */
-
-.chart-head {
-  display: flex;
-  align-items: center;
-  gap: var(--s3);
-  margin: var(--s4) 0 var(--s2);
 }
 .window-switch {
   display: flex;
@@ -2025,63 +1816,6 @@ body {
   max-width: 7rem;
   line-height: 1.15;
 }
-
-
-
-/* ------------------------------------------------------- receiver setup */
-
-.radio-config {
-  margin-top: var(--s3);
-  border-top: 1px solid var(--line-soft);
-  padding-top: var(--s2);
-}
-.radio-config summary {
-  cursor: pointer;
-  font: 0.7rem var(--mono);
-  color: var(--muted);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  list-style: none;
-}
-.radio-config summary::-webkit-details-marker {
-  display: none;
-}
-.radio-config summary::before {
-  content: "▸ ";
-  color: var(--dim);
-}
-.radio-config[open] summary::before {
-  content: "▾ ";
-}
-.cfg-row {
-  display: flex;
-  align-items: center;
-  gap: var(--s3);
-  margin-top: var(--s3);
-  font-size: 0.78rem;
-  color: var(--muted);
-}
-.cfg-row > span:first-child {
-  min-width: 5.5rem;
-}
-.cfg-row select,
-.ppm-row input {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--s1);
-  color: var(--text);
-  font: 0.78rem var(--mono);
-  padding: 0.15rem var(--s2);
-}
-.ppm-row {
-  display: flex;
-  align-items: center;
-  gap: var(--s2);
-  flex: 1;
-}
-.ppm-row input {
-  width: 4rem;
-}
 .ppm-row .unit {
   color: var(--dim);
   font: 0.7rem var(--mono);
@@ -2108,37 +1842,11 @@ body {
   pointer-events: none;
 }
 
-.audio-note {
-  font: 0.65rem var(--mono);
-  color: var(--warn);
-  white-space: nowrap;
-}
-
 /* Skeletons sit in the same box as the panel they stand in for, so the stack's
    natural height - and therefore the whole sidebar's scale - does not change
    when data arrives. See the note in PanelState.tsx. */
 .panel-loading {
   justify-content: flex-start;
-}
-.skeleton-weather {
-  display: flex;
-  align-items: center;
-  gap: var(--s5);
-}
-.skeleton-weather .skeleton-stack {
-  flex: 1;
-}
-.skeleton-rain {
-  margin-top: var(--s3);
-  padding-top: var(--s3);
-  border-top: 1px solid var(--line-soft);
-}
-.skeleton-light {
-  align-items: center;
-  gap: var(--s4);
-}
-.skeleton-light > :first-child {
-  flex: none;
 }
 
 /* Reserved space, not removed space. Anything inside the sidebar that appears
@@ -2169,12 +1877,6 @@ body {
 }
 .volume.muted-by-browser > span {
   color: var(--warn);
-}
-
-.audio-diag {
-  font: 0.66rem var(--mono);
-  color: var(--dim);
-  line-height: 1.3;
 }
 
 /* Loading and fault overlay the real panel rather than replacing it, so the
@@ -2819,14 +2521,6 @@ body {
 }
 .org-switch select:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
 .org-switch select:disabled { opacity: 0.5; cursor: wait; }
-.org-guest {
-  font: 700 0.62rem var(--mono);
-  letter-spacing: 0.1em;
-  color: var(--warn);
-  border: 1px solid var(--warn);
-  border-radius: var(--s1);
-  padding: 0.05rem var(--s2);
-}
 
 /* An elevated session - platform administration, or working inside someone
    else's organisation. Amber across the entire header rather than a badge in
@@ -2852,17 +2546,6 @@ body {
 .topbar.elevated .org-switch select {
   border-color: var(--warn);
   color: var(--warn);
-}
-
-/* MJPEG frames. object-fit: contain rather than cover - a security view must
-   not be cropped to fill a panel, because the part cut off is exactly the part
-   nobody knew they were missing. */
-.video-frame {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-  background: #000;
-  display: block;
 }
 .video-idle {
   display: flex;
@@ -3239,14 +2922,6 @@ body {
   color: var(--text);
   letter-spacing: 0.06em;
   word-break: break-all;
-}
-
-/* The camera panel's parking space in each layout slot. It holds no styling of
-   its own: the panel is portalled in and brings its own, and the host exists
-   only so React has a stable DOM parent to move it between. Full size in both,
-   because the panel sizes itself from the slot it lands in. */
-.video-host {
-  display: contents;
 }
 
 

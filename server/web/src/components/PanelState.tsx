@@ -64,24 +64,6 @@ export function panelStatus(
   return Date.now() - lastSeen > staleAfterMs ? "fault" : "live";
 }
 
-export function Skeleton({
-  w = "100%",
-  h = "1rem",
-  radius = "0.25rem",
-}: {
-  w?: string;
-  h?: string;
-  radius?: string;
-}) {
-  return (
-    <span
-      className="skeleton"
-      style={{ width: w, height: h, borderRadius: radius }}
-      aria-hidden
-    />
-  );
-}
-
 /**
  * Wraps a panel body and overlays a loading shimmer or a fault marker.
  *

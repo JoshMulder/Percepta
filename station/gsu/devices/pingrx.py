@@ -267,7 +267,6 @@ class PingRxAdsb:
 #: outside the default 12 km alert ring: a point obstacle never moves, and one
 #: inside the ring would hold the console in a permanent proximity alert that
 #: is a property of the simulator rather than of anything happening.
-_SURFACE = ("service surface", "emergency surface", "point obstacle")
 _PROFILES: tuple[tuple[int, float, tuple[str, ...], tuple[float, float],
                        tuple[float, float], tuple[float, float]], ...] = (
     #  emitter                       weight  callsigns                       altitude m        speed km/h     spawn km

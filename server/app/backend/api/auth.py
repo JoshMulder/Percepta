@@ -88,11 +88,6 @@ class LoginChallenge(BaseModel):
     qr_svg: str | None = None
 
 
-class OrganizationSummary(BaseModel):
-    id: str
-    name: str
-
-
 class MeResponse(BaseModel):
     user_id: str
     email: str

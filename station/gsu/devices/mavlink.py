@@ -135,7 +135,6 @@ CRC_EXTRA = {
     MSG_REQUEST_DATA_STREAM: 148,
     **UAVIONIX_STATUS_MSGIDS,
 }
-PAYLOAD_LEN = {MSG_ADSB_VEHICLE: ADSB_VEHICLE_LEN, MSG_HEARTBEAT: HEARTBEAT_LEN}
 
 
 def x25_crc(data: bytes, crc: int = 0xFFFF) -> int:
@@ -213,7 +212,7 @@ def decode_adsb_vehicle(payload: bytes) -> AdsbVehicle:
     (
         icao, lat_e7, lon_e7, altitude_mm, heading_cdeg, hor_cms, ver_cms,
         flags, squawk, altitude_type_raw, callsign_raw, emitter_type, tslc,
-    ) = struct.unpack("<IiiiHHhHHB9sBB", payload[:ADSB_VEHICLE_LEN])
+    ) = struct.unpack(ADSB_VEHICLE_FORMAT, payload[:ADSB_VEHICLE_LEN])
 
     valid_coords = bool(flags & FLAG_VALID_COORDS)
     valid_altitude = bool(flags & FLAG_VALID_ALTITUDE)
@@ -299,7 +298,7 @@ def encode_adsb_vehicle(
     tests nothing.
     """
     return struct.pack(
-        "<IiiiHHhHHB9sBB",
+        ADSB_VEHICLE_FORMAT,
         icao & 0xFFFFFFFF, lat_e7, lon_e7, altitude_mm,
         heading_cdeg & 0xFFFF, hor_cms & 0xFFFF, ver_cms,
         flags & 0xFFFF, squawk & 0xFFFF, altitude_type,

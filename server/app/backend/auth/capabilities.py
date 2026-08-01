@@ -70,24 +70,6 @@ READ_CAPABILITIES = frozenset({
     Capability.MEDIA_REVIEW,
 })
 
-#: Capabilities with a physical effect at the station. Every use is audited.
-ACTUATOR_CAPABILITIES = frozenset(Capability) - READ_CAPABILITIES
-
-#: Capabilities over hardware that only one operator can usefully drive at once.
-#: There is no lease mechanism: radio tuning was deliberately left unlocked (see
-#: RADIO_CONTROL), and PTZ is left the same way for consistency until real use
-#: shows it needs otherwise - two operators fighting over a camera is visible and
-#: self-correcting in a way a silent lock is not.
-#:
-#: RADIO_TRANSMIT is the one that will genuinely need exclusivity, because two
-#: transmitters keying the same channel is not a UX problem. Revisit when the
-#: certified hardware arrives.
-CONTENDED_CAPABILITIES = frozenset({
-    Capability.VIDEO_PTZ,
-    Capability.RADIO_CONTROL,
-    Capability.RADIO_TRANSMIT,
-})
-
 #: Not grantable through the API under current scope. Enforced at the grant
 #: boundary so it cannot be handed out by mistake before the hardware and the
 #: operator licensing exist to justify it.
@@ -98,11 +80,18 @@ UNGRANTABLE_CAPABILITIES = frozenset({
 GRANTABLE_CAPABILITIES = frozenset(Capability) - UNGRANTABLE_CAPABILITIES
 
 
-def is_actuator(capability: Capability) -> bool:
-    return capability in ACTUATOR_CAPABILITIES
-
-
-def is_contended(capability: Capability) -> bool:
-    """True for hardware only one operator can usefully drive at a time. Purely
-    informational today - nothing enforces exclusivity."""
-    return capability in CONTENDED_CAPABILITIES
+# ON CONTENTION, which used to be a set and two helpers nothing called.
+#
+# VIDEO_PTZ, RADIO_CONTROL and RADIO_TRANSMIT are the capabilities only one
+# operator can usefully drive at once, and there is deliberately no lease
+# mechanism: radio tuning was left unlocked on purpose, and PTZ is left the
+# same way for consistency until real use shows otherwise — two operators
+# fighting over a camera is visible and self-correcting in a way a silent lock
+# is not.
+#
+# RADIO_TRANSMIT is the one that will genuinely need exclusivity, because two
+# transmitters keying the same channel is not a UX problem. It is ungrantable
+# today (above), so the question is deferred rather than open. Revisit when the
+# certified hardware arrives — and note that `is_contended` existed for two
+# years, enforced nothing, and said so in its own docstring. A set is not a
+# mechanism.

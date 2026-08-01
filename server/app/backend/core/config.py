@@ -113,10 +113,6 @@ class Settings(BaseSettings):
 
     stream_revalidate_seconds: int = 60
 
-    # Lifetime of a media stream ticket. Deliberately short: the ticket only has
-    # to survive the round trip from issuing it to attaching the stream.
-    stream_ticket_seconds: int = 60
-
     # Cross-worker fan-out and immediate revocation over Redis. Turning this off
     # confines fan-out to a single process, so WEB_CONCURRENCY must then be 1 or
     # subscribers on other workers silently miss frames.

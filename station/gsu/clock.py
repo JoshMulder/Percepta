@@ -81,10 +81,6 @@ def implausible_reason(at: datetime | None = None) -> str | None:
     return None
 
 
-def is_plausible(at: datetime | None = None) -> bool:
-    return implausible_reason(at) is None
-
-
 def parse(value: str | None) -> datetime | None:
     """Parse an ISO-8601 timestamp from the platform, tolerating `Z` and a
     missing timezone. A naive timestamp is treated as UTC — the platform sends

@@ -92,17 +92,6 @@ export function IconAlert({ className = "icon" }: Props) {
   );
 }
 
-export function IconStation({ className = "icon" }: Props) {
-  return (
-    <svg {...base} className={className}>
-      <path d="M9 21 12 9l3 12" />
-      <path d="M10 16.5h4" />
-      <path d="M8 6.4a5.4 5.4 0 0 1 8 0" />
-      <path d="M5.6 3.6a8.8 8.8 0 0 1 12.8 0" opacity="0.5" />
-    </svg>
-  );
-}
-
 export function IconExpand({ className = "icon" }: Props) {
   return (
     <svg {...base} className={className}>
@@ -111,16 +100,6 @@ export function IconExpand({ className = "icon" }: Props) {
     </svg>
   );
 }
-
-export function IconLock({ className = "icon" }: Props) {
-  return (
-    <svg {...base} className={className}>
-      <rect x="4.5" y="10.5" width="15" height="10" rx="2" />
-      <path d="M8 10.5V7.8a4 4 0 0 1 8 0v2.7" />
-    </svg>
-  );
-}
-
 export function IconSpeaker({
   level,
   className = "icon",
@@ -143,11 +122,6 @@ export function IconSpeaker({
       )}
     </svg>
   );
-}
-
-/** Filled dot for online/offline state, not a stroke icon. */
-export function Dot({ ok }: { ok: boolean }) {
-  return <span className={`dot${ok ? " ok" : ""}`} aria-hidden />;
 }
 
 /* --------------------------------------------------------------- sky ----- */

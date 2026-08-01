@@ -43,6 +43,35 @@ def _logging(verbose: bool) -> None:
     )
 
 
+def _skew_note(standing) -> str:
+    """How far this box's clock is from the platform's, said out loud.
+
+    `clock.skew` and `clock.SKEW_WARN` existed for this and nothing called
+    either, so the platform's time was printed as "(reference only)" and left
+    for the reader to subtract. The agent does not poll `/api/enrol/status`, so
+    there is no running loop to raise a health condition from — this command is
+    the one place the two clocks are ever both in hand, and it is what somebody
+    debugging a box runs.
+
+    Skew matters because the credential is time-bounded at both ends: a box
+    far enough ahead treats a live credential as expired, and one far enough
+    behind refuses to enrol at all (`clock.implausible_reason`). Both present
+    as "the platform rejected us" with nothing pointing at the clock.
+    """
+    drift = clock.skew(standing.server_time)
+    if drift is None:
+        return " (the platform did not say)"
+    seconds = drift.total_seconds()
+    if abs(drift) < clock.SKEW_WARN:
+        return f" (this box is {seconds:+.1f}s against it)"
+    return (
+        f" (this box is {seconds:+.1f}s against it — beyond "
+        f"{clock.SKEW_WARN.total_seconds() / 60:.0f} minutes, which will start "
+        f"failing enrolment and credential checks. Fix the clock, not the "
+        f"credential: check chrony with `chronyc tracking`.)"
+    )
+
+
 def _bench(agent) -> int:
     """Measure what one tick of this agent costs, here.
 
@@ -1000,7 +1029,7 @@ def main(argv: list[str] | None = None) -> int:
         f"  config version {standing.config_version}\n"
         f"  credential expires {standing.credential_expires_at}\n"
         f"  renew now: {standing.renew_now}\n"
-        f"  platform clock {standing.server_time} (reference only)"
+        f"  platform clock {standing.server_time}{_skew_note(standing)}"
     )
     return 0
 
