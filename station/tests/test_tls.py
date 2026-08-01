@@ -153,13 +153,58 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(api.mode, tls.TRUST_SYSTEM)
         self.assertEqual(api.purpose, "api")
 
-    def test_the_broker_has_no_system_trust_option(self):
-        # A private service with a private CA. "Any CA the OS trusts" is not a
-        # description of it, and there is no argument to ask for one.
+    def test_the_broker_does_not_reach_system_trust_on_its_own(self):
+        # The default is unchanged and is the safe one: nothing pinned, nothing
+        # stated, so every TLS URL is refused rather than verified against
+        # whatever roots happen to be installed.
         store = tls.CaStore(self.home / "stored.pem")
         self.assertEqual(tls.resolve_broker(store).mode, tls.TRUST_PINNED)
         with self.assertRaises(tls.Refusal):
             tls.resolve_broker(store).check("rediss://broker:6380/0", "the broker")
+
+    def test_an_unrecognised_stated_mode_still_refuses(self):
+        # Omission and nonsense both mean "I was not told", and neither is
+        # permission. An older platform sends no ca_mode at all, and that box
+        # must keep refusing rather than quietly widening its trust.
+        store = tls.CaStore(self.home / "stored.pem")
+        for stated in (None, "", "sytsem", "none", "off", "insecure"):
+            trust = tls.resolve_broker(store, stated_mode=stated)
+            self.assertEqual(trust.mode, tls.TRUST_PINNED, stated)
+            with self.assertRaises(tls.Refusal, msg=stated):
+                trust.check("wss://platform.example/broker", "the relay")
+
+    def test_the_platform_may_state_system_trust_for_the_relay(self):
+        # The deployment case: the relay is served by the platform's own 443
+        # behind a proxy holding a publicly trusted certificate, so there is no
+        # private CA on the wire to pin. Refusing here was a station that
+        # enrolled perfectly and then published nothing.
+        store = tls.CaStore(self.home / "stored.pem")
+        trust = tls.resolve_broker(store, stated_mode=tls.TRUST_SYSTEM)
+        self.assertEqual(trust.mode, tls.TRUST_SYSTEM)
+        trust.check("wss://platform.example/broker", "the relay")
+        # Still full verification, and still no way to ask for less.
+        self.assertEqual(trust.context().verify_mode, ssl.CERT_REQUIRED)
+
+    @unittest.skipUnless(HAS_OPENSSL, "needs openssl to make a certificate")
+    def test_a_pinned_ca_outranks_a_stated_system_mode(self):
+        # Precedence is the property that keeps this from being a downgrade:
+        # no box that is pinned today can be argued out of it by an answer
+        # from the platform, whether the CA came from enrolment or was
+        # installed out of band.
+        pem = make_ca(self.home, "broker").read_text()
+        store = tls.CaStore(self.home / "stored.pem")
+        store.save(pem)
+        self.assertEqual(
+            tls.resolve_broker(store, stated_mode=tls.TRUST_SYSTEM).mode,
+            tls.TRUST_PINNED,
+        )
+        installed = str(make_ca(self.home, "installed"))
+        self.assertEqual(
+            tls.resolve_broker(tls.CaStore(self.home / "empty.pem"),
+                               installed=installed,
+                               stated_mode=tls.TRUST_SYSTEM).mode,
+            tls.TRUST_PINNED,
+        )
 
     @unittest.skipUnless(HAS_OPENSSL, "needs openssl to make a certificate")
     def test_the_api_can_be_pinned_when_the_platform_serves_its_own_cert(self):

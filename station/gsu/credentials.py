@@ -55,6 +55,13 @@ class Broker:
     #: sent yet because the development broker has no TLS. Expect it; do not
     #: require it.
     ca_pem: str | None = None
+    #: How to verify the broker: `"pinned"` against `ca_pem`, or `"system"`
+    #: when the platform is behind a publicly trusted certificate and has said
+    #: so. None means an older platform that stated neither, which `tls.py`
+    #: treats as "pinned with nothing to pin" — i.e. it refuses. Defaulted here
+    #: rather than required so a credential stored before this field existed
+    #: still loads.
+    ca_mode: str | None = None
     #: Where the live H.264 goes, if the platform names it. Derived from the
     #: API's host when it does not — see `transport/stream.py`.
     media_url: str | None = None
@@ -122,6 +129,7 @@ class Enrolment:
                 audio_topic=broker["audio_topic"],
                 command_topic=broker["command_topic"],
                 ca_pem=broker.get("ca_pem"),
+                ca_mode=broker.get("ca_mode"),
                 media_url=broker.get("media_url"),
             ),
             site=Site(

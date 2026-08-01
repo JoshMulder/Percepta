@@ -1311,6 +1311,38 @@ class RelayTransportTests(unittest.TestCase):
             got = build_transport(url, None, "secret")
             self.assertIsInstance(got, RelayTransport, url)
 
+    def test_a_trust_refusal_is_reported_rather_than_thrown_away(self):
+        # `Refusal` is a RuntimeError, and `_connect` used to catch only
+        # `(WebSocketError, OSError)` — so a station with nothing to verify the
+        # relay against died in its own thread with `last_error` still None.
+        # The console then showed a box that simply had no broker and no reason
+        # given, which is the hardest possible version of this fault to
+        # diagnose from a remote site.
+        from gsu import tls
+        relay = self.transport(
+            trust=tls.Trust(mode=tls.TRUST_PINNED, path=None, purpose="broker"))
+        self.assertFalse(relay._connect())
+        self.assertIsNotNone(relay.last_error)
+        self.assertIn("no broker CA", relay.last_error)
+        # A certificate this station will not accept is a different fault from
+        # a link that is down, and the agent raises a different condition for
+        # each. The Redis transport always reported this; the relay did not.
+        self.assertTrue(relay.tls_failed)
+        # And it is not retried: a refusal is a decision, permanent until
+        # somebody changes something, so reconnect noise must not bury it.
+        self.assertTrue(relay._stop.is_set())
+
+    def test_the_platform_stating_system_trust_lets_the_relay_connect(self):
+        # The deployment case behind a public-CA proxy. Not a refusal, so the
+        # thread stays alive and the failure below is an ordinary unreachable
+        # host rather than a trust decision.
+        from gsu import tls
+        relay = self.transport(
+            trust=tls.Trust(mode=tls.TRUST_SYSTEM, purpose="broker"))
+        self.assertFalse(relay._connect())          # nothing is listening
+        self.assertFalse(relay._stop.is_set())
+        self.assertFalse(relay.tls_failed)
+
     def test_publishing_with_no_link_is_a_counted_drop(self):
         # Never queued. Telemetry is current state, not a ledger — replaying
         # stale readings into a live console after an outage is worse than a

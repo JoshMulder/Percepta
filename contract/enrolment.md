@@ -154,16 +154,25 @@ token rather than by the rate limit alone.
   },
   "broker": {
     "url": "wss://platform.example/broker",
-    "ca_pem": "…",                   // pinned; the station verifies THE BROKER
-                                     // against this CA and no other. SENT.
-                                     // NULL when the platform is behind a
-                                     // publicly trusted certificate: pinning a
-                                     // private CA the live certificate does not
-                                     // chain to fails every connection.
-                                     // Persist it beside the credential. It is
-                                     // the broker's trust root, not the API's -
-                                     // the API is normally behind a proxy with
-                                     // a public certificate.
+    "ca_pem": "…",                   // the CA to pin, when ca_mode is
+                                     // "pinned". Persist it beside the
+                                     // credential. It is the broker's trust
+                                     // root, not the API's.
+    "ca_mode": "pinned" | "system",  // HOW to verify the broker. "pinned" =
+                                     // against ca_pem and nothing else.
+                                     // "system" = against the OS trust store,
+                                     // because this platform is behind a
+                                     // publicly trusted certificate and its
+                                     // own private CA is not on the wire.
+                                     // The platform is the only party that
+                                     // knows which, so it says: a null ca_pem
+                                     // alone cannot tell "not sent yet" from
+                                     // "use the public roots", and a station
+                                     // that guesses is wrong in one direction
+                                     // or the other. Absent (an older
+                                     // platform) means "pinned", so a station
+                                     // that has nothing to pin refuses rather
+                                     // than downgrading.
     "username": "gsu:{station_id}",  // the broker principal to authenticate as
     "telemetry_topic": "gsu/{station_id}/telemetry",
     "audio_topic": "gsu/{station_id}/audio",
@@ -404,10 +413,17 @@ someone to physically re-enter the code.
 until it expires or is revoked; `claim_count` records how often it was used, and
 issuing a new code revokes any outstanding one.
 
-**`ca_pem` is sent.** Both the broker and the API serve TLS from one private CA,
-and the plaintext listeners are disabled outright rather than merely
+**`ca_pem` is sent, and `ca_mode` says what to do with it.** On a stack serving
+its own certificate, both the broker and the API serve TLS from one private CA
+and the mode is `"pinned"`. Behind a reverse proxy holding a publicly trusted
+certificate the mode is `"system"` and no CA is sent, because the private CA is
+not what the station will be shown.
+
+Either way the plaintext listeners are disabled outright rather than merely
 discouraged - a station misconfigured to `redis://` or `http://` fails instead
-of sending its credential in clear and appearing to work.
+of sending its credential in clear and appearing to work. `"system"` is not a
+weaker mode in that sense: it is full verification against a different, larger
+root set, and there remains no way to ask a station not to verify at all.
 
 **Two fields were added**: `credential.renew_after` and `broker.username`. Both
 are additive and safe to ignore.

@@ -13,8 +13,15 @@ So:
 
 | | Trust | Why |
 |---|---|---|
-| **Broker** (`rediss://`) | **always pinned** to `broker.ca_pem` | A private CA the station explicitly trusts. Nothing else will do |
+| **Broker** (`rediss://`, a private service) | **pinned** to `broker.ca_pem` | A private CA the station explicitly trusts. Nothing else will do |
+| **Broker** (`wss://`, the 443 relay) | whichever the platform **states** | The relay is served by the platform's own 443, so it is the API's endpoint wearing a different path — and it inherits the API's answer |
 | **Platform API** (`https://`) | **system trust store** by default, pinned only when told | It is expected to sit behind a TLS-terminating proxy with a public certificate on a real domain |
+
+The middle row is the one that changed, and it changed because the deployment
+did: pinning is a statement about *an endpoint*, and once the broker moved onto
+the same host, port and certificate as the API, insisting it was still a
+private service with a private CA described nothing real. It is the platform
+that knows which case it is in, so `broker.ca_mode` is how it says.
 
 The pinning on the broker is the stronger statement and it is the one that
 matters most: a public trust store says "somebody a browser vendor trusts signed
@@ -72,6 +79,19 @@ TRUST_MODES = (TRUST_PINNED, TRUST_SYSTEM)
 
 #: URL schemes that carry TLS, across both transports and the API.
 TLS_SCHEMES = ("https", "rediss", "mqtts", "ssl", "wss")
+
+#: Substrings in a connection error that mean the handshake was refused rather
+#: than the network being down. The two need different words in front of a
+#: technician: one is weather, the other is a certificate nobody will notice
+#: otherwise. Lives here rather than in either transport because both need it
+#: and a second copy would drift.
+TLS_FAILURE_MARKERS = (
+    "certificate verify failed", "ssl", "tlsv1", "wrong version number",
+)
+
+
+def looks_like_tls_failure(error: str) -> bool:
+    return any(marker in error.lower() for marker in TLS_FAILURE_MARKERS)
 
 #: ...and the ones that do not. Anything not in either list is refused rather
 #: than guessed at: an unrecognised scheme is not evidence of encryption.
@@ -221,9 +241,12 @@ class Trust:
         if self.purpose == "broker":
             return (
                 f"{what} at {url} needs TLS, and this box has no broker CA to "
-                "check it against. The broker's CA arrives in the enrolment "
-                "response (contract/enrolment.md §4), so enrol first — or "
-                "pre-provision it with GSU_CA_FILE. It will not connect without "
+                "check it against, and the platform did not say to use the "
+                "public roots instead. Both arrive in the enrolment response "
+                "as broker.ca_pem and broker.ca_mode (contract/enrolment.md "
+                "§4), so enrol — or re-enrol, if this box was enrolled against "
+                "an older platform that sent neither. GSU_CA_FILE "
+                "pre-provisions a CA out of band. It will not connect without "
                 "one and it will not fall back to an unverified connection."
             )
         return (
@@ -353,8 +376,9 @@ def resolve_broker(
     store: CaStore,
     installed: str | None = None,
     require_tls: bool = False,
+    stated_mode: str | None = None,
 ) -> Trust:
-    """What the broker is verified against. Always pinned, never the OS bundle.
+    """What the broker is verified against.
 
     Precedence:
 
@@ -362,12 +386,28 @@ def resolve_broker(
        Wins because it was put there deliberately, out of band.
     2. **The CA persisted from the enrolment response** — the normal path. The
        broker's CA is delivered by `broker.ca_pem` and pinned from then on.
-    3. Nothing, which is fine on a development box talking plaintext to a local
-       broker and refuses any `rediss://` URL.
+    3. **`stated_mode == "system"`** — the platform said, at enrolment, that it
+       sits behind a publicly trusted certificate. See below.
+    4. Nothing, which is fine on a development box talking plaintext to a local
+       broker and refuses any `rediss://` or `wss://` URL.
 
-    There is no system-trust option here on purpose. The broker is a private
-    service with a private CA, and "any CA the OS trusts" is not a description
-    of it.
+    ON THE SYSTEM OPTION
+    --------------------
+    This file used to say there was no system-trust option here on purpose,
+    because "the broker is a private service with a private CA". That was true
+    of `rediss://` on 6380. It stopped being true when the relay moved the
+    broker onto the platform's own 443: the broker is now *the same TLS
+    endpoint as the API*, and the reason given at the top of this module for
+    why the API uses the system store — it sits behind a proxy holding a public
+    certificate for a real domain — applies to it unchanged. **Trust follows
+    the endpoint, not the role.**
+
+    Two properties keep this from being the downgrade rule this module exists
+    to prevent. It is never *inferred*: a station reaches here only because the
+    platform stated `ca_mode: "system"` in a response it received over a
+    verified connection, and an absent or unrecognised mode still refuses.
+    And it is never a *fallback*: a pinned CA, from either source, always wins,
+    so no box that is pinned today can be argued out of it by a later answer.
     """
     if installed:
         path, pem = _installed(installed, "GSU_CA_FILE")
@@ -379,6 +419,9 @@ def resolve_broker(
         return Trust(mode=TRUST_PINNED, path=store.path, source="enrolment",
                      fingerprint=fingerprint(pem), require_tls=require_tls,
                      purpose="broker")
+    if stated_mode == TRUST_SYSTEM:
+        return Trust(mode=TRUST_SYSTEM, source="platform stated",
+                     require_tls=require_tls, purpose="broker")
     return Trust(mode=TRUST_PINNED, require_tls=require_tls, purpose="broker")
 
 

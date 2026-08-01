@@ -48,6 +48,7 @@ import threading
 import time
 
 from . import Handler, Transport
+from .. import tls
 from ..media.websocket import WebSocket, WebSocketError
 
 log = logging.getLogger("gsu.transport")
@@ -86,6 +87,13 @@ class RelayTransport(Transport):
         self._dropped = 0
         self._refusals: dict[str, str] = {}
         self._last_error: str | None = None
+        #: A certificate this station will not accept, as distinct from a link
+        #: that is down — `agent._update_link_state` raises a different health
+        #: condition for each, because an operator does different things about
+        #: weather and about a trust root. The Redis transport has always
+        #: reported this; the relay did not, so the deployment transport was
+        #: the one that could fail on TLS and say nothing.
+        self.tls_failed = False
         #: Set once the platform has accepted the credential, so "connected"
         #: means "usable" rather than "a socket exists". A TCP connection to a
         #: proxy that then refuses the upgrade is not a working link.
@@ -237,8 +245,22 @@ class RelayTransport(Transport):
                 what="the broker relay",
             )
             socket.connect()
+        except tls.Refusal as exc:
+            # A refusal is a decision, not a link fault, and it is permanent
+            # until someone changes something. Retrying it forever would bury
+            # the reason under reconnect noise — but *dropping* it is worse and
+            # is what used to happen: `Refusal` is a RuntimeError, so it fell
+            # straight through the clause below, killed this thread, and left
+            # `last_error` None. The console then showed a station with no
+            # broker and nothing at all to say about why.
+            self._last_error = str(exc)
+            self.tls_failed = True
+            log.error("%s", exc)
+            self._stop.set()
+            return False
         except (WebSocketError, OSError) as exc:
             self._last_error = str(exc)
+            self.tls_failed = tls.looks_like_tls_failure(str(exc))
             log.warning("Relay could not connect: %s", exc)
             return False
         self._socket = socket

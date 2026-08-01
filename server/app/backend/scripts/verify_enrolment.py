@@ -141,6 +141,54 @@ async def main() -> int:
             f"response mentions {leaked}",
         )
 
+        # A station enrolling through a reverse proxy is the deployment case,
+        # and it used to be the broken one: the platform correctly declined to
+        # pin its private CA, but said so only by omitting `ca_pem` — which a
+        # station cannot tell apart from "no CA yet", so it refused to connect
+        # and reported nothing. The mode has to be stated.
+        proxied = await client.post(
+            f"{BASE}/api/enrol",
+            json={"token": "ZZZZ-ZZZZ-ZZZZ"},
+            headers={"X-Forwarded-Proto": "https"},
+        )
+        check("a proxied claim is still rejected on a bad token",
+              proxied.status_code == 404, str(proxied.status_code))
+        # Its own station: claiming is deliberately not repeatable against one
+        # that has already enrolled (§3 below is the check for that).
+        with PrivilegedSessionLocal() as db:
+            spare = GroundStation(
+                organization_id=organization_id,
+                name="Enrolment verification, proxied (temporary)",
+                timezone="UTC", latitude=-43.5, longitude=172.6,
+            )
+            db.add(spare)
+            db.commit()
+            spare_id = spare.id
+            _, proxy_token = enrolment.issue_token(
+                db, station=spare, issued_by_user_id=None
+            )
+            db.commit()
+        via_proxy = (await client.post(
+            f"{BASE}/api/enrol",
+            json={"token": proxy_token},
+            headers={"X-Forwarded-Proto": "https"},
+        )).json()
+        check("behind a proxy the platform says to use the public roots",
+              via_proxy["broker"]["ca_mode"] == "system",
+              f"ca_mode {via_proxy['broker'].get('ca_mode')!r}")
+        check("and sends no CA to pin",
+              via_proxy["broker"]["ca_pem"] is None,
+              "a CA was sent alongside system trust")
+        check("served directly, it says to pin its own",
+              enrolled["broker"]["ca_mode"] == "pinned",
+              f"ca_mode {enrolled['broker'].get('ca_mode')!r}")
+        broker_acl.deprovision(spare_id)
+        with PrivilegedSessionLocal() as db:
+            gone = db.get(GroundStation, spare_id)
+            if gone is not None:
+                db.delete(gone)
+                db.commit()
+
         print("\n2. Broker principal")
         acl = redis.Redis.from_url(settings.redis_url)
         try:

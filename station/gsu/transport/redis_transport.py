@@ -31,7 +31,7 @@ import time
 
 import redis
 
-from ..tls import Refusal, Trust, is_tls
+from ..tls import Refusal, Trust, is_tls, looks_like_tls_failure
 from . import Handler, Transport, redact_url, split_credentials
 
 log = logging.getLogger("gsu.transport")
@@ -311,14 +311,9 @@ class RedisTransport(Transport):
                 self._fail(exc)
                 return None
 
-    #: Substrings that mean the handshake was refused rather than the network
-    #: being down. The two need different words in front of a technician: one
-    #: is weather, the other is a certificate nobody will notice otherwise.
-    _TLS_MARKERS = ("certificate verify failed", "ssl", "tlsv1", "wrong version number")
-
     def _fail(self, exc: Exception) -> None:
         text = str(exc)
-        self.tls_failed = any(marker in text.lower() for marker in self._TLS_MARKERS)
+        self.tls_failed = looks_like_tls_failure(text)
         if self._connected or self._last_error != text:
             if self.tls_failed:
                 log.error(

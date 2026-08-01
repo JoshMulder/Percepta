@@ -74,6 +74,12 @@ class BrokerOut(BaseModel):
     #: token is short-lived and single-station. Everything afterwards is
     #: verified against this.
     ca_pem: str | None = None
+    #: `"pinned"` — verify the broker against `ca_pem` and nothing else — or
+    #: `"system"`, meaning this platform is behind a publicly trusted
+    #: certificate and the OS trust store is the right root. Stated because a
+    #: null `ca_pem` cannot distinguish "not sent yet" from "use the public
+    #: roots", and a station that guesses either way guesses wrong somewhere.
+    ca_mode: str = "pinned"
     telemetry_topic: str
     audio_topic: str
     command_topic: str
@@ -140,8 +146,9 @@ def _ca_pem() -> str | None:
         return None
 
 
-def _broker_ca(request: Request | None) -> str | None:
-    """The CA to pin for the broker, or None when pinning would break it.
+def _broker_trust(request: Request | None) -> tuple[str, str | None]:
+    """How the station should verify the broker: `("pinned", pem)` or
+    `("system", None)`.
 
     The relay is this application, so the certificate a station will see is the
     one serving this request. Behind a reverse proxy that is the proxy's — a
@@ -150,17 +157,31 @@ def _broker_ca(request: Request | None) -> str | None:
     certificate does not chain to. Every connection then fails verification,
     and the station looks enrolled and mute.
 
+    **The mode is stated rather than left to be inferred from a missing
+    `ca_pem`.** A null CA used to mean two incompatible things — "nothing to
+    pin yet, refuse" and "verify against the public roots" — and the station,
+    seeing only the null, correctly chose the safer one and refused to connect
+    at all. The platform is the only party that knows which case it is in, so
+    it is the party that has to say.
+
     `X-Forwarded-Proto` is the fact that decides it, not a guess: its presence
     means something else terminated TLS and our certificate is not on the wire.
     `STATION_PIN_CA` overrides in either direction for a deployment where that
     is not true.
+
+    Note the asymmetry in the last line: when we mean to pin and the CA file
+    cannot be read, this still answers "pinned" with no PEM. That is a fault,
+    and a station that refuses is the correct outcome — reporting "system"
+    would tell a box to trust the public roots for a server presenting a
+    private certificate, turning a loud misconfiguration into a quiet one.
     """
     if settings.station_pin_ca is not None:
-        return _ca_pem() if settings.station_pin_ca else None
+        return ("pinned", _ca_pem()) if settings.station_pin_ca else ("system", None)
     if request is not None and request.headers.get("x-forwarded-proto"):
-        log.info("Behind a proxy, so enrolling with no broker CA to pin.")
-        return None
-    return _ca_pem()
+        log.info("Behind a proxy, so the station verifies the broker against "
+                 "the public roots rather than pinning ours.")
+        return ("system", None)
+    return ("pinned", _ca_pem())
 
 
 def _broker(station_id: uuid.UUID, request: Request | None = None) -> BrokerOut:
@@ -184,9 +205,11 @@ def _broker(station_id: uuid.UUID, request: Request | None = None) -> BrokerOut:
         if host:
             scheme = "wss" if request.url.scheme in ("https", "wss") else "ws"
             url = f"{scheme}://{host}/broker"
+    ca_mode, ca_pem = _broker_trust(request)
     return BrokerOut(
         url=url or settings.redis_url,
-        ca_pem=_broker_ca(request),
+        ca_pem=ca_pem,
+        ca_mode=ca_mode,
         telemetry_topic=f"gsu/{station_id}/telemetry",
         audio_topic=f"gsu/{station_id}/audio",
         command_topic=f"cmd/gsu/{station_id}",

@@ -199,20 +199,26 @@ class Agent:
 
     # --- trust ----------------------------------------------------------
 
-    def _resolve_broker_trust(self) -> tls.Trust:
-        """What the broker is verified against. Always a pinned private CA.
+    def _resolve_broker_trust(self, stated_mode: str | None = None) -> tls.Trust:
+        """What the broker is verified against: a pinned CA, or the public
+        roots when the platform has said it is behind a public certificate.
 
         A trust root that cannot be read is a fault to *report*, never a reason
         to proceed without one: the fallback is "no CA", which refuses every
         TLS URL, and never "no verification". The station keeps sensing and
         recording either way — that is the whole design — it simply does not
         talk to anything it cannot identify.
+
+        `stated_mode` is `broker.ca_mode` from the enrolment response and is
+        None until one has been loaded, which is why this is re-resolved when
+        an enrolment arrives rather than only at construction.
         """
         try:
             trust = tls.resolve_broker(
                 self.ca,
                 installed=self.config.ca_file,
                 require_tls=self.config.require_tls,
+                stated_mode=stated_mode,
             )
         except tls.Refusal as exc:
             self.health.raise_condition("tls.broker_trust_unusable", "critical", str(exc))
@@ -261,7 +267,27 @@ class Agent:
         and is not something the platform gets to change by sending a field.
         """
         pem = enrolment.broker.ca_pem
+        mode = enrolment.broker.ca_mode
+        if mode == tls.TRUST_SYSTEM:
+            # The platform is behind a publicly trusted certificate and has
+            # said so. Any CA stored from an earlier enrolment is now a pin to
+            # something that will not be presented again, so it is dropped
+            # rather than left to win the precedence order and refuse every
+            # connection — which is the failure this whole path exists to end.
+            # An installed GSU_CA_FILE is untouched: that was put there
+            # deliberately and out of band, and outranks anything said here.
+            if self.ca.load() is not None:
+                log.warning(
+                    "The platform now serves a publicly trusted certificate, so "
+                    "the CA pinned at %s no longer applies and has been "
+                    "dropped. The broker is verified against the system trust "
+                    "store from here.", self.config.ca_path,
+                )
+                self.ca.clear()
+            self.trust = self._resolve_broker_trust(stated_mode=mode)
+            return
         if not pem:
+            self.trust = self._resolve_broker_trust(stated_mode=mode)
             return
         # Persisted even when an installed CA is present and takes precedence:
         # if the installed file is ever removed, the box should still be pinned
@@ -289,7 +315,7 @@ class Agent:
         # Re-resolve so the next transport uses it. The API client keeps its own
         # trust: one CA arriving in a response must not silently become the root
         # for the channel that delivered it.
-        self.trust = self._resolve_broker_trust()
+        self.trust = self._resolve_broker_trust(stated_mode=mode)
 
     # --- devices --------------------------------------------------------
 
