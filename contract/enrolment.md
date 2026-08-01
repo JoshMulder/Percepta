@@ -153,9 +153,13 @@ token rather than by the rate limit alone.
                                      // than each station hardcoding half a life
   },
   "broker": {
-    "url": "mqtts://broker.example:8883",
+    "url": "wss://platform.example/broker",
     "ca_pem": "…",                   // pinned; the station verifies THE BROKER
                                      // against this CA and no other. SENT.
+                                     // NULL when the platform is behind a
+                                     // publicly trusted certificate: pinning a
+                                     // private CA the live certificate does not
+                                     // chain to fails every connection.
                                      // Persist it beside the credential. It is
                                      // the broker's trust root, not the API's -
                                      // the API is normally behind a proxy with

@@ -98,7 +98,16 @@ async def run_relay(station_id: uuid.UUID, frames: list[str]):
 
     class Found:
         id = station_id
+        organization_id = uuid.uuid4()
 
+    # The console notice is not what these checks are about, and publishing it
+    # would need a live hub.
+    original_announce = broker._announce
+
+    async def quiet(*_a, **_k):
+        return None
+
+    broker._announce = quiet
     original_auth = broker.enrolment.authenticate
     original_redis = broker.aioredis.Redis.from_url
     original_session = broker.PrivilegedSessionLocal
@@ -117,6 +126,7 @@ async def run_relay(station_id: uuid.UUID, frames: list[str]):
         broker.enrolment.authenticate = original_auth
         broker.aioredis.Redis.from_url = original_redis
         broker.PrivilegedSessionLocal = original_session
+        broker._announce = original_announce
     return socket, redis
 
 

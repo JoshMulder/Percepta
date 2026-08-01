@@ -1103,3 +1103,37 @@ front of us: rpicam-vid and the synthetic source emit no B-frames by
 construction, this camera emits none by configuration. Building a fix with no
 failing case to prove it is how the flat timeline came to be written in the
 first place.
+
+
+## 47. The broker is reached over 443, and MQTT is not the destination any more
+
+Redis on 6380 works on a LAN and nowhere else. Behind a reverse proxy — which
+is what a public deployment is — that port is shut and 443 is the only one
+open, at every site, on every corporate network, over Starlink. "Only 443 is
+open" is the normal condition, not a quirk to work around once.
+
+**MQTT was the recorded intention and it is not any more.** `mqtt.py` was a
+stub whose constructor raised, nothing instantiated it, and yet
+`contract/transport.md` and `contract/enrolment.md` both pointed at it — three
+documents naming a destination the project had stopped walking toward, which
+is worse than having no plan, because somebody would have built toward it.
+
+MQTT was priced properly before it was dropped. It is the better protocol for
+this traffic and it loses on one thing: port 8883, which is shut wherever 6380
+is. MQTT over WebSocket on 443 is real and would clear that, but it costs a
+broker service, a client library on the station — breaking the
+one-dependency rule — and a bridge into Redis, which does **not** go away:
+the console's realtime bus, the media relay and the ingest leader election all
+use it. So MQTT would have been a *second* broker alongside Redis, to replace
+forty lines of topic checking. More moving parts, not fewer.
+
+What it would have bought that the relay does not: broker-enforced ACLs, which
+is audited code holding the isolation property instead of ours. That is a real
+loss and the reason `verify_broker.py` exists — deleting the check makes it
+fail and name exactly what leaked. Last Will was the other argument, and the
+relay gets the same thing free by knowing when its own socket closes.
+
+**If station traffic ever needs to be consumed by anything outside this
+platform** — a customer's SCADA, another vendor's tooling — MQTT's standardness
+becomes worth the second broker, and adopting it then is much more expensive
+than adopting it now. That is the condition that would reverse this.

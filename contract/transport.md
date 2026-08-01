@@ -150,7 +150,7 @@ Two traps, both of which have already cost someone an hour:
 
 ## Broker
 
-Redis pub/sub today; MQTT over TLS is the intended production transport
+A WebSocket relay on 443 in production (`WS /broker`); Redis pub/sub direct on a bench
 (`server/docs/01-architecture-notes.md`). Both are fire-and-forget from the
 station's point of view, and the contract assumes nothing stronger:
 

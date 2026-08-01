@@ -137,8 +137,16 @@ def build_transport(
 ) -> Transport:
     """Pick a transport from the broker URL the platform handed out.
 
-    The one function that has to change when production moves to MQTT, and the
-    reason `mqtt.py` exists as a stub rather than as a surprise.
+    Two transports: `wss://` is the deployment one — the relay in `relay.py`,
+    which reaches the broker over the only port that is open everywhere — and
+    `rediss://` is the direct connection, for a bench where the broker's own
+    port is reachable.
+
+    There was a third, `mqtt.py`, which was a stub that never connected to
+    anything. MQTT is the better protocol for this traffic and it lost on one
+    thing: port 8883, which is shut wherever 6380 is. Carrying a second broker
+    and a client library to arrive at what the relay does in two files with no
+    dependency was not worth it. See DECISIONS.md.
 
     `trust` is the station's pinned CA (`gsu/tls.py`). Every transport takes it
     and every transport must refuse rather than connect without it, which is
@@ -158,8 +166,4 @@ def build_transport(
 
         return RelayTransport(url, username=username, password=password,
                               trust=trust)
-    if scheme in ("mqtt", "mqtts", "ssl", "tcp"):
-        from .mqtt import MqttTransport
-
-        return MqttTransport(url, username=username, password=password, trust=trust)
     raise ValueError(f"No transport knows how to speak {scheme!r} (from {url!r})")

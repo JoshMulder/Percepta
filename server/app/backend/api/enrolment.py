@@ -141,10 +141,53 @@ def _ca_pem() -> str | None:
         return None
 
 
-def _broker(station_id: uuid.UUID) -> BrokerOut:
+def _broker_ca(request: Request | None) -> str | None:
+    """The CA to pin for the broker, or None when pinning would break it.
+
+    The relay is this application, so the certificate a station will see is the
+    one serving this request. Behind a reverse proxy that is the proxy's — a
+    publicly trusted one, in the deployment this was written for — and handing
+    out our own private CA would have the station pin something the live
+    certificate does not chain to. Every connection then fails verification,
+    and the station looks enrolled and mute.
+
+    `X-Forwarded-Proto` is the fact that decides it, not a guess: its presence
+    means something else terminated TLS and our certificate is not on the wire.
+    `STATION_PIN_CA` overrides in either direction for a deployment where that
+    is not true.
+    """
+    if settings.station_pin_ca is not None:
+        return _ca_pem() if settings.station_pin_ca else None
+    if request is not None and request.headers.get("x-forwarded-proto"):
+        log.info("Behind a proxy, so enrolling with no broker CA to pin.")
+        return None
+    return _ca_pem()
+
+
+def _broker(station_id: uuid.UUID, request: Request | None = None) -> BrokerOut:
+    """What the station is told to connect to.
+
+    The relay is served by this application, so the right address is `/broker`
+    on whatever host the station just reached to enrol — which is also the only
+    thing that survives a reverse proxy. Deriving it from the request rather
+    than from configuration is the same reasoning as the enrolment string:
+    a configured value is right in the deployment it was written in and wrong
+    behind every proxy, and being wrong here means a station that enrols
+    perfectly and then publishes nowhere.
+
+    `STATION_BROKER_URL` still overrides, for a deployment that really does put
+    the broker somewhere else. Falling back to `redis_url` remains for a stack
+    with no host header to work from.
+    """
+    url = settings.station_broker_url
+    if not url and request is not None:
+        host = request.headers.get("host", "")
+        if host:
+            scheme = "wss" if request.url.scheme in ("https", "wss") else "ws"
+            url = f"{scheme}://{host}/broker"
     return BrokerOut(
-        url=settings.station_broker_url or settings.redis_url,
-        ca_pem=_ca_pem(),
+        url=url or settings.redis_url,
+        ca_pem=_broker_ca(request),
         telemetry_topic=f"gsu/{station_id}/telemetry",
         audio_topic=f"gsu/{station_id}/audio",
         video_topic=f"gsu/{station_id}/video",
@@ -189,7 +232,7 @@ def _response(issued: enrolment.IssuedCredential) -> EnrolResponse:
                 + enrolment.RENEW_AFTER
             ).isoformat(),
         ),
-        broker=_broker(station.id),
+        broker=_broker(station.id, request),
         station=StationOut(
             name=station.name,
             timezone=station.timezone,

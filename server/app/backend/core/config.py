@@ -74,6 +74,14 @@ class Settings(BaseSettings):
     # redis_url so a development stack needs no extra configuration.
     station_broker_url: str | None = None
 
+    # Whether an enrolling station is given a CA to pin for the broker.
+    #
+    # None, the default, decides per request: behind a reverse proxy the
+    # certificate a station sees is the proxy's, so ours is not worth pinning
+    # and pinning it fails every connection. Set explicitly only where that
+    # inference is wrong — True to pin regardless, False never to.
+    station_pin_ca: bool | None = None
+
     # Where the simulator posts its own enrolment. Development only - it is the
     # API talking to itself from inside the container.
     simulator_enrol_url: str = "https://localhost:8000"

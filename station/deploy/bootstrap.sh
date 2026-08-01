@@ -475,7 +475,11 @@ set_env() {
 }
 
 set_env GSU_PLATFORM_URL "$PLATFORM_URL"
-set_env GSU_BROKER_URL   "rediss://${PLATFORM}:6380/0"
+# Deliberately not set. The platform states the broker address at enrolment,
+# and it is the relay on this same host — `wss://<host>/broker`. Writing one
+# here would override that with a guess, which is how a station ends up
+# pointed at a port a proxy has closed.
+set_env GSU_BROKER_URL   ""
 set_env GSU_DEMO         "$DEMO"
 # On the container path this is the *container's* namespace, and what the
 # outside world can reach is decided by the port mapping below — so it is
@@ -496,17 +500,7 @@ else
   set_env GSU_API_CA_FILE ""
 fi
 info "platform: $PLATFORM_URL"
-info "broker:   rediss://${PLATFORM}:6380/0"
-# The broker is a separate port and a separate reachability question, and a
-# station that enrols and then publishes nothing looks like a station that
-# works. Say it here rather than leaving it to be discovered from an empty
-# console.
-if ! timeout 8 bash -c "cat < /dev/null > /dev/tcp/${PLATFORM}/6380" 2>/dev/null; then
-  warn "port 6380 on ${PLATFORM} is not reachable from this box."
-  warn "The station will enrol over the API and then publish no telemetry."
-  warn "Behind a proxy that exposes only 443 the broker needs tunnelling;"
-  warn "that work is not done. On the bench, open 6380 or use the LAN address."
-fi
+info "broker:   stated at enrolment (the relay on this same host)"
 [ "$DEMO" = 1 ] && info "demo box: every slot simulated"
 
 # The setup page refuses to bind anywhere but loopback without a password hash,

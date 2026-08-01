@@ -41,6 +41,7 @@ from fastapi.websockets import WebSocketDisconnect
 from backend.core.config import settings
 from backend.database.session import PrivilegedSessionLocal
 from backend.realtime.bus import command_channel
+from backend.realtime.hub import hub
 from backend.services import enrolment
 
 log = logging.getLogger(__name__)
@@ -81,11 +82,13 @@ async def broker(websocket: WebSocket) -> None:
             return
         station, _credential = found
         station_id = station.id
+        organization_id = station.organization_id
         db.commit()
 
     await websocket.accept()
     permitted = _permitted(station_id)
     log.info("Broker relay open for station %s.", station_id)
+    await _announce(organization_id, station_id, online=True)
 
     # Commands travel the other way on the same socket. Subscribed here rather
     # than through the shared ingest listener because this is one station's
@@ -144,7 +147,22 @@ async def broker(websocket: WebSocket) -> None:
             await client.aclose()
         except Exception:  # noqa: BLE001 - teardown, on a socket already gone
             pass
+        # The socket closing is the earliest and most certain evidence a
+        # station has gone. Offline was otherwise a timeout — telemetry stops,
+        # last_seen_at ages, and the console decides it is stale some seconds
+        # later. This is what MQTT would have given us as a Last Will, and the
+        # relay gets it for free by knowing when its own socket ends.
+        await _announce(organization_id, station_id, online=False)
         log.info("Broker relay closed for station %s.", station_id)
+
+
+async def _announce(organization_id: uuid.UUID, station_id: uuid.UUID,
+                    *, online: bool) -> None:
+    """Tell the console a station arrived or left, on the org status channel."""
+    try:
+        await hub.publish_status(organization_id, station_id, {"online": online})
+    except Exception:  # noqa: BLE001 - a console notice must never break the link
+        log.debug("Could not announce station %s.", station_id, exc_info=True)
 
 
 async def _pump_commands(websocket: WebSocket, pubsub, station_id: uuid.UUID) -> None:
