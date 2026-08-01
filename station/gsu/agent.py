@@ -1568,6 +1568,25 @@ class Agent:
             # link is verified, and whether its clock is disciplined by
             # anything. Both are cheap to state and expensive to guess.
             "security": self.security(),
+            # How often this station actually publishes each stream, so a
+            # console can work out what "late" means instead of assuming.
+            #
+            # The contract states these cadences and the console derived its
+            # staleness thresholds from them as bare literals — 3x for the 1 Hz
+            # streams, 6x for weather. But `weather_period_s` is a site setting
+            # and is settable at runtime over the command channel, so raising
+            # it above 30s on a metered link — an entirely reasonable thing to
+            # do — put a permanent red X on a perfectly healthy station, with
+            # nothing on either side to say why. The station is the only party
+            # that knows its own cadence; it says so here.
+            "cadence": {
+                "adsb": 1.0,
+                "power": 1.0,
+                "radio": 1.0,
+                "light": 1.0,
+                "weather": float(self.site.weather_period_s),
+                "health": float(self.site.health_period_s),
+            },
             "clock": clock.discipline().to_dict(),
             "devices": [report.to_dict() for report in self.inventory.report()],
             # The console's reason to render "no receiver" rather than an empty

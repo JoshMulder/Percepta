@@ -319,6 +319,12 @@ export interface HealthPayload extends Availability {
   unsourced_streams?: string[];
   unsourced_fields?: Record<string, string[]>;
   storage?: Record<string, number>;
+  /** How often this station publishes each stream, in seconds. The console
+   *  derives its staleness thresholds from this rather than assuming the
+   *  contract's defaults, because `weather_period_s` is a site setting a
+   *  metered link may legitimately raise. Absent on an older agent, which
+   *  falls back to the contract cadence. */
+  cadence?: Partial<Record<string, number>>;
 }
 
 export interface LightPayload extends Availability {

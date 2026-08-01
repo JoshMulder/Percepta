@@ -130,17 +130,25 @@ encrypted; there is no unencrypted path and no downgrade.**
 
 The two channels are verified differently, and the distinction matters:
 
-- **Broker** - verified against `broker.ca_pem`, the private CA handed over at
-  enrolment. A station trusts exactly one issuer for its data path, which is
-  stronger here than public PKI rather than weaker.
+- **Broker** - verified as `broker.ca_mode` says. `"pinned"` means against
+  `broker.ca_pem` and no other issuer, which is stronger than public PKI rather
+  than weaker. `"system"` means this platform is behind a publicly trusted
+  certificate, so its private CA is not what the station will be shown.
 - **API** - normally behind a TLS-terminating reverse proxy with a public
   certificate, so verified against the system trust store. A station may pin the
   API to a private CA instead where there is no proxy, but that is configuration
   rather than the default.
 
-The field is `broker.ca_pem` and not `ca_pem` for exactly this reason: it is the
-broker's trust root. Using it for the API works today and stops working the
-moment a real certificate is in front.
+The field is `broker.ca_pem` and not `ca_pem` because it is the *broker's* trust
+root. Using it for the API works today and stops working the moment a real
+certificate is in front.
+
+**The mode is stated, never inferred.** A missing `ca_pem` cannot distinguish
+"none sent yet" from "use the public roots", and a station that guesses is wrong
+in one direction or the other — refusing to connect at all, or widening its
+trust on its own. An absent or unrecognised `ca_mode` means `"pinned"`, so the
+station with nothing to pin refuses rather than downgrades, and a pinned CA
+always outranks a stated mode.
 
 The plaintext listeners are **disabled**, not deprioritised. A station pointed at
 `redis://` or `http://` fails to connect rather than quietly sending its
@@ -195,8 +203,16 @@ to tolerate gaps, so favour dropping data over queueing it.
 | `power` | 1 Hz | |
 | `radio` | 1 Hz | |
 | `light` | 1 Hz | |
-| `weather` | 0.2 Hz | Changes slowly; no reason to send it faster |
+| `weather` | 0.2 Hz | Changes slowly. A metered site may set this lower — see below |
 | `audio` | while squelch is open only | See below |
+
+**A station reports the cadences it is actually using**, in `health.cadence`,
+as seconds per stream. Consumers deriving a timeout — "this panel is stale" —
+must use that rather than the table above, which is the default and not a
+promise. `weather_period_s` is a site setting and is settable at runtime, so a
+station legitimately slowed down to save bandwidth would otherwise be marked
+faulty by a console still assuming 0.2 Hz, with nothing at either end to say
+why. Absent on an older agent, which means the table.
 
 **Audio is the platform's largest single consumer** and the one place where
 being careless is expensive. Uncompressed it is ~384 kbit/s per listener,

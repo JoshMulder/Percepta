@@ -56,24 +56,44 @@ import { WeatherPanel } from "./WeatherPanel";
  */
 const COMPACT = "(max-width: 56rem), (max-height: 34rem)";
 
-/**
- * How long without a frame counts as a failed sensor, per stream.
+/** Missed publishes before a stream is called stale.
  *
- * Set from the rate each one actually reports at, with a wide margin: ADS-B,
- * power, radio and light are 1 Hz, weather is every 5 s. A margin this generous
- * means a brief Starlink dropout does not paint the console red - and an X that
- * appears during normal operation is one operators learn to ignore, which is
- * worse than not having it.
- */
-const STALE_AFTER_MS = {
-  adsb: 15_000,
-  weather: 30_000,
-  power: 15_000,
-  radio: 15_000,
-  light: 15_000,
+ *  Three, so a brief dropout does not paint the console red. This is the only
+ *  number here that is a judgement; everything else is arithmetic on the
+ *  station's own cadence. */
+const STALE_AFTER_PUBLISHES = 3;
+
+/** Fallback cadences in seconds, from `contract/transport.md`.
+ *
+ *  Used only until a health frame arrives — the station reports what it is
+ *  actually doing in `health.cadence`, and that wins. These were previously
+ *  the whole mechanism, written out as milliseconds already multiplied, with
+ *  no link back to the table they came from. `weather_period_s` is a site
+ *  setting and is settable at runtime, so a site that slowed weather down to
+ *  save bandwidth got a permanent red X on a healthy station and no
+ *  explanation on either side. */
+const DEFAULT_CADENCE_S = {
+  adsb: 1,
+  weather: 5,
+  power: 1,
+  radio: 1,
+  light: 1,
 } as const;
 
-type StreamKind = keyof typeof STALE_AFTER_MS;
+type StreamKind = keyof typeof DEFAULT_CADENCE_S;
+
+/** Milliseconds of silence before `kind` is stale, given what the station says
+ *  about itself. Weather at 0.2 Hz gets the same three publishes as ADS-B at
+ *  1 Hz, which is why this is a multiplier rather than a table. */
+function staleAfterMs(
+  kind: StreamKind, cadence: Partial<Record<StreamKind, number>>,
+): number {
+  const seconds = cadence[kind] ?? DEFAULT_CADENCE_S[kind];
+  // A station reporting nonsense must not switch staleness off altogether.
+  const safe = Number.isFinite(seconds) && seconds > 0
+    ? seconds : DEFAULT_CADENCE_S[kind];
+  return safe * STALE_AFTER_PUBLISHES * 1000;
+}
 
 /** What the console's own connection to the server is doing. Distinct from the
  *  dot beside it, which is the *station's* link - the two fail separately and
@@ -228,7 +248,7 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
       audioRef.current.push(a.pcm, a.rate);
       return;
     }
-    if (payload.kind && payload.kind in STALE_AFTER_MS) {
+    if (payload.kind && payload.kind in DEFAULT_CADENCE_S) {
       const kind = payload.kind as StreamKind;
       setLastSeen((prev) => ({ ...prev, [kind]: Date.now() }));
       // A stream declaring itself unavailable is still arriving, so it counts
@@ -583,7 +603,8 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
     if (unavailable[kind] && !isDemo(kind)) return "fault" as const;
 
     return panelStatus(
-      lastSeen[kind] ?? null, streamsSince, STALE_AFTER_MS[kind], isDemo(kind),
+      lastSeen[kind] ?? null, streamsSince,
+      staleAfterMs(kind, health?.cadence ?? {}), isDemo(kind),
       fittedFor(kind),
     );
   };
