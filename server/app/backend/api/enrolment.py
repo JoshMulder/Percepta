@@ -76,7 +76,6 @@ class BrokerOut(BaseModel):
     ca_pem: str | None = None
     telemetry_topic: str
     audio_topic: str
-    video_topic: str
     command_topic: str
     username: str
 
@@ -216,7 +215,7 @@ def _organization_name(organization_id) -> str | None:
         return None
 
 
-def _response(issued: enrolment.IssuedCredential) -> EnrolResponse:
+def _response(issued: enrolment.IssuedCredential, request: Request) -> EnrolResponse:
     station = issued.station
     return EnrolResponse(
         station_id=str(station.id),
@@ -308,7 +307,7 @@ def claim(body: ClaimRequest, request: Request) -> EnrolResponse:
         db.flush()
         provisioned = broker_acl.sync_station(db, station_id)
         issued.credential.broker_provisioned = provisioned
-        response = _response(issued)
+        response = _response(issued, request)
         db.commit()
 
     record(
@@ -376,7 +375,7 @@ def renew(
         station_id = station.id
         organization_id = station.organization_id
         expires = issued.credential.expires_at
-        response = _response(issued)
+        response = _response(issued, request)
         db.commit()
 
     record(
