@@ -113,14 +113,21 @@ async def media_ingest(websocket: WebSocket) -> None:
         if found is None:
             await websocket.close(code=4401)
             return
-        station, _credential = found
+        station, credential = found
         station_id = station.id
         organization_id = station.organization_id
+        credential_id = credential.id
         db.commit()
 
     await websocket.accept()
     stream = await relay.publisher_connected(station_id, organization_id)
     log.info("Media ingest open for station %s.", station_id)
+    # The expensive half of the revocation gap: this socket carries megabits,
+    # and authenticating it once at connect meant a decommissioned box kept
+    # streaming for as long as the link held. Same watcher as /broker.
+    revoked = asyncio.create_task(enrolment.close_when_revoked(
+        credential_id, station_id, lambda: websocket.close(code=4401),
+    ))
 
     try:
         while True:
@@ -164,6 +171,7 @@ async def media_ingest(websocket: WebSocket) -> None:
     except Exception:
         log.exception("Media ingest failed for station %s.", station_id)
     finally:
+        revoked.cancel()
         await relay.publisher_gone(station_id)
 
 

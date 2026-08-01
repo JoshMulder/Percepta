@@ -34,6 +34,7 @@ that requires someone to physically re-enter the code, and the recovery is to
 enter a new one.
 """
 
+import asyncio
 import logging
 import secrets
 import uuid
@@ -47,6 +48,7 @@ from backend.core.crypto import lookup_hash
 from backend.database.models.ground_station import GroundStation
 from backend.database.models.station_credential import StationCredential
 from backend.database.models.station_enrolment_token import StationEnrolmentToken
+from backend.database.session import PrivilegedSessionLocal
 
 log = logging.getLogger(__name__)
 
@@ -281,6 +283,68 @@ def is_valid(credential: StationCredential, *, at: datetime | None = None) -> bo
     if credential.superseded_at is not None and credential.superseded_at <= now:
         return False
     return True
+
+
+#: How often a live station socket re-checks that its credential still stands.
+#:
+#: `contract/transport.md` promises that revoking a credential stops a
+#: station's data "within about thirty seconds, whether or not the broker
+#: noticed". That used to be true for free: the broker enforced a per-station
+#: ACL, so removing the principal cut the connection. The 443 relay
+#: authenticates once when the socket opens, which moved the guarantee from
+#: the broker into these two endpoints — and until this existed, a revoked
+#: station kept publishing until something else dropped its socket.
+#:
+#: Fifteen seconds so the worst case is comfortably inside the promise.
+REVALIDATE_SECONDS = 15.0
+
+
+def still_usable(credential_id: uuid.UUID) -> bool:
+    """Whether a credential issued earlier would still authenticate now.
+
+    The same two tests `authenticate` applies — the credential is valid and the
+    station is active — and deliberately not `authenticate` itself, which
+    stamps `last_used_at`. Called on a timer for every connected station, that
+    would be a write per station per interval to record something no more true
+    than the last one.
+    """
+    with PrivilegedSessionLocal() as db:
+        credential = db.get(StationCredential, credential_id)
+        if credential is None or not is_valid(credential):
+            return False
+        station = db.get(GroundStation, credential.ground_station_id)
+        return station is not None and station.is_active
+
+
+async def close_when_revoked(
+    credential_id: uuid.UUID,
+    station_id: uuid.UUID,
+    close,
+    *,
+    every: float = REVALIDATE_SECONDS,
+) -> None:
+    """Close a station's socket once its credential stops standing.
+
+    Shared by `/broker` and `/media/ingest` rather than written twice: they had
+    the same once-at-connect shape, and two copies of a revocation check is two
+    chances for one of them to be forgotten. `close` is the endpoint's own
+    close, so each can pick its own code and tidy up its own way.
+
+    Polled rather than pushed. A revocation event would be quicker, but it has
+    to reach whichever worker holds that socket and be delivered exactly once;
+    a poll needs nothing to have gone right elsewhere, which is the property
+    worth having in the thing that stops a decommissioned box.
+    """
+    while True:
+        await asyncio.sleep(every)
+        if await asyncio.to_thread(still_usable, credential_id):
+            continue
+        log.info(
+            "Credential for station %s no longer stands; closing its socket.",
+            station_id,
+        )
+        await close()
+        return
 
 
 def renew(

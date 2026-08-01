@@ -47,6 +47,15 @@ within about thirty seconds, whether or not the broker noticed. Enrolment is
 built — see `enrolment.md` — and issues each station a broker principal
 (`gsu:{station_id}`) pinned to exactly the three channels above.
 
+That thirty seconds holds on both transports, and by different means. On the
+direct Redis path the ACL is deleted and the station's clients are killed
+outright. On the 443 relay — the deployment path — there is no ACL to delete,
+so each open socket carries a watcher that re-checks the credential every 15s
+and closes the socket when it no longer stands. **Authenticating once, at
+connect, is not enough on a link that stays up for months.** Both the relay and
+the media uplink do this; `scripts/verify_enrolment.py` §5 revokes a credential
+out from under a live socket and fails if the socket survives.
+
 Redis' `default` user is closed: `server/docker-compose.yaml` passes
 `--requirepass` and the stack refuses to start without it, so a process that
 reaches the port still has no identity. Per-station ACLs are the second layer,

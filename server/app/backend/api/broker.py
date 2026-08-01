@@ -79,9 +79,10 @@ async def broker(websocket: WebSocket) -> None:
         if found is None:
             await websocket.close(code=4401)
             return
-        station, _credential = found
+        station, credential = found
         station_id = station.id
         organization_id = station.organization_id
+        credential_id = credential.id
         db.commit()
 
     await websocket.accept()
@@ -97,6 +98,13 @@ async def broker(websocket: WebSocket) -> None:
     pubsub = client.pubsub()
     await pubsub.subscribe(command_channel(station_id))
     commands = asyncio.create_task(_pump_commands(websocket, pubsub, station_id))
+    # Authentication happens once, when the socket opens. Without this a
+    # revoked station keeps publishing until something else drops its
+    # connection — which on a healthy link is never. See
+    # `enrolment.close_when_revoked`.
+    revoked = asyncio.create_task(enrolment.close_when_revoked(
+        credential_id, station_id, lambda: websocket.close(code=4401),
+    ))
 
     refused = 0
     try:
@@ -140,6 +148,7 @@ async def broker(websocket: WebSocket) -> None:
         log.exception("Broker relay failed for station %s.", station_id)
     finally:
         commands.cancel()
+        revoked.cancel()
         try:
             await pubsub.unsubscribe(command_channel(station_id))
             await pubsub.aclose()

@@ -9,17 +9,22 @@ against a development stack but not against production.
 """
 
 import asyncio
+import json
 import logging
 import pathlib
+import ssl
 import sys
+import time
 import uuid
 
 import httpx
 import redis
+import websockets
 from sqlalchemy import select
 
 from backend.core.config import settings
 from backend.database.models.ground_station import GroundStation
+from backend.database.models.organization import Organization
 from backend.database.session import PrivilegedSessionLocal
 from backend.realtime.bus import url_without_credentials
 from backend.services import broker_acl, enrolment
@@ -54,6 +59,7 @@ async def main() -> int:
         db.add(station)
         db.commit()
         station_id = station.id
+        organization_id = station.organization_id
 
     # Verified against the platform's own CA rather than with verification
     # turned off. This script exists to prove the enrolment path behaves; a
@@ -113,10 +119,26 @@ async def main() -> int:
             and enrolled["broker"]["command_topic"] == f"cmd/gsu/{station_id}",
             str(enrolled["broker"]),
         )
+        # The station is told its own tenant's name and nothing else about the
+        # platform's tenancy. It is echoed back so whoever is standing at the
+        # box can see which organisation the code they pasted enrolled it into
+        # — the mistake being a contractor commissioning into the previous
+        # customer's org and nobody noticing until data lands in the wrong
+        # console. What must not appear is any *other* tenant.
+        with PrivilegedSessionLocal() as db:
+            names = db.execute(select(Organization.id, Organization.name)).all()
+        own = next((n for i, n in names if i == organization_id), None)
+        others = [n for i, n in names if i != organization_id and n]
         check(
-            "no organisation is disclosed to the station",
-            "organization" not in str(enrolled).lower(),
-            "response mentions an organisation",
+            "the station is told which organisation it joined",
+            enrolled["station"]["organization"] == own,
+            f"{enrolled['station']['organization']!r}, expected {own!r}",
+        )
+        leaked = [n for n in others if n.lower() in str(enrolled).lower()]
+        check(
+            "and is told nothing about any other tenant",
+            not leaked,
+            f"response mentions {leaked}",
         )
 
         print("\n2. Broker principal")
@@ -218,12 +240,67 @@ async def main() -> int:
               str(junk.status_code))
 
         print("\n5. Revocation")
+        # The case the contract is explicit about, and the one that is easy to
+        # get wrong: `contract/transport.md` promises revoking a credential
+        # stops a station's data within about thirty seconds "whether or not
+        # the broker noticed". The relay authenticates once, when the socket
+        # opens, so without a re-check a revoked station keeps publishing until
+        # something else drops its connection — which on a healthy link is
+        # never. Opened here while the credential is still good, so that a
+        # socket which closes has been closed *by the revocation*.
+        relay = await websockets.connect(
+            BASE.replace("https://", "wss://").replace("http://", "ws://") + "/broker",
+            additional_headers={"Authorization": f"Bearer {new_secret}"},
+            ssl=ssl.create_default_context(cafile=settings.tls_ca_file)
+            if BASE.startswith("https") and pathlib.Path(settings.tls_ca_file).exists()
+            else None,
+        )
+        # Proving it works first is what stops this being vacuous: a socket
+        # that never carried anything would also "close on revocation".
+        listener = redis.Redis.from_url(settings.redis_url).pubsub()
+        listener.subscribe(f"gsu/{station_id}/telemetry")
+        await relay.send(json.dumps({
+            "topic": f"gsu/{station_id}/telemetry",
+            "payload": {"kind": "power", "available": False},
+        }))
+        # Looped rather than a single `get_message`: the first message on a
+        # fresh pubsub is the subscribe confirmation, and `get_message` with
+        # `ignore_subscribe_messages` returns None for it rather than reading
+        # past it — so the one-shot form reports "nothing arrived" every time.
+        def _await_frame(deadline: float = 5.0):
+            end = time.monotonic() + deadline
+            while time.monotonic() < end:
+                message = listener.get_message(
+                    ignore_subscribe_messages=True, timeout=end - time.monotonic()
+                )
+                if message is not None:
+                    return message
+            return None
+
+        arrived = await asyncio.to_thread(_await_frame)
+        check("a live station publishes through the relay", arrived is not None,
+              "nothing reached Redis")
+
         with PrivilegedSessionLocal() as db:
             enrolment.revoke_credentials(
                 db, station_id=station_id, reason="verification"
             )
             db.commit()
         broker_acl.deprovision(station_id)
+
+        # Nothing above reaches the relay socket: `deprovision` kills Redis
+        # clients authenticated as the station's principal, and this station
+        # never was one — it came in over 443. If this closes, the watcher
+        # closed it.
+        closed = True
+        try:
+            await asyncio.wait_for(relay.wait_closed(), timeout=30.0)
+        except TimeoutError:
+            closed = False
+            await relay.close()
+        check("revocation closes a socket that is already open", closed,
+              "still open 30s after revocation")
+        listener.close()
 
         after = await client.get(
             f"{BASE}/api/enrol/status",

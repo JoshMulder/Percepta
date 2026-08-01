@@ -100,6 +100,12 @@ async def run_relay(station_id: uuid.UUID, frames: list[str]):
         id = station_id
         organization_id = uuid.uuid4()
 
+    class Credential:
+        # The endpoint keeps this to re-check revocation on the open socket.
+        # The watcher itself is proven against a real credential and a real
+        # socket by verify_enrolment §5; here it only has to exist.
+        id = uuid.uuid4()
+
     # The console notice is not what these checks are about, and publishing it
     # would need a live hub.
     original_announce = broker._announce
@@ -111,7 +117,7 @@ async def run_relay(station_id: uuid.UUID, frames: list[str]):
     original_auth = broker.enrolment.authenticate
     original_redis = broker.aioredis.Redis.from_url
     original_session = broker.PrivilegedSessionLocal
-    broker.enrolment.authenticate = lambda db, secret: (Found(), None)
+    broker.enrolment.authenticate = lambda db, secret: (Found(), Credential())
     broker.aioredis.Redis.from_url = lambda *_a, **_k: redis
 
     class NullSession:
