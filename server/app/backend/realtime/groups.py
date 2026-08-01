@@ -115,3 +115,43 @@ class GroupRegistry:
     def group_count(self) -> int:
         """Diagnostics only - the number of groups, never their contents."""
         return len(self._members)
+
+    def stations_subscribed_to(self, stream: str) -> set[uuid.UUID]:
+        """Station ids with at least one live subscriber to `stream`, here.
+
+        Read the warning at the top of this file before deciding whether this
+        belongs. It does, and the distinction is the whole reason the warning
+        is worded the way it is: this returns **identifiers, never
+        connections**. There is still no way to reach a connection that did not
+        join a group, and nothing here can be used to send anything anywhere.
+
+        It exists so demand-driven streams can be *renewed* rather than
+        tracked. The alternative is hooking subscribe and unsubscribe, which
+        misses every way a subscriber leaves without saying so — a closed
+        laptop, a dropped link, a revoked session, a browser tab shut while
+        nothing was being sent. That last one is not hypothetical: it is the
+        bug `api/media.watch_for_close` was written for, where the last viewer
+        never left and a station streamed to nobody. Re-asserting a lease from
+        who is actually here, and letting silence stop it, has no equivalent
+        failure.
+
+        Per-worker, like every other read of this registry. A subscriber on
+        another worker renews from that worker, and the station takes the
+        latest lease it is told about.
+        """
+        found: set[uuid.UUID] = set()
+        suffix = f":{stream}"
+        for group, members in self._members.items():
+            if not group.startswith("org:") or not group.endswith(suffix):
+                continue
+            if not members:
+                continue
+            parts = group.split(":")
+            # org:{org}:gsu:{station}:{stream}
+            if len(parts) != 5 or parts[2] != "gsu":
+                continue
+            try:
+                found.add(uuid.UUID(parts[3]))
+            except ValueError:
+                continue
+        return found

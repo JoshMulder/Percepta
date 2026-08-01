@@ -14,6 +14,7 @@ from backend.api.auth import router as auth_router
 from backend.api.commands import router as commands_router
 from backend.api.enrolment import router as enrolment_router
 from backend.api.media import renew_leases, router as media_router
+from backend.services import audio_demand
 from backend.api.organization import router as organization_router
 from backend.api.platform import router as platform_router
 from backend.api.station_config import router as station_config_router
@@ -72,10 +73,15 @@ async def lifespan(app: FastAPI):
     # Keeps watched stations streaming. Silence is the stop signal, so this
     # task existing is what makes on-demand video actually stop.
     leases = asyncio.create_task(renew_leases())
+    # The same shape for airband audio, and for the same reason: a listener
+    # who closes their laptop never says so, and a station transmitting to
+    # nobody is the most expensive thing on the link.
+    audio = asyncio.create_task(audio_demand.renew())
     try:
         yield
     finally:
         leases.cancel()
+        audio.cancel()
         await power_history.stop()
         await station_ingest.stop()
         await hub.stop()

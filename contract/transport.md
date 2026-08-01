@@ -215,12 +215,25 @@ faulty by a console still assuming 0.2 Hz, with nothing at either end to say
 why. Absent on an older agent, which means the table.
 
 **Audio is the platform's largest single consumer** and the one place where
-being careless is expensive. Uncompressed it is ~384 kbit/s per listener,
-continuously. Two things keep it manageable, and the second is not done:
+being careless is expensive. Uncompressed it is ~384 kbit/s, and base64 inside
+a JSON envelope makes it ~512. Three things keep it manageable, and the third
+is not done:
 
 1. **Send only while the gate is open.** Airband is silent most of the time, so
    this alone is most of the saving. Required.
-2. **Compress it.** Opus at 16–24 kbit/s is transparent for voice and would cut
+2. **Send only while somebody is listening.** Required. The platform sends
+   `radio.audio` with a `lease_seconds`, renews it while a console holds the
+   subscription, and **stops saying anything at all** when the last one goes.
+   The lease expires on its own, so audio stops when the platform goes away
+   rather than when it remembers to say so — the same shape as `video.start`,
+   and for the same reason: most listeners never say goodbye. A closed laptop,
+   a dropped link, a revoked session and a shut tab all look identical to
+   somebody still listening, right up until the lease runs out.
+
+   A station that has never been asked sends no audio. **Recording is not
+   gated by this** — a transmission nobody had a console open for is still
+   written to disk, exactly as one during an outage is.
+3. **Compress it.** Opus at 16–24 kbit/s is transparent for voice and would cut
    the rest by more than an order of magnitude. The current format is
    base64-encoded PCM inside JSON, which is convenient and wasteful; expect this
    to change, and keep the encoding behind one function.

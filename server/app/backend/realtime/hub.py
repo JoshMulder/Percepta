@@ -196,6 +196,18 @@ class Hub:
 
         group = station_group(conn.organization_id, conn.station_id, stream)
         await self._join(conn, group)
+        # Audio costs 512 kbit/s while an over lasts, so a station only sends
+        # it when asked. Asked here as well as by the renewal loop, or the
+        # first listener waits up to RENEW_SECONDS to hear anything — which on
+        # airband is indistinguishable from a quiet channel.
+        #
+        # Imported inside the function: services.audio_demand imports this
+        # module, and the cycle at import time is not worth restructuring two
+        # files to avoid for one call.
+        if stream == "audio":
+            from backend.services import audio_demand
+
+            audio_demand.request(conn.station_id)
         return group
 
     async def unsubscribe(self, conn: Connection, stream: str) -> None:

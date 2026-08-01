@@ -47,6 +47,11 @@ class PayloadTests(unittest.TestCase):
         cls.agent = agent_in(cls._dir.name, traffic="busy")
         cls.sent: list[dict] = []
         cls.agent._publish = lambda topic, payload: cls.sent.append(payload) or True
+        # Somebody is listening. Audio is demand-driven — 512 kbit/s during an
+        # over is the largest thing this station sends — so without this the
+        # busy profile produces audio locally and publishes none of it, which
+        # is the correct behaviour and not what this fixture is for.
+        cls.agent.radio.want_audio(True, 3600)
         for index in range(60):
             cls.agent.step(1.0, weather_due=index % 5 == 0, health_due=index == 10)
 
@@ -82,6 +87,39 @@ class PayloadTests(unittest.TestCase):
         for payload in audio[:3]:
             errors = sorted(AUDIO.iter_errors(payload), key=str)
             self.assertFalse(errors, [e.message for e in errors])
+
+    def test_audio_is_not_published_when_nobody_is_listening(self):
+        """The second gate, and the expensive one.
+
+        The squelch decides whether there is audio at all; this decides whether
+        it goes up a metered link. Airband is silent most of the time but an
+        over is 512 kbit/s, and a station at a site nobody has open should cost
+        nothing — the spectrum has been demand-driven since it was written, for
+        a cost two orders of magnitude smaller, and audio was the one left on.
+        """
+        with tempfile.TemporaryDirectory() as home:
+            agent = agent_in(home, traffic="busy")
+            self.addCleanup(agent.shutdown)
+            sent: list[dict] = []
+            agent._publish = lambda topic, payload: sent.append(payload) or True
+            for _ in range(30):
+                agent.step(1.0)
+            self.assertEqual(
+                [p for p in sent if p.get("kind") == "audio"], [],
+                "audio was published with nobody listening",
+            )
+            # ...and it is the *link* that is spared, not the recording. A
+            # transmission nobody had a console open for is still on the disk.
+            self.assertTrue(agent.store.stats().get("recordings", 0) > 0
+                            or agent.store.stats().get("audio_files", 0) > 0,
+                            f"nothing was recorded either: {agent.store.stats()}")
+
+            # Now ask, and it arrives.
+            agent.radio.want_audio(True, 60)
+            for _ in range(20):
+                agent.step(1.0)
+            self.assertTrue([p for p in sent if p.get("kind") == "audio"],
+                            "audio did not resume when it was asked for")
 
     def test_no_payload_asserts_an_organisation(self):
         # contract/README.md rule 1. A station never says which tenant it is.

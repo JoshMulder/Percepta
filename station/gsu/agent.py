@@ -1150,15 +1150,23 @@ class Agent:
         self._radio_pumped = True
         if audio is None:
             return None
-        # Recorded whether or not it can be sent. A transmission during an
-        # outage is not simply gone.
+        # Recorded whether or not it can be sent, and whether or not anybody
+        # is listening. A transmission during an outage is not simply gone,
+        # and neither is one nobody happened to have a console open for.
         self.store.write_audio(
             base64.b64decode(audio["pcm"]), audio["rate"],
             label=f"{self.radio.freq_hz // 1000}kHz",
         )
-        self._publish(
-            self.enrolment.broker.audio_topic if self.enrolment else None, audio,
-        )
+        # Published only while somebody is listening. 24 kHz of 16-bit mono is
+        # 384 kbit/s, and base64 in a JSON envelope makes it 512 — the largest
+        # thing this station sends, and it used to go up on every over whether
+        # or not a console existed to hear it. The platform asks and renews;
+        # silence stops it. See `RadioController.want_audio`.
+        if self.radio.audio_wanted:
+            self._publish(
+                self.enrolment.broker.audio_topic if self.enrolment else None,
+                audio,
+            )
         return audio
 
     def _sleep_pumping_radio(self, until: float) -> None:

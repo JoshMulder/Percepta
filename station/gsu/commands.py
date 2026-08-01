@@ -127,6 +127,20 @@ def build_handlers(radio, light, on_config, stream=None) -> dict[str, Handler]:
         radio.want_spectrum(on)
         return "spectrum on" if on else "spectrum off"
 
+    def audio_start(payload: dict) -> str:
+        """Somebody is listening. Leased, so silence stops it.
+
+        Idempotent: a second listener extends the lease rather than starting
+        anything, because there is one receiver and its audio is one stream.
+        """
+        lease = payload.get("lease_seconds")
+        radio.want_audio(True, None if lease is None else float(lease))
+        return "audio on"
+
+    def audio_stop(payload: dict) -> str:
+        radio.want_audio(False)
+        return "audio off"
+
     def ppm(payload: dict) -> str:
         radio.set_ppm(int(payload["ppm"]))
         return f"ppm {radio.ppm}"                        # -> radio.ppm
@@ -146,6 +160,8 @@ def build_handlers(radio, light, on_config, stream=None) -> dict[str, Handler]:
             "radio.gain": gain,
             "radio.ppm": ppm,
             "radio.spectrum": spectrum,
+            "radio.audio": audio_start,
+            "radio.audio_stop": audio_stop,
         })
     else:
         log.warning("No receiver fitted: radio commands will be ignored and logged.")

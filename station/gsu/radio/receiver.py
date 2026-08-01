@@ -52,6 +52,19 @@ SPECTRUM_BINS = 128
 #: the tab stops the traffic within a few seconds.
 SPECTRUM_WINDOW_S = 12.0
 
+#: How long one request keeps audio coming, when the platform does not say.
+#:
+#: Audio is the largest thing this station sends — 24 kHz of 16-bit mono is
+#: 384 kbit/s, and base64 in a JSON envelope makes it 512 — and it used to go
+#: up whenever the squelch opened, listener or not. The spectrum has been
+#: demand-driven since it was written, for a cost two orders of magnitude
+#: smaller; audio was the one that mattered and it was the one left open.
+#:
+#: The platform states a lease with each request and this is only the
+#: fallback. Longer than the spectrum's window because an over lasts seconds
+#: and a gap mid-transmission is what a listener actually notices.
+AUDIO_WINDOW_S = 30.0
+
 FREQ_MIN_HZ = 108_000_000
 FREQ_MAX_HZ = 137_000_000
 
@@ -157,6 +170,10 @@ class RadioController:
         #: Monotonic time until which somebody is watching the spectrum. Zero
         #: means nobody, and nobody is the normal case.
         self._spectrum_until = 0.0
+        #: The same, for audio. Also zero by default: a station that has never
+        #: been asked sends no audio, which is the whole point — a box at a
+        #: quiet site with nobody logged in should cost nothing on the link.
+        self._audio_until = 0.0
         # The last few measurement lines for the setup page's datastream
         # field: what the receiver is hearing, in the terms the console's own
         # radio panel uses. Bounded — a tap, never a history.
@@ -258,6 +275,36 @@ class RadioController:
         self._spectrum_until = (
             time.monotonic() + SPECTRUM_WINDOW_S if on else 0.0
         )
+
+    def want_audio(self, on: bool = True, lease_seconds: float | None = None) -> None:
+        """Somebody is listening, or has stopped.
+
+        Leased and re-requested rather than held open by a connection, exactly
+        like `want_spectrum` and like the camera: a console that crashes, a
+        laptop lid that closes or a platform that goes away should stop the
+        traffic on its own, and none of them sends a goodbye. **Silence is the
+        stop signal**, which is the only version of this that survives the
+        platform failing rather than merely closing.
+        """
+        if not on:
+            self._audio_until = 0.0
+            return
+        window = AUDIO_WINDOW_S if lease_seconds is None else float(lease_seconds)
+        # A platform asking for an absurd lease must not be able to pin the
+        # uplink open; a tiny one must not make audio stutter.
+        window = max(5.0, min(300.0, window))
+        self._audio_until = time.monotonic() + window
+
+    @property
+    def audio_wanted(self) -> bool:
+        """Whether audio should go up the link right now.
+
+        Local recording does not consult this. A transmission during an
+        outage, or one nobody happened to be listening to, is not simply gone
+        — `store.write_audio` keeps it either way, and that was true before
+        this existed.
+        """
+        return time.monotonic() < self._audio_until
 
     def set_ppm(self, ppm: int) -> None:
         self.ppm = int(ppm)
