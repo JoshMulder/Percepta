@@ -1,0 +1,76 @@
+# Dependency and test gate.
+#
+# The audit that prompted this found four dependency issues and said the real
+# finding was the absence of this file: nothing ran `pip-audit` or `npm audit`,
+# so a vulnerable pin could only be noticed by somebody going looking. Two of
+# the four had been sitting in the lockfile for months.
+#
+# Deliberately not a deploy pipeline. Stations are updated by
+# `station/deploy/gsu-update.sh` pulling a tagged image on a timer, and the
+# platform by `docker compose up` on the host — neither wants a CI runner with
+# credentials to a customer site. This only ever reports.
+
+name: audit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly, because a lockfile does not change but the set of known
+    # vulnerabilities in it does. Monday morning, NZ time.
+    - cron: "0 20 * * 0"
+
+jobs:
+  station:
+    name: station tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The agent has one runtime dependency and the tests need two more. numpy
+      # is optional at runtime and gates the whole RTL-SDR suite when it is
+      # absent, so it is installed here — without it 60-odd radio tests skip
+      # and the run still reports green, which is worse than red.
+      - run: pip install redis jsonschema numpy
+      - run: python -m unittest discover -s tests -t . -v
+        working-directory: station
+
+  python-deps:
+    name: python advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pip-audit
+      # Both requirement sets. The station's is one line and the platform's is
+      # where the exposure is, but a station is the box on somebody else's
+      # network and gets the same check.
+      - run: pip-audit -r server/app/requirements.txt --strict
+      - run: pip-audit -r station/requirements.txt --strict
+
+  console:
+    name: console tests and advisories
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: server/web/package-lock.json
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npx vitest run
+      - run: npx vite build
+      # Production dependencies only. vite and vitest are dev-server and
+      # test-runner surface — worth patching, and not worth failing a build
+      # over, because neither is reachable from a deployed station or console.
+      - run: npm audit --omit=dev --audit-level=high
