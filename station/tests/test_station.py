@@ -1289,3 +1289,127 @@ class StreamReportingHonestyTests(unittest.TestCase):
         class Bare:
             pass
         self.assertTrue(getattr(Bare(), "enforces_settings", True))
+
+
+class RelayTransportTests(unittest.TestCase):
+    """The 443 broker transport.
+
+    A message relay, not a Redis proxy: what goes over the socket is
+    `{topic, payload}`, and the platform decides what a station may publish
+    from the credential rather than from the frame. These cover the station's
+    half — the platform's refusal check has its own tests.
+    """
+
+    def transport(self, url="wss://p.example/broker", **kw):
+        from gsu.transport.relay import RelayTransport
+        return RelayTransport(url, password="secret", **kw)
+
+    def test_the_url_scheme_picks_it(self):
+        from gsu.transport import build_transport
+        from gsu.transport.relay import RelayTransport
+        for url in ("ws://127.0.0.1:8000/broker", "wss://p.example/broker"):
+            got = build_transport(url, None, "secret")
+            self.assertIsInstance(got, RelayTransport, url)
+
+    def test_publishing_with_no_link_is_a_counted_drop(self):
+        # Never queued. Telemetry is current state, not a ledger — replaying
+        # stale readings into a live console after an outage is worse than a
+        # gap, and a station quietly dropping everything must not look like a
+        # quiet site.
+        relay = self.transport()
+        self.assertFalse(relay.publish("gsu/x/telemetry", {"a": 1}))
+        self.assertFalse(relay.publish("gsu/x/telemetry", {"a": 2}))
+        self.assertEqual(relay.dropped, 2)
+        self.assertFalse(relay.connected)
+
+    def test_an_unserialisable_payload_is_dropped_not_raised(self):
+        relay = self.transport()
+        relay._ready.set()
+        relay._socket = _FakeSocket()
+        self.assertFalse(relay.publish("gsu/x/telemetry", {"bad": object()}))
+        self.assertEqual(relay.dropped, 1)
+
+    def test_an_oversized_frame_is_dropped_before_it_is_sent(self):
+        # A megabyte is a bug upstream, and finding it as a stalled socket is
+        # worse than finding it as a log line.
+        from gsu.transport.relay import MAX_FRAME_BYTES
+        relay = self.transport()
+        relay._ready.set()
+        socket = _FakeSocket()
+        relay._socket = socket
+        relay.publish("gsu/x/telemetry", {"pad": "y" * (MAX_FRAME_BYTES + 100)})
+        self.assertEqual(socket.sent, [])
+        self.assertEqual(relay.dropped, 1)
+
+    def test_a_published_frame_carries_topic_and_payload(self):
+        relay = self.transport()
+        relay._ready.set()
+        socket = _FakeSocket()
+        relay._socket = socket
+        self.assertTrue(relay.publish("gsu/x/telemetry", {"a": 1}))
+        self.assertEqual(json.loads(socket.sent[0]),
+                         {"topic": "gsu/x/telemetry", "payload": {"a": 1}})
+
+    def test_a_command_reaches_its_handler(self):
+        relay = self.transport()
+        got = []
+        relay.subscribe("cmd/gsu/x", lambda t, p: got.append((t, p)))
+        relay._on_message(1, json.dumps(
+            {"topic": "cmd/gsu/x", "payload": {"kind": "light.set"}}).encode())
+        self.assertEqual(got, [("cmd/gsu/x", {"kind": "light.set"})])
+
+    def test_a_handler_that_raises_does_not_end_the_link(self):
+        relay = self.transport()
+
+        def bad(topic, payload):
+            raise RuntimeError("no")
+
+        relay.subscribe("cmd/gsu/x", bad)
+        relay._on_message(1, json.dumps(
+            {"topic": "cmd/gsu/x", "payload": {"kind": "x"}}).encode())
+        # Still usable: one bad command must not take the transport down.
+        self.assertEqual(relay.refusals, {})
+
+    def test_malformed_frames_are_ignored(self):
+        relay = self.transport()
+        for frame in (b"not json", b"[]", b'{"topic": 1}', b'{"payload": {}}'):
+            relay._on_message(1, frame)   # must not raise
+
+    def test_a_refusal_is_reported_rather_than_retried(self):
+        # An ACL fault and an unreachable broker both look like a failed
+        # publish, and they are completely different problems.
+        relay = self.transport()
+        relay._on_message(1, json.dumps({
+            "type": "refused", "topic": "gsu/other/telemetry",
+            "reason": "not yours",
+        }).encode())
+        self.assertEqual(relay.refusals, {"gsu/other/telemetry": "not yours"})
+
+    def test_it_will_not_send_a_credential_over_plaintext(self):
+        # Everywhere else in the station refuses to fall back to an unverified
+        # connection; a socket carrying the station's bearer token is the last
+        # place to make an exception.
+        relay = self.transport(url="ws://192.168.2.49:8000/broker")
+        self.assertFalse(relay._connect())
+        self.assertIn("plaintext", (relay.last_error or ""))
+
+    def test_loopback_plaintext_is_allowed_for_a_test_harness(self):
+        # No network, so nobody to be on it. It fails to connect here because
+        # nothing is listening, not because it was refused.
+        relay = self.transport(url="ws://127.0.0.1:1/broker")
+        relay._connect()
+        self.assertNotIn("plaintext", (relay.last_error or ""))
+
+
+class _FakeSocket:
+    connected = True
+
+    def __init__(self):
+        self.sent = []
+
+    def send_text(self, text):
+        self.sent.append(text)
+        return True
+
+    def close(self, reason=""):
+        self.connected = False

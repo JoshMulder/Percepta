@@ -110,7 +110,18 @@ class WebSocket:
     """One outbound WebSocket connection, opened only while it is needed."""
 
     def __init__(self, url: str, headers: dict[str, str] | None = None,
-                 trust=None, origin: str | None = None) -> None:
+                 trust=None, origin: str | None = None,
+                 on_message=None, what: str = "the media uplink") -> None:
+        #: What to call this connection in logs and errors. Two things use this
+        #: client now — the media uplink and the broker relay — and a relay
+        #: socket reporting itself as "the media uplink" sends whoever is
+        #: reading the log to the wrong file.
+        self.what = what
+        #: Called with (opcode, payload) for each text or binary frame that
+        #: arrives. None means "there is nothing to receive here", which is
+        #: true of the media uplink and not of the broker relay — see the
+        #: note where frames are dispatched.
+        self.on_message = on_message
         self.url = url
         self.headers = dict(headers or {})
         self.trust = trust
@@ -136,7 +147,7 @@ class WebSocket:
             # Refuses a plaintext URL, or a TLS one with nothing to verify
             # against, in the same words as the broker path. There is no route
             # from here to an unverified connection.
-            self.trust.check(self.url, "the media uplink")
+            self.trust.check(self.url, self.what)
         self._closed.clear()
         raw = socket.create_connection((self.host, self.port), timeout=CONNECT_TIMEOUT_S)
         try:
@@ -158,7 +169,7 @@ class WebSocket:
         self._reader = threading.Thread(target=self._read_forever, name="gsu-ws",
                                         daemon=True)
         self._reader.start()
-        log.info("Media uplink open to %s", self.url)
+        log.info("%s open to %s", self.what.capitalize(), self.url)
 
     def _handshake(self, raw: socket.socket) -> str:
         key = base64.b64encode(os.urandom(16)).decode()
@@ -277,10 +288,10 @@ class WebSocket:
                 continue
             except (OSError, ssl.SSLError) as exc:
                 if not self._closed.is_set():
-                    self._fail(f"the media uplink dropped: {exc}")
+                    self._fail(f"{self.what} dropped: {exc}")
                 return
             if not chunk:
-                self._fail("the platform closed the media uplink")
+                self._fail(f"the platform closed {self.what}")
                 return
             buffer += chunk
             while True:
@@ -292,13 +303,22 @@ class WebSocket:
                     self._send(OP_PONG, payload)
                 elif opcode == OP_CLOSE:
                     reason = payload[2:].decode("utf-8", "replace") if len(payload) > 2 else ""
-                    self._fail(f"the platform closed the media uplink: {reason or 'no reason given'}")
+                    self._fail(f"the platform closed {self.what}: {reason or 'no reason given'}")
                     return
                 elif opcode in (OP_TEXT, OP_BINARY):
-                    # The station does not take instructions here — commands
-                    # arrive on the command channel, authenticated and
-                    # ACL-pinned, and a second control path would be a second
-                    # thing to secure.
+                    if self.on_message is not None:
+                        # The broker relay receives here: commands come down
+                        # the same socket the telemetry goes up.
+                        try:
+                            self.on_message(opcode, payload)
+                        except Exception:  # noqa: BLE001 - a handler must not
+                            # take the reader thread down with it.
+                            log.exception("A websocket message handler failed.")
+                        continue
+                    # No handler: the media uplink, which does not take
+                    # instructions. Commands arrive on the command channel,
+                    # authenticated and ACL-pinned, and a second control path
+                    # would be a second thing to secure.
                     log.info("Ignoring a message from the media endpoint (%d bytes).",
                              len(payload))
 

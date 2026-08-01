@@ -149,7 +149,16 @@ def build_transport(
         from .redis_transport import RedisTransport
 
         return RedisTransport(url, username=username, password=password, trust=trust)
-    if scheme in ("mqtt", "mqtts", "ssl", "tcp", "ws", "wss"):
+    if scheme in ("ws", "wss"):
+        # The deployment transport. See relay.py: 443 is the one port open
+        # everywhere, and this is a message relay rather than a Redis proxy so
+        # that a station can reach the broker without being able to address
+        # anybody else's channels.
+        from .relay import RelayTransport
+
+        return RelayTransport(url, username=username, password=password,
+                              trust=trust)
+    if scheme in ("mqtt", "mqtts", "ssl", "tcp"):
         from .mqtt import MqttTransport
 
         return MqttTransport(url, username=username, password=password, trust=trust)
