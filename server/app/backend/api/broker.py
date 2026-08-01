@@ -42,21 +42,17 @@ from backend.core.config import settings
 from backend.database.session import PrivilegedSessionLocal
 from backend.realtime.bus import command_channel
 from backend.realtime.hub import hub
-from backend.services import enrolment
+from backend.services import enrolment, station_topics
 
 log = logging.getLogger(__name__)
 
 router = APIRouter(tags=["broker"])
 
 #: What a station may publish, formatted with its own id. Anything else is
-#: refused. Kept as an explicit list rather than a prefix match: `gsu/{id}/`
-#: would also admit a topic nobody consumes, and a station inventing channels
-#: on a shared broker is the thing this is here to prevent.
+#: refused. From `station_topics` rather than built here, so what this accepts
+#: cannot drift from what enrolment promised and the ACL granted.
 def _permitted(station_id: uuid.UUID) -> frozenset[str]:
-    return frozenset({
-        f"gsu/{station_id}/telemetry",
-        f"gsu/{station_id}/audio",
-    })
+    return station_topics.published_by_station(station_id)
 
 
 #: A frame larger than this is dropped and the connection closed. Matches the

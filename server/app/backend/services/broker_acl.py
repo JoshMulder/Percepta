@@ -36,6 +36,7 @@ import uuid
 import redis
 
 from backend.core.config import settings
+from backend.services import station_topics
 
 log = logging.getLogger(__name__)
 
@@ -62,19 +63,13 @@ def principal(station_id: uuid.UUID | str) -> str:
 
 
 def _channels(station_id: uuid.UUID | str) -> list[str]:
-    """Exactly the channels this contract gives the station.
+    """Exactly the channels the contract gives the station, as ACL patterns.
 
-    Redis channel patterns do not distinguish publish from subscribe, so this
-    also lets a station publish onto its own command channel - it can issue
-    commands to itself and to nothing else, which is not worth a second
-    mechanism to prevent. Directional ACLs should be written that
-    way when the transport moves.
+    What the ACL grants must be what enrolment promises: a station told a
+    topic it is not granted publishes into a NoPermissionError and looks like
+    a healthy box with nothing to say. See station_topics.
     """
-    return [
-        f"&gsu/{station_id}/telemetry",
-        f"&gsu/{station_id}/audio",
-        f"&cmd/gsu/{station_id}",
-    ]
+    return list(station_topics.granted_to_station(station_id))
 
 
 def _client() -> redis.Redis:

@@ -33,6 +33,7 @@ import redis
 import redis.asyncio as aioredis
 
 from backend.core.config import settings
+from backend.services import station_topics
 
 if TYPE_CHECKING:
     from backend.realtime.hub import Hub
@@ -92,10 +93,7 @@ def command_channel(station_id) -> str:
     channel, so a broker ACL can pin it there and a compromised station cannot
     listen to commands meant for another org's hardware.
     """
-    # Slash-separated to match contract/transport.md, and because the intended
-    # relay carries this as a topic path rather than a key. Redis does not
-    # care; the contract does.
-    return f"cmd/gsu/{station_id}"
+    return station_topics.command(station_id)
 
 
 _sync_client: redis.Redis | None = None

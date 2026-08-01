@@ -24,7 +24,7 @@ from sqlalchemy import select
 
 from backend.database.models.organization import Organization
 from backend.database.session import PrivilegedSessionLocal
-from backend.services import broker_acl, enrolment
+from backend.services import broker_acl, enrolment, station_topics
 from backend.services.audit import record
 
 log = logging.getLogger(__name__)
@@ -210,9 +210,9 @@ def _broker(station_id: uuid.UUID, request: Request | None = None) -> BrokerOut:
         url=url or settings.redis_url,
         ca_pem=ca_pem,
         ca_mode=ca_mode,
-        telemetry_topic=f"gsu/{station_id}/telemetry",
-        audio_topic=f"gsu/{station_id}/audio",
-        command_topic=f"cmd/gsu/{station_id}",
+        telemetry_topic=station_topics.telemetry(station_id),
+        audio_topic=station_topics.audio(station_id),
+        command_topic=station_topics.command(station_id),
         username=broker_acl.principal(station_id),
     )
 

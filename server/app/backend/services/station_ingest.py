@@ -53,13 +53,12 @@ from backend.core.config import settings
 from backend.database.models.ground_station import GroundStation
 from backend.database.session import PrivilegedSessionLocal
 from backend.realtime.hub import hub
-from backend.services import geocode
+from backend.services import geocode, station_topics
 from backend.services.enrolment import has_valid_credential
 
 log = logging.getLogger(__name__)
 
-TELEMETRY_PATTERN = "gsu/*/telemetry"
-AUDIO_PATTERN = "gsu/*/audio"
+TELEMETRY_PATTERN, AUDIO_PATTERN = station_topics.subscribed_by_platform()
 
 #: Payload kinds the platform understands. Anything else is dropped rather than
 #: rejected: a station may legitimately be newer than the platform, and the
