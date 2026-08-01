@@ -95,6 +95,16 @@ MAX_FAILURES = 5
 LOCKOUT_SECONDS = 900.0
 FAILURE_WINDOW_SECONDS = 900.0
 
+#: Failures across *every* source before the console locks entirely.
+#:
+#: The per-peer counter above is defeated by rotating the source address,
+#: which on a LAN costs nothing — so on its own it bounds a careless attacker
+#: and not a deliberate one. Deliberately much looser than the per-peer limit:
+#: this one can lock out the person who is actually standing at the station,
+#: and the window is short for that reason. What it bounds is a guessing rate,
+#: not a single wrong password.
+MAX_FAILURES_ALL_SOURCES = 30
+
 #: More than this and something is enumerating rather than typing.
 MAX_SESSIONS = 8
 
@@ -318,25 +328,59 @@ class Gate:
     # --- lockout ----------------------------------------------------------
 
     def locked_for(self, peer: str) -> float:
+        """Seconds this peer must wait. The longer of two independent limits.
+
+        Both are consulted every time, and that is the whole point: the
+        per-peer limit answers 0 for an address it has never seen, which is
+        exactly the address a rotating attacker is using. Returning early on
+        it — which this did — meant the global counter was unreachable in the
+        one case it exists for.
+        """
+        per_peer = 0.0
         with self._lock:
             entry = self._failures.get(peer)
-            if not entry:
-                return 0.0
-            count, last = entry
-            if time.monotonic() - last > FAILURE_WINDOW_SECONDS:
-                self._failures.pop(peer, None)
-                return 0.0
-            if count < MAX_FAILURES:
-                return 0.0
-            return max(0.0, LOCKOUT_SECONDS - (time.monotonic() - last))
+            if entry:
+                count, last = entry
+                if time.monotonic() - last > FAILURE_WINDOW_SECONDS:
+                    self._failures.pop(peer, None)
+                elif count >= MAX_FAILURES:
+                    per_peer = max(
+                        0.0, LOCKOUT_SECONDS - (time.monotonic() - last))
+        # Per-source alone is defeated by rotating the source, which on a LAN
+        # is free. The whole-console counter is what actually bounds guessing;
+        # it is deliberately looser, because one address locking everybody out
+        # of a station's setup page is a worse outcome than a slow guess.
+        return max(per_peer, self._global_lockout())
 
     def note_failure(self, peer: str) -> None:
+        now = time.monotonic()
         with self._lock:
+            # Expired entries go on every failure. Unbounded growth is a real
+            # concern in a 384 MB container (deploy/docker-compose.yml sets
+            # `mem_limit`), and the thing that grows it is the same rotation
+            # that defeats a per-source lockout — so the two are fixed
+            # together rather than one being left as the price of the other.
+            self._failures = {
+                address: entry for address, entry in self._failures.items()
+                if now - entry[1] <= FAILURE_WINDOW_SECONDS
+            }
             count, last = self._failures.get(peer, (0, 0.0))
-            if time.monotonic() - last > FAILURE_WINDOW_SECONDS:
+            if now - last > FAILURE_WINDOW_SECONDS:
                 count = 0
-            self._failures[peer] = (count + 1, time.monotonic())
+            self._failures[peer] = (count + 1, now)
         log.warning("Setup login failed from %s.", peer)
+
+    def _global_lockout(self) -> float:
+        """Seconds left on the whole-console lockout, across every source."""
+        now = time.monotonic()
+        with self._lock:
+            recent = [last for _, last in self._failures.values()
+                      if now - last <= FAILURE_WINDOW_SECONDS]
+            total = sum(count for count, last in self._failures.values()
+                        if now - last <= FAILURE_WINDOW_SECONDS)
+        if total < MAX_FAILURES_ALL_SOURCES or not recent:
+            return 0.0
+        return max(0.0, LOCKOUT_SECONDS - (now - max(recent)))
 
     def note_success(self, peer: str) -> None:
         with self._lock:
@@ -448,10 +492,20 @@ class Gate:
         return Decision(False, status=401, login=True, reason="password required")
 
     def login(self, peer_address: str, password: str) -> Decision:
-        """Check a password and, if it is right, start a session."""
+        """Check a password and, if it is right, start a session.
+
+        The window is checked here as well as in `authorise`, and the ordering
+        was backwards: `login` called `refresh()` on success, so a correct
+        password *extended* a window that had not been checked. The socket is
+        supposed to be gone by then — `_watch` rebinds every 5s — so it was a
+        five-second race per cycle rather than a hole, but a window that a
+        login can reopen is not a window.
+        """
         scope = classify(peer_address)
         if scope == "public":
             return Decision(False, status=403, reason="not a local address")
+        if not self.window_open():
+            return Decision(False, status=403, reason="the setup window is closed")
         wait = self.locked_for(peer_address)
         if wait > 0:
             return Decision(

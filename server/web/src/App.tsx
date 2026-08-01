@@ -6,10 +6,22 @@ import { ResetPassword } from "./components/ResetPassword";
 import type { Me } from "./types";
 
 /** The reset link's token, if this load is one. Read before the session check:
- *  somebody following a reset link is by definition unable to sign in. */
+ *  somebody following a reset link is by definition unable to sign in.
+ *
+ *  From the fragment, which the browser never sends to the server — so the
+ *  token does not appear in the reverse proxy's access log. The console is
+ *  served by the API itself with an html fallback, so a token in the query
+ *  string was a real request and a real log line every time somebody opened
+ *  the link.
+ *
+ *  The query string is still accepted, for links already in somebody's inbox
+ *  when this changed. Those keep working and keep being logged; there is
+ *  nothing to be done about a link that has already been sent. */
 function resetToken(): string | null {
   if (window.location.pathname !== "/reset-password") return null;
-  return new URLSearchParams(window.location.search).get("token");
+  const fragment = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+  return fragment.get("token")
+    ?? new URLSearchParams(window.location.search).get("token");
 }
 
 export function App() {

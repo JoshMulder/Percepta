@@ -498,11 +498,17 @@ def invite_member(
         )
     )
 
-    # Only someone who cannot yet sign in needs a link. An existing account has
-    # a password already, and sending them a set-password link would be handing
-    # an org admin a way to take over an account in someone else's tenancy.
-    invited = created or user.password_hash is None
-    if invited:
+    # Only someone who cannot yet sign in needs a *link*. An existing account
+    # has a password already, and sending them a set-password link would be
+    # handing an org admin a way to take over an account in someone else's
+    # tenancy.
+    #
+    # Both cases are still mailed, and that is not politeness. Mailing only
+    # new accounts made the response below a reliable answer to "does this
+    # address already have an account" — exactly what the docstring above says
+    # this endpoint must not become, and across tenancy boundaries.
+    needs_link = created or user.password_hash is None
+    if needs_link:
         _, plaintext = password_reset.issue(
             db, user=user, requested_by=identity.user_id
         )
@@ -523,6 +529,23 @@ def invite_member(
             raise HTTPException(
                 status_code=502, detail=f"The invitation could not be sent: {exc}"
             ) from exc
+    else:
+        actor = db.get(User, identity.user_id)
+        try:
+            password_reset.send_added_to_organization(
+                user=user,
+                organization_name=org.name,
+                inviter=actor.display_name if actor else "An administrator",
+            )
+        except EmailNotConfiguredError as exc:
+            db.rollback()
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except OSError as exc:
+            db.rollback()
+            log.exception("Notification mail failed")
+            raise HTTPException(
+                status_code=502, detail=f"The notification could not be sent: {exc}"
+            ) from exc
 
     user_id, user_email = user.id, user.email
     db.commit()
@@ -534,11 +557,15 @@ def invite_member(
         target_type="user",
         target_id=str(user_id),
         ip_address=request.client.host if request.client else None,
-        detail={"email": user_email, "roles": roles, "new_account": created},
+        detail={"email": user_email, "roles": roles, "new_account": created,
+                "link_sent": needs_link},
     )
+    # No field here distinguishes a new account from an existing one. The
+    # audit entry records it — an admin reviewing their own org's history
+    # should see it — but the response an org admin can poll must not.
     return {
         "user_id": str(user_id),
         "email": user_email,
         "roles": roles,
-        "invitation_sent": invited,
+        "invitation_sent": True,
     }

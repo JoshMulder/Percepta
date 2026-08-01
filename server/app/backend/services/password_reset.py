@@ -61,9 +61,23 @@ def generate_token() -> str:
 
 
 def reset_url(token: str, *, invite: bool = False) -> str:
+    """The link that goes in the email.
+
+    **The token is in the fragment, not the query string.** A fragment is never
+    sent to the server, so it does not reach the reverse proxy's access log —
+    and the console is served by this same application with an `html=True`
+    fallback, so `/reset-password?token=…` was a real HTTP request and a real
+    log line on every open. Single use and twelve hours bounded the damage, but
+    the set of people who can read a proxy log is much wider than the set who
+    can read the recipient's mailbox.
+
+    The console reads it with `window.location.hash` and clears it. `invite`
+    stays a query parameter deliberately: it only changes the wording on the
+    page, and there is no reason to hide it.
+    """
     base = settings.console_base_url.rstrip("/")
-    suffix = "&invite=1" if invite else ""
-    return f"{base}/reset-password?token={token}{suffix}"
+    query = "?invite=1" if invite else ""
+    return f"{base}/reset-password{query}#token={token}"
 
 
 def issue(
@@ -198,5 +212,36 @@ def send_invitation(
             f"ask an administrator to send another.\n\n"
             f"If you were not expecting this, you can ignore this email - the "
             f"account cannot be used until a password is set.\n"
+        ),
+    )
+
+
+def send_added_to_organization(
+    *, user: User, organization_name: str, inviter: str
+) -> None:
+    """Tell somebody who already has an account that they are now in another
+    organisation. No link, and nothing they have to act on.
+
+    Exists so that `invite_member` sends *something* either way. Sending only
+    to new accounts made the response's `invitation_sent` a reliable answer to
+    "does this address already have an account", which is the question the
+    endpoint's own docstring says it must not answer — an org admin could
+    learn whether an address belongs to a user in somebody else's tenancy.
+
+    Deliberately not a set-password link. An existing account already has a
+    password, and mailing its owner a reset link at an org admin's request
+    would hand that admin a way to take over an account in another tenancy.
+    That control is the reason the two cases differed in the first place; this
+    keeps it and removes the signal.
+    """
+    email_service.send(
+        to=user.email,
+        subject=f"You have been added to {organization_name} on Percepta",
+        body_text=(
+            f"{inviter} has added you to {organization_name} on Percepta.\n\n"
+            f"Sign in with your existing password and you will see it in the "
+            f"organisation switcher. Nothing else is needed.\n\n"
+            f"If you were not expecting this, tell whoever administers your "
+            f"organisation.\n"
         ),
     )

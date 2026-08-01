@@ -394,11 +394,12 @@ function InviteMember({
     setError(null);
     try {
       const result = await api.inviteMember(email.trim(), name.trim(), [role]);
-      setMessage(
-        result.invitation_sent
-          ? `Invitation sent to ${result.email}.`
-          : `${result.email} already had an account and has been added.`,
-      );
+      // One message either way. The other branch said "already had an
+      // account", which told an org admin whether an address belongs to a
+      // user in somebody else's tenancy — the question the invite endpoint's
+      // own docstring says it must not answer. Both cases are now emailed, so
+      // "sent" is true whichever it was.
+      setMessage(`Invitation sent to ${result.email}.`);
       setEmail("");
       setName("");
       setOpen(false);

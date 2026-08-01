@@ -18,6 +18,7 @@ import time
 
 from sqlalchemy import text
 
+from backend.api.broker import MAX_FRAME_BYTES as BROKER_MAX_FRAME_BYTES
 from backend.core.config import settings
 from backend.database.session import privileged_engine
 
@@ -27,6 +28,11 @@ logging.basicConfig(
 logger = logging.getLogger("startup")
 
 APP_DIR = "/app"
+
+#: Uvicorn's websocket frame cap, taken from the relay's own so the two cannot
+#: drift. A transport that enforces a limit at one size and allocates at
+#: another is a disagreement nothing reports.
+WS_MAX_SIZE = BROKER_MAX_FRAME_BYTES
 
 
 def wait_for_postgres(timeout: int = 60) -> None:
@@ -128,6 +134,15 @@ def main() -> None:
         port,
         "--workers",
         workers,
+        # The station relay caps a frame at 512 KiB and closes the socket on
+        # anything larger — but it checks *after* `receive_text()` has already
+        # read and allocated it. Uvicorn's own default is 16 MiB, so without
+        # this an authenticated station could force 16 MiB allocations against
+        # a cap the code believes is 512 KiB. Bounded and it needs a valid
+        # credential, so it is a hardening rather than a hole; the fix is one
+        # flag and the alternative is buffering the read ourselves.
+        "--ws-max-size",
+        str(WS_MAX_SIZE),
     ]
 
     # Behind a reverse proxy by default: the proxy terminates TLS and this
