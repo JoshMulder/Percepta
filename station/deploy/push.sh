@@ -2,7 +2,7 @@
 #
 # Push the working tree's station agent to a bench Pi and restart it.
 #
-#   station/deploy/push.sh [pi5|2b|all]      (default: all)
+#   station/deploy/push.sh                   (the Pi 5)
 #
 # ---------------------------------------------------------------------------
 # WHY THIS EXISTS
@@ -17,31 +17,34 @@
 # behind. What that looks like from the console is a setting that "was never
 # added" — which is indistinguishable from the work not having been done.
 #
-# The two boxes are deliberately different shapes, so there is one recipe each
-# rather than one recipe pretending they match:
+# One box:
 #
-#   192.168.2.132  Station1     Pi 2B  systemd unit, host venv, CSI camera
 #   192.168.2.133  PerceptaGSU  Pi 5   docker compose, RTSP camera
+#
+# The Pi 2B (192.168.2.132, systemd unit, host venv, CSI camera) was dropped
+# from the bench. Its recipe is gone from here; the systemd path it used is
+# NOT — see bootstrap.sh, where a CSI camera still selects it, because
+# rpicam-vid bus-errors in the container image and the live stream never
+# produces a frame (DEPLOYMENT.md §3).
 #
 # WHAT TRAVELS, AND WHAT DOES NOT
 #
-# gsu/ always. Plus, for the Pi 5 only, deploy/Dockerfile and the compose
-# files — on that box those are build input: `docker compose build` reads them
-# off the Pi, so a dependency added to the Dockerfile here reaches nothing
-# until they go too. That is not a hypothetical. librtlsdr and numpy were
-# installed on the host when the first SDR was brought up, which made the
-# radio work from a shell there and not at all from the containerised agent,
-# and no amount of pushing gsu/ was ever going to fix it.
+# gsu/, plus deploy/Dockerfile and the compose files — those are build input:
+# `docker compose build` reads them off the Pi, so a dependency added to the
+# Dockerfile here reaches nothing until they go too. That is not a
+# hypothetical. librtlsdr and numpy were installed on the host when the first
+# SDR was brought up, which made the radio work from a shell there and not at
+# all from the containerised agent, and no amount of pushing gsu/ was ever
+# going to fix it.
 #
-# The 2B's unit file and the udev rules stay put. Those are system state that
-# install.sh owns, and copying them in behind it is how a box reaches a
-# configuration no installer would produce. Change one and run install.sh.
+# The udev rules stay put. That is system state install.sh owns, and copying
+# it in behind the installer is how a box reaches a configuration no installer
+# would produce.
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
 
 PI5=192.168.2.133
-PI2B=192.168.2.132
 KEY=${GSU_DEPLOY_KEY:-$HOME/.ssh/percepta_deploy}
 SSHOPT=(-o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=8
         -i "$KEY" -o IdentitiesOnly=yes)
@@ -96,20 +99,6 @@ push_pi5() {
     sudo docker compose up -d 2>&1 | tail -1'
 }
 
-# --chown, because the 2B runs the agent as the unqualified `gsu` user rather
-# than in a container, and files arriving owned by root are files the service
-# cannot read.
-push_2b() {
-  stage "$PI2B"
-  info "installing on the 2B (systemd)"
-  ssh -n "${SSHOPT[@]}" "pi@$PI2B" '
-    sudo rsync -a --delete --exclude __pycache__ --chown=gsu:gsu \
-      /tmp/gsu-new/ /opt/percepta/station/gsu/ && rm -rf /tmp/gsu-new
-    sudo systemctl restart gsu.service
-    sleep 8
-    printf "  gsu.service: %s\n" "$(systemctl is-active gsu.service)"'
-}
-
 # Answering on :8088 is the only check worth making from here. "The service is
 # active" is what a container says while publishing nothing.
 #
@@ -130,9 +119,6 @@ verify() {   # $1 = host, $2 = label
 }
 
 case "${1:-all}" in
-  pi5) run_tests; push_pi5; verify "$PI5"  "Pi 5" ;;
-  2b)  run_tests; push_2b;  verify "$PI2B" "2B"   ;;
-  all) run_tests; push_pi5; push_2b
-       verify "$PI5" "Pi 5"; verify "$PI2B" "2B" ;;
-  *)   die "usage: push.sh [pi5|2b|all]" ;;
+  pi5|all) run_tests; push_pi5; verify "$PI5" "Pi 5" ;;
+  *)       die "usage: push.sh [pi5]" ;;
 esac
