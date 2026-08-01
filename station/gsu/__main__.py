@@ -30,7 +30,7 @@ import tempfile
 import time
 
 from . import AGENT_VERSION, clock, tls
-from .agent import Agent
+from .agent import AUDIO_TICK_S, Agent
 from .config import AgentConfig
 from .devices.serialio import list_ports
 
@@ -76,18 +76,48 @@ def _bench(agent) -> int:
         set_traffic("off", transmitting=False)
     measure("full tick, squelch closed", lambda: agent.step(1.0), 100)
     if agent.radio is not None:
-        measure("radio tick, squelch closed", lambda: agent.radio.tick(1.0), 100)
+        # A second of radio the way the agent actually runs it: `_pump_radio`
+        # calls `tick(AUDIO_TICK_S)` eight times, not `tick(1.0)` once. Timing
+        # the single call understated the deployed cost eight-fold, because
+        # `read()`'s work is flat in `dt` rather than proportional to it — which
+        # is exactly how the fixed snapshot count went unnoticed after the
+        # sub-tick landed. Reported per second either way, so the two lines are
+        # directly comparable and the difference between them is the point.
+        def second_of_radio() -> None:
+            elapsed = 0.0
+            while elapsed < 1.0:
+                slice_s = min(AUDIO_TICK_S, 1.0 - elapsed)
+                agent.radio.tick(slice_s)
+                elapsed += slice_s
+
+        measure("radio, 1 s in one tick (not how it runs)",
+                lambda: agent.radio.tick(1.0), 100)
+        measure(f"radio, 1 s at {AUDIO_TICK_S * 1000:.0f} ms sub-ticks",
+                second_of_radio, 30)
         if set_traffic:
             set_traffic("busy", transmitting=True)
-            measure("radio tick, squelch open (1 s audio)", lambda: agent.radio.tick(1.0), 30)
+            measure("radio, squelch open (1 s audio)", second_of_radio, 30)
     if agent.adsb is not None:
         measure("ADS-B poll (MAVLink decode)", lambda: agent.adsb.poll(1.0), 100)
     if agent.weather is not None:
         measure("weather read", lambda: agent.weather.read(5.0), 100)
     if agent.power is not None:
         measure("power read", lambda: agent.power.read(1.0), 100)
+    fitted = type(front_end).__name__ if front_end is not None else "none"
     print(
-        "\nThe simulated airband front end synthesises audio in Python, which no\n"
+        f"\nRadio front end measured: {fitted}.\n"
+    )
+    if fitted != "RtlSdrFrontEnd":
+        print(
+            "That is NOT the RTL-SDR path. The simulated front end produces 241\n"
+            "bins against the dongle's 4096 and runs no FFT at all, so the radio\n"
+            "lines above say nothing about a station with hardware fitted — the\n"
+            "measurement passes alone do roughly seventeen times less work. Run\n"
+            "this on a box with the dongle plugged in for a figure that means\n"
+            "anything.\n"
+        )
+    print(
+        "The simulated airband front end synthesises audio in Python, which no\n"
         "real station does — on hardware that work is the SDR pipeline's, in its\n"
         "own process. Measure that separately.\n"
     )

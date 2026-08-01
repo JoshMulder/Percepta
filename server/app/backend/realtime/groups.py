@@ -45,6 +45,25 @@ def station_group(
     return f"org:{organization_id}:gsu:{ground_station_id}:{stream}"
 
 
+def station_group_pattern(
+    *, organization_id: uuid.UUID | str = "*",
+    ground_station_id: uuid.UUID | str = "*",
+    stream: str = "*",
+) -> str:
+    """A glob over station groups, built by the same rule as the real name.
+
+    For a listener that wants one stream across every station — the power
+    recorder — rather than one group. Derived from `station_group` so a change
+    to the naming reaches both, which is the thing that has gone wrong here
+    before: a pattern written out by hand keeps matching *something* after the
+    names move, and matching the wrong set is silent.
+
+    Wildcards are glob, for Redis `PSUBSCRIBE`. Anything left unspecified is
+    `*`, so the caller states only what it is pinning.
+    """
+    return station_group(organization_id, ground_station_id, stream)  # type: ignore[arg-type]
+
+
 class GroupRegistry:
     """Group name -> the connections authorised into it.
 

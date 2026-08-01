@@ -66,13 +66,27 @@ OFFSET_HZ = 60_000
 N_FFT = 4096
 BIN_HZ = SAMPLE_RATE / N_FFT
 
-#: Snapshots taken across each tick's samples; the one with the most in-channel
-#: power is the one handed over. A single snapshot of the last 17 ms would miss
-#: a transmission that ended earlier in the second and close the gate on a live
-#: over. Four is enough for airband, where an over lasts seconds, and the
-#: upward bias it puts on a noise-only reading is a few tenths of a dB against
-#: an 8 dB AUTO margin.
-SNAPSHOTS = 4
+#: How much of a block one periodogram is taken to cover. The one with the most
+#: in-channel power is the one handed over: a single snapshot of the last 17 ms
+#: would miss a transmission that ended earlier in the block and close the gate
+#: on a live over. A look every 250 ms is enough for airband, where an over
+#: lasts seconds, and the upward bias it puts on a noise-only reading is a few
+#: tenths of a dB against an 8 dB AUTO margin.
+#:
+#: **Derived from the block length rather than fixed, because the block length
+#: changed underneath it.** This was `SNAPSHOTS = 4`, written when `read()` was
+#: called once a second. The 125 ms audio sub-tick then started calling it eight
+#: times a second and the four were never revisited — so the station took 32
+#: periodograms a second, all four of each set landing inside the same 125 ms
+#: window, to cover ground one of them already covered. Measured: 15.9 ms/s of
+#: FFT against 3.6 ms/s for this, and that is on a desktop, with the squelch
+#: shut and nobody listening.
+SNAPSHOT_SPAN_S = 0.25
+
+
+def snapshots_for(seconds: float) -> int:
+    """Periodograms worth taking for a block of this length. At least one."""
+    return max(1, round(seconds / SNAPSHOT_SPAN_S))
 
 #: What the console is shown before the tuner has been asked what it can do.
 #: An R820T2's table; the fitted tuner replaces it at open.
@@ -263,11 +277,11 @@ class RtlSdrFrontEnd:
         self._blocks += 1
         self._failures = 0
         self._reason = ""
-        spectrum = self._best_snapshot(samples)
+        spectrum = self._best_snapshot(samples, snapshots_for(seconds))
         self._last_spectrum = spectrum
         return Block(spectrum_db=spectrum, bin_hz=BIN_HZ, seconds=seconds)
 
-    def _best_snapshot(self, samples) -> list[float]:
+    def _best_snapshot(self, samples, snapshots: int) -> list[float]:
         """Of several periodograms across the block, the one with the most
         in-channel power.
 
@@ -281,8 +295,8 @@ class RtlSdrFrontEnd:
         span = max(1, samples.size - N_FFT)
         best: list[float] | None = None
         best_power = float("-inf")
-        for index in range(SNAPSHOTS):
-            start = (span * index) // SNAPSHOTS
+        for index in range(snapshots):
+            start = (span * index) // snapshots
             spectrum = am.spectrum_dbfs(
                 samples[start : start + N_FFT], N_FFT, SAMPLE_RATE, OFFSET_HZ
             )

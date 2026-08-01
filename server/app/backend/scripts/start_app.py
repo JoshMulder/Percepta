@@ -93,6 +93,32 @@ def main() -> None:
     port = os.environ.get("APP_PORT", "8000")
     workers = os.environ.get("WEB_CONCURRENCY", "1")
 
+    # Two subsystems are in-process by design and say so where they live:
+    # `realtime/media.py` (the video relay) and `api/media.py` (`_tickets`).
+    # Both are correct — the socket a ticket authorises has to land on the
+    # worker holding the stream anyway — but neither survives being forked.
+    #
+    # Above one worker, a ticket issued on worker A cannot be redeemed on
+    # worker B, and a viewer routed away from the worker holding the station's
+    # ingest socket sees nothing. Neither fails cleanly: they fail for a
+    # fraction of viewers, non-deterministically, which reads as "video is
+    # flaky" and sends you looking at the camera.
+    #
+    # Warned rather than refused: raising the worker count is a legitimate
+    # thing to want, and somebody who has read this may be doing it knowing
+    # video is not in use.
+    try:
+        if int(workers) > 1:
+            logger.warning(
+                "WEB_CONCURRENCY=%s - VIDEO WILL BE UNRELIABLE. Stream tickets "
+                "and the media relay are per-process, so a viewer that lands "
+                "on the wrong worker gets no picture and no error. Everything "
+                "else fans out through Redis and is unaffected.", workers,
+            )
+    except ValueError:
+        logger.warning("WEB_CONCURRENCY=%r is not a number; uvicorn will "
+                       "decide what to do with it.", workers)
+
     argv = [
         "uvicorn",
         "backend.main:app",

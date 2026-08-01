@@ -139,6 +139,19 @@ class FrontEndTests(unittest.TestCase):
     def test_transmit_is_not_offered(self):
         self.assertFalse(self.make().tx_capable)
 
+    def test_a_short_block_still_measures_the_channel(self):
+        """One snapshot is a real measurement, not a degraded one."""
+        from gsu.radio import dsp
+
+        front_end = self.make()
+        front_end.read(1.0)
+        block = front_end.read(0.125)
+        self.assertEqual(len(block.spectrum_db), 4096)
+        # Refuses if the spectrum cannot show the measurement window, so this
+        # passing is the check that a 125 ms block is still squelchable.
+        self.assertIsInstance(
+            dsp.noise_floor_db(block.spectrum_db, block.bin_hz), float)
+
     def test_the_spectrum_reaches_the_measurement_window(self):
         """`dsp.noise_floor_db` refuses a spectrum that cannot show 15–50 kHz
         either side, and rightly. This one must not be refused."""
@@ -488,3 +501,35 @@ class RegistryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SnapshotCadenceTests(unittest.TestCase):
+    """Deliberately outside the numpy-gated class above.
+
+    `snapshots_for` is arithmetic over a float and the fix hangs off it, so it
+    has to be checked on every box the suite runs on rather than only where a
+    dongle library happens to be installed.
+    """
+
+    def test_snapshots_follow_the_block_length(self):
+        """A fixed count was right at 1 Hz and wrong at the deployed 125 ms.
+
+        `read()` used to take four periodograms whatever `dt` was, and the agent
+        started calling it eight times a second — so all four landed inside one
+        125 ms window, covering ground the first already covered, at 32 FFTs a
+        second. The count has to follow the interval, because what it is for is
+        covering the interval.
+        """
+        from gsu.radio.rtlsdr import SNAPSHOT_SPAN_S, snapshots_for
+
+        self.assertEqual(snapshots_for(1.0), 4)          # unchanged at 1 Hz
+        self.assertEqual(snapshots_for(0.125), 1)        # the deployed sub-tick
+        self.assertEqual(snapshots_for(0.5), 2)
+        self.assertEqual(snapshots_for(2.0), 8)
+        # Never zero, however short the block: a tick with no measurement at
+        # all would leave the squelch deciding on a stale spectrum.
+        for tiny in (0.0, 0.001, 0.01):
+            self.assertEqual(snapshots_for(tiny), 1, tiny)
+        # The rate per *second* never drops below the original design intent.
+        for dt in (0.125, 0.25, 0.5, 1.0):
+            self.assertGreaterEqual(snapshots_for(dt) / dt, 1 / SNAPSHOT_SPAN_S, dt)

@@ -64,7 +64,13 @@ class Settings(BaseSettings):
 
     # --- Redis --------------------------------------------------------------
     # Cross-process live fan-out, revocation push, outbound station commands,
-    # stream-ticket single-use tracking.
+    # ingest leader election and rate limiting.
+    #
+    # Stream tickets are NOT in this list, though this comment used to claim
+    # they were: `api/media.py` keeps them in a process-local dict, on purpose,
+    # because the socket a ticket authorises must land on the worker holding
+    # the stream regardless. See the WEB_CONCURRENCY warning in
+    # scripts/start_app.py.
     redis_url: str = "redis://localhost:6379/0"
 
     # Certificate authority the platform verifies the broker against, and the

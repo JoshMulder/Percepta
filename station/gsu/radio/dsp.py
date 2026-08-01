@@ -38,6 +38,7 @@ power, and both are arithmetic rather than taste:
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 from statistics import median
 from typing import Sequence
 
@@ -68,10 +69,24 @@ IN_CHANNEL_CORRECTION_DB = BINS_TO_CHANNEL_DB
 AUTO_SQUELCH_MARGIN_DB = 8.0
 
 
-def bin_offsets(bins: int, bin_hz: float = BIN_HZ) -> list[float]:
-    """Frequency offset from the tuned centre for each bin, in Hz."""
+@lru_cache(maxsize=8)
+def bin_offsets(bins: int, bin_hz: float = BIN_HZ) -> tuple[float, ...]:
+    """Frequency offset from the tuned centre for each bin, in Hz.
+
+    Cached because it is a pure function of the bin plan, and the bin plan is
+    fixed for as long as a front end is fitted — but it was being rebuilt, as a
+    4096-element list comprehension, twice on every measurement. That was
+    invisible while this ran once a second; at the 125 ms audio sub-tick it is
+    sixteen of them a second, and measured at about 44% of the cost of the two
+    passes that use it.
+
+    A tuple so a caller cannot mutate the cached copy out from under the next
+    one. `maxsize` is small on purpose: there are two front ends and one bin
+    plan each, so anything past a handful of entries means a caller is varying
+    `bins` per call and the cache is the wrong tool.
+    """
     centre = bins // 2
-    return [(index - centre) * bin_hz for index in range(bins)]
+    return tuple((index - centre) * bin_hz for index in range(bins))
 
 
 def _linear(db: float) -> float:

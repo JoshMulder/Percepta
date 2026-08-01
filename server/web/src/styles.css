@@ -3429,18 +3429,30 @@ body {
    Where the power came from is already said by which stub is lit. */
 .pf-dash { stroke: var(--accent); }
 
-.pf-solar .pf-node rect { stroke: rgba(232, 176, 75, 0.5); }
-.pf-mains .pf-node rect { stroke: rgba(0, 160, 220, 0.5); }
-.pf-gen .pf-node rect { stroke: rgba(185, 140, 240, 0.5); }
-.pf-battery .pf-node rect { stroke: rgba(53, 196, 138, 0.5); }
+/* Compound, not descendant. `PowerFlow.tsx` puts the tone and `pf-node` on the
+   same <g> — `<g class="pf-node pf-solar">` — so `.pf-solar .pf-node` asked for
+   a pf-node *inside* a pf-solar and matched nothing at all. Every node kept the
+   default stroke and the whole colour scheme below was inert. `.pf-node.dim`
+   two rules up had it right, and `PowerFlow.test.tsx` queries the compound
+   form too, because that is what the DOM actually is. */
+.pf-node.pf-solar rect { stroke: rgba(232, 176, 75, 0.5); }
+.pf-node.pf-mains rect { stroke: rgba(0, 160, 220, 0.5); }
+.pf-node.pf-gen rect { stroke: rgba(185, 140, 240, 0.5); }
+.pf-node.pf-battery rect { stroke: rgba(53, 196, 138, 0.5); }
 /* The same thresholds the station duty-cycles on, so the battery reads as a
    worry before the site starts shedding load rather than after. The state of
    charge carries this, not the flow: a battery can be nearly flat and
-   charging hard, and colouring that link red would say the opposite. */
-.pf-battery-low .pf-node rect { stroke: rgba(232, 176, 75, 0.6); }
-.pf-battery-low .pf-value { fill: var(--warn); }
-.pf-battery-critical .pf-node rect { stroke: rgba(255, 122, 69, 0.7); }
-.pf-battery-critical .pf-value { fill: var(--danger); }
+   charging hard, and colouring that link red would say the opposite.
+
+   These two were the worst of the selector bug above, because they
+   half-worked: `.pf-value` IS a descendant of the node, so the percentage
+   turned amber and then red while the outline meant to reinforce it stayed
+   neutral — under-signalling a battery the station is about to shed load
+   over. */
+.pf-node.pf-battery-low rect { stroke: rgba(232, 176, 75, 0.6); }
+.pf-node.pf-battery-low .pf-value { fill: var(--warn); }
+.pf-node.pf-battery-critical rect { stroke: rgba(255, 122, 69, 0.7); }
+.pf-node.pf-battery-critical .pf-value { fill: var(--danger); }
 /* The rail itself. */
 .pf-bus .pf-track { stroke: var(--line); }
 

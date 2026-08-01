@@ -29,6 +29,8 @@ from sqlalchemy.dialects.postgresql import insert
 from backend.core.config import settings
 from backend.database.models.power_sample import PowerSample
 from backend.database.session import PrivilegedSessionLocal
+from backend.realtime.bus import group_channel
+from backend.realtime.groups import station_group_pattern
 
 log = logging.getLogger(__name__)
 
@@ -36,6 +38,18 @@ log = logging.getLogger(__name__)
 #: so the 7-day window is always fully covered.
 RETENTION = timedelta(days=8)
 PRUNE_EVERY = timedelta(hours=6)
+
+#: The only channels this recorder has any use for. Built from the same group
+#: name every publisher uses (`realtime.groups.station_group`) rather than
+#: written out, so the shape cannot drift away from it.
+#:
+#: **`telemetry`, not `power`.** The stream is the channel the station
+#: publishes on — `gsu/{station}/telemetry` — and `power` is a `kind` inside
+#: the payload, which is why the check in `_handle` still has to happen. Worth
+#: stating because narrowing this to `power` matches nothing at all, records
+#: no history, and logs no error: the recorder sits there subscribed to a
+#: pattern nothing publishes on, looking healthy.
+TELEMETRY_PATTERN = group_channel(station_group_pattern(stream="telemetry"))
 
 
 def _minute(when: datetime) -> datetime:
@@ -76,7 +90,17 @@ class PowerHistory:
             try:
                 self._redis = aioredis.Redis.from_url(settings.redis_url)
                 pubsub = self._redis.pubsub()
-                await pubsub.psubscribe("rt:g:*")
+                # Narrowed to the one stream this reads. `rt:g:*` matched every
+                # group on the platform — every organisation's audio and
+                # status as well — and `_handle` then parsed each frame before
+                # discovering it was not a power reading. At thirty stations
+                # that is ~180 json.loads a second to keep half a row, and with
+                # radio audio flowing it also parses and throws away 8 base64
+                # frames a second. Worse than the cost: it quietly defeated the
+                # property bus.py states in its own header, that a worker
+                # serving only org B never receives a byte of org A's data —
+                # this pulled all of it into every worker.
+                await pubsub.psubscribe(TELEMETRY_PATTERN)
                 log.info("Power history recorder started.")
                 while True:
                     message = await pubsub.get_message(
@@ -96,6 +120,12 @@ class PowerHistory:
         if isinstance(data, bytes):
             data = data.decode()
         if not isinstance(data, str):
+            return
+        # Cheaper than parsing to find out. Telemetry carries five kinds and
+        # this wants one of them, so four frames in five are rejected on a
+        # substring test rather than a full json.loads. The authoritative
+        # check is still the parsed one below — this only skips work.
+        if '"kind":"power"' not in data and '"kind": "power"' not in data:
             return
         try:
             frame = json.loads(data)
