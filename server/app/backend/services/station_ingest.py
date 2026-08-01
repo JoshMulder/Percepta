@@ -140,7 +140,7 @@ class StationIngest:
                 while not await self._acquire():
                     await asyncio.sleep(CONTEND_SECONDS)
                 log.info(
-                    "Station ingest leading (%s); listening on %s, %s and %s.",
+                    "Station ingest leading (%s); listening on %s and %s.",
                     self._token, TELEMETRY_PATTERN, AUDIO_PATTERN,
                 )
                 try:

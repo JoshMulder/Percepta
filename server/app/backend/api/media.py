@@ -35,7 +35,9 @@ from backend.auth.identity import Identity
 from backend.database.dependencies import get_db
 from backend.database.session import PrivilegedSessionLocal
 from backend.realtime.bus import command_channel, publish_sync
+from backend.core.config import settings
 from backend.realtime.media import LEASE_SECONDS, RENEW_SECONDS, relay
+from backend.repositories.auth_session_repository import AuthSessionRepository
 from backend.services import enrolment
 
 log = logging.getLogger(__name__)
@@ -79,6 +81,11 @@ def stream_ticket(
     ticket = uuid.uuid4().hex
     _tickets[ticket] = {
         "user_id": identity.user_id,
+        # Kept so the viewer socket can re-check that the session behind it is
+        # still live. Capabilities alone do not cover signing out, a password
+        # change, or a session an admin revoked — all of which must stop the
+        # picture, and none of which change a grant.
+        "session_id": identity.session_id,
         "organization_id": identity.organization_id,
         "station_id": station_id,
         "expires_at": datetime.now(UTC) + timedelta(seconds=TICKET_SECONDS),
@@ -231,6 +238,39 @@ async def media_view(websocket: WebSocket, ticket: str = Query(...)) -> None:
             else:
                 await websocket.send_bytes(chunk)
 
+    def _viewer_still_allowed() -> bool:
+        """The same two questions the console's own socket keeps asking."""
+        with PrivilegedSessionLocal() as db:
+            if AuthSessionRepository(db).get_active(
+                    session_id=claim["session_id"]) is None:
+                return False
+            return Capability.VIDEO_VIEW in capabilities_for(
+                db,
+                user_id=claim["user_id"],
+                organization_id=organization_id,
+                ground_station_id=station_id,
+            )
+
+    async def revalidate() -> None:
+        # Authorising once at attach was the same mistake as authenticating a
+        # station once at connect, on the heaviest stream in the platform: a
+        # withdrawn grant, a deactivated station or a signed-out session left
+        # the camera running in that tab until the station stopped publishing.
+        # docs/03-realtime-isolation.md §6 argues at length that this is not
+        # acceptable, and it was applied everywhere except here.
+        #
+        # Poll only, with no push to pair it with. The console's socket gets
+        # both because `revocation.py` addresses a session id and the hub holds
+        # connections by session; a viewer is keyed by ticket and there is
+        # nothing for a push to find. One timer is the whole mechanism, so it
+        # is deliberately the same interval the hub sweeps on.
+        while True:
+            await asyncio.sleep(settings.stream_revalidate_seconds)
+            if await asyncio.to_thread(_viewer_still_allowed):
+                continue
+            log.info("Viewer of %s is no longer permitted; closing.", station_id)
+            return
+
     async def watch_for_close() -> None:
         # A viewer that closes while nothing is being sent must still be
         # noticed. Waiting only on the fragment queue meant a browser tab shut
@@ -245,9 +285,10 @@ async def media_view(websocket: WebSocket, ticket: str = Query(...)) -> None:
 
     sender = asyncio.create_task(pump())
     closer = asyncio.create_task(watch_for_close())
+    checker = asyncio.create_task(revalidate())
     try:
         done, pending = await asyncio.wait(
-            {sender, closer}, return_when=asyncio.FIRST_COMPLETED
+            {sender, closer, checker}, return_when=asyncio.FIRST_COMPLETED
         )
         for task in pending:
             task.cancel()
@@ -262,6 +303,7 @@ async def media_view(websocket: WebSocket, ticket: str = Query(...)) -> None:
     finally:
         sender.cancel()
         closer.cancel()
+        checker.cancel()
         await relay.detach(station_id, queue)
         try:
             await websocket.close()

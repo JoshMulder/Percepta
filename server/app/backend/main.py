@@ -20,7 +20,7 @@ from backend.api.station_config import router as station_config_router
 from backend.api.station_enrolment import router as station_enrolment_router
 from backend.api.stations import router as stations_router
 from backend.api.tiles import router as tiles_router
-from backend.core.config import settings
+from backend.core.config import settings, verify_signing_key
 from backend.core.crypto import warn_if_unencrypted
 from backend.database.session import check_database_connection
 from backend.realtime.endpoint import websocket_endpoint
@@ -56,6 +56,7 @@ def _configure_logging() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _configure_logging()
+    verify_signing_key()
     warn_if_unencrypted()
     if not settings.rls_enabled:
         logger.warning(

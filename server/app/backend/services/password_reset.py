@@ -28,6 +28,7 @@ import logging
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import NamedTuple
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -130,7 +131,21 @@ def send(*, user: User, plaintext: str, by_admin: bool) -> None:
     )
 
 
-def redeem(db: Session, *, token_value: str, new_password: str) -> User:
+class Redeemed(NamedTuple):
+    """The outcome of a redemption, including what the caller still has to do.
+
+    `revoked_sessions` is returned rather than acted on here because the push
+    that closes a live socket is not transactional and this function is: an
+    announcement sent before the commit is one a rollback cannot take back.
+    Named in the return type so it is hard to walk past — the reset path went
+    without it for exactly as long as it was invisible.
+    """
+
+    user: User
+    revoked_sessions: list[uuid.UUID]
+
+
+def redeem(db: Session, *, token_value: str, new_password: str) -> Redeemed:
     """Consume a token and set the password. Raises ResetError if unusable."""
     now = _now()
     token = db.execute(
@@ -157,8 +172,8 @@ def redeem(db: Session, *, token_value: str, new_password: str) -> User:
     # Everything that was signed in as this user stops being signed in. If the
     # reason for the reset was that somebody else had the account, this is the
     # step that actually removes them.
-    AuthSessionRepository(db).revoke_all_for_user(user_id=user.id)
-    return user
+    revoked = AuthSessionRepository(db).revoke_all_for_user(user_id=user.id)
+    return Redeemed(user=user, revoked_sessions=revoked)
 
 
 def send_invitation(

@@ -4,6 +4,13 @@ from pydantic import Field, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+#: The value `.env.example` ships. Copying that file is the normal way to get
+#: a stack running, which is exactly what makes this dangerous: it produces a
+#: working platform whose session tokens are signed with a key published in
+#: the repository.
+DEFAULT_SECRET_KEY = "change-me"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="ignore"
@@ -38,7 +45,9 @@ class Settings(BaseSettings):
     pgbouncer_port: int = 6432
 
     # --- Auth ---------------------------------------------------------------
-    secret_key: str = Field(default="change-me")
+    #: Signs every session token. The default is refused at startup rather than
+    #: warned about - see `verify_signing_key`.
+    secret_key: str = Field(default=DEFAULT_SECRET_KEY)
     access_token_expire_minutes: int = 60 * 12
 
     # Set the Secure flag on the session cookie. Off by default so local HTTP
@@ -207,3 +216,34 @@ def get_settings() -> Settings:
 
 
 settings = get_settings()
+
+
+def verify_signing_key() -> None:
+    """Refuse to start with the published signing key. Called from lifespan.
+
+    Louder than the neighbouring secrets, and deliberately. A missing
+    `SECRETS_ENCRYPTION_KEY` degrades one feature and says so; a bypassed RLS
+    still has the application's own scoping behind it. This one has no second
+    layer underneath: a known signing key means anyone can mint a token for
+    any user in any organisation.
+
+    What keeps that from being instantly fatal today is `resolve_identity`,
+    which requires the token's session id to match a live `auth_sessions` row -
+    so a forged token also needs a uuid4 nobody can guess. That is a real
+    control and it is why this is a refusal rather than an emergency. But it is
+    one control, it was not designed to be the only one, and any session id
+    that ever leaks - a log line, a backup, one database read - becomes
+    indefinite impersonation of that user.
+
+    A warning would not have been enough. Everything about the default is built
+    to pass unnoticed: it is in the example file, it boots, and nothing it
+    breaks is visible from the console.
+    """
+    if settings.secret_key != DEFAULT_SECRET_KEY:
+        return
+    raise RuntimeError(
+        "SECRET_KEY is still the example value, so every session token would "
+        "be signed with a key published in this repository. Generate one and "
+        "put it in server/.env:\n\n"
+        "    python3 -c \"import secrets; print(secrets.token_urlsafe(48))\"\n"
+    )

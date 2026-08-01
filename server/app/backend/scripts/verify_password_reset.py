@@ -13,11 +13,15 @@ import sys
 import uuid
 from datetime import UTC, datetime, timedelta
 
+from sqlalchemy import select
+
 from backend.auth.password import PasswordError, hash_password, verify_password
 from backend.core.crypto import lookup_hash
+from backend.database.models.auth_session import AuthSession
 from backend.database.models.password_reset_token import PasswordResetToken
 from backend.database.models.user import User
 from backend.database.session import PrivilegedSessionLocal
+from backend.repositories.auth_session_repository import AuthSessionRepository
 from backend.services import password_reset
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -49,8 +53,23 @@ def seed(db) -> User:
 
 def cleanup(db) -> None:
     db.query(PasswordResetToken).filter(PasswordResetToken.user_id == U).delete()
+    # Before the user: §3 creates a session to prove redemption revokes it, and
+    # auth_sessions.user_id is a foreign key, so leaving these behind makes the
+    # script fail to tidy up after the run that succeeded.
+    db.query(AuthSession).filter(AuthSession.user_id == U).delete()
     db.query(User).filter(User.id == U).delete()
     db.commit()
+
+
+def _any_org(db, user):
+    """Any organisation, to hang a session on.
+
+    Not one this user belongs to: the throwaway account seeded here has no
+    membership, and revocation is keyed on the user rather than the org, so
+    which one it is makes no difference to what is being checked.
+    """
+    from backend.database.models.organization import Organization
+    return db.execute(select(Organization.id).limit(1)).scalar_one()
 
 
 def main() -> int:
@@ -91,11 +110,29 @@ def main() -> int:
             except password_reset.ResetError:
                 check("a weak password is refused", False, "raised ResetError")
             db.rollback()
-            password_reset.redeem(
+            # A live session, so redemption has something to revoke. The reset
+            # flow is the one used when an account is believed to be in
+            # somebody else's hands, so returning the ids is not bookkeeping:
+            # the endpoint pushes each one to close whatever socket is still
+            # open on it. Writing the rows alone leaves an attacker's video and
+            # telemetry running until the next sweep.
+            live = AuthSessionRepository(db).create(
+                user_id=user.id,
+                organization_id=_any_org(db, user),
+                expires_at=datetime.now(UTC) + timedelta(hours=1),
+            )
+            db.commit()
+            live_id = live.id
+            redeemed = password_reset.redeem(
                 db, token_value=second, new_password="a-good-password-1"
             )
             db.commit()
             check("the link still worked afterwards", True)
+            check("redemption reports the sessions it ended",
+                  live_id in redeemed.revoked_sessions,
+                  f"returned {redeemed.revoked_sessions}")
+            check("and they really are revoked",
+                  AuthSessionRepository(db).get_active(session_id=live_id) is None)
 
             db.refresh(user)
             check(

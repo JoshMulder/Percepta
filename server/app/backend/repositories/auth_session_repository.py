@@ -49,18 +49,34 @@ class AuthSessionRepository:
             .values(revoked_at=datetime.now(UTC))
         )
 
-    def revoke_all_for_user(self, *, user_id: uuid.UUID) -> None:
-        """Sign out everywhere.
+    def revoke_all_for_user(self, *, user_id: uuid.UUID) -> list[uuid.UUID]:
+        """Sign out everywhere. Returns the sessions that were ended.
 
-        NOT YET COMPLETE. This alone does not promptly stop a live WebSocket - an
-        open socket makes no further HTTP requests, so it only notices at the
-        next revalidation sweep (STREAM_REVALIDATE_SECONDS, default 60s). The
-        Redis push that makes revocation immediate is not built yet; until it is,
-        60 seconds is the real worst case, not the backstop it is meant to be.
-        See docs/03-realtime-isolation.md section 6.
+        **The caller must push each id to `realtime.revocation.revoke_session`.**
+        Writing the rows alone does not stop a live WebSocket: an open socket
+        makes no further HTTP requests, so it notices only at the next
+        revalidation sweep (`STREAM_REVALIDATE_SECONDS`, default 60s) - and the
+        flows that call this are the ones where somebody is believed to be in
+        the account right now, which is the worst possible time to leave their
+        video and telemetry running for another minute.
+
+        The ids are returned rather than pushed here because the push is not
+        transactional and this is: sending it before the commit would announce
+        a revocation that a rollback then undoes. `api/account.py` is the
+        worked example.
+
+        (This docstring used to say the Redis push "is not built yet". It has
+        been built - `realtime/revocation.py` - and the stale note is most of
+        why the reset path went without it.)
         """
+        rows = self.db.execute(
+            select(AuthSession.id).where(
+                AuthSession.user_id == user_id, AuthSession.revoked_at.is_(None)
+            )
+        ).scalars().all()
         self.db.execute(
             update(AuthSession)
             .where(AuthSession.user_id == user_id, AuthSession.revoked_at.is_(None))
             .values(revoked_at=datetime.now(UTC))
         )
+        return list(rows)

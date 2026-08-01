@@ -14,6 +14,7 @@ from backend.auth import mfa
 from backend.auth.password import PasswordError, verify_password
 from backend.auth.platform import PLATFORM_ORGANIZATION_ID
 from backend.auth.security import create_access_token
+from backend.core import ratelimit
 from backend.core.config import settings
 from backend.database.dependencies import get_db
 from backend.database.models.audit_log import AuditLog
@@ -34,6 +35,26 @@ from backend.services import password_reset
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+#: Failed sign-ins tolerated before the next attempt is refused outright.
+#:
+#: bcrypt already makes each guess expensive, but expensive is not the same as
+#: bounded, and MFA is per-organisation opt-in - so for a tenant that has not
+#: turned it on, the password is the only factor standing in front of a
+#: security console. Counted two ways because they stop different attacks: a
+#: single host working through a wordlist, and a distributed run against one
+#: known address.
+#:
+#: The account counter is the one with a cost: anybody who knows an operator's
+#: address can lock it for the window. That is accepted, narrowly - fifteen
+#: minutes, cleared by any success, and every block written to the audit log
+#: with its source - because the alternative is an unbounded guessing budget
+#: against a console that opens gates and moves cameras. It is not accepted
+#: silently: if this ever locks somebody out during an incident, the audit
+#: trail is what says who was doing it.
+ACCOUNT_LOCK_AFTER = 10
+SOURCE_LOCK_AFTER = 30
+LOCK_WINDOW_SECONDS = 900
 
 
 class LoginRequest(BaseModel):
@@ -166,6 +187,28 @@ def login(
     response: Response,
     db: Session = Depends(get_db),
 ) -> MeResponse | LoginChallenge:
+    source = request.client.host if request.client else "unknown"
+    # Keyed on the address as *typed*, before any lookup, so an address nobody
+    # holds locks exactly like one somebody does. Keying on a resolved user
+    # would make the lock itself an oracle: only real accounts would ever
+    # return 429, which is the enumeration signal the single 401 above this
+    # function goes out of its way to avoid.
+    account_key = f"login:{body.email.strip().lower()}"
+    if (ratelimit.failures(account_key) >= ACCOUNT_LOCK_AFTER
+            or ratelimit.failures(f"login-source:{source}") >= SOURCE_LOCK_AFTER):
+        _audit("login_blocked", request=request, actor_email=body.email,
+               detail={"reason": "too_many_failures"})
+        raise HTTPException(
+            status_code=429,
+            detail="Too many failed sign-in attempts. Try again in 15 minutes.",
+            headers={"Retry-After": str(LOCK_WINDOW_SECONDS)},
+        )
+
+    def failed() -> None:
+        ratelimit.note_failure(account_key, window_seconds=LOCK_WINDOW_SECONDS)
+        ratelimit.note_failure(f"login-source:{source}",
+                               window_seconds=LOCK_WINDOW_SECONDS)
+
     user = UserRepository(db).get_by_email(body.email)
 
     # One failure message and one code path for every reason: unknown email,
@@ -173,11 +216,13 @@ def login(
     # an attacker which addresses are real.
     if user is None or not user.is_active:
         verify_password(body.password, None)
+        failed()
         _audit("login_failed", request=request, actor_email=body.email,
                detail={"reason": "unknown_or_inactive"})
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
     if not verify_password(body.password, user.password_hash):
+        failed()
         _audit("login_failed", request=request, actor_email=body.email,
                actor_user_id=user.id, detail={"reason": "bad_password"})
         raise HTTPException(status_code=401, detail="Invalid email or password")
@@ -199,6 +244,7 @@ def login(
     ).scalars().all()
 
     if not rows:
+        failed()
         _audit("login_failed", request=request, actor_email=body.email,
                actor_user_id=user.id, detail={"reason": "no_membership"})
         raise HTTPException(status_code=401, detail="Invalid email or password")
@@ -215,6 +261,7 @@ def login(
             if not code:
                 return LoginChallenge(status="mfa_required")
             if not mfa.verify_code(secret=user.mfa_secret, code=code):
+                failed()
                 _audit("login_failed", request=request, actor_email=body.email,
                        actor_user_id=user.id, detail={"reason": "bad_mfa_code"})
                 raise HTTPException(status_code=401, detail="Invalid code")
@@ -236,6 +283,7 @@ def login(
                     qr_svg=mfa.qr_svg_data_uri(uri),
                 )
             if not mfa.verify_code(secret=user.mfa_secret, code=code):
+                failed()
                 _audit("login_failed", request=request, actor_email=body.email,
                        actor_user_id=user.id,
                        detail={"reason": "bad_mfa_enrollment_code"})
@@ -247,6 +295,9 @@ def login(
             db.commit()
             _audit("mfa_enrolled", request=request, actor_email=user.email,
                    actor_user_id=user.id)
+
+    ratelimit.forget(account_key)
+    ratelimit.forget(f"login-source:{source}")
 
     organization = rows[0]
     expires_at = datetime.now(UTC) + timedelta(
@@ -515,9 +566,10 @@ def redeem_password_reset(
     """
     with PrivilegedSessionLocal() as privileged:
         try:
-            user = password_reset.redeem(
+            redeemed = password_reset.redeem(
                 privileged, token_value=body.token, new_password=body.new_password
             )
+            user = redeemed.user
         except PasswordError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except password_reset.ResetError as exc:
@@ -535,6 +587,15 @@ def redeem_password_reset(
             .limit(1)
         ).scalar_one_or_none()
         privileged.commit()
+
+    # After the commit, so nothing is announced that a rollback would undo.
+    # Writing the rows is not enough on its own: an open WebSocket makes no
+    # further HTTP requests, so without this it keeps serving video and
+    # telemetry to whoever held the old session for up to a minute — during
+    # the one flow whose entire purpose is that somebody else is in the
+    # account. api/account.py has done this for password *change* all along.
+    for session_id in redeemed.revoked_sessions:
+        revoke_session(session_id)
 
     _audit(
         "user.password_reset.redeemed",
