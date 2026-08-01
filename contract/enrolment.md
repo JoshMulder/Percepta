@@ -276,12 +276,28 @@ credential has already expired it cannot renew either. That is a site visit.
 Enrolment returns identity and enough to connect. Everything else is
 configuration, and it changes over a station's life.
 
-**Delivered on the command channel**, versioned, station-initiated:
+**Today the station owns all of it, and nothing is pushed.**
 
-- The station reports its `config_version` in telemetry.
-- The platform sends `config.set` when its version is newer.
-- The station applies, persists, and reports the new version. The platform never
-  assumes the change took — same rule as every other command.
+- The station reports its `config_version` in telemetry, and the platform
+  records it against the station as a display of what is running.
+- `config.set` exists and the station implements it, but **the platform never
+  sends one.** The only settings it holds that the station also has are
+  position and elevation, and `station/gsu/config.py` records the decision that
+  those must not be settable from two ends: two editable copies of one fact
+  disagree, and the disagreement is invisible from both.
+- So site policy — alert thresholds, retention, stream settings — is typed on
+  the setup page by somebody at the box. Every threshold in it has to work with
+  the platform unreachable, which is the same reason it lives there.
+
+This paragraph used to say the platform sends `config.set` when its version is
+newer. It could not: `config_version` was written by nothing, so the platform's
+copy sat at 1 for ever and was never newer than anything.
+
+**If the platform is given policy of its own** — fleet-wide alert thresholds
+are the obvious candidate — that is when to build the push, and it needs a
+stated answer to which side wins when both have edited. The station's half is
+already there: `config.set` applies, persists and reports the new version, and
+the platform never assumes the change took.
 
 What configuration covers:
 

@@ -99,6 +99,9 @@ class StationIngest:
         self._token = uuid.uuid4().hex
         self._registry: dict[uuid.UUID, tuple[uuid.UUID | None, datetime]] = {}
         self._seen: dict[uuid.UUID, datetime] = {}
+        #: Last config version written per station, so a health frame every
+        #: half minute does not become a write every half minute.
+        self._config_version: dict[uuid.UUID, int] = {}
         #: Last known synthetic/real state per station, so the row is written
         #: when it changes rather than on every health frame.
         self._simulated: dict[uuid.UUID, bool] = {}
@@ -316,12 +319,63 @@ class StationIngest:
         if kind == "health":
             await self._reconcile_simulated(station_id, payload)
             await self._reconcile_position(station_id, payload)
+            await self._reconcile_config_version(station_id, payload)
 
         # Onto the internal fan-out, where authorisation and per-subscriber
         # delivery already apply. Nothing downstream needs to know the frame
         # came from outside.
         await hub.publish_station(organization_id, station_id, stream, payload)
         await self._touch(station_id)
+
+    async def _reconcile_config_version(
+        self, station_id: uuid.UUID, payload: dict,
+    ) -> None:
+        """Believe the station about which config it is running.
+
+        `ground_stations.config_version` was written by nothing at all. It
+        defaulted to 1, was handed to the station at enrolment, read back in
+        four API responses, and never moved — so the console reported "version
+        1" about a station running whatever the setup page had been used to
+        change, for ever.
+
+        The station is the source, the same way it is for position and for
+        `is_simulated`: site policy is typed on the box by somebody standing at
+        it, because every threshold in it must work with the platform
+        unreachable. This makes the platform's copy a *display* of that rather
+        than a number nobody maintains.
+
+        **This is deliberately not the other direction.** `contract/enrolment.md`
+        §7 used to say the platform sends `config.set` when its version is
+        newer, which could never happen and should not: the only settings the
+        platform holds that the station also has are position and elevation,
+        and `station/gsu/config.py` records the decision that those must not be
+        settable from two ends. If the platform is ever given policy of its own
+        to push — fleet-wide alert thresholds, say — that is the moment to build
+        the push, and it needs a real answer to which side wins.
+
+        Written only when it changes. Health arrives every half minute and this
+        moves when somebody edits the setup page, not per frame.
+        """
+        version = payload.get("config_version")
+        if not isinstance(version, int):
+            return
+        if self._config_version.get(station_id) == version:
+            return
+        try:
+            await asyncio.to_thread(self._write_config_version, station_id, version)
+        except Exception:  # noqa: BLE001 - a display field must not stop ingest
+            log.exception("Could not record config version for %s.", station_id)
+            return
+        self._config_version[station_id] = version
+
+    def _write_config_version(self, station_id: uuid.UUID, version: int) -> None:
+        with PrivilegedSessionLocal() as db:
+            db.execute(
+                update(GroundStation)
+                .where(GroundStation.id == station_id)
+                .values(config_version=version)
+            )
+            db.commit()
 
     async def _reconcile_simulated(self, station_id: uuid.UUID, payload: dict) -> None:
         """Believe the station about whether its own data is synthetic.
