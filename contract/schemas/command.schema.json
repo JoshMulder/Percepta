@@ -34,7 +34,7 @@
       "type": "object",
       "properties": {
         "kind": { "const": "radio.monitor" },
-        "on": { "type": "boolean", "description": "Momentary squelch defeat - the MON button. Station-wide: there is one gate, so this pushes hiss to every listener. Expected to be held, never latched. Reported back as radio.monitor." }
+        "on": { "type": "boolean", "description": "Momentary squelch defeat - the MON button. Station-wide: there is one gate, so this pushes hiss to every listener. Expected to be held, never latched.\n\n**The station releases it on its own after a few minutes**, and reports monitor false when it does. Holding the gate open makes squelch_open true, so audio flows continuously up a metered link, and the console holding it can close, crash or be signed out without ever sending the release - the same reason the audio and video leases expire rather than waiting to be told. A station that means to keep it open sends the command again. Reported back as radio.monitor." }
       },
       "required": ["kind", "on"]
     },

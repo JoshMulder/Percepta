@@ -187,10 +187,20 @@ def monitor(
     physical radio too, which is why it is a momentary control rather than a
     setting - it is expected to be held, not left on.
 
-    Not audited. It changes nothing that outlives the press, and a row per
-    volume drag would bury the commands that matter.
+    Audited, unlike the other momentary controls. This used to say it was not,
+    on the grounds that it changes nothing outliving the press. That was wrong
+    in the one direction that matters: a held gate reports squelch_open, so
+    audio flows continuously up a metered link, and nothing on this side ever
+    releases it - the console holding it can close, crash or be signed out. The
+    station now releases it for itself after five minutes
+    (`radio/receiver.MONITOR_MAX_S`), and this row is what answers "who opened
+    it" for the five minutes before that.
     """
     _dispatch(station_id, {"kind": "radio.monitor", "on": body.on})
+    _audit(
+        request=request, identity=identity, station_id=station_id,
+        action="radio_monitor", detail={"on": body.on},
+    )
     return {"accepted": True}
 
 

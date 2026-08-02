@@ -69,8 +69,12 @@ TELEMETRY_PATTERN, AUDIO_PATTERN = station_topics.subscribed_by_platform()
 #: is actually attached, whether its credential is renewing, what it is holding
 #: locally. It rides the telemetry stream and needs telemetry.view like the
 #: rest.
+#: `video` is deliberately absent. The snapshot channel it belonged to was
+#: retired (`contract/transport.md`) and the schema defines no such kind, so
+#: accepting one here would fan an MJPEG-sized payload out to every subscriber
+#: for a stream nothing renders. Live video goes over the media WebSocket.
 KNOWN_KINDS = {
-    "adsb", "weather", "power", "radio", "light", "audio", "health", "video",
+    "adsb", "weather", "power", "radio", "light", "audio", "health",
 }
 
 #: How often a station's last_seen_at is written. Telemetry arrives several
@@ -106,6 +110,57 @@ CONTEND_SECONDS = 3.0
 GEOCODE_COOLDOWN_S = 3600.0
 
 
+#: The bounds from the contract schemas that a console would otherwise turn
+#: into an allocation. Deliberately **not** full schema validation: the
+#: contract requires unknown fields and unknown kinds to pass through, a
+#: station may legitimately be newer than the platform, and validating every
+#: field of every frame at 1 Hz per station would put a large jsonschema
+#: traversal on the fleet's one ingest loop for no safety this does not already
+#: give.
+#:
+#: What it is for: the handful of values where "the schema says so" is not
+#: enough, because the consumer is a browser that allocates from them. A
+#: station is a box on somebody else's network and may be lying.
+#: Each entry is (field, expected type, low, high). The type matters as much as
+#: the range: a string where a list belongs passes a length check with a small
+#: number and then reaches a console that calls .map on it.
+LIMITS = {
+    "audio": (
+        ("rate", float, 8000, 48000),   # ctx.sampleRate / rate scales an allocation
+        ("pcm", str, 0, 262144),        # length, not value
+    ),
+    "adsb": (("aircraft", list, 0, 500),),  # a map marker and DOM subtree each
+    "health": (
+        ("conditions", list, 0, 64),
+        ("devices", list, 0, 64),
+        ("resources", list, 0, 64),
+    ),
+}
+
+
+def _out_of_bounds(kind: str, payload: dict) -> str | None:
+    """Why this frame should not be forwarded, or None if it is fine.
+
+    O(1) per field: a length or a comparison, never a walk of the payload.
+    """
+    for field, want, low, high in LIMITS.get(kind, ()):
+        value = payload.get(field)
+        if value is None:
+            continue
+        if want is float:
+            # bool is an int in Python and is not a sample rate.
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                return f"{field} is {type(value).__name__}, expected a number"
+            size = value
+        else:
+            if not isinstance(value, want):
+                return f"{field} is {type(value).__name__}, expected {want.__name__}"
+            size = len(value)
+        if not low <= size <= high:
+            return f"{field} is {size}, outside {low}-{high}"
+    return None
+
+
 class StationIngest:
     def __init__(self) -> None:
         self._task: asyncio.Task | None = None
@@ -134,6 +189,9 @@ class StationIngest:
         self._locality_tasks: set[asyncio.Task] = set()
         self._unknown_kinds: set[str] = set()
         self._unknown_stations: set[uuid.UUID] = set()
+        #: Stations currently sending frames outside the contract's bounds,
+        #: so the log says so once rather than at their publish rate.
+        self._oversized: set[uuid.UUID] = set()
 
     async def start(self) -> None:
         if self._task is None:
@@ -346,6 +404,14 @@ class StationIngest:
                          kind, station_id)
             return
 
+        oversized = _out_of_bounds(kind, payload)
+        if oversized is not None:
+            if station_id not in self._oversized:
+                self._oversized.add(station_id)
+                log.warning("Dropping %s from %s: %s.", kind, station_id, oversized)
+            return
+        self._oversized.discard(station_id)
+
         organization_id = await self._organization(station_id)
         if organization_id is None:
             return
@@ -477,6 +543,7 @@ class StationIngest:
 
         if position is None:
             fix: tuple[float, float] | None = None
+            elevation: float | None = None
         elif isinstance(position, dict):
             try:
                 latitude = float(position["latitude"])
@@ -494,18 +561,30 @@ class StationIngest:
                 )
                 return
             fix = (latitude, longitude)
+            # Part of the same position and owned by the same person, so it is
+            # stored with it. Optional: a station that cannot measure its
+            # height omits it, and omitting is not the same as retracting, so
+            # the stored value is left alone rather than nulled. Bounded to
+            # the range a ground station can physically occupy.
+            elevation = position.get("elevation_m")
+            try:
+                elevation = None if elevation is None else float(elevation)
+            except (TypeError, ValueError):
+                elevation = None
+            if elevation is not None and not -500.0 <= elevation <= 9000.0:
+                elevation = None
         else:
             return
 
-        if station_id in self._position and self._position[station_id] == fix:
+        if self._position.get(station_id, "unset") == (fix, elevation):
             return
-        self._position[station_id] = fix
+        self._position[station_id] = (fix, elevation)
         # The coordinates are a local write and are awaited. The locality is a
         # call to somebody else's service, so it is not: this coroutine reads
         # the pubsub for every station in every organisation, and awaiting an
         # 8-second timeout here would stop the platform's telemetry on one
         # station's say-so. It used to.
-        await asyncio.to_thread(self._write_position, station_id, fix)
+        await asyncio.to_thread(self._write_position, station_id, fix, elevation)
         if fix is not None and self._locality_due(station_id):
             task = asyncio.create_task(
                 asyncio.to_thread(self._write_locality, station_id, fix)
@@ -526,7 +605,10 @@ class StationIngest:
         return True
 
     def _write_position(
-        self, station_id: uuid.UUID, fix: tuple[float, float] | None
+        self,
+        station_id: uuid.UUID,
+        fix: tuple[float, float] | None,
+        elevation: float | None = None,
     ) -> None:
         """The coordinates, and nothing that needs the network.
 
@@ -536,17 +618,23 @@ class StationIngest:
         ingest loop, and a wrong town name is a smaller problem than a
         platform that stops carrying telemetry.
         """
-        stale = {} if fix else {"locality": None, "region": None, "locality_for": None}
+        values: dict = {
+            "latitude": fix[0] if fix else None,
+            "longitude": fix[1] if fix else None,
+        }
+        if fix is None:
+            # A retraction takes the height with it: an elevation with no
+            # coordinates is not a position, it is a leftover.
+            values |= {"locality": None, "region": None, "locality_for": None,
+                       "elevation_m": None}
+        elif elevation is not None:
+            values["elevation_m"] = elevation
         try:
             with PrivilegedSessionLocal() as db:
                 db.execute(
                     update(GroundStation)
                     .where(GroundStation.id == station_id)
-                    .values(
-                        latitude=fix[0] if fix else None,
-                        longitude=fix[1] if fix else None,
-                        **stale,
-                    )
+                    .values(**values)
                 )
                 db.commit()
             log.info(

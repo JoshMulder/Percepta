@@ -202,10 +202,10 @@ technician on site.
     "command_topic": "cmd/gsu/{station_id}"
   },
   "station": {
-    // What the station is told it is, at the moment it enrols. Name and
-    // position are settled here and frozen afterwards - a station that needs
-    // a different position has moved, and a box that has moved is
-    // recommissioned rather than edited.
+    // What the station is told it is, at the moment it enrols. The name is
+    // settled here and changed only by an admin. The position is the
+    // station's *initial* value: from here on the box owns it and reports it
+    // in health.position, and the console renders it read-only. See §7.
     "name": "Kaikoura Ridge",
     "timezone": "Pacific/Auckland",
     "latitude": -42.4004,
@@ -343,9 +343,18 @@ configuration, and it changes over a station's life.
   records it against the station as a display of what is running.
 - `config.set` exists and the station implements it, but **the platform never
   sends one.** The only settings it holds that the station also has are
-  position and elevation, and `station/gsu/config.py` records the decision that
-  those must not be settable from two ends: two editable copies of one fact
-  disagree, and the disagreement is invisible from both.
+  position and elevation, and those must not be settable from two ends: two
+  editable copies of one fact disagree, and the disagreement is invisible from
+  both.
+- **Position flows the other way, and only the other way.** The station
+  reports `health.position` (latitude, longitude, optional `elevation_m`, and
+  `source` saying whether it was typed or fixed by GPS); the platform stores
+  what it is told, derives the locality from it, and renders it read-only.
+  Enrolment supplies the starting value because a box has to have one before
+  anybody has stood at it. Omitting the field changes nothing stored; `null`
+  retracts. This is the one case where the station is the author of something
+  the platform also displays, and it is settled that way because the person at
+  the site is the one who knows.
 - So site policy — alert thresholds, retention, stream settings — is typed on
   the setup page by somebody at the box. Every threshold in it has to work with
   the platform unreachable, which is the same reason it lives there.

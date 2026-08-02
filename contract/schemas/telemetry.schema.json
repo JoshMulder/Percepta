@@ -77,7 +77,8 @@
         },
         "aircraft": {
           "type": "array",
-          "description": "The complete current picture, not a delta. An empty array means no contacts, which is different from sending nothing - sending nothing is what a failed receiver looks like.",
+          "maxItems": 500,
+          "description": "The complete current picture, not a delta. An empty array means no contacts, which is different from sending nothing - sending nothing is what a failed receiver looks like.\n\nThis is the station's most expensive unconditional stream: at 1 Hz with no lease and no gate, a busy 50-contact picture is roughly 20 kB a frame, ~150 kbit/s, ~1.5 GB a day, and it is genuinely uncompressed on the wire. See transport.md's cadence section. The cap is far above any real receiver's traffic and exists so that one station cannot hand every console watching it an unbounded array to render; a station seeing more contacts than this should send the nearest 500, which is what an operator is looking at anyway. Omitting fields with no value is worth 10-20% and costs nothing - only icao, range_km and bearing are required.",
           "items": {
             "$ref": "#/$defs/aircraft"
           }
@@ -477,7 +478,7 @@
             "type": "integer"
           },
           "maxItems": 256,
-          "description": "Per-bin power in dBFS across span_hz, centred on freq_hz, for a spectrum display. Present only while a console has asked for it (the radio.spectrum command): the receiver measures 241 bins and sending them continuously is around 150 MB a day on a metered link, for a display that is open for minutes at commissioning. Decimated by peak rather than mean — an airband channel is a handful of bins wide and averaging buries a real carrier — and rounded to whole dB, which is all a canvas can render."
+          "description": "Per-bin power in dBFS across span_hz, centred on freq_hz, for a spectrum display. Present only while a console has asked for it (the radio.spectrum command): sending it continuously is on the order of 50-100 MB a day on a metered link, for a display that is open for minutes at commissioning. Decimated by peak rather than mean — an airband channel is a handful of bins wide and averaging buries a real carrier — and rounded to whole dB, which is all a canvas can render. (An earlier note here said 150 MB, which was the arithmetic for 241 bins as decimal floats; this field is whole-dB integers and the station decimates to 128 bins before sending.)"
         },
         "span_hz": {
           "type": "number",
@@ -557,12 +558,14 @@
         },
         "conditions": {
           "type": "array",
-          "description": "Named problems currently true, e.g. `uplink.down`, `credential.renewal_failing`. Raised and cleared by the station; the platform surfaces them and never infers them.",
+          "maxItems": 64,
+          "description": "Named problems currently true, e.g. `uplink.down`, `credential.renewal_failing`. Raised and cleared by the station; the platform surfaces them and never infers them. Bounded because a console raises an alert per condition it has not seen before and holds them for the session: a station is reporting its own faults here, and a station with more than a few dozen distinct ones is not reporting, it is flooding.",
           "items": {
             "type": "object",
             "properties": {
               "id": {
-                "type": "string"
+                "type": "string",
+                "maxLength": 100
               },
               "severity": {
                 "type": "string",
@@ -573,7 +576,8 @@
                 ]
               },
               "detail": {
-                "type": "string"
+                "type": "string",
+                "maxLength": 500
               }
             },
             "required": [
@@ -591,6 +595,25 @@
         "uptime_s": {
           "type": "number",
           "minimum": 0
+        },
+        "position": {
+          "type": ["object", "null"],
+          "description": "Where this station says it is. **The station owns this** - enrolment sets the initial value, and from then on the box is the one place it is edited, because the person standing at the site is the one who knows. The platform stores what it is told and its console renders the position read-only; two editable copies of one fact disagree, and the disagreement is invisible from both ends.\n\nOnly ever the station's own configuration. Echoing the platform's value back as though the station had confirmed it would launder a guess into a measurement.\n\nOmitting the field means 'nothing to say' and leaves the stored position alone - a station that predates this sends nothing, and reading that as a retraction would take the map away from every station in the field. Retracting is explicit and is `null`.",
+          "properties": {
+            "latitude": {"type": "number", "minimum": -90, "maximum": 90},
+            "longitude": {"type": "number", "minimum": -180, "maximum": 180},
+            "elevation_m": {
+              "type": "number",
+              "minimum": -500,
+              "maximum": 9000,
+              "description": "Metres. Part of the position and stored with it. Optional - a station that cannot measure its height omits it, and omitting is not retracting, so the stored value stands. The ADS-B barometric correction is its consumer and refuses without one rather than assuming sea level."
+            },
+            "source": {
+              "type": "string",
+              "description": "How the station came by this: `configured` for a position typed at the box, `gps` for one a receiver fixed. Carried so the platform can tell a typed position from a surveyed one the day a GPS is fitted, rather than having to guess which it is looking at."
+            }
+          },
+          "required": ["latitude", "longitude"]
         },
         "cadence": {
           "type": "object",
@@ -632,7 +655,8 @@
         },
         "devices": {
           "type": "array",
-          "description": "What is actually attached, as the station found it. The platform reconciles its own inventory against this rather than assuming: a camera that has failed and a camera that was never fitted look identical in a database and completely different at the site.",
+          "maxItems": 64,
+          "description": "What is actually attached, as the station found it. The platform reconciles its own inventory against this rather than assuming: a camera that has failed and a camera that was never fitted look identical in a database and completely different at the site. Bounded: a station has one slot per job and a handful of jobs.",
           "items": {
             "$ref": "#/$defs/device"
           }
@@ -643,6 +667,7 @@
         },
         "resources": {
           "type": "array",
+          "maxItems": 64,
           "items": {
             "type": "object"
           },

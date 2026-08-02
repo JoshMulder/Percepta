@@ -6,8 +6,18 @@
   "type": "object",
   "properties": {
     "kind": { "const": "audio" },
-    "rate": { "type": "integer", "description": "Sample rate in Hz. 24000 today; the console resamples to whatever the browser grants." },
-    "pcm": { "type": "string", "contentEncoding": "base64", "description": "Mono signed 16-bit little-endian PCM. Wasteful and known to be so - expect this to become binary frames with Opus, so keep the encoding behind one function." }
+    "rate": {
+      "type": "integer",
+      "minimum": 8000,
+      "maximum": 48000,
+      "description": "Sample rate in Hz. 24000 today; the console resamples to whatever the browser grants. Bounded because a consumer resampling by ctx.sampleRate/rate turns a small number into a very large allocation and a zero into a division by zero - the range is wide enough for any real airband receiver and narrow enough that the arithmetic downstream stays finite."
+    },
+    "pcm": {
+      "type": "string",
+      "contentEncoding": "base64",
+      "maxLength": 262144,
+      "description": "Mono signed 16-bit little-endian PCM. Wasteful and known to be so - expect this to become binary frames with Opus, so keep the encoding behind one function. Bounded well above the ~8 kB a frame actually carries: audio is a stream of short chunks, not a file."
+    }
   },
   "required": ["kind", "rate", "pcm"]
 }

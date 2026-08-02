@@ -89,10 +89,12 @@ class BrokerOut(BaseModel):
 class StationOut(BaseModel):
     """What the station is told it is, at the moment it enrols.
 
-    Name and position are settled here and frozen afterwards — a station that
-    needs a different position has moved, and a box that has moved is
-    recommissioned rather than edited (see api/station_config.py). So this is
-    not a snapshot the station should expect to be updated: it is the answer.
+    The name is settled here and changed only by an admin. The position is the
+    station's *starting* value, not a frozen one: a box has to have somewhere
+    to begin before anybody has stood at it, and from then on the station owns
+    it and reports `health.position`, which the ingest believes (see
+    `services/station_ingest._reconcile_position` and `contract/enrolment.md`
+    §7). The console renders it read-only for the same reason.
     """
 
     name: str

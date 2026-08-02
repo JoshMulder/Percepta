@@ -65,6 +65,24 @@ SPECTRUM_WINDOW_S = 12.0
 #: and a gap mid-transmission is what a listener actually notices.
 AUDIO_WINDOW_S = 30.0
 
+#: Longest the gate stays defeated by monitor before releasing itself.
+#:
+#: Monitor is the MON button on a handheld: momentary, expected to be held, and
+#: the contract's command schema says so. But the thing holding it is a console
+#: on the other side of a link that drops, and nothing releases it if that
+#: console closes, crashes or is signed out — the same "most listeners never say
+#: goodbye" problem the audio and video leases exist for. A gate held open is
+#: not a cosmetic state: it reports squelch_open, so audio flows continuously
+#: at ~512 kbit/s from an unattended site on a metered link, for as long as
+#: nobody notices.
+#:
+#: Five minutes is far longer than any real use — setting a level against the
+#: noise takes seconds — and short enough that a forgotten press costs a few
+#: pounds rather than a month of uplink. The release is reported like any other
+#: state: telemetry says monitor false, so a console never shows a gate held
+#: open that is not.
+MONITOR_MAX_S = 300.0
+
 FREQ_MIN_HZ = 108_000_000
 FREQ_MAX_HZ = 137_000_000
 
@@ -155,6 +173,8 @@ class RadioController:
         #: never been left, so there is nothing frozen to fall back to.
         self.manual_threshold_db: float | None = None
         self.monitor = False
+        #: When a held-open gate releases itself. See MONITOR_MAX_S.
+        self._monitor_until = 0.0
         #: Last threshold actually applied, so leaving AUTO can freeze at it
         #: rather than jumping.
         self.last_threshold_db = -70.0
@@ -248,6 +268,9 @@ class RadioController:
         # rebooted with the gate held open would push hiss to every listener
         # until someone noticed.
         self.monitor = bool(on)
+        self._monitor_until = (
+            time.monotonic() + MONITOR_MAX_S if self.monitor else 0.0
+        )
 
     def set_gain(self, gain: float | str) -> None:
         self.gain = gain if gain == "auto" else float(gain)
@@ -321,6 +344,17 @@ class RadioController:
         mistake available on a metered link, so there is exactly one place that
         decides and it is this one.
         """
+        if self.monitor and time.monotonic() >= self._monitor_until:
+            # Nobody released it. Whoever pressed it is not necessarily still
+            # there, and this gate costs bandwidth for as long as it is open.
+            self.monitor = False
+            self._monitor_until = 0.0
+            log.warning(
+                "Monitor released after %.0fs: the gate was held open and "
+                "nothing turned it off. Audio stops unless a real signal "
+                "opens the squelch.", MONITOR_MAX_S,
+            )
+
         block = self.front_end.read(dt)
         self._last_spectrum = block.spectrum_db
         self._rssi_db = dsp.in_channel_power_db(block.spectrum_db, block.bin_hz)

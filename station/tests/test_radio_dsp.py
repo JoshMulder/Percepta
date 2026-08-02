@@ -115,6 +115,46 @@ class SquelchTests(unittest.TestCase):
         # threshold moves with the noise — what it must not do is jump.
         self.assertAlmostEqual(payload["threshold_db"], before, delta=1.5)
 
+    def test_a_held_gate_releases_itself(self):
+        """The console holding monitor can close, crash or be signed out.
+
+        Nothing on the platform releases it, and a held gate reports
+        squelch_open — so audio flows continuously up a metered link from an
+        unattended site until somebody notices. It has to time out here,
+        because here is the only side that is always running.
+        """
+        self.controller.set_monitor(True)
+        payload, _ = self.controller.tick(1.0)
+        self.assertTrue(payload["monitor"])
+
+        # Just before the deadline it is still held: a real press must not be
+        # cut short while somebody is genuinely listening to the noise.
+        self.controller._monitor_until = time.monotonic() + 0.05
+        payload, _ = self.controller.tick(1.0)
+        self.assertTrue(payload["monitor"], "released early")
+
+        self.controller._monitor_until = time.monotonic() - 0.01
+        payload, _ = self.controller.tick(1.0)
+        self.assertFalse(payload["monitor"], "the gate stayed held for ever")
+        # Reported, not merely done: a console must never show a gate held open
+        # that is not, and the platform only ever learns this from telemetry.
+        self.assertFalse(payload["squelch_open"])
+
+    def test_the_release_deadline_is_generous_but_finite(self):
+        from gsu.radio.receiver import MONITOR_MAX_S
+
+        # Long enough to set an audio level against the noise unhurried...
+        self.assertGreaterEqual(MONITOR_MAX_S, 60)
+        # ...and short enough that a forgotten press is not a month of uplink.
+        self.assertLessEqual(MONITOR_MAX_S, 900)
+
+    def test_releasing_monitor_by_hand_clears_the_deadline(self):
+        self.controller.set_monitor(True)
+        self.controller.set_monitor(False)
+        self.assertEqual(self.controller._monitor_until, 0.0)
+        payload, _ = self.controller.tick(1.0)
+        self.assertFalse(payload["monitor"])
+
     def test_audio_only_while_the_gate_is_open(self):
         front_end = SimulatedFrontEnd(traffic="busy", seed=7)
         controller = RadioController(front_end)

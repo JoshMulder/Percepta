@@ -254,12 +254,22 @@ to tolerate gaps, so favour dropping data over queueing it.
 
 | Stream | Cadence | Notes |
 |---|---|---|
-| `adsb` | 1 Hz | Full current picture each time, not deltas |
+| `adsb` | 1 Hz | Full current picture each time, not deltas. The costliest un-gated stream — see below |
 | `power` | 1 Hz | |
 | `radio` | 1 Hz | |
 | `light` | 1 Hz | |
 | `weather` | 0.2 Hz | Changes slowly. A metered site may set this lower — see below |
-| `audio` | while squelch is open only | See below |
+| `health` | every 30 s | The station's own state. Slow by design |
+| `audio` | while squelch is open, and only while asked | See below |
+
+**What a station costs when nothing is happening.** The four 1 Hz streams plus
+weather and health come to roughly **5–6 kbit/s, about 2 GB a month**, per
+station, for ever. That is the floor the design accepts in exchange for the
+console never having to guess whether a silent station is a failed one. It is
+worth knowing before adding a field to a 1 Hz payload: anything that rides
+`radio` or `power` is paid for 86,400 times a day whether it changed or not,
+which is why capability constants belong in `health` and not beside the
+readings.
 
 **A station reports the cadences it is actually using**, in `health.cadence`,
 as seconds per stream. Consumers deriving a timeout — "this panel is stale" —
@@ -269,8 +279,28 @@ station legitimately slowed down to save bandwidth would otherwise be marked
 faulty by a console still assuming 0.2 Hz, with nothing at either end to say
 why. Absent on an older agent, which means the table.
 
-**Audio is the platform's largest single consumer** and the one place where
-being careless is expensive. Uncompressed it is ~384 kbit/s, and base64 inside
+**ADS-B is the largest thing nobody gates**, and it is worth stating because
+the two streams the contract is careful about are both cheaper than it in the
+cases that matter. A contact serialises to roughly 400 bytes, so a 50-contact
+picture at 1 Hz is about **150 kbit/s, or 1.5 GB a day** — a third of live
+audio, continuously, whether or not a single console is open. Most of that is
+repeated JSON key names, and none of it is compressed on the wire.
+
+Three things follow, none of which needs a schema change:
+
+1. **Omit what has no value.** Only `icao`, `range_km` and `bearing` are
+   required. Sending explicit nulls for the other sixteen fields is 10–20% of
+   the stream, and the weather payload already omits rather than nulls.
+2. **The array is capped at 500 contacts** — far above any real receiver, and
+   there so one station cannot hand every console an unbounded array to
+   render. A station seeing more should send the nearest 500.
+3. **Full picture, not deltas, stays right.** It is what makes the stream
+   droppable on a link that drops, which is the whole cadence model. The cost
+   is the price of that property, not an oversight — but it is a real cost and
+   the contract should not price two streams and stay quiet about the biggest.
+
+**Audio is the platform's largest single consumer while it is flowing** and the
+one place where being careless is expensive. Uncompressed it is ~384 kbit/s, and base64 inside
 a JSON envelope makes it ~512. Three things keep it manageable, and the third
 is not done:
 

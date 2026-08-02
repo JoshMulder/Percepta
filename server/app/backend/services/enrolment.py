@@ -216,9 +216,22 @@ def claim(
         # The record was deleted or decommissioned after the code was issued.
         raise InvalidToken()
 
-    # Already enrolled by some other token: this code is for a station that is
-    # already in service, and re-enrolling it would cut off working hardware.
-    if station.enrolled_at is not None and token.claimed_at is None:
+    # Already in service, and this code predates that: a stale token somebody
+    # found written down, arriving at a station that is working. Claiming it
+    # would cut off live hardware, so it is refused.
+    #
+    # A token issued *after* the station enrolled is the opposite case and is
+    # allowed through: an admin generating a fresh code for a station already
+    # in service is the documented way to replace the box (§2, §8), and there
+    # is no other thing that act can mean. Comparing the two timestamps is what
+    # separates them - the guard used to be "enrolled and this token unclaimed",
+    # which caught the replacement flow as well and made it impossible to
+    # complete without an admin first revoking, a step no runbook mentioned.
+    if (
+        station.enrolled_at is not None
+        and token.claimed_at is None
+        and token.created_at <= station.enrolled_at
+    ):
         raise AlreadyEnrolled()
 
     # A retry supersedes whatever the earlier attempt produced - the box that
