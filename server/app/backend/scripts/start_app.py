@@ -143,6 +143,23 @@ def main() -> None:
         # flag and the alternative is buffering the read ourselves.
         "--ws-max-size",
         str(WS_MAX_SIZE),
+        # Socket liveness, and the numbers are the contract's — the timings
+        # table in `contract/transport.md` states 20 s idle and a 10 s pong
+        # deadline, and both ends have to agree on them.
+        #
+        # It has to be set here rather than in the Dockerfile, which is what it
+        # was: compose overrides the image's CMD with this script, so a `CMD`
+        # carrying these flags is inert and silently so. Uvicorn's own defaults
+        # are 20/20 — the interval already matched and the timeout did not, so
+        # a station whose NAT mapping was dropped went unnoticed for twice as
+        # long as the contract allows.
+        #
+        # This is also the only place it *can* be set: Starlette exposes no
+        # access to the ping machinery, so the relay endpoint cannot do it.
+        "--ws-ping-interval",
+        "20",
+        "--ws-ping-timeout",
+        "10",
     ]
 
     # Behind a reverse proxy by default: the proxy terminates TLS and this

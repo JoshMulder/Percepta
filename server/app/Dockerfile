@@ -59,14 +59,11 @@ USER 10001
 
 EXPOSE 8000
 
-# The WebSocket ping timings are the contract's, stated here because this is
-# where they take effect: `contract/transport.md` puts them in the timings
-# table as 20 s idle and a 10 s pong deadline, and both ends must agree.
+# A bare uvicorn, for anyone running this image without compose.
 #
-# uvicorn's own defaults are 20/20. The interval already matched; the timeout
-# did not, and a station whose NAT mapping is dropped would have gone
-# unnoticed for twice as long as the contract allows. This is application
-# behaviour that happens to be configured at the server — the relay code
-# cannot set it, because Starlette gives no access to the ping machinery.
-CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", \
-     "--ws-ping-interval", "20", "--ws-ping-timeout", "10"]
+# The WebSocket ping timings deliberately are NOT here. The real deployment
+# overrides this CMD with `python -m backend.scripts.start_app`, so flags set
+# here never run — and the first version of this put them here, where they
+# looked authoritative and did nothing. They live in that script, next to the
+# frame cap, which is the only place they take effect.
+CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
