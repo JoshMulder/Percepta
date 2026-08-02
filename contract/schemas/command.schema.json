@@ -35,7 +35,7 @@
       "type": "object",
       "properties": {
         "kind": { "const": "radio.monitor" },
-        "on": { "type": "boolean", "description": "Momentary squelch defeat - the MON button. Station-wide: there is one gate, so this pushes hiss to every listener. Expected to be held, never latched.\n\n**The station releases it on its own after a few minutes**, and reports monitor false when it does. Holding the gate open makes squelch_open true, so audio flows continuously up a metered link, and the console holding it can close, crash or be signed out without ever sending the release - the same reason the audio and video leases expire rather than waiting to be told. A station that means to keep it open sends the command again. Reported back as radio.monitor." }
+        "on": { "type": "boolean", "description": "Momentary squelch defeat - the MON button. Station-wide: there is one gate, so this pushes hiss to every listener. Expected to be held, never latched.\n\n**The station releases it on its own** after the timeout in transport.md's timings table, and reports monitor false when it does. A console that means to keep it held re-sends before then. Holding the gate open makes squelch_open true, so audio flows continuously up a metered link, and the console holding it can close, crash or be signed out without ever sending the release - the same reason the audio and video leases expire rather than waiting to be told. A station that means to keep it open sends the command again. Reported back as radio.monitor." }
       },
       "required": ["kind", "on"]
     },
@@ -59,7 +59,8 @@
       "type": "object",
       "properties": {
         "kind": { "const": "radio.spectrum" },
-        "on": { "type": "boolean", "description": "Somebody is looking at the spectrum display, or has stopped. Demand-driven and re-requested periodically rather than held open by a connection, so a console that crashes stops the traffic without saying goodbye - the full sweep is roughly 150 MB a day on a metered link, for a display that is open for minutes at commissioning. Reported back as radio.spectrum and radio.span_hz, present only while asked for." }
+        "on": { "type": "boolean", "description": "Somebody is looking at the spectrum display, or has stopped. Demand-driven and leased for the same reason as audio and video: a console that crashes stops the traffic without saying goodbye, and the full sweep is tens of megabytes a day on a metered link for a display that is open for minutes at commissioning. Reported back as radio.spectrum and radio.span_hz, present only while asked for.\n\n`false` stops it immediately rather than waiting for the lease, because unlike audio there is no cost to a stop that never arrives - the lease already covers that case." },
+        "lease_seconds": { "type": "number", "exclusiveMinimum": 0, "description": "How long this request is good for. Defaults and bounds are in transport.md's timings table; the station clamps to them." }
       },
       "required": ["kind", "on"]
     },
@@ -69,7 +70,7 @@
       "properties": {
         "kind": { "const": "radio.audio" },
         "on": { "const": true, "description": "Always true. False is deliberately not defined: an unsubscribe-style stop would leave a station transmitting forever when the stopper never arrives, so stopping is the lease's job alone." },
-        "lease_seconds": { "type": "number", "exclusiveMinimum": 0, "description": "How long this request is good for. The station clamps it to sane bounds, so an absurd lease cannot pin the uplink open." }
+        "lease_seconds": { "type": "number", "exclusiveMinimum": 0, "description": "How long this request is good for. Defaults and bounds are in transport.md's timings table; the station clamps to them, so an absurd lease cannot pin the uplink open." }
       },
       "required": ["kind"]
     },
@@ -78,7 +79,8 @@
       "description": "The first viewer attached: start the live H.264 stream to the media WebSocket (transport.md) and keep it running for lease_seconds. Repeated while anyone is watching; treat a repeat as a renewal, never a second start - there is one camera, and a second encoder on it reads as broken hardware. If the lease expires unrenewed the station stops on its own, so a crashed platform or a dropped link cannot leave it paying for a picture nobody can see. Reported back in health.video.stream.",
       "properties": {
         "kind": { "const": "video.start" },
-        "lease_seconds": { "type": "number", "exclusiveMinimum": 0, "description": "How long this request is good for. The station clamps it to sane bounds." }
+        "lease_seconds": { "type": "number", "exclusiveMinimum": 0, "description": "How long this request is good for. Defaults and bounds are in transport.md's timings table; the station clamps to them." },
+        "viewers": { "type": "integer", "minimum": 1, "description": "How many are watching right now. Advisory and reported straight back in health.video.stream.viewers, so an operator can see that a station is streaming for four people rather than one. It must not change what the station sends: there is one encoder and one stream regardless, and a station that tried to act on this would be optimising for a number it cannot verify." }
       },
       "required": ["kind", "lease_seconds"]
     },

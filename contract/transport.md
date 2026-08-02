@@ -314,6 +314,48 @@ and all three are required:
    in the shape everybody already knew was wrong, and paying for a breaking
    change later to fix it.
 
+## Timings, and who owns each one
+
+Every number both sides must agree on, in one place. These are the values that
+are invisible in a schema — a shape can be validated and a lifetime cannot —
+and each one is somewhere two independently built ends would otherwise each
+choose something reasonable and not match.
+
+| What | Value | Owned by |
+|---|---|---|
+| `radio.audio` lease, when `lease_seconds` is absent | 30 s | station default |
+| `video.start` lease, when the platform states none | 30 s | station default |
+| `radio.spectrum` lease, when `lease_seconds` is absent | 15 s | station default |
+| Any lease the station will honour | clamped to **5–300 s** | station |
+| Renewal, for every lease | at or before **one third** of the lease | platform |
+| `radio.monitor` releases itself after | 300 s | station |
+| Events per message | at most 100 | station |
+| Event batches in flight at once | 1 | station |
+| Credential renewal begins | `credential.renew_after`, as issued | platform states it |
+| Revocation takes effect within | 30 s | platform |
+
+Four rules go with the table, because the numbers alone do not settle it.
+
+**A lease the platform states always wins, inside the clamp.** The defaults
+above are what a station uses when told nothing. They are not a ceiling and not
+a negotiation: a platform asking for 45 s gets 45 s.
+
+**The clamp is the station's, and it is not silent.** 5–300 s exists so a
+platform that has gone wrong cannot pin an unattended box's uplink open for a
+day, or make it stutter with a two-second lease. A station that clamps is
+already reporting the truth in `health.video.stream.lease_remaining_s`, which
+is where a platform sees that its 3600 became 300.
+
+**Renew at a third, not at the edge.** A platform that renews exactly when the
+lease expires produces a gap on every cycle, because the renewal has to cross a
+link that drops. A third means two consecutive renewals can be lost before a
+listener hears anything, which on these links is the point.
+
+**Stopping is never only a command.** `video.stop` and `radio.spectrum {on:
+false}` end things sooner as a courtesy, and the lease running out is the
+guarantee. A station that never receives a stop still stops. This is why
+`radio.audio` has no stop at all — see its schema entry.
+
 ## Store and forward
 
 A station must keep working with no link at all: continue sensing, recording and

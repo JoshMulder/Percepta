@@ -137,9 +137,13 @@ technician on site.
 ```jsonc
 // request
 {
-  "token": "…",                      // as issued; claimable until it expires
-                                     // or is revoked, so a dropped connection
-                                     // can be retried (§2)
+  "token": "…",                      // as the technician typed it. Claimable
+                                     // until it expires or is revoked, so a
+                                     // dropped connection can be retried (§2).
+                                     // The platform canonicalises before
+                                     // comparing - see below - so the station
+                                     // sends it unaltered and never has to
+                                     // guess the form
   "public_key": "…",                 // PEM; omitted while using bearer credentials
   "hardware": {                      // for the fleet inventory, not for trust
     "model": "…",
@@ -258,6 +262,18 @@ Failures, and the response the technician sees:
 **`429` is retryable and must be treated as such.** It is the one failure here
 that clears on its own, and a station that gave up on it would strand the
 technician the rate limit was never aimed at. Back off and try again.
+
+**The platform canonicalises the token; the station sends what was typed.**
+Upper-case it and discard everything that is not a letter or digit, then
+compare. So `k7mp 3qrt-9wxz` and `K7MP-3QRT-9WXZ` are the same code, because a
+person reading one aloud to another person will produce both.
+
+Normalising in exactly one place is the point. If both sides did it they could
+do it differently, and if neither did, a station that helpfully stripped the
+dashes would fail every enrolment — with `404` and *"This code is not valid.
+Ask for a new one"*, which sends the technician to fetch another code that will
+fail the same way. Grouping is presentation, and presentation must not be
+load-bearing.
 
 **Deliberately not distinguished:** unknown, expired and revoked all return the
 same thing. Telling an attacker which of those a guess was is free information
