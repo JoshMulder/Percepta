@@ -96,12 +96,30 @@ station ──(outbound wss, station credential)──► platform ──(per vi
   fragments without parsing or re-muxing, so a second viewer costs a socket
   rather than a codec, and a browser plays it through Media Source Extensions
   with no player library.
+
+The order of a session is fixed, and all three messages are required:
+
+```
+text    {"codec": "avc1.640028"}    once, before anything else
+text    init                        a new encoder session starts here
+binary  ftyp + moov                 the initialisation segment
+binary  moof + mdat                 one per frame, from then on
+```
+
+- **The codec string is not optional and is not guessable.** Media Source
+  Extensions cannot open a buffer without the exact string, so a viewer given
+  only bytes decodes nothing and shows black - which is indistinguishable from
+  a dead camera, and is why this frame comes first. Derive it from the
+  stream's own sequence parameter set (ISO/IEC 14496-15 Annex E.3), never from
+  configuration: `avc1.PPCCLL` for H.264, `hvc1.P.C.TLL.CC` for HEVC. A
+  station that guesses is a station that reports a picture nobody can watch.
 - **The first binary frame of a session is the initialisation segment**
   (`ftyp` + `moov`). The platform keeps it and gives it to every later viewer,
-  because a viewer handed only the next fragment sees nothing at all - and that
-  looks exactly like a dead camera. Send a text frame `init` to declare a new
-  encoder session; the platform discards the old one, since parameters that no
-  longer match decode as corruption rather than as an error.
+  because a viewer handed only the next fragment sees nothing at all. Send a
+  text frame `init` to declare a new encoder session; the platform discards the
+  old one, since parameters that no longer match decode as corruption rather
+  than as an error.
+- **Frames are capped at 512 KiB**, as on the broker relay.
 - **Nothing reaches a viewer directly** (topology rule 8). The platform
   terminates the stream and re-originates it, so a viewer never learns a
   station's address and a station never learns a viewer's.
@@ -171,8 +189,39 @@ Two traps, both of which have already cost someone an hour:
 ## Broker
 
 A WebSocket relay on 443 in production (`WS /broker`); Redis pub/sub direct on a bench
-(`server/docs/01-architecture-notes.md`). Both are fire-and-forget from the
-station's point of view, and the contract assumes nothing stronger:
+(`server/docs/01-architecture-notes.md`). The port is the whole reason: 6380 and
+8883 are shut wherever a reverse proxy is, and 443 is not.
+
+### The relay's wire format
+
+```
+wss://<platform>/broker            Authorization: Bearer <credential>
+
+  ->  {"topic": "gsu/{id}/telemetry", "payload": { … }}   one JSON text frame
+  <-  {"topic": "cmd/gsu/{id}",       "payload": { … }}   commands, unrequested
+  <-  {"type": "refused", "topic": "…", "reason": "…"}    a topic you may not use
+```
+
+- **The station id is never sent.** It is derived from the credential, as
+  everywhere else. A box holding a valid secret still cannot say which station
+  it is.
+- **There is no subscribe handshake.** Commands arrive on the same socket from
+  the moment it opens, because the credential already determines the one
+  command channel this station may receive. A station that tries to subscribe
+  is refused.
+- **`refused` is a frame, not a disconnection.** Publishing to a topic outside
+  the enrolment response's three gets one of these and the socket stays up —
+  a station silently dropping everything it publishes looks exactly like a
+  station with nothing to say, and this is the fault most likely to be a
+  misconfiguration.
+- **Frames are capped at 512 KiB**, both directions, enforced by closing the
+  socket (1009). A station that needs to send more than that is wrong about
+  something; telemetry is current state.
+- **Close code 4401** means the credential was refused — at connect, or later,
+  because it is re-checked every 15 s on the open socket (see *Authentication*).
+
+Both transports are fire-and-forget from the station's point of view, and the
+contract assumes nothing stronger:
 
 - **Telemetry may be dropped.** It is a stream of current state, not a ledger.
   Publish the current value on a fixed cadence rather than publishing changes
@@ -187,12 +236,16 @@ station's point of view, and the contract assumes nothing stronger:
 ## Identity
 
 Each station authenticates with its own credential — a bearer token today, with
-mTLS client certificates still to come (`enrolment.md` §3) — and the broker ACL
-pins that identity to `gsu/{station_id}/#` and `cmd/gsu/{station_id}`.
+mTLS client certificates still to come (`enrolment.md` §3) — and that identity
+is pinned to **exactly the three channels** in the table above, by name. Not a
+`gsu/{station_id}/` prefix: a prefix would also admit channels nobody consumes,
+and a station inventing its own on a shared broker is what the check exists to
+prevent. A new channel is a change to the contract and to the grant, together.
 
-Enrolment is built on both sides: `server/app/backend/api/enrolment.py` and
-`station/gsu/enrolment.py`. This line used to say it was not, in the same file
-that documents it two sections earlier.
+On the 443 relay the same rule is enforced a second time and more tightly still
+— the relay compares each frame's topic against the two a station may *publish*
+to, so the command channel is receive-only there even though a Redis ACL cannot
+express the difference.
 
 ## Cadence and bandwidth
 

@@ -90,6 +90,21 @@ LEASE_SECONDS = 15
 RENEW_SECONDS = 5.0
 CONTEND_SECONDS = 3.0
 
+#: How long before a station's locality is looked up again.
+#:
+#: The lookup is a call to somebody else's service with an 8-second timeout,
+#: and the position that triggers it arrives in a frame the station controls at
+#: a cadence the station chooses. Two things therefore keep it off the hot
+#: path: it never runs inside `_handle` (see `_reconcile_position`), and it runs
+#: at most this often per station. Without the second, a station whose position
+#: jitters past the one-metre fingerprint spends a lookup per health frame -
+#: for ever, and against a public endpoint that would rightly ban us for it.
+#:
+#: A real mast moves when somebody drives to it, so an hour of staleness on the
+#: *name* of a place costs nothing. The coordinates themselves are written
+#: immediately and are not subject to this.
+GEOCODE_COOLDOWN_S = 3600.0
+
 
 class StationIngest:
     def __init__(self) -> None:
@@ -109,6 +124,14 @@ class StationIngest:
         #: Last position written per station, so a health frame every half
         #: minute is not a database write every half minute.
         self._position: dict[uuid.UUID, tuple[float, float] | None] = {}
+        #: Earliest monotonic time each station may cost another locality
+        #: lookup. Set *before* the task is spawned, so it doubles as the
+        #: in-flight guard: a second frame arriving mid-lookup is inside the
+        #: cooldown and spawns nothing.
+        self._geocode_after: dict[uuid.UUID, float] = {}
+        #: Locality lookups in flight. Held so the event loop cannot garbage
+        #: collect a running task, and so `stop` can cancel them.
+        self._locality_tasks: set[asyncio.Task] = set()
         self._unknown_kinds: set[str] = set()
         self._unknown_stations: set[uuid.UUID] = set()
 
@@ -124,6 +147,11 @@ class StationIngest:
             except asyncio.CancelledError:
                 pass
             self._task = None
+        # Locality lookups are best effort and can be mid-timeout, so shutdown
+        # abandons them rather than waiting up to 8 seconds each on a name.
+        for task in list(self._locality_tasks):
+            task.cancel()
+        self._locality_tasks.clear()
         await self._release()
         if self._redis is not None:
             try:
@@ -472,24 +500,52 @@ class StationIngest:
         if station_id in self._position and self._position[station_id] == fix:
             return
         self._position[station_id] = fix
+        # The coordinates are a local write and are awaited. The locality is a
+        # call to somebody else's service, so it is not: this coroutine reads
+        # the pubsub for every station in every organisation, and awaiting an
+        # 8-second timeout here would stop the platform's telemetry on one
+        # station's say-so. It used to.
         await asyncio.to_thread(self._write_position, station_id, fix)
+        if fix is not None and self._locality_due(station_id):
+            task = asyncio.create_task(
+                asyncio.to_thread(self._write_locality, station_id, fix)
+            )
+            self._locality_tasks.add(task)
+            task.add_done_callback(self._locality_tasks.discard)
+
+    def _locality_due(self, station_id: uuid.UUID) -> bool:
+        """Whether this station may cost a locality lookup now.
+
+        Reserves the slot as it answers, so this is also the in-flight guard -
+        a lookup takes seconds and the cooldown is an hour.
+        """
+        now = time.monotonic()
+        if now < self._geocode_after.get(station_id, 0.0):
+            return False
+        self._geocode_after[station_id] = now + GEOCODE_COOLDOWN_S
+        return True
 
     def _write_position(
         self, station_id: uuid.UUID, fix: tuple[float, float] | None
     ) -> None:
+        """The coordinates, and nothing that needs the network.
+
+        A stale locality beside a new position is the one inconsistency this
+        allows, and it lasts as long as the lookup does. The alternative —
+        writing both together — is what put an 8-second timeout inside the
+        ingest loop, and a wrong town name is a smaller problem than a
+        platform that stops carrying telemetry.
+        """
+        stale = {} if fix else {"locality": None, "region": None, "locality_for": None}
         try:
             with PrivilegedSessionLocal() as db:
-                # The locality is derived from the position, so it is written
-                # in the same statement — there is no moment where a station
-                # carries one position's coordinates and another's town.
-                place = self._locality_for(db, station_id, fix)
                 db.execute(
                     update(GroundStation)
                     .where(GroundStation.id == station_id)
                     .values(
                         latitude=fix[0] if fix else None,
                         longitude=fix[1] if fix else None,
-                        **place,
+                        **stale,
                     )
                 )
                 db.commit()
@@ -500,6 +556,33 @@ class StationIngest:
             )
         except Exception:
             log.exception("Could not update position for %s.", station_id)
+
+    def _write_locality(
+        self, station_id: uuid.UUID, fix: tuple[float, float]
+    ) -> None:
+        """Look the position up and name it. Off the ingest path, best effort.
+
+        Writes only when the station is still at the position that prompted
+        this: the lookup takes seconds, and a station that moved meanwhile has
+        its own newer lookup coming.
+        """
+        try:
+            with PrivilegedSessionLocal() as db:
+                place = self._locality_for(db, station_id, fix)
+                if not place:
+                    return
+                db.execute(
+                    update(GroundStation)
+                    .where(
+                        GroundStation.id == station_id,
+                        GroundStation.latitude == fix[0],
+                        GroundStation.longitude == fix[1],
+                    )
+                    .values(**place)
+                )
+                db.commit()
+        except Exception:
+            log.exception("Could not resolve the locality for %s.", station_id)
 
     @staticmethod
     def _fingerprint(fix: tuple[float, float] | None) -> str | None:
@@ -513,13 +596,12 @@ class StationIngest:
         return None if fix is None else f"{fix[0]:.5f},{fix[1]:.5f}"
 
     def _locality_for(
-        self, db, station_id: uuid.UUID, fix: tuple[float, float] | None
+        self, db, station_id: uuid.UUID, fix: tuple[float, float]
     ) -> dict:
-        """Columns to write alongside a new position.
+        """Columns naming a position, or `{}` if the stored name already fits.
 
         Skips the network entirely when the position has not really changed,
-        which is the normal case: this runs on every health frame that carries
-        a position, and a fixed site sends the same one for months.
+        which is the normal case: a fixed site sends the same one for months.
         """
         wanted = self._fingerprint(fix)
         current = db.execute(
@@ -527,8 +609,6 @@ class StationIngest:
         ).scalar_one_or_none()
         if current == wanted:
             return {}
-        if fix is None:
-            return {"locality": None, "region": None, "locality_for": None}
 
         place = geocode.describe(fix[0], fix[1])
         if place is None:

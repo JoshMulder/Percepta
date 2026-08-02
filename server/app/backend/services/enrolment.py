@@ -44,7 +44,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.core.crypto import lookup_hash
+from backend.core.crypto import keyed_hash, lookup_hash
 from backend.database.models.ground_station import GroundStation
 from backend.database.models.station_credential import StationCredential
 from backend.database.models.station_enrolment_token import StationEnrolmentToken
@@ -162,7 +162,9 @@ def issue_token(
     token = StationEnrolmentToken(
         organization_id=station.organization_id,
         ground_station_id=station.id,
-        token_hash=lookup_hash(normalise_token(plaintext)),
+        # Keyed, not bare: 58 bits is beyond guessing and within reach of
+        # anyone holding the table. See `core/crypto.keyed_hash`.
+        token_hash=keyed_hash(normalise_token(plaintext)),
         expires_at=now + ttl,
         issued_by_user_id=issued_by_user_id,
     )
@@ -202,7 +204,7 @@ def claim(
     token = db.execute(
         select(StationEnrolmentToken).where(
             StationEnrolmentToken.token_hash
-            == lookup_hash(normalise_token(token_value))
+            == keyed_hash(normalise_token(token_value))
         )
     ).scalar_one_or_none()
 

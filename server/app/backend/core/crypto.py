@@ -25,6 +25,7 @@ storing it beside the dump would defeat the entire control.
 """
 
 import hashlib
+import hmac
 import logging
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -113,8 +114,50 @@ def lookup_hash(value: str) -> str:
 
     SHA-256 hex (64 chars). Only ever use this for CSPRNG-generated tokens -
     never for user-chosen input, which is guessable offline.
+
+    **The input must have enough entropy to survive an offline attack on its
+    own**, because nothing here adds any: no salt, no work factor. That is true
+    of a 256-bit station credential and it is emphatically not true of anything
+    a human types. For those, use `keyed_hash`.
     """
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+def keyed_hash(value: str) -> str:
+    """Deterministic hash for a secret short enough to be brute-forced.
+
+    An enrolment token is twelve characters from a thirty-character alphabet -
+    about 58 bits - because a technician reads it down a phone line and types
+    it on a hillside. That is far beyond *guessing* against a rate limit and a
+    24-hour life, and nowhere near enough to survive somebody who has the
+    table: 2^58 SHA-256 evaluations is hours of commodity hardware, and the
+    result is a live token claimable at an unauthenticated endpoint.
+
+    So the digest is keyed with HMAC. A replica, a backup or a stray SELECT no
+    longer contains everything an attacker needs; they also need
+    SECRETS_ENCRYPTION_KEY, which lives outside the database by policy
+    (`04-production-readiness.md`). Equality lookups still work, so the indexed
+    column is unchanged.
+
+    Keyed with the *derived* key rather than the Fernet key itself, so this can
+    never emit anything that doubles as key material.
+
+    Rotating SECRETS_ENCRYPTION_KEY invalidates outstanding tokens. They live
+    24 hours and issuing another is cheap and audited, so this is a smaller
+    consequence than the encrypted columns the same key already governs.
+    """
+    key = (settings.secrets_encryption_key or "").strip().encode()
+    if not key:
+        # No key configured: development, where the encrypted columns are
+        # already plaintext. Fall back rather than refuse - an enrolment that
+        # fails closed here would strand a developer, and the deployment that
+        # matters is the one with a key, which `warn_if_unencrypted` nags for.
+        return hashlib.sha256(value.encode()).hexdigest()
+    return hmac.new(
+        hashlib.sha256(b"percepta.enrolment-token." + key).digest(),
+        value.encode(),
+        hashlib.sha256,
+    ).hexdigest()
 
 
 def generate_key() -> str:

@@ -13,7 +13,7 @@ class StationEnrolmentToken(UUIDMixin, TimestampMixin, Base):
     """A short-lived code that lets one box claim one station record.
 
     An admin issues it; a technician types it into the box on site. It is both a
-    secret and a lookup key, so it is stored only as `lookup_hash` of the value
+    secret and a lookup key, so it is stored only as `keyed_hash` of the value
     and is unrecoverable afterwards - the same treatment DroneOps gives its
     calendar feed token, for the same reason. Losing one means issuing another,
     which is cheap and leaves an audit trail.
