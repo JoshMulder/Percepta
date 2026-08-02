@@ -57,6 +57,43 @@ RENEW_SECONDS = 10
 KEEP_FRAGMENTS = 1
 
 
+#: Live viewer sockets, by the session that opened them.
+#:
+#: A viewer is keyed by a single-use ticket, so revocation used to have nothing
+#: to address: signing out or having a session revoked left the camera running
+#: in that tab until the next poll noticed, on the heaviest stream in the
+#: platform. The console's own socket has had a push signal all along, because
+#: the hub holds connections by session and `revocation.apply_revocation` can
+#: find them. This is the equivalent for viewers - something for a push to
+#: find. The poll stays as the backstop for everything a push cannot reach: a
+#: withdrawn grant, a deactivated station, a worker that never saw the event.
+_viewers: dict[uuid.UUID, set[asyncio.Event]] = {}
+
+
+def watch_session(session_id: uuid.UUID) -> asyncio.Event:
+    """Register a viewer. Set when that session should stop watching."""
+    stop = asyncio.Event()
+    _viewers.setdefault(session_id, set()).add(stop)
+    return stop
+
+
+def unwatch_session(session_id: uuid.UUID, stop: asyncio.Event) -> None:
+    holders = _viewers.get(session_id)
+    if holders is None:
+        return
+    holders.discard(stop)
+    if not holders:
+        _viewers.pop(session_id, None)
+
+
+def close_session_viewers(session_id: uuid.UUID) -> int:
+    """Stop every viewer opened by a session. Returns how many."""
+    holders = _viewers.get(session_id) or set()
+    for stop in holders:
+        stop.set()
+    return len(holders)
+
+
 @dataclass
 class StationStream:
     """One station's live stream, and everyone watching it."""

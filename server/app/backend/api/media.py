@@ -36,6 +36,7 @@ from backend.database.dependencies import get_db
 from backend.database.session import PrivilegedSessionLocal
 from backend.realtime.bus import command_channel, publish_sync
 from backend.core.config import settings
+from backend.realtime import media as media_relay
 from backend.realtime.media import LEASE_SECONDS, RENEW_SECONDS, relay
 from backend.repositories.auth_session_repository import AuthSessionRepository
 from backend.services import enrolment
@@ -259,11 +260,12 @@ async def media_view(websocket: WebSocket, ticket: str = Query(...)) -> None:
         # docs/03-realtime-isolation.md §6 argues at length that this is not
         # acceptable, and it was applied everywhere except here.
         #
-        # Poll only, with no push to pair it with. The console's socket gets
-        # both because `revocation.py` addresses a session id and the hub holds
-        # connections by session; a viewer is keyed by ticket and there is
-        # nothing for a push to find. One timer is the whole mechanism, so it
-        # is deliberately the same interval the hub sweeps on.
+        # The backstop, not the whole mechanism. An ended session now also
+        # arrives as a push, because a viewer registers itself by session id
+        # for `revocation.py` to find (`realtime/media.watch_session`). This
+        # timer catches what a push cannot reach: a withdrawn grant, a
+        # deactivated station, or a worker that never saw the event.
+        # Deliberately the same interval the hub sweeps on.
         while True:
             await asyncio.sleep(settings.stream_revalidate_seconds)
             if await asyncio.to_thread(_viewer_still_allowed):
@@ -283,12 +285,30 @@ async def media_view(websocket: WebSocket, ticket: str = Query(...)) -> None:
             if message.get("type") == "websocket.disconnect":
                 return
 
+    # Something for a revocation push to find. The poll below remains the
+    # backstop; this is what makes signing out stop the picture now rather
+    # than within a minute. A ticket with an unreadable session id still
+    # streams and still polls - it simply cannot be pushed to.
+    try:
+        session_uuid = uuid.UUID(str(claim["session_id"]))
+    except (KeyError, TypeError, ValueError):
+        session_uuid = None
+    revoked = (
+        media_relay.watch_session(session_uuid) if session_uuid
+        else asyncio.Event()
+    )
+
+    async def wait_for_revocation() -> None:
+        await revoked.wait()
+        log.info("Viewer of %s closed: the session was revoked.", station_id)
+
     sender = asyncio.create_task(pump())
     closer = asyncio.create_task(watch_for_close())
     checker = asyncio.create_task(revalidate())
+    pushed = asyncio.create_task(wait_for_revocation())
     try:
         done, pending = await asyncio.wait(
-            {sender, closer, checker}, return_when=asyncio.FIRST_COMPLETED
+            {sender, closer, checker, pushed}, return_when=asyncio.FIRST_COMPLETED
         )
         for task in pending:
             task.cancel()
@@ -304,6 +324,9 @@ async def media_view(websocket: WebSocket, ticket: str = Query(...)) -> None:
         sender.cancel()
         closer.cancel()
         checker.cancel()
+        pushed.cancel()
+        if session_uuid:
+            media_relay.unwatch_session(session_uuid, revoked)
         await relay.detach(station_id, queue)
         try:
             await websocket.close()

@@ -48,7 +48,7 @@ issuing anything new.
     ├─ create station ──────────►│                            │
     │  (org, name, location)     │                            │
     │                            │                            │
-    ├─ issue enrolment token ───►│  short-lived, single-use    │
+    ├─ issue enrolment token ───►│  short-lived, one station   │
     │                            │                            │
     │                            ├─ enter token on the box ──►│
     │                            │                            │
@@ -142,7 +142,9 @@ technician on site.
 ```jsonc
 // request
 {
-  "token": "…",                      // as issued, single use
+  "token": "…",                      // as issued; claimable until it expires
+                                     // or is revoked, so a dropped connection
+                                     // can be retried (§2)
   "public_key": "…",                 // PEM; omitted while using bearer credentials
   "hardware": {                      // for the fleet inventory, not for trust
     "model": "…",
@@ -199,7 +201,17 @@ technician on site.
     "username": "gsu:{station_id}",  // the broker principal to authenticate as
     "telemetry_topic": "gsu/{station_id}/telemetry",
     "audio_topic": "gsu/{station_id}/audio",
-    "command_topic": "cmd/gsu/{station_id}"
+    "command_topic": "cmd/gsu/{station_id}",
+    "media_url": "wss://platform.example/media/ingest"
+                                     // where the live H.264 goes. Not a
+                                     // broker channel - video is bulk data
+                                     // and never touches the broker - but the
+                                     // same credential opens it, so it is
+                                     // stated here rather than built out of
+                                     // the API's address by the station.
+                                     // Absent means derive it from the API
+                                     // host, which is what an older platform
+                                     // leaves a station to do.
   },
   "station": {
     // What the station is told it is, at the moment it enrols. The name is
@@ -234,8 +246,13 @@ Failures, and the response the technician sees:
 | Cause | Status | Shown as |
 |---|---|---|
 | Token unknown, expired or revoked | `404` | "This code is not valid. Ask for a new one." |
-| Station already enrolled by a different token | `409` | "This station is already set up." |
+| Station already in service, and this code predates that | `409` | "This station is already set up." |
+| Too many attempts from one source | `429` | "Too many attempts. Wait a minute and try again." |
 | Malformed request | `422` | — |
+
+**`429` is retryable and must be treated as such.** It is the one failure here
+that clears on its own, and a station that gave up on it would strand the
+technician the rate limit was never aimed at. Back off and try again.
 
 **Deliberately not distinguished:** unknown, expired and revoked all return the
 same thing. Telling an attacker which of those a guess was is free information

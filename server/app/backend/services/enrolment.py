@@ -23,15 +23,12 @@ return the same thing. Which one it was is free information about the token
 space to an attacker, and makes no difference at all to the technician holding
 the code.
 
-One deliberate deviation from the contract, and the reasoning. §4 says a retry
-from the same station "returns the same credential". We cannot - see above - so
-a retry inside the token's lifetime issues a *fresh* credential and revokes the
-previous one. It satisfies what that clause is actually for, which is that a
-technician who loses signal mid-enrolment must be able to finish without an
-admin issuing anything new, and it avoids storing the secret recoverably. The
-cost is that an accidental re-claim cuts off a box that had already succeeded;
-that requires someone to physically re-enter the code, and the recovery is to
-enter a new one.
+**A retry supersedes rather than repeating.** Because the secret is
+unrecoverable, a second claim on a live token issues a *fresh* credential and
+revokes the previous one. That is what the contract asks for (§2): a technician
+who loses signal mid-enrolment finishes without an admin issuing anything new.
+The cost is that an accidental re-claim cuts off a box that had already
+succeeded, and the recovery is to re-enter a code at the site.
 """
 
 import asyncio

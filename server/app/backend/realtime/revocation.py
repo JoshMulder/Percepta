@@ -23,6 +23,7 @@ import logging
 import uuid
 from typing import TYPE_CHECKING
 
+from backend.realtime import media
 from backend.realtime.bus import REVOKE_CHANNEL, publish_sync
 
 if TYPE_CHECKING:
@@ -92,6 +93,14 @@ async def apply_revocation(hub: "Hub", event: dict) -> None:
     if kind == KIND_SESSION:
         for conn in hub.connections_for_session(target):
             hub.close_connection(conn, reason="session ended")
+        # Media viewers are not hub connections - they are keyed by ticket, on
+        # their own socket - so they need telling separately. Without this the
+        # camera keeps running in a signed-out tab until the viewer's own poll
+        # comes round, which is up to a minute on the most expensive stream
+        # the platform carries.
+        stopped = media.close_session_viewers(target)
+        if stopped:
+            log.info("Closed %d media viewer(s) for an ended session.", stopped)
         return
 
     if kind in (KIND_USER, KIND_GRANT):

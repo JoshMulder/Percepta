@@ -84,6 +84,17 @@ class BrokerOut(BaseModel):
     audio_topic: str
     command_topic: str
     username: str
+    #: Where the live H.264 goes (`WS /media/ingest`). Not a broker channel —
+    #: video is bulk data and deliberately does not touch the broker — but it
+    #: is stated here because it is the same credential, the same enrolment
+    #: response, and the station keeps one object of "where things are".
+    #:
+    #: Sent so the station stops deriving it from the API's address. That
+    #: derivation is right until a deployment terminates media somewhere else,
+    #: and the rule this platform already follows for topics is that an
+    #: address the station needs is one the platform states rather than one
+    #: the station builds out of strings.
+    media_url: str | None = None
 
 
 class StationOut(BaseModel):
@@ -202,11 +213,16 @@ def _broker(station_id: uuid.UUID, request: Request | None = None) -> BrokerOut:
     with no host header to work from.
     """
     url = settings.station_broker_url
-    if not url and request is not None:
+    media_url = None
+    if request is not None:
         host = request.headers.get("host", "")
         if host:
             scheme = "wss" if request.url.scheme in ("https", "wss") else "ws"
-            url = f"{scheme}://{host}/broker"
+            if not url:
+                url = f"{scheme}://{host}/broker"
+            # The media ingest is served by this application, so the host that
+            # answered the enrolment is the host that will accept the video.
+            media_url = f"{scheme}://{host}/media/ingest"
     ca_mode, ca_pem = _broker_trust(request)
     return BrokerOut(
         url=url or settings.redis_url,
@@ -216,6 +232,7 @@ def _broker(station_id: uuid.UUID, request: Request | None = None) -> BrokerOut:
         audio_topic=station_topics.audio(station_id),
         command_topic=station_topics.command(station_id),
         username=broker_acl.principal(station_id),
+        media_url=media_url,
     )
 
 

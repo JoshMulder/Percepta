@@ -42,6 +42,21 @@ log = logging.getLogger("simulate")
 TICK_SECONDS = 1.0
 ADSB_RANGE_KM = 80.0
 
+#: How often the station describes itself rather than its surroundings. Slow by
+#: design - it is state, not a reading - and reported in `health.cadence` so a
+#: console derives staleness from what this station actually does.
+HEALTH_SECONDS = 30.0
+
+#: Reported in health so a fleet view can tell what is running. Prefixed
+#: `simulator-` because a console showing this alongside real stations should
+#: never have to guess which it is looking at.
+AGENT_VERSION = "1.0"
+
+#: Bins in a spectrum sweep, decimated by peak and rounded to whole dB - the
+#: schema caps this at 256, and a canvas cannot render more than a few hundred.
+SPECTRUM_BINS = 128
+SPECTRUM_SPAN_HZ = 120_000
+
 # How far above the measured noise floor AUTO holds the gate. Remote-Radio's
 # guidance is a few dB above the floor; 8 is comfortably clear of it without
 # missing weak transmissions.
@@ -204,6 +219,20 @@ class StationSim:
         self.wind_dir = random.uniform(0, 360)
         self.t = random.uniform(0, 1000)
         self.was_online = True
+        #: Monotonic-ish deadlines, in simulated seconds. Audio and the
+        #: spectrum are leased: the platform asks, re-asks while somebody is
+        #: there, and silence stops them. A station that streamed either
+        #: unasked would be the exact behaviour the leases exist to prevent,
+        #: and a reference implementation that did it would teach it.
+        self.audio_until = 0.0
+        self.spectrum_until = 0.0
+        #: `video.start` is answered honestly rather than ignored: there is no
+        #: camera here, and "unavailable, and why" is what a station with no
+        #: camera owes the platform. Silence would look like a wedged encoder.
+        self.stream_state = "unavailable"
+        self.config_version = 1
+        self.uptime_s = 0.0
+        self.health_due = 0.0
 
     def apply(self, command: dict) -> None:
         """Act on an operator command, exactly as the onboard computer would.
@@ -239,9 +268,39 @@ class StationSim:
             self.ppm = int(command.get("ppm", 0))
         elif kind == "light.set":
             self.light_on = bool(command.get("on"))
+        elif kind == "radio.audio":
+            # Leased, and a repeat is a renewal rather than a second start.
+            # There is no "off": the platform stops asking and the lease runs
+            # out, which is the only version that survives the platform
+            # crashing rather than merely closing a tab.
+            lease = command.get("lease_seconds", 30)
+            try:
+                lease = max(5.0, min(300.0, float(lease)))
+            except (TypeError, ValueError):
+                lease = 30.0
+            self.audio_until = self.t + lease
+        elif kind == "radio.spectrum":
+            # Same shape, shorter window: re-requested while a console has the
+            # display open, so closing the tab stops the traffic without
+            # anybody having to say goodbye.
+            self.spectrum_until = self.t + 12.0 if command.get("on", True) else 0.0
+        elif kind == "video.start":
+            # Reported, not assumed. A station with no camera says so and says
+            # why; it does not go quiet, because quiet is what a broken
+            # encoder looks like.
+            self.stream_state = "unavailable"
+        elif kind == "video.stop":
+            self.stream_state = "unavailable"
+        elif kind == "config.set":
+            # Apply what is recognised, persist, and report the new version in
+            # health. The platform never assumes the change took.
+            version = command.get("version", command.get("config_version"))
+            if isinstance(version, int):
+                self.config_version = version
 
     def tick(self, dt: float) -> list[tuple[str, dict]]:
         self.t += dt
+        self.uptime_s += dt
         events: list[tuple[str, dict]] = []
 
         for contact in self.contacts:
@@ -331,25 +390,39 @@ class StationSim:
         else:
             threshold = self.manual_threshold_db
         self.last_threshold_db = threshold
-        events.append(
-            ("telemetry", {
-                "kind": "radio",
-                "freq_hz": self.freq_hz,
-                "rssi_db": round(rssi, 1),
-                "noise_floor_db": round(noise, 1),
-                "threshold_db": round(threshold, 1),
-                # Gated on the threshold rather than announced independently, so
-                # a badly set squelch visibly stops opening on real traffic -
-                # which is the behaviour an operator is adjusting against.
-                "squelch_open": rssi > threshold or self.monitor,
-                "monitor": self.monitor,
-                "auto_squelch": self.auto_squelch,
-                "gain": self.gain,
-                "gains": AVAILABLE_GAINS,
-                "ppm": self.ppm,
-                "tx_capable": False,
-            })
-        )
+        radio = {
+            "kind": "radio",
+            "freq_hz": self.freq_hz,
+            "rssi_db": round(rssi, 1),
+            "noise_floor_db": round(noise, 1),
+            "threshold_db": round(threshold, 1),
+            # Gated on the threshold rather than announced independently, so
+            # a badly set squelch visibly stops opening on real traffic -
+            # which is the behaviour an operator is adjusting against.
+            "squelch_open": rssi > threshold or self.monitor,
+            "monitor": self.monitor,
+            "auto_squelch": self.auto_squelch,
+            "gain": self.gain,
+            "gains": AVAILABLE_GAINS,
+            "ppm": self.ppm,
+            "tx_capable": False,
+        }
+        # Only while a console has asked for it. Sending it continuously is
+        # tens of megabytes a day on a metered link for a display that is open
+        # for minutes at commissioning, which is why it is leased like audio.
+        if self.t < self.spectrum_until:
+            centre = SPECTRUM_BINS // 2
+            radio["spectrum"] = [
+                round(
+                    noise + random.uniform(-2.0, 2.0)
+                    # The carrier sits in the middle few bins, so the display
+                    # shows a peak where the receiver says the signal is.
+                    + (rssi - noise if abs(i - centre) < 3 else 0.0)
+                )
+                for i in range(SPECTRUM_BINS)
+            ]
+            radio["span_hz"] = SPECTRUM_SPAN_HZ
+        events.append(("telemetry", radio))
 
         # The floodlight only changes when something commands it. An earlier
         # version toggled it at random to make the panel move, which was a bad
@@ -357,12 +430,20 @@ class StationSim:
         # from a fault, and it sent operators looking for a bug that was not there.
         events.append(("telemetry", {"kind": "light", "on": self.light_on}))
 
-        # Audio only while the gate is open. Airband is silent most of the time,
-        # so this is the difference between a continuous 384 kbit/s per listener
-        # and almost nothing - which on a metered Starlink link is the whole
-        # argument. Base64 in JSON rides the existing fan-out; binary frames and
-        # Opus would cut it further and are the obvious next step.
-        if rssi > threshold or self.monitor:
+        # Audio needs BOTH gates, and the contract marks both Required.
+        #
+        #   1. the squelch is open - airband is silent most of the time
+        #   2. somebody is listening - the platform leases it and re-asks
+        #
+        # This used to test only the first, which meant the reference
+        # implementation streamed 512 kbit/s to nobody whenever the band was
+        # busy, and modelled for anyone copying it exactly the behaviour the
+        # lease was added to prevent. A station that has never been asked sends
+        # no audio at all.
+        #
+        # Base64 in JSON rides the existing fan-out; binary frames and Opus
+        # would cut it further and are the obvious next step.
+        if (rssi > threshold or self.monitor) and self.t < self.audio_until:
             events.append(
                 ("audio", {
                     "kind": "audio",
@@ -371,7 +452,61 @@ class StationSim:
                 })
             )
 
+        if self.t >= self.health_due:
+            self.health_due = self.t + HEALTH_SECONDS
+            events.append(("telemetry", self.health()))
+
         return events
+
+    def health(self) -> dict:
+        """What the station says about itself, on the slow cadence.
+
+        Here because the contract tells consumers to read `health.cadence`
+        rather than assume the table in transport.md, and a reference
+        implementation that never sent a health frame left the one shape a
+        console most needs to handle without an example.
+        """
+        return {
+            "kind": "health",
+            "status": "ok",
+            "agent_version": f"simulator-{AGENT_VERSION}",
+            "config_version": self.config_version,
+            "uptime_s": round(self.uptime_s, 1),
+            # What this station is actually running, which is what a console
+            # must derive staleness from - not the defaults.
+            "cadence": {
+                "adsb": TICK_SECONDS,
+                "power": TICK_SECONDS,
+                "radio": TICK_SECONDS,
+                "light": TICK_SECONDS,
+                "weather": 5.0,
+                "health": HEALTH_SECONDS,
+            },
+            "uplink": {"connected": True, "dropped_frames": 0, "offline_seconds": 0},
+            # The station is the author of its own position (enrolment.md §7).
+            "position": {
+                "latitude": self.lat,
+                "longitude": self.lon,
+                "source": "configured",
+            },
+            "devices": [
+                {"slot": "adsb", "status": "present", "simulated": True},
+                {"slot": "radio", "status": "present", "simulated": True},
+                {"slot": "weather", "status": "present", "simulated": True},
+                {"slot": "power", "status": "present", "simulated": True},
+                {"slot": "light", "status": "present", "simulated": True},
+                # No camera, and it says so rather than being absent from the
+                # list: "never fitted" and "failed" are different facts and an
+                # operator does different things about each.
+                {"slot": "camera", "status": "not_fitted"},
+            ],
+            "video": {
+                "stream": {
+                    "state": self.stream_state,
+                    "reason": "this is a simulator and has no camera",
+                },
+            },
+        }
 
 
 async def ensure_enrolled(sim) -> bool:
