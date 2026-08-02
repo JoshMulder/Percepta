@@ -30,15 +30,10 @@ compile, that is the moment to stop and raise it.
 | `schemas/command.schema.json` | Every command a station must accept |
 | `conformance/check_station.py` | Runs against a live station and reports what it got wrong |
 
-## The reference implementation already exists
-
-`server/app/backend/scripts/simulate_station.py` is a working station: it speaks
-this protocol on the real bus, and the console cannot tell it from hardware.
-
-That makes the station brief precise rather than vague — **replace the
-simulator, keep the console working, pass conformance.** When in doubt about
-what a field should contain, that file is the answer, and this contract is what
-stops it being the *only* answer.
+Those files are the contract, and they are frozen at a version. **`NOTES.md` is
+not** — it carries where each side implements this, what is built so far, and
+the traps that have cost somebody an hour. That split is deliberate: a document
+that names source files cannot be frozen, because the files move.
 
 ## Declaring a stream unavailable
 
@@ -80,14 +75,13 @@ frequency across its whole coverage area, and this platform's sites are
 unattended on links that drop routinely. Loss of the operator's connection must
 release PTT immediately, enforced *at the station*, with a hardware watchdog and
 a maximum transmission time that do not depend on the platform being reachable.
-See `server/docs/05-radio-integration.md`.
 
 **3. The airband noise floor is measured outside the channel.** Median of the
 spectrum 15–50 kHz either side, converted to in-channel power. Measuring inside
 the channel has a specific failure: a weak signal arriving while the estimate is
 stale-high gets treated as noise, the floor drifts up toward it, and the squelch
-latches shut permanently. That is the regression to test, and the simulator
-cannot exercise it because it is *told* the floor rather than measuring it.
+latches shut permanently. That is the regression to test, and it cannot be
+exercised by anything that is *told* the floor rather than measuring it.
 
 ## Version
 
@@ -122,8 +116,11 @@ the most expensive thing in this document.
    and removals are not; treat them as breaking and stage them.
 4. Run `conformance/check_station.py` on both sides afterwards.
 
-## Wider context
+Editorial changes — rewording, reorganising, moving commentary to `NOTES.md` —
+do not bump the version. The version describes what crosses the boundary, not
+how well it is written down.
 
-- `server/docs/00-topology.md` — the canonical system definition. Read first.
-- `server/docs/03-realtime-isolation.md` — why the platform is shaped this way.
-- `server/docs/05-radio-integration.md` — what the radio hardware demands.
+## Read next
+
+- `NOTES.md` — where each side implements this, what is built, and the traps.
+  Not normative, and the place to look when something is not working.

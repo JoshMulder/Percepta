@@ -3,11 +3,6 @@
 How a physical box becomes a ground station the platform will accept data from,
 and everything it needs to know to operate afterwards.
 
-**Both sides are built** — the platform in
-`server/app/backend/services/enrolment.py`, `api/enrolment.py` and
-`api/station_enrolment.py`, the station in `station/gsu/enrolment.py` and
-`gsu/credentials.py` — and this document describes the behaviour as it runs.
-
 It was written before either side existed because enrolment is where the
 platform's tenancy guarantee is actually established — every other isolation
 control assumes the station's identity is trustworthy, and this is the step that
@@ -452,29 +447,25 @@ These need a human, and the station agent should not invent answers.
 
 ---
 
-## 10. What each side built
+## 10. What each side owes
 
 **Platform**
-- `station_enrolment_tokens` and `station_credentials`, both hashed, both under
-  RLS. A credential decides which tenant a box may publish as, so a query
-  against it that escaped its org scope would be the worst leak in the schema
-- `POST /api/enrol`, `/api/enrol/renew`, `GET /api/enrol/status`
-- Admin API to issue and revoke, behind `config.write`, at
-  `/api/stations/{id}/enrolment`
-- Broker principals derived from station identity, one per station, pinned to
-  its own channels (`services/broker_acl.py`), with the broker's `default` user
-  closed — `server/docker-compose.yaml` passes `--requirepass` and the stack
-  will not start without it, so per-station principals are a second layer
-  rather than the only one
+- Tokens and credentials stored hashed, and scoped to their organisation. A
+  credential decides which tenant a box may publish as, so a query against it
+  that escaped its org scope would be the worst leak in the schema
+- The three endpoints in §4, and an admin path to issue and revoke behind a
+  configuration capability
+- A broker principal per station, derived from its identity, granted exactly
+  the channels in `transport.md` and nothing else
 - Every issue, claim, renew, revoke and rejection audited
-- `scripts/verify_enrolment.py` exercises the lifecycle against a running stack
 
 **Station**
-- Credential storage in a permissions-restricted file, with the pinned CA
-  beside it (`gsu/credentials.py`; the seam for a hardware keystore)
-- Setup page and the claim exchange, resumable
-- Renewal with overlap, and a health alarm when it is failing
-  (`gsu/enrolment.py`)
-- Time sync, and refusing to enrol with an implausible clock (`gsu/clock.py`)
-- Config apply, persist, and report version
-- Device discovery, and reporting what is actually attached
+- Credential and pinned CA at rest, readable only by the agent, behind a seam
+  that a hardware keystore could replace
+- The claim exchange, resumable, reachable by somebody at the box without a
+  terminal
+- Renewal with overlap, and a health condition raised while it is failing
+- Time sync, and refusing to enrol with an implausible clock
+- Config apply, persist, and report the version in `health.config_version`
+- Device discovery, and reporting what is actually attached rather than what
+  was configured

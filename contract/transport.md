@@ -20,46 +20,30 @@ station cannot publish into another tenant's namespace or read anything back.
 **The platform resolves the organisation from the station id**, via its device
 registry. Nothing in the payload says which tenant this is, and nothing should.
 
-## The platform side of this boundary
-
-**Built.** `server/app/backend/services/station_ingest.py` subscribes to
-`gsu/*/telemetry` and `gsu/*/audio`, resolves station → organisation from the
-device registry, and republishes onto the platform's internal fan-out
-(`rt:g:org:{org}:gsu:{station}:{stream}`). It starts with the application. A
-station publishing to this contract is now heard.
-
-What it does with what you send:
+## What the platform does with what you send
 
 | | |
 |---|---|
 | Station id | Taken from the **channel name**, never from the payload |
-| Organisation | Resolved from the registry. A station id that is unknown or deactivated is dropped, logged once, and nothing reaches any subscriber |
-| Unknown `kind` | Dropped and logged once — as this contract promises, so a station may be newer than the platform |
-| Malformed JSON | Dropped and logged |
-| `last_seen_at` | Written by the ingest, at most every 15s per station. This is what drives online/offline in the console, so **a station that stops publishing goes offline on its own** — there is no separate heartbeat to send |
-
-The simulator publishes across this same boundary, so it exercises the ingest
-rather than bypassing it, and `conformance/check_station.py` passes against it
-without `--legacy`.
+| Organisation | Resolved from the platform's own registry. A station id that is unknown or deactivated is dropped and nothing reaches any subscriber |
+| Unknown `kind` | Dropped, as this contract promises, so a station may be newer than the platform |
+| Malformed JSON | Dropped |
+| Liveness | Derived from the fact that a station is publishing at all. **A station that stops publishing goes offline on its own** — there is no separate heartbeat to send |
 
 **Authentication.** A station must be enrolled and hold a valid credential
-before anything it publishes reaches a subscriber; revoking one stops its data
-within about thirty seconds, whether or not the broker noticed. Enrolment is
-built — see `enrolment.md` — and issues each station a broker principal
-(`gsu:{station_id}`) pinned to exactly the three channels above.
+before anything it publishes reaches a subscriber. Revoking one stops its data
+**within thirty seconds**, whether or not the broker noticed, and that bound
+holds on both transports.
 
-That thirty seconds holds on both transports, and by different means. On the
-direct Redis path the ACL is deleted and the station's clients are killed
-outright. On the 443 relay — the deployment path — there is no ACL to delete,
-so each open socket carries a watcher that re-checks the credential every 15s
-and closes the socket when it no longer stands. **Authenticating once, at
-connect, is not enough on a link that stays up for months.** Both the relay and
-the media uplink do this; `scripts/verify_enrolment.py` §5 revokes a credential
-out from under a live socket and fails if the socket survives.
+**Authenticating once, at connect, is not enough on a link that stays up for
+months.** Where the transport has its own identity layer, revocation removes it
+and drops the station's connections; where it does not — the 443 relay, which
+is one authenticated socket — each open socket re-checks the credential on a
+timer and closes when it no longer stands. The media uplink does the same. Any
+long-lived connection carrying a station credential owes this.
 
-Redis' `default` user is closed: `server/docker-compose.yaml` passes
-`--requirepass` and the stack refuses to start without it, so a process that
-reaches the port still has no identity. Per-station ACLs are the second layer,
+The broker's anonymous or default identity is closed, so a process that reaches
+the port still has no identity. Per-station credentials are the second layer,
 not the only one.
 
 ## Video
@@ -67,16 +51,15 @@ not the only one.
 **There is no video channel.** `gsu/{station_id}/video` carried one MJPEG frame
 per message and is gone, along with `schemas/video.schema.json`.
 
-It was removed at the station and for a reason worth keeping: the camera is a
-single device with a single owner, and a periodic snapshot publisher competing
-with the live encoder for it is what wedged a real camera —
-`station/gsu/video.py` has the full account. Removing one of the two readers
-does not narrow that class of fault, it deletes it.
+It was removed for a reason worth keeping: the camera is a single device with a
+single owner, and a periodic snapshot publisher competing with the live encoder
+for it is what wedged a real camera. Removing one of the two readers does not
+narrow that class of fault, it deletes it.
 
 Live video goes over the media WebSocket instead (`WS /media/ingest`), started
-only while somebody is watching. What is left on the station is a preview that
-publishes nothing at all: it serves the newest frame it has to the local setup
-page, over loopback, so an installer can aim a camera.
+only while somebody is watching. A station may serve a preview to its own local
+setup page so an installer can aim a camera; that publishes nothing and does not
+cross this boundary.
 
 A station's camera state — fitted or not, which capture path, who holds the
 sensor — is reported in the health frame (`health.video`), which is where a
@@ -171,27 +154,21 @@ trust on its own. An absent or unrecognised `ca_mode` means `"pinned"`, so the
 station with nothing to pin refuses rather than downgrades, and a pinned CA
 always outranks a stated mode.
 
-The plaintext listeners are **disabled**, not deprioritised. A station pointed at
-`redis://` or `http://` fails to connect rather than quietly sending its
-credential in clear, because a silent downgrade is the failure nobody finds out
-about.
+Plaintext listeners are **disabled**, not deprioritised. A station pointed at a
+plaintext scheme fails to connect rather than quietly sending its credential in
+clear, because a silent downgrade is the failure nobody finds out about.
 
-Two traps, both of which have already cost someone an hour:
-
-- **redis-py lets a URL override keyword arguments.** `ConnectionPool.from_url`
-  ends with `kwargs.update(url_options)`, so connecting with a credential-
-  carrying URL *and* `username=`/`password=` authenticates as whoever the URL
-  names. The `broker.url` handed over at enrolment is deliberately credential-
-  free for this reason.
-- **`redis-cli` accepts a CA that Python refuses.** A CA without
-  `basicConstraints` and `keyUsage` works on the command line and fails in
-  `ssl`. Testing with `redis-cli` alone proves nothing about your client.
+**`broker.url` carries no credentials**, and a station must not accept one that
+does. Identity comes from `broker.username` and the station's own secret. This
+is a requirement rather than a convention because at least one widely used
+client library lets credentials in a URL silently override the ones passed
+alongside it — see `NOTES.md`.
 
 ## Broker
 
-A WebSocket relay on 443 in production (`WS /broker`); Redis pub/sub direct on a bench
-(`server/docs/01-architecture-notes.md`). The port is the whole reason: 6380 and
-8883 are shut wherever a reverse proxy is, and 443 is not.
+A WebSocket relay on 443 (`WS /broker`) is the deployment transport; a direct
+pub/sub connection is available on a bench. The port is the whole reason: 6380
+and 8883 are shut wherever a reverse proxy is, and 443 is not.
 
 ### The relay's wire format
 
@@ -234,19 +211,24 @@ contract assumes nothing stronger:
   command, add the field that reports its effect.
 - **Ordering is per channel only**, and not relied upon.
 
+The events channel is the exception to the first of these, and only to the
+first — see *Store and forward*.
+
 ## Identity
 
 Each station authenticates with its own credential — a bearer token today, with
 mTLS client certificates still to come (`enrolment.md` §3) — and that identity
-is pinned to **exactly the three channels** in the table above, by name. Not a
+is granted **exactly the four channels** in the table above, by name. Not a
 `gsu/{station_id}/` prefix: a prefix would also admit channels nobody consumes,
 and a station inventing its own on a shared broker is what the check exists to
-prevent. A new channel is a change to the contract and to the grant, together.
+prevent. **A new channel is a change to the contract and to the grant,
+together**, and a topic granted in one place and not the other produces a
+station that enrols perfectly and publishes nothing.
 
-On the 443 relay the same rule is enforced a second time and more tightly still
-— the relay compares each frame's topic against the two a station may *publish*
-to, so the command channel is receive-only there even though a Redis ACL cannot
-express the difference.
+Where the transport can distinguish publish from subscribe, it must: a station
+publishes to its three upward channels and only receives on its command
+channel. Some brokers cannot express that in a grant, in which case the
+constraint is enforced by whatever terminates the connection.
 
 ## Cadence and bandwidth
 
