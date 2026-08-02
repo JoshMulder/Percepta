@@ -33,12 +33,14 @@ import argparse
 import base64
 import hashlib
 import json
+import math
 import os
 import socket
 import ssl
 import struct
 import sys
 import time
+import traceback
 from pathlib import Path
 
 try:
@@ -125,6 +127,15 @@ skipped: list[str] = []
 #: own telemetry checks and still collect a certificate.
 skipped_streams: list[str] = []
 
+#: Why the socket ended, if it ended before the run did. This decides the
+#: verdict for the same reason `skipped_streams` does: once the station is
+#: gone, every remaining check passes by default because a dead socket
+#: delivers nothing to fail on. A station that answered all nine commands and
+#: then vanished was being told "audio stops when the lease lapses — PASS,
+#: this station satisfies the contract", on the evidence of a closed socket,
+#: in the same report that said it had been left mistuned.
+disconnected: list[str] = []
+
 
 def check(label: str, ok: bool, detail: str = "") -> None:
     print(f"  {'PASS' if ok else 'FAIL'}  {label}{'' if ok else f'  ({detail})'}")
@@ -138,9 +149,13 @@ def skip(label: str, why: str) -> None:
 
 
 def load(name: str) -> Draft202012Validator:
-    return Draft202012Validator(
-        json.loads((SCHEMAS / name).read_text(encoding="utf-8"))
-    )
+    schema = json.loads((SCHEMAS / name).read_text(encoding="utf-8"))
+    # JSON Schema ignores keywords it does not recognise, by design. So a
+    # misspelt `maxLength` is not an error — it is a bound that silently stops
+    # existing, in the one tool that decides whether a station is conformant.
+    # This is the cheapest possible guard against the schemas rotting under us.
+    Draft202012Validator.check_schema(schema)
+    return Draft202012Validator(schema)
 
 
 # --- the relay, written out ------------------------------------------------
@@ -179,19 +194,46 @@ class Relay:
         self.closed = False
         #: Anything the station sent that the wire format does not allow.
         self.envelope_faults: list[str] = []
+        #: Fragments of a message still being assembled. On the instance, not
+        #: in `read_frame`, so that a control frame or a window ending
+        #: mid-message does not throw away what has arrived so far.
+        self._parts: list[bytes] = []
+        #: Pongs seen. transport.md requires both ends to answer a ping, which
+        #: is the only way either of them detects a half-open socket — a
+        #: station on CGNAT whose NAT mapping is dropped otherwise publishes
+        #: into a hole indefinitely, because nothing arrives downward on a
+        #: healthy link either.
+        self.pongs = 0
 
     # -- framing ----------------------------------------------------------
 
     def _fill(self, deadline: float) -> None:
-        """One read into the buffer. Never consumes."""
+        """One read into the buffer. Never consumes.
+
+        Every way this socket can die leaves as `ConnectionError`. It used to
+        leave as a bare `OSError` — `settimeout` on a socket this harness had
+        already closed itself raises WinError 10038, which is neither
+        `ConnectionError` nor `socket.timeout` — and the read loops catch only
+        those two. One oversized frame therefore closed the socket at 1009 and
+        then tracebacked out of the run on the next read, skipping the block
+        that puts the receiver back and leaving a commissioned site mistuned
+        with no warning printed. The warning lives in the block that got
+        skipped, so the one path where it could not run is the one where it
+        mattered.
+        """
+        if self.closed:
+            raise ConnectionError("socket already closed")
         remaining = deadline - time.time()
         if remaining <= 0:
             raise TimeoutError
-        self.sock.settimeout(min(remaining, 1.0))
         try:
+            self.sock.settimeout(min(remaining, 1.0))
             chunk = self.sock.recv(65536)
         except socket.timeout:
             return
+        except OSError as exc:
+            self.closed = True
+            raise ConnectionError(f"socket failed: {exc}") from exc
         if not chunk:
             self.closed = True
             raise ConnectionError("station closed the socket")
@@ -241,29 +283,40 @@ class Relay:
         most client libraries split large ones — which is precisely a station
         batching events or audio. Treating each fragment as a whole message
         rejected such a station on every single check.
+
+        The half-assembled message lives on the instance because two ordinary
+        things interrupt one. §5.4 lets a control frame arrive *between*
+        fragments, and a collection window can end in the middle of one — and
+        when the fragments were a local, both threw them away. The next
+        continuation frame then had nothing to continue, which desyncs the
+        stream permanently: a conformant station that merely pinged mid-message
+        failed all sixteen checks, with the same symptom that reassembly was
+        added to fix.
         """
-        parts: list[bytes] = []
         while True:
             piece = self._read_one(deadline)
             if piece is None:
-                return None
+                return None                      # control frame; parts survive
             data, opcode, fin = piece
-            if parts and opcode != 0x0:
+            if self._parts and opcode != 0x0:
                 self.envelope_faults.append(
                     "a new message began before the previous one finished")
-                parts = []
-            if not parts and opcode == 0x0:
+                self._parts = []
+            if not self._parts and opcode == 0x0:
                 self.envelope_faults.append("continuation frame with nothing to continue")
                 return None
-            parts.append(data)
-            if sum(len(p) for p in parts) > 512 * 1024:
+            self._parts.append(data)
+            if sum(len(p) for p in self._parts) > 512 * 1024:
                 self.envelope_faults.append(
                     "reassembled message exceeds 512 KiB")
+                self._parts = []
                 self.close(1009)
                 raise ConnectionError("message too large")
             if fin:
                 break
-        return b"".join(parts).decode("utf-8", "replace")
+        out = b"".join(self._parts)
+        self._parts = []
+        return out.decode("utf-8", "replace")
 
     def _read_one(self, deadline: float) -> tuple[bytes, int, bool] | None:
         """One physical frame: `(payload, opcode, fin)`, or None if control."""
@@ -295,6 +348,7 @@ class Relay:
             self.write(data, opcode=0xA)
             return None
         if opcode == 0xA:                       # pong
+            self.pongs += 1
             return None
         if opcode == 0x2:
             self.envelope_faults.append(
@@ -316,6 +370,17 @@ class Relay:
             header.append(127)
             header += struct.pack("!Q", n)
         self.sock.sendall(bytes(header) + data)
+
+    def ping(self, payload: bytes = b"percepta") -> bool:
+        """Send a WebSocket ping. False if the socket has already gone."""
+        if self.closed:
+            return False
+        try:
+            self.write(payload, opcode=0x9)
+            return True
+        except OSError:
+            self.closed = True
+            return False
 
     def close(self, code: int = 1000) -> None:
         try:
@@ -479,7 +544,9 @@ def collect(relay: Relay, seconds: float) -> list[tuple[str, dict]]:
         except (TimeoutError, socket.timeout):
             break
         except ConnectionError as exc:
-            notes.append(f"socket ended during collection: {exc}")
+            if not disconnected:
+                disconnected.append(str(exc))
+                notes.append(f"socket ended during collection: {exc}")
             break
         if got is not None:
             out.append(got)
@@ -509,9 +576,22 @@ def cadence_from(by_kind: dict[str, list[dict]]) -> dict[str, float]:
 
 
 def unavailable_now(by_kind: dict[str, list[dict]]) -> set[str]:
+    """Streams this station says it has no source for — for the whole run.
+
+    **Every** frame has to say so, not merely one. Latching on any single frame
+    let one transient declaration — a tuner reporting "warming up" for a second
+    before working perfectly — route that stream's command checks, and both
+    audio gates with them, into SKIP for the rest of the run, while the exit
+    code stayed 0. That is the expensive rule certified on no evidence at all,
+    and a tuner that warms up is the ordinary case rather than an attack.
+
+    A station that goes unavailable partway and stays there now fails its
+    command checks instead, which is the loud outcome and the right one:
+    something really did stop working.
+    """
     return {
         k for k, payloads in by_kind.items()
-        if any(p.get("available") is False for p in payloads)
+        if payloads and all(p.get("available") is False for p in payloads)
     }
 
 
@@ -544,7 +624,10 @@ def await_report(relay: Relay, kind: str, field: str, expect, seconds: float):
             frame = relay.read_payload(deadline)
         except (TimeoutError, socket.timeout):
             break
-        except ConnectionError:
+        except ConnectionError as exc:
+            if not disconnected:
+                disconnected.append(str(exc))
+                notes.append(f"socket ended while awaiting a report: {exc}")
             break
         if frame is None:
             continue
@@ -557,6 +640,97 @@ def await_report(relay: Relay, kind: str, field: str, expect, seconds: float):
         if matches(got, expect):
             return got, True
     return got, False
+
+
+def _num(value):
+    """`value` if it is a usable number, else None.
+
+    Everything `restore` reads came off the wire from the station under test,
+    so a string where a frequency belonged raised `TypeError` inside an
+    f-string — after the socket had been closed, which lost the verdict and
+    both restore notes together. `1e400` is the other one: `parse_constant`
+    catches the literal tokens `NaN` and `Infinity`, but a large enough
+    exponent parses to `inf` without going near it, and prints as `inf MHz`.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def restore(relay: Relay, by_kind: dict[str, list[dict]],
+            unavailable_kinds: set[str]) -> None:
+    """Put the site back the way it was found.
+
+    This runs against commissioned hardware on a real site, and a station left
+    listening to whatever frequency a test chose is a station that stopped
+    doing its job quietly. Restore from what the site was observed doing, not
+    from an assumption: the command list ends with `auto_squelch on` because
+    that pair tests both directions, but a site deliberately running a fixed
+    threshold against a known interferer would then be left in AUTO with its
+    hand-set threshold discarded, and nobody would connect that to having run
+    a test.
+
+    Called from a `finally`, so it still runs when a check raises.
+    """
+    radio_live = "radio" not in unavailable_kinds
+    first_radio = next((p for p in by_kind.get("radio", [])
+                        if _num(p.get("freq_hz")) is not None), {})
+    was = _num(first_radio.get("freq_hz"))
+    was_auto = first_radio.get("auto_squelch")
+    was_threshold = _num(first_radio.get("threshold_db"))
+
+    if radio_live and was_auto is False:
+        if was_threshold is None:
+            # Reporting "returned to a fixed None dB" was worse than silence:
+            # it says the site is safe when the threshold was never recovered.
+            notes.append("COULD NOT return the squelch: this site was on a "
+                         "fixed threshold but never reported a usable one, "
+                         "and it is now on AUTO — check it")
+        else:
+            relay.send_command({"kind": "radio.squelch", "db": was_threshold})
+            _, back = await_report(relay, "radio", "threshold_db",
+                                   was_threshold, COMMAND_TIMEOUT)
+            notes.append(
+                f"squelch returned to a fixed {was_threshold} dB" if back else
+                f"COULD NOT return the squelch to {was_threshold} dB — this "
+                "site was on a fixed threshold and is now on AUTO; check it")
+
+    if radio_live and any(k == "radio.tune" for k, *_ in COMMANDS):
+        if was is None:
+            notes.append("COULD NOT return the receiver: this run never saw a "
+                         "frequency to put it back to, and it was tuned to "
+                         "119.500 MHz — check the site")
+        elif not relay.send_command({"kind": "radio.tune", "freq_hz": was}):
+            notes.append(f"COULD NOT return the receiver to {was / 1e6:.3f} MHz: "
+                         "the station disconnected — check the site")
+        else:
+            _, back = await_report(relay, "radio", "freq_hz", was, COMMAND_TIMEOUT)
+            notes.append(f"receiver returned to {was / 1e6:.3f} MHz" if back else
+                         f"COULD NOT return the receiver to {was / 1e6:.3f} MHz "
+                         "— check the site")
+
+    # The floodlight is switched twice by section 5 and was never put back —
+    # so a daytime run could leave a site lit all night, which costs a battery
+    # that has to last until morning.
+    if "light" not in unavailable_kinds and any(
+            k == "light.set" for k, *_ in COMMANDS):
+        was_lit = next((p.get("on") for p in by_kind.get("light", [])
+                        if isinstance(p.get("on"), bool)), None)
+        lit = "on" if was_lit else "off"
+        if was_lit is None:
+            notes.append("COULD NOT return the floodlight: this run never saw "
+                         "its state and has been switching it — check the site")
+        elif not relay.send_command({"kind": "light.set", "on": was_lit}):
+            notes.append(f"COULD NOT return the floodlight to {lit}: the "
+                         "station disconnected — check the site")
+        else:
+            _, back = await_report(relay, "light", "on", was_lit, COMMAND_TIMEOUT)
+            notes.append(f"floodlight returned to {lit}" if back else
+                         f"COULD NOT return the floodlight to {lit} — check "
+                         "the site")
+
+    relay.send_command({"kind": "radio.spectrum", "on": False})
+    relay.close()
 
 
 def main() -> int:
@@ -582,259 +756,249 @@ def main() -> int:
     max_listen = max(MIN_WAIT, args.listen_for)
     relay = await_station(args.port, args.host, args.tls, args.wait)
 
-    print("0. Connection")
-    check("authenticates with a bearer credential", bool(relay.credential),
-          "no Authorization header")
-    if relay.credential:
-        shown = relay.credential[:4] + "…" if len(relay.credential) > 4 else "…"
-        notes.append(f"credential presented ({shown}), not verified by this harness")
-    check("connects to /broker", relay.path.startswith("/broker"),
-          f"path was {relay.path!r}")
-
-    # Ask for audio before listening. A station that obeys the contract sends
-    # none at all unless somebody has asked — so without this, the gating check
-    # below would have nothing to judge and would silently pass every
-    # lease-respecting station while only ever testing the ones that ignore it.
-    audio_request = {"kind": "radio.audio", "on": True, "lease_seconds": 30}
-    relay.send_command(audio_request)
-
-    print("\n1. Telemetry")
-    seen = collect(relay, MIN_WAIT)
     by_kind: dict[str, list[dict]] = {}
-    for stream, payload in seen:
-        key = "audio" if stream == "audio" else (
-            "events" if stream == "events" else str(payload.get("kind")))
-        by_kind.setdefault(key, []).append(payload)
+    unavailable_kinds: set[str] = set()
+    try:
+        print("0. Connection")
+        check("authenticates with a bearer credential", bool(relay.credential),
+              "no Authorization header")
+        if relay.credential:
+            shown = relay.credential[:4] + "…" if len(relay.credential) > 4 else "…"
+            notes.append(f"credential presented ({shown}), not verified by this harness")
+        check("connects to /broker", relay.path.startswith("/broker"),
+              f"path was {relay.path!r}")
 
-    spoken = next(
-        (f.get("contract_version") for f in by_kind.get("health", [])
-         if f.get("contract_version")), None)
-    if spoken is None:
-        notes.append(f"station declares no contract_version; this checks "
-                     f"{CONTRACT_VERSION}")
-    elif spoken != CONTRACT_VERSION:
-        notes.append(f"station speaks contract {spoken}, this checks "
-                     f"{CONTRACT_VERSION}")
-
-    def absorb(window: float) -> None:
+        # Ask for audio before listening. A station that obeys the contract sends
+        # none at all unless somebody has asked — so without this, the gating check
+        # below would have nothing to judge and would silently pass every
+        # lease-respecting station while only ever testing the ones that ignore it.
+        audio_request = {"kind": "radio.audio", "on": True, "lease_seconds": 30}
         relay.send_command(audio_request)
-        for stream, payload in collect(relay, window):
-            seen.append((stream, payload))
+
+        # Ping now, judge in section 2. A station has the whole opening window
+        # to answer, which is far longer than the ten seconds transport.md
+        # allows, so this fails only a station that never pongs at all.
+        relay.ping()
+
+        print("\n1. Telemetry")
+        seen = collect(relay, MIN_WAIT)
+        by_kind: dict[str, list[dict]] = {}
+        for stream, payload in seen:
             key = "audio" if stream == "audio" else (
                 "events" if stream == "events" else str(payload.get("kind")))
             by_kind.setdefault(key, []).append(payload)
 
-    listened = MIN_WAIT
-    # Health arrives every 30 s by default and carries the cadences everything
-    # below is judged against, so a first window of 8 s discovers it about one
-    # run in four. Without it the harness falls back to the defaults, believes
-    # it waited long enough, and fails a station that told it otherwise — the
-    # outcome depending on where the station's health tick happened to land.
-    if not by_kind.get("health") and listened < HEALTH_PERIOD + 2:
-        extra = min(max_listen, HEALTH_PERIOD + 2) - listened
-        if extra > 0:
-            absorb(extra)
-            listened += extra
+        spoken = next(
+            (f.get("contract_version") for f in by_kind.get("health", [])
+             if f.get("contract_version")), None)
+        if spoken is None:
+            notes.append(f"station declares no contract_version; this checks "
+                         f"{CONTRACT_VERSION}")
+        elif spoken != CONTRACT_VERSION:
+            notes.append(f"station speaks contract {spoken}, this checks "
+                         f"{CONTRACT_VERSION}")
 
-    cadence = cadence_from(by_kind)          # health may have only just arrived
-    if cadence != DEFAULT_CADENCE:
-        stated = ", ".join(f"{k} {v:g}s" for k, v in sorted(cadence.items())
-                           if DEFAULT_CADENCE.get(k) != v)
-        notes.append(f"station reports its own cadence: {stated}")
+        def absorb(window: float) -> None:
+            relay.send_command(audio_request)
+            for stream, payload in collect(relay, window):
+                seen.append((stream, payload))
+                key = "audio" if stream == "audio" else (
+                    "events" if stream == "events" else str(payload.get("kind")))
+                by_kind.setdefault(key, []).append(payload)
 
-    missing = [k for k in cadence if not by_kind.get(k)]
-    if missing:
-        want = min(max_listen, max(cadence[k] * PERIODS for k in missing))
-        extra = want - listened
-        if extra > 0:
-            absorb(extra)
-            listened += extra
+        listened = MIN_WAIT
+        # Health arrives every 30 s by default and carries the cadences everything
+        # below is judged against, so a first window of 8 s discovers it about one
+        # run in four. Without it the harness falls back to the defaults, believes
+        # it waited long enough, and fails a station that told it otherwise — the
+        # outcome depending on where the station's health tick happened to land.
+        if not by_kind.get("health") and listened < HEALTH_PERIOD + 2:
+            extra = min(max_listen, HEALTH_PERIOD + 2) - listened
+            if extra > 0:
+                absorb(extra)
+                listened += extra
 
-    for kind in cadence:
-        payloads = by_kind.get(kind, [])
-        unavailable = [p for p in payloads if p.get("available") is False]
-        needed = cadence[kind] * PERIODS
-        if unavailable:
-            # A station saying "I have no receiver for this" is conformant.
-            # Demanding a payload it cannot honestly fill is what makes a
-            # station invent numbers, which is what this harness exists to
-            # prevent.
-            #
-            # But the reason has to be a reason. `minLength: 1` is satisfied by
-            # a space, and README promises a station "is failed for pretending"
-            # — a blank reason on every stream is the shape of pretending.
-            reason = (unavailable[-1].get("unavailable_reason") or "").strip()
-            check(f"{kind} unavailable, with a reason", bool(reason),
-                  "unavailable_reason is blank or whitespace")
-            notes.append(f"{kind} declared unavailable: {reason or '(blank)'}")
-        elif not payloads and needed > listened + 0.5:
-            # Absent, but this run never waited long enough to expect it. The
-            # contract lets a metered site slow a stream down and says a
-            # station must not be failed for it, so MAX_WAIT capping the
-            # window is the harness's limitation and not the station's fault.
-            # Reporting it as a failure — with a duration the harness never
-            # actually waited — is how correctly-configured hardware gets
-            # rejected on site.
-            skipped_streams.append(kind)
-            skip(f"publishes {kind}",
-                 f"reported cadence needs {needed:g}s and this run listened "
-                 f"for {listened:g}s; re-run with --listen-for {needed:.0f}")
-        else:
-            check(f"publishes {kind}", bool(payloads),
-                  f"nothing received in {listened:g}s")
+        cadence = cadence_from(by_kind)          # health may have only just arrived
+        if cadence != DEFAULT_CADENCE:
+            stated = ", ".join(f"{k} {v:g}s" for k, v in sorted(cadence.items())
+                               if DEFAULT_CADENCE.get(k) != v)
+            notes.append(f"station reports its own cadence: {stated}")
 
-    print("\n2. Envelope")
-    # The relay format is the newest surface in the contract and the one with
-    # no schema, so it is checked here rather than by a validator.
-    check("frames match the relay envelope", not relay.envelope_faults,
-          "; ".join(sorted(set(relay.envelope_faults))[:3]))
+        missing = [k for k in cadence if not by_kind.get(k)]
+        if missing:
+            want = min(max_listen, max(cadence[k] * PERIODS for k in missing))
+            extra = want - listened
+            if extra > 0:
+                absorb(extra)
+                listened += extra
 
-    print("\n3. Schema")
-    for kind, payloads in sorted(by_kind.items()):
-        if kind == "audio":
-            schema = audio_schema
-        elif kind == "events":
-            schema = events_schema
-        elif kind in cadence or kind in OPTIONAL_KINDS:
-            schema = telemetry_schema
-        else:
-            notes.append(f"unknown kind '{kind}' ignored, as the contract allows")
-            continue
-        first: list = []
-        bad = 0
-        for payload in payloads:
-            errs = sorted(schema.iter_errors(payload), key=str)
-            if errs:
-                bad += 1
-                first = first or errs
-        detail = "; ".join(e.message for e in first[:2])
-        if bad:
-            detail += f"  ({bad} of {len(payloads)} frame(s))"
-        check(f"{kind} matches schema ({len(payloads)} frame(s))", not bad, detail)
+        for kind in cadence:
+            payloads = by_kind.get(kind, [])
+            unavailable = [p for p in payloads if p.get("available") is False]
+            needed = cadence[kind] * PERIODS
+            if unavailable:
+                # A station saying "I have no receiver for this" is conformant.
+                # Demanding a payload it cannot honestly fill is what makes a
+                # station invent numbers, which is what this harness exists to
+                # prevent.
+                #
+                # But the reason has to be a reason. `minLength: 1` is satisfied by
+                # a space, and README promises a station "is failed for pretending"
+                # — a blank reason on every stream is the shape of pretending.
+                # Type-checked before `.strip()`, because everything here is
+                # station-supplied and section 3 is the part that reports a wrong
+                # type. A list here used to raise `AttributeError` in section 1 and
+                # take the whole run down before the schema check that would have
+                # explained it ever printed.
+                raw_reason = unavailable[-1].get("unavailable_reason")
+                reason = raw_reason.strip() if isinstance(raw_reason, str) else ""
+                check(f"{kind} unavailable, with a reason", bool(reason),
+                      "unavailable_reason is blank, whitespace, or not a string")
+                notes.append(f"{kind} declared unavailable: {reason or '(blank)'}")
+            elif not payloads and needed > listened + 0.5:
+                # Absent, but this run never waited long enough to expect it. The
+                # contract lets a metered site slow a stream down and says a
+                # station must not be failed for it, so MAX_WAIT capping the
+                # window is the harness's limitation and not the station's fault.
+                # Reporting it as a failure — with a duration the harness never
+                # actually waited — is how correctly-configured hardware gets
+                # rejected on site.
+                skipped_streams.append(kind)
+                skip(f"publishes {kind}",
+                     f"reported cadence needs {needed:g}s and this run listened "
+                     f"for {listened:g}s; re-run with --listen-for {needed:.0f}")
+            else:
+                check(f"publishes {kind}", bool(payloads),
+                      f"nothing received in {listened:g}s")
 
-    # Events are validated and deliberately NOT acknowledged: `events.ack`
-    # means "durably stored, delete your copy", this stores nothing, and the
-    # file runs against real sites. A conformance check must never cost a
-    # station its undelivered history.
-    if by_kind.get("events"):
-        notes.append("events validated but NOT acknowledged — this harness "
-                     "stores nothing, and acking would tell the station to "
-                     "delete them")
+        print("\n2. Envelope")
+        # The relay format is the newest surface in the contract and the one with
+        # no schema, so it is checked here rather than by a validator.
+        check("frames match the relay envelope", not relay.envelope_faults,
+              "; ".join(sorted(set(relay.envelope_faults))[:3]))
+        # A station that never pongs cannot tell a dead link from a quiet one,
+        # and neither can the platform: commands are unrequested, so a silent
+        # hour is normal and proves nothing either way.
+        check("answers a WebSocket ping", relay.pongs > 0,
+              "no pong in the opening window; a half-open socket would go "
+              "unnoticed at both ends")
 
-    print("\n4. Audio is gated")
-    # Every audio frame must sit against a squelch that was open. A station may
-    # publish audio on a faster sub-tick than its 1 Hz radio telemetry, so a
-    # transmission starting mid-interval legitimately puts audio on the wire
-    # just before the radio frame announcing the open gate — frames are
-    # therefore judged against the state either side, and only audio bracketed
-    # by a closed gate is a failure.
-    ordered = [p for _, p in seen]
-    if "radio" in unavailable_now(by_kind):
-        notes.append("radio unavailable, so audio gating was not tested")
-    elif not by_kind.get("radio"):
-        check("audio only while squelch is open", False, "no radio telemetry")
-    elif not by_kind.get("audio"):
-        check("audio only while squelch is open", True)
-        notes.append("no audio in the window, so gating was not exercised; "
-                     "run again on a busy channel to test it")
-    else:
-        def open_at(index: int, step: int) -> bool | None:
-            i = index + step
-            while 0 <= i < len(ordered):
-                if ordered[i].get("kind") == "radio":
-                    return bool(ordered[i].get("squelch_open")
-                                or ordered[i].get("monitor"))
-                i += step
-            return None
-
-        ungated = 0
-        for index, payload in enumerate(ordered):
-            if payload.get("kind") != "audio":
+        print("\n3. Schema")
+        for kind, payloads in sorted(by_kind.items()):
+            if kind == "audio":
+                schema = audio_schema
+            elif kind == "events":
+                schema = events_schema
+            elif kind in cadence or kind in OPTIONAL_KINDS:
+                schema = telemetry_schema
+            else:
+                notes.append(f"unknown kind '{kind}' ignored, as the contract allows")
                 continue
-            before, after = open_at(index, -1), open_at(index, 1)
-            if before is False and after is not True:
-                ungated += 1
-        check("audio only while squelch is open", ungated == 0,
-              f"{ungated} audio frame(s) with the squelch closed either side")
+            first: list = []
+            bad = 0
+            for payload in payloads:
+                errs = sorted(schema.iter_errors(payload), key=str)
+                if errs:
+                    bad += 1
+                    first = first or errs
+            detail = "; ".join(e.message for e in first[:2])
+            if bad:
+                detail += f"  ({bad} of {len(payloads)} frame(s))"
+            check(f"{kind} matches schema ({len(payloads)} frame(s))", not bad, detail)
 
-    print("\n5. Commands take effect")
-    unavailable_kinds = unavailable_now(by_kind)
-    exercised = 0
-    for kind, body, report_kind, field, expect in COMMANDS:
-        if report_kind in unavailable_kinds:
-            skip(f"{kind} -> {report_kind}.{field}",
-                 f"{report_kind} is declared unavailable")
-            continue
-        if not relay.send_command({"kind": kind, **body}):
-            skip(f"{kind} -> {report_kind}.{field}", "the station disconnected")
-            continue
-        got, ok = await_report(relay, report_kind, field, expect, COMMAND_TIMEOUT)
-        check(f"{kind} -> {report_kind}.{field}", ok, f"reported {got!r}")
-        exercised += 1
+        # Events are validated and deliberately NOT acknowledged: `events.ack`
+        # means "durably stored, delete your copy", this stores nothing, and the
+        # file runs against real sites. A conformance check must never cost a
+        # station its undelivered history.
+        if by_kind.get("events"):
+            notes.append("events validated but NOT acknowledged — this harness "
+                         "stores nothing, and acking would tell the station to "
+                         "delete them")
 
-    print("\n6. Audio stops when the lease lapses")
-    # The second gate, and the expensive one. Checking only squelch gating
-    # would pass a station that ignores the lease entirely and streams whenever
-    # the band is busy — which is precisely the behaviour the lease was added
-    # to prevent, and which the reference implementation once shipped. So: ask
-    # for a short lease, stop asking, and confirm the audio stops.
-    if "radio" in unavailable_kinds:
-        notes.append("radio unavailable, so the audio lease was not tested")
-    elif not by_kind.get("audio"):
-        notes.append("no audio seen at all, so lease expiry was not tested")
-    else:
-        relay.send_command({"kind": "radio.audio", "on": True, "lease_seconds": 5})
-        collect(relay, 9.0)                      # let it lapse, unrenewed
-        after = collect(relay, 6.0)
-        leftover = [p for _, p in after if p.get("kind") == "audio"]
-        opened = any(p.get("kind") == "radio"
-                     and (p.get("squelch_open") or p.get("monitor"))
-                     for _, p in after)
-        check("audio stops when the lease lapses", not leftover,
-              f"{len(leftover)} audio frame(s) sent with no live lease")
-        if not opened and not leftover:
-            notes.append("the band was quiet after the lease lapsed, so silence "
-                         "there proves less than it looks; re-run on a busy "
-                         "channel to be sure")
-
-    # Put the receiver back where it was found. This runs against commissioned
-    # hardware on a real site, and a station left listening to whatever
-    # frequency a test chose is a station that stopped doing its job quietly.
-    # Restore from what the site was observed doing, not from an assumption.
-    # The command list ends with `auto_squelch on` because that pair tests both
-    # directions — but a site deliberately running a fixed threshold against a
-    # known interferer would then be left in AUTO with its hand-set threshold
-    # discarded, and nobody would connect that to having run a test.
-    first_radio = next((p for p in by_kind.get("radio", [])
-                        if p.get("freq_hz")), {})
-    was = first_radio.get("freq_hz")
-    was_auto = first_radio.get("auto_squelch")
-    was_threshold = first_radio.get("threshold_db")
-    if was_auto is False and "radio" not in unavailable_kinds:
-        relay.send_command({"kind": "radio.squelch", "db": was_threshold})
-        _, back = await_report(relay, "radio", "threshold_db", was_threshold,
-                               COMMAND_TIMEOUT)
-        notes.append(
-            f"squelch returned to a fixed {was_threshold} dB"
-            if back else
-            f"COULD NOT return the squelch to {was_threshold} dB — this site "
-            "was on a fixed threshold and is now on AUTO; check it")
-    if "radio" not in unavailable_kinds and any(
-            k == "radio.tune" for k, *_ in COMMANDS):
-        if not was:
-            notes.append("COULD NOT return the receiver: this run never saw a "
-                         "frequency to put it back to, and it was tuned to "
-                         "119.500 MHz — check the site")
-        elif not relay.send_command({"kind": "radio.tune", "freq_hz": was}):
-            notes.append(f"COULD NOT return the receiver to {was / 1e6:.3f} MHz: "
-                         "the station disconnected — check the site")
+        print("\n4. Audio is gated")
+        # Every audio frame must sit against a squelch that was open. A station may
+        # publish audio on a faster sub-tick than its 1 Hz radio telemetry, so a
+        # transmission starting mid-interval legitimately puts audio on the wire
+        # just before the radio frame announcing the open gate — frames are
+        # therefore judged against the state either side, and only audio bracketed
+        # by a closed gate is a failure.
+        ordered = [p for _, p in seen]
+        if "radio" in unavailable_now(by_kind):
+            notes.append("radio unavailable, so audio gating was not tested")
+        elif not by_kind.get("radio"):
+            check("audio only while squelch is open", False, "no radio telemetry")
+        elif not by_kind.get("audio"):
+            check("audio only while squelch is open", True)
+            notes.append("no audio in the window, so gating was not exercised; "
+                         "run again on a busy channel to test it")
         else:
-            _, back = await_report(relay, "radio", "freq_hz", was, COMMAND_TIMEOUT)
-            notes.append(f"receiver returned to {was / 1e6:.3f} MHz" if back else
-                         f"COULD NOT return the receiver to {was / 1e6:.3f} MHz "
-                         "— check the site")
-    relay.send_command({"kind": "radio.spectrum", "on": False})
-    relay.close()
+            def open_at(index: int, step: int) -> bool | None:
+                i = index + step
+                while 0 <= i < len(ordered):
+                    if ordered[i].get("kind") == "radio":
+                        return bool(ordered[i].get("squelch_open")
+                                    or ordered[i].get("monitor"))
+                    i += step
+                return None
+
+            ungated = 0
+            for index, payload in enumerate(ordered):
+                if payload.get("kind") != "audio":
+                    continue
+                before, after = open_at(index, -1), open_at(index, 1)
+                if before is False and after is not True:
+                    ungated += 1
+            check("audio only while squelch is open", ungated == 0,
+                  f"{ungated} audio frame(s) with the squelch closed either side")
+
+        print("\n5. Commands take effect")
+        unavailable_kinds = unavailable_now(by_kind)
+        exercised = 0
+        for kind, body, report_kind, field, expect in COMMANDS:
+            if report_kind in unavailable_kinds:
+                skip(f"{kind} -> {report_kind}.{field}",
+                     f"{report_kind} is declared unavailable")
+                continue
+            if not relay.send_command({"kind": kind, **body}):
+                skip(f"{kind} -> {report_kind}.{field}", "the station disconnected")
+                continue
+            got, ok = await_report(relay, report_kind, field, expect, COMMAND_TIMEOUT)
+            check(f"{kind} -> {report_kind}.{field}", ok, f"reported {got!r}")
+            exercised += 1
+
+        print("\n6. Audio stops when the lease lapses")
+        # The second gate, and the expensive one. Checking only squelch gating
+        # would pass a station that ignores the lease entirely and streams whenever
+        # the band is busy — which is precisely the behaviour the lease was added
+        # to prevent, and which the reference implementation once shipped. So: ask
+        # for a short lease, stop asking, and confirm the audio stops.
+        if "radio" in unavailable_kinds:
+            notes.append("radio unavailable, so the audio lease was not tested")
+        elif not by_kind.get("audio"):
+            notes.append("no audio seen at all, so lease expiry was not tested")
+        else:
+            relay.send_command({"kind": "radio.audio", "on": True, "lease_seconds": 5})
+            collect(relay, 9.0)                      # let it lapse, unrenewed
+            after = collect(relay, 6.0)
+            leftover = [p for _, p in after if p.get("kind") == "audio"]
+            opened = any(p.get("kind") == "radio"
+                         and (p.get("squelch_open") or p.get("monitor"))
+                         for _, p in after)
+            check("audio stops when the lease lapses", not leftover,
+                  f"{len(leftover)} audio frame(s) sent with no live lease")
+            if not opened and not leftover:
+                notes.append("the band was quiet after the lease lapsed, so silence "
+                             "there proves less than it looks; re-run on a busy "
+                             "channel to be sure")
+
+    except Exception as exc:                  # a bug in this harness
+        # Never a silent traceback and never an exit 0. The site still
+        # gets put back below, and the run is loudly not a certificate.
+        traceback.print_exc()
+        failures.append(f"the harness itself raised {exc!r} — this is a "
+                        "harness fault, not evidence about the station")
+    finally:
+        restore(relay, by_kind, unavailable_kinds)
 
     if skipped:
         print("\nNot tested")
@@ -856,6 +1020,16 @@ def main() -> int:
             "those streams were not tested — and the cadence is a number the\n"
             "station itself supplies, so this is not evidence of anything.\n"
             "Re-run with --listen-for long enough to see them."
+        )
+        return 2
+    if disconnected:
+        print(
+            f"INCONCLUSIVE: the socket ended mid-run ({disconnected[0]}). Every\n"
+            "check after that point had nothing to fail on — a dead socket\n"
+            "delivers no audio, so the lease rule in particular was certified\n"
+            "on no evidence at all. Nothing here says the station is wrong;\n"
+            "nothing here proves it is right. Check the notes above: the site\n"
+            "may have been left mistuned."
         )
         return 2
     if exercised == 0:
