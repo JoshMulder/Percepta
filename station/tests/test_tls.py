@@ -32,7 +32,7 @@ from gsu import tls
 from gsu.agent import Agent
 from gsu.config import AgentConfig
 from gsu.enrolment import EnrolmentClient
-from gsu.transport import build_transport, redact_url, split_credentials
+from gsu.transport import build_transport, redact_url
 
 STATION = "29ed8568-999e-4725-8daa-3ee3cea1751e"
 HAS_OPENSSL = shutil.which("openssl") is not None
@@ -265,39 +265,44 @@ class CaStoreTests(unittest.TestCase):
         self.assertIsNone(self.store.load())
 
 
-class UrlCredentialTests(unittest.TestCase):
-    """redis-py lets the URL override the keyword arguments.
+class UrlSecrecyTests(unittest.TestCase):
+    """A URL is logged by every proxy between here and the platform.
 
-    `ConnectionPool.from_url` finishes with `kwargs.update(url_options)`, so a
-    URL carrying `user:pass@` silently replaces the station's identity with
-    whatever it names — failing confusingly at best, and at worst succeeding as
-    somebody else. A station that publishes as another principal has left the
-    tenancy model the platform rests on (`contract/README.md` rule 1).
+    This class used to be about a genuine redis-py trap:
+    `ConnectionPool.from_url` finished with `kwargs.update(url_options)`, so a
+    URL carrying `user:pass@` silently replaced the station's identity with
+    whatever it named — failing confusingly at best, and at worst succeeding as
+    somebody else, which is a station that has left the tenancy model the whole
+    platform rests on.
+
+    That trap is gone with the Redis transport, and with the username contract
+    2.0 removed: there is no principal for a URL to override, and the
+    credential travels in an `Authorization` header rather than anywhere a URL
+    could reach. What survives is the display rule, because a hand-edited
+    `GSU_BROKER_URL` can still carry a secret and the setup console has no
+    authentication in front of it.
     """
 
-    def test_credentials_are_split_out_of_the_url(self):
-        address, user, password = split_credentials("rediss://bob:s3cret@host:6380/0")
-        self.assertEqual(address, "rediss://host:6380/0")
-        self.assertEqual((user, password), ("bob", "s3cret"))
+    def test_display_never_leaks_the_password(self):
+        shown = redact_url("wss://bob:s3cret@host/broker")
+        self.assertNotIn("s3cret", shown)
+        self.assertIn("host", shown)
 
     def test_a_clean_url_is_left_exactly_alone(self):
-        for url in ("rediss://host:6380/0", "redis://127.0.0.1:6379/0",
+        for url in ("wss://platform.example/broker", "ws://127.0.0.1:8099/broker",
                     "https://platform:8000"):
-            self.assertEqual(split_credentials(url)[0], url)
+            self.assertEqual(redact_url(url), url)
 
-    def test_display_never_leaks_the_password(self):
-        shown = redact_url("rediss://bob:s3cret@host:6380/0")
-        self.assertNotIn("s3cret", shown)
-        self.assertIn("host:6380", shown)
+    def test_only_the_relay_is_a_transport_now(self):
+        """`rediss://` was a transport and is not one any more.
 
-    def test_the_transport_ignores_url_credentials_and_says_so(self):
-        transport = build_transport(
-            "redis://someone:hunter2@127.0.0.1:6399/0",
-            username=f"gsu:{STATION}", password="the-real-secret", trust=tls.Trust(),
-        )
-        self.assertEqual(transport.url, "redis://127.0.0.1:6399/0")
-        self.assertEqual(transport._username, f"gsu:{STATION}")
-        self.assertEqual(transport._password, "the-real-secret")
+        Deleted rather than deprecated: it spoke a topic-based protocol no
+        contract document describes, and it was the only reason the transport
+        interface had to stay topic-shaped. A URL that used to work must fail
+        loudly rather than fall back to something that looks similar.
+        """
+        with self.assertRaises(ValueError):
+            build_transport("rediss://broker:6380/0", secret="x")
 
 
 @unittest.skipUnless(HAS_OPENSSL, "needs openssl to make a certificate")
@@ -398,10 +403,7 @@ class AgentRefusalTests(unittest.TestCase):
             credential=Credential("bearer", "secret", now + timedelta(days=90),
                                   now + timedelta(days=45)),
             broker=Broker(
-                url="redis://127.0.0.1:6399/0", username=f"gsu:{STATION}",
-                telemetry_topic=f"gsu/{STATION}/telemetry",
-                audio_topic=f"gsu/{STATION}/audio",
-                command_topic=f"cmd/gsu/{STATION}",
+                url="redis://127.0.0.1:6399/0",
                 ca_pem=self.ca.read_text(),
             ),
             site=Site("Test", "UTC", -43.5, 172.6),

@@ -29,6 +29,7 @@ import logging
 import sqlite3
 import threading
 import time
+import uuid
 import wave
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -43,10 +44,39 @@ CREATE TABLE IF NOT EXISTS events (
     kind      TEXT NOT NULL,
     severity  TEXT NOT NULL,
     detail    TEXT NOT NULL DEFAULT '',
-    synced_at TEXT
+    synced_at TEXT,
+    event_id  TEXT,
+    seq       INTEGER,
+    clock     TEXT NOT NULL DEFAULT 'synced'
 );
 CREATE INDEX IF NOT EXISTS events_pending ON events (synced_at, id);
+CREATE UNIQUE INDEX IF NOT EXISTS events_seq ON events (seq);
+
+-- The `seq` counter, kept here rather than derived from the rows still
+-- present, because `contract/transport.md` requires exactly that and the
+-- reason is not obvious.
+--
+-- An emptied store that restarts at zero reuses numbers it has already used —
+-- and on a quiet station, draining to empty is routine rather than rare. That
+-- is what makes a stale acknowledgement dangerous: a `through_seq` from before
+-- the rebuild lands *inside* the fresh range, so the station's clamp does not
+-- fire and it deletes events the platform never saw.
+CREATE TABLE IF NOT EXISTS counters (
+    name  TEXT PRIMARY KEY,
+    value INTEGER NOT NULL
+);
+INSERT OR IGNORE INTO counters (name, value) VALUES ('event_seq', 0);
 """
+
+#: Columns added after the first release. SQLite has no `ADD COLUMN IF NOT
+#: EXISTS`, and a station in the field has a database this code has to open
+#: rather than replace — so each one is checked and added, which is the whole
+#: of the migration story for a single-file store.
+_ADDED_COLUMNS = (
+    ("event_id", "TEXT"),
+    ("seq", "INTEGER"),
+    ("clock", "TEXT NOT NULL DEFAULT 'synced'"),
+)
 
 #: A single transmission is seconds long; a segment that spans several is easier
 #: to review than hundreds of fragments, and one that runs forever is a file
@@ -85,6 +115,11 @@ class LocalStore:
         # thread. Every access is under the lock.
         self._db = sqlite3.connect(self.db_path, check_same_thread=False)
         self._db.executescript(SCHEMA)
+        existing = {row[1] for row in self._db.execute(
+            "PRAGMA table_info(events)").fetchall()}
+        for column, spec in _ADDED_COLUMNS:
+            if column not in existing:
+                self._db.execute(f"ALTER TABLE events ADD COLUMN {column} {spec}")
         self._db.commit()
 
         self._wave: wave.Wave_write | None = None
@@ -98,16 +133,87 @@ class LocalStore:
 
     # --- events ---------------------------------------------------------
 
-    def record_event(self, kind: str, severity: str, detail: str = "") -> int:
+    def record_event(self, kind: str, severity: str, detail: str = "",
+                     clock_state: str = "synced") -> int:
+        """Write one fact down, with both identifiers the contract requires.
+
+        `event_id` survives a store rebuild and answers "is this the same
+        fact"; `seq` is monotonic and answers "is everything up to here dealt
+        with". They are separate because collapsing them leaves the
+        acknowledgement unable to advance past a gap — and a gap is exactly
+        what an event the platform refuses produces.
+
+        The counter is bumped in the same transaction as the insert. If the
+        power fails between the two, the station loses a *number*, not a fact:
+        the sequence skips one, which is harmless because the platform
+        acknowledges a high-water mark and never asks for a specific seq.
+        """
         at = datetime.now(UTC).isoformat()
+        event_id = str(uuid.uuid4())
         with self._lock:
+            self._db.execute(
+                "UPDATE counters SET value = value + 1 WHERE name = 'event_seq'")
+            seq = int(self._db.execute(
+                "SELECT value FROM counters WHERE name = 'event_seq'"
+            ).fetchone()[0])
             cursor = self._db.execute(
-                "INSERT INTO events (at, kind, severity, detail) VALUES (?, ?, ?, ?)",
-                (at, kind, severity, detail),
+                "INSERT INTO events (at, kind, severity, detail, event_id, seq, "
+                "clock) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (at, kind, severity, detail, event_id, seq,
+                 clock_state if clock_state in ("synced", "unsynced") else "synced"),
             )
             self._db.commit()
         log.info("event %s [%s] %s", kind, severity, detail)
         return int(cursor.lastrowid or 0)
+
+    def unsent_events(self, limit: int = 100) -> list[dict]:
+        """The oldest unacknowledged events, in the contract's wire shape.
+
+        Oldest first, because the platform acknowledges a high-water mark: a
+        batch delivered out of order would have the station delete events
+        between the two on the strength of a `through_seq` that never covered
+        them.
+        """
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT event_id, seq, at, kind, severity, detail, clock "
+                "FROM events WHERE synced_at IS NULL AND seq IS NOT NULL "
+                "ORDER BY seq ASC LIMIT ?", (limit,),
+            ).fetchall()
+        out = []
+        for event_id, seq, at, kind, severity, detail, clock_state in rows:
+            event = {
+                "id": event_id, "seq": int(seq), "at": at,
+                "type": kind, "severity": severity,
+                "clock": clock_state or "synced",
+            }
+            if detail:
+                event["message"] = detail
+            out.append(event)
+        return out
+
+    def mark_sent_through(self, through_seq: int) -> int:
+        """Acknowledged: delete nothing, but stop re-sending up to here.
+
+        Marked rather than deleted so the setup page can still show a site's
+        recent history after it has been delivered. `prune` is what actually
+        reclaims the space, on its own schedule.
+        """
+        at = datetime.now(UTC).isoformat()
+        with self._lock:
+            cursor = self._db.execute(
+                "UPDATE events SET synced_at = ? "
+                "WHERE synced_at IS NULL AND seq IS NOT NULL AND seq <= ?",
+                (at, int(through_seq)),
+            )
+            self._db.commit()
+        return int(cursor.rowcount or 0)
+
+    def unsent_count(self) -> int:
+        with self._lock:
+            return int(self._db.execute(
+                "SELECT COUNT(*) FROM events WHERE synced_at IS NULL"
+            ).fetchone()[0])
 
     def recent_events(self, limit: int = 50) -> list[Event]:
         with self._lock:

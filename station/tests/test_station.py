@@ -265,7 +265,6 @@ class CommandTests(unittest.TestCase):
         self._dir = tempfile.TemporaryDirectory()
         self.agent = agent_in(self._dir.name)
         self.router = CommandRouter(
-            f"cmd/gsu/{STATION}",
             build_handlers(
                 self.agent.radio, self.agent.light, self.agent._apply_config,
                 self.agent.stream,
@@ -283,46 +282,48 @@ class CommandTests(unittest.TestCase):
             self.agent.step(1.0)
         return {payload["kind"]: payload for payload in sent}
 
-    @unittest.expectedFailure
     def test_every_command_in_the_schema_has_a_handler(self):
-        """KNOWN GAP against contract 1.0: `events.ack` has no handler here.
+        """The pairing the contract rests on: no command without an effect.
 
-        Contract 1.0 added the events channel - the one channel that carries
-        facts with no newer version, so the one that is acknowledged. The
-        station owes the other half: buffer events across reboots, publish them
-        oldest-first in capped batches, and delete up to the acknowledged seq.
-
-        Delete this decorator once that exists; until then the failure is the
-        work list and not a regression.
+        This carried an `expectedFailure` for the whole of the 2.0 draft
+        because `events.ack` had no handler — the station could receive an
+        acknowledgement and do nothing with it, which means re-sending a
+        delivered batch for ever. The decorator was the work list; the handler
+        now exists, so it is gone.
         """
         kinds = {
             option["properties"]["kind"]["const"] for option in COMMANDS["oneOf"]
         }
         self.assertTrue(kinds <= set(self.router.handlers), kinds - set(self.router.handlers))
 
-    def test_the_channel_must_be_slash_separated(self):
-        # The failure that broke the reference implementation: subscribed,
-        # receiving, and dropping everything.
-        self.assertFalse(
-            self.router.dispatch(f"cmd:gsu:{STATION}", {"kind": "light.set", "on": True})
-        )
-        self.assertFalse(
-            self.router.dispatch("cmd/gsu/somebody-else", {"kind": "light.set", "on": True})
-        )
-        self.assertTrue(
-            self.router.dispatch(f"cmd/gsu/{STATION}", {"kind": "light.set", "on": True})
-        )
+    def test_a_command_needs_no_channel_to_be_this_stations_own(self):
+        """The near-miss this used to guard against cannot happen any more.
+
+        There was a test here called `test_the_channel_must_be_slash_separated`,
+        and it guarded a real failure: the platform's internal fan-out names
+        channels with colons, the station boundary used slashes, and a station
+        handed the wrong form subscribed successfully, received everything, and
+        dropped all of it — indistinguishable from a box ignoring its operator.
+
+        Contract 2.0 deleted the fault rather than the bug. A station has one
+        socket and one downward stream, and the platform resolved whose
+        commands these are from the credential before sending them, so there is
+        no name on the wire left to get wrong. What is asserted now is that
+        dispatch works on the payload alone.
+        """
+        self.assertTrue(self.router.dispatch({"kind": "light.set", "on": True}))
+        self.assertEqual(self.router.applied, 1)
 
     def test_unknown_commands_are_ignored_not_rejected(self):
         self.assertFalse(
-            self.router.dispatch(f"cmd/gsu/{STATION}", {"kind": "future.thing", "x": 1})
+            self.router.dispatch({"kind": "future.thing", "x": 1})
         )
         self.assertEqual(self.router.ignored, 1)
 
     def test_transmit_is_not_implemented_anywhere(self):
         self.assertNotIn("radio.transmit", self.router.handlers)
         self.assertFalse(
-            self.router.dispatch(f"cmd/gsu/{STATION}", {"kind": "radio.transmit", "on": True})
+            self.router.dispatch({"kind": "radio.transmit", "on": True})
         )
 
     def test_each_command_is_observable_in_telemetry(self):
@@ -339,13 +340,13 @@ class CommandTests(unittest.TestCase):
             ({"kind": "light.set", "on": False}, "light", "on", False),
         ]
         for command, kind, field, expected in cases:
-            self.router.dispatch(f"cmd/gsu/{STATION}", command)
+            self.router.dispatch(command)
             payload = self.telemetry()[kind]
             self.assertEqual(payload[field], expected, f"{command} was not reported back")
 
     def test_a_command_for_a_device_that_is_not_fitted_is_not_silently_accepted(self):
-        router = CommandRouter(f"cmd/gsu/{STATION}", build_handlers(None, None, None))
-        self.assertFalse(router.dispatch(f"cmd/gsu/{STATION}", {"kind": "light.set", "on": True}))
+        router = CommandRouter(build_handlers(None, None, None))
+        self.assertFalse(router.dispatch({"kind": "light.set", "on": True}))
         self.assertEqual(router.applied, 0)
 
 
@@ -1394,13 +1395,13 @@ class RelayTransportTests(unittest.TestCase):
 
     def transport(self, url="wss://p.example/broker", **kw):
         from gsu.transport.relay import RelayTransport
-        return RelayTransport(url, password="secret", **kw)
+        return RelayTransport(url, secret="secret", **kw)
 
     def test_the_url_scheme_picks_it(self):
         from gsu.transport import build_transport
         from gsu.transport.relay import RelayTransport
         for url in ("ws://127.0.0.1:8000/broker", "wss://p.example/broker"):
-            got = build_transport(url, None, "secret")
+            got = build_transport(url, secret="secret")
             self.assertIsInstance(got, RelayTransport, url)
 
     def test_a_trust_refusal_is_reported_rather_than_thrown_away(self):
@@ -1470,33 +1471,74 @@ class RelayTransportTests(unittest.TestCase):
         relay._ready.set()
         socket = _FakeSocket()
         relay._socket = socket
-        self.assertTrue(relay.publish("gsu/x/telemetry", {"a": 1}))
+        self.assertTrue(relay.publish("t", {"a": 1}))
         self.assertEqual(json.loads(socket.sent[0]),
-                         {"topic": "gsu/x/telemetry", "payload": {"a": 1}})
+                         {"stream": "t", "payload": {"a": 1}})
+
+    def test_a_station_cannot_publish_on_the_command_stream(self):
+        # Caught here rather than earned as a `refused` frame a round trip
+        # later: publishing on `c` is a bug in this station, not a
+        # misconfiguration on the platform.
+        relay = self.transport()
+        relay._ready.set()
+        relay._socket = _FakeSocket()
+        self.assertFalse(relay.publish("c", {"kind": "light.set"}))
+        self.assertFalse(relay.publish("z", {"a": 1}))
+
+    def test_nan_never_reaches_the_wire(self):
+        # NaN passes every numeric bound in the schemas, because comparisons
+        # against it are false — so a frame carrying one validates and means
+        # nothing. It is not JSON either way.
+        relay = self.transport()
+        relay._ready.set()
+        socket = _FakeSocket()
+        relay._socket = socket
+        self.assertFalse(relay.publish("t", {"kind": "power", "soc_pct": float("nan")}))
+        self.assertEqual(socket.sent, [])
 
     def test_a_command_reaches_its_handler(self):
         relay = self.transport()
         got = []
-        relay.subscribe("cmd/gsu/x", lambda t, p: got.append((t, p)))
+        relay.on_command(got.append)
         relay._on_message(1, json.dumps(
-            {"topic": "cmd/gsu/x", "payload": {"kind": "light.set"}}).encode())
-        self.assertEqual(got, [("cmd/gsu/x", {"kind": "light.set"})])
+            {"stream": "c", "payload": {"kind": "light.set"}}).encode())
+        self.assertEqual(got, [{"kind": "light.set"}])
+
+    def test_a_refusal_is_matched_before_a_command(self):
+        """`type` before `stream`, and the order is load-bearing.
+
+        Both downward frames carry `stream` and only the command carries
+        `payload`, so dispatching on `stream` first raises KeyError on a
+        refusal — and the refusal a station is most likely to provoke is for
+        publishing on `c`, which arrives as `stream: "c"` and looks exactly
+        like a command. The frame written to explain a misconfiguration would
+        crash the station that made it.
+        """
+        relay = self.transport()
+        got = []
+        relay.on_command(got.append)
+        relay._on_message(1, json.dumps({
+            "type": "refused", "stream": "c", "reason": "not yours",
+        }).encode())
+        self.assertEqual(got, [])
+        self.assertEqual(relay.refusals, {"c": "not yours"})
 
     def test_a_handler_that_raises_does_not_end_the_link(self):
         relay = self.transport()
 
-        def bad(topic, payload):
+        def bad(payload):
             raise RuntimeError("no")
 
-        relay.subscribe("cmd/gsu/x", bad)
+        relay.on_command(bad)
         relay._on_message(1, json.dumps(
-            {"topic": "cmd/gsu/x", "payload": {"kind": "x"}}).encode())
+            {"stream": "c", "payload": {"kind": "x"}}).encode())
         # Still usable: one bad command must not take the transport down.
         self.assertEqual(relay.refusals, {})
 
     def test_malformed_frames_are_ignored(self):
         relay = self.transport()
-        for frame in (b"not json", b"[]", b'{"topic": 1}', b'{"payload": {}}'):
+        for frame in (b"not json", b"[]", b'{"stream": 1}', b'{"payload": {}}',
+                      b'{"stream": "c"}', b'{"stream": "c", "payload": 5}'):
             relay._on_message(1, frame)   # must not raise
 
     def test_a_refusal_is_reported_rather_than_retried(self):
@@ -1504,10 +1546,9 @@ class RelayTransportTests(unittest.TestCase):
         # publish, and they are completely different problems.
         relay = self.transport()
         relay._on_message(1, json.dumps({
-            "type": "refused", "topic": "gsu/other/telemetry",
-            "reason": "not yours",
+            "type": "refused", "stream": "e", "reason": "not yours",
         }).encode())
-        self.assertEqual(relay.refusals, {"gsu/other/telemetry": "not yours"})
+        self.assertEqual(relay.refusals, {"e": "not yours"})
 
     def test_it_will_not_send_a_credential_over_plaintext(self):
         # Everywhere else in the station refuses to fall back to an unverified

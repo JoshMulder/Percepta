@@ -50,10 +50,6 @@ STATION = "29ed8568-999e-4725-8daa-3ee3cea1751e"
 def broker() -> Broker:
     return Broker(
         url="rediss://broker:6380/0",
-        username=f"gsu:{STATION}",
-        telemetry_topic=f"gsu/{STATION}/telemetry",
-        audio_topic=f"gsu/{STATION}/audio",
-        command_topic=f"cmd/gsu/{STATION}",
     )
 
 
@@ -404,46 +400,19 @@ class PreviewCacheTests(AgentFixture):
         self.agent.sensor_lease.release(token)
 
 
-class RefusedChannelTests(AgentFixture):
-    """A channel the broker will not grant is not a link that is down.
-
-    The station no longer publishes video, so there is no longer a video
-    channel for a broker to refuse — but this transport behaviour is not about
-    video and was only ever tested through it. Keeping it: the regression it
-    guards (one ungranted topic closing the whole client) would take telemetry
-    down, and telemetry has not gone anywhere.
-    """
-
-    def test_a_refused_publish_does_not_take_the_uplink_down(self):
-        # The regression this exists for: a NOPERM used to be handled as a
-        # broken connection, so one ungranted topic closed the client and backed
-        # the whole uplink off — telemetry would start dropping because video
-        # was not permitted.
-        import redis
-
-        from gsu import tls
-        from gsu.transport import build_transport
-
-        transport = build_transport(
-            "redis://127.0.0.1:6399/0", username=f"gsu:{STATION}",
-            password="secret", trust=tls.Trust(),
-        )
-
-        class Client:
-            def publish(self, topic, payload):
-                if topic.endswith("/video"):
-                    raise redis.exceptions.NoPermissionError(
-                        "NOPERM this user has no permissions to access one of "
-                        "the channels used as arguments"
-                    )
-                return 1
-
-        transport._ensure_client = lambda: Client()
-        self.assertTrue(transport.publish(f"gsu/{STATION}/telemetry", {"kind": "power"}))
-        self.assertFalse(transport.publish(f"gsu/{STATION}/video", {"kind": "video"}))
-        self.assertTrue(transport.connected, "the link is fine; one topic is not")
-        self.assertIn(f"gsu/{STATION}/video", transport.refusals)
-        self.assertTrue(transport.publish(f"gsu/{STATION}/telemetry", {"kind": "power"}))
+# RefusedChannelTests is gone with the Redis transport.
+#
+# It guarded a real regression — a NOPERM on one channel was handled as a
+# broken connection, so an ungranted topic closed the whole client and backed
+# the uplink off, and telemetry started dropping because *video* was not
+# permitted. Both the transport and the per-topic grant are gone: contract 2.0
+# has a station publish a one-letter stream code it cannot get wrong, and the
+# platform answers an unpermitted one with a `refused` frame while leaving the
+# socket up.
+#
+# The property survives and is tested where it now lives:
+# `test_station.RelayTransportTests.test_a_refusal_is_reported_rather_than_retried`
+# and `test_a_refusal_is_matched_before_a_command`.
 
 
 # TopicTests is gone with `resolve_video_topic`. It covered a helper that

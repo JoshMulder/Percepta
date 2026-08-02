@@ -74,7 +74,8 @@ class CommandRouter:
         log.info("Applied %s -> %s", kind, effect)
         return True
 
-def build_handlers(radio, light, on_config, stream=None) -> dict[str, Handler]:
+def build_handlers(radio, light, on_config, stream=None,
+                   events=None) -> dict[str, Handler]:
     """Wire the contract's commands to the things that carry them out.
 
     Every entry here has a matching field in a telemetry payload — that pairing
@@ -87,6 +88,21 @@ def build_handlers(radio, light, on_config, stream=None) -> dict[str, Handler]:
     changed, and the station's log says why. Registering a handler that quietly
     does nothing would produce exactly the silence this file exists to prevent.
     """
+
+    def events_ack(payload: dict) -> str:
+        """`events.ack`: the platform has the batch; stop re-sending it.
+
+        Registered unconditionally, unlike the device commands above, and the
+        difference is deliberate. A missing device is a station that honestly
+        cannot carry out an instruction, and falling through to the
+        ignored-command path is the truthful answer. A missing event sender is
+        this station not having finished starting up, and an acknowledgement
+        dropped on that basis is a batch delivered for ever.
+        """
+        if events is None:
+            return "no event sender yet"
+        events.on_ack(payload.get("through_seq"))
+        return f"through seq {payload.get('through_seq')}"
 
     def tune(payload: dict) -> str:
         radio.tune(int(payload["freq_hz"]))
@@ -145,7 +161,7 @@ def build_handlers(radio, light, on_config, stream=None) -> dict[str, Handler]:
         # Reported as light.on only once the hardware has actually done it.
         return f"requested {'on' if payload['on'] else 'off'}"
 
-    handlers: dict[str, Handler] = {}
+    handlers: dict[str, Handler] = {"events.ack": events_ack}
     if radio is not None:
         handlers.update({
             "radio.tune": tune,

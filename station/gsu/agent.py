@@ -33,6 +33,7 @@ from . import AGENT_VERSION, clock, tls
 from .camera.ownership import SensorLease
 from .commands import CommandRouter, build_handlers
 from .config import AgentConfig, SiteConfig
+from .events import EventSender
 from .credentials import CredentialStore, Enrolment
 from .devices.altitude import BarometricReference
 from .devices.inventory import Inventory
@@ -123,6 +124,7 @@ class Agent:
         self.enrolment: Enrolment | None = None
         self.transport: Transport | None = None
         self.router: CommandRouter | None = None
+        self.events: EventSender | None = None
         self.renewer: Renewer | None = None
 
         # Devices exist before enrolment does. A box waiting for a technician to
@@ -689,12 +691,21 @@ class Agent:
                     secret=enrolment.credential.secret,
                     trust=self.trust,
                 )
-            except tls.Refusal as exc:
+            except (tls.Refusal, ValueError) as exc:
                 # Refusing to publish is the correct outcome, and everything
                 # below still happens: sensing, recording, local alerting and
                 # credential renewal are unaffected, and `_publish` already
                 # returns False when there is no transport. The one thing that
                 # must not happen is connecting anyway.
+                #
+                # `ValueError` is here for a URL scheme no transport speaks —
+                # a `rediss://` left in an environment file after 2.0, most
+                # likely. That is a deployment mistake rather than a trust
+                # decision, but the right answer is identical and the wrong
+                # answer would be worse: an unhandled exception here takes down
+                # a box that is otherwise sensing, recording and alerting
+                # perfectly well, over a setting nobody can correct until
+                # somebody drives out to it.
                 self.transport = None
                 self.health.raise_condition("uplink.refused", "critical", str(exc))
                 self.store.record_event("uplink.refused", "critical", str(exc))
@@ -706,8 +717,11 @@ class Agent:
                 self.health.clear("uplink.refused")
                 self.transport.start()
 
+            if self.transport is not None:
+                self.events = EventSender(self.store, self.transport.publish)
             handlers = build_handlers(
                 self.radio, self.light, self._apply_config, self.stream,
+                self.events,
             )
             self.router = CommandRouter(handlers)
             if self.transport is not None:
@@ -782,6 +796,7 @@ class Agent:
                     log.debug("Transport close failed during reset.", exc_info=True)
                 self.transport = None
             self.router = None
+            self.events = None
             self.enrolment = None
             self._credential_mtime = None
 
@@ -865,6 +880,7 @@ class Agent:
     def _on_command(self, payload: dict) -> None:
         if self.router is not None:
             self.router.dispatch(payload)
+
 
     def _apply_config(self, payload: dict) -> str:
         """`config.set`: apply, persist, and report the new version.
@@ -1097,6 +1113,14 @@ class Agent:
         # Every stream reports on its own cadence whether or not it has a
         # source. A stream with none says so explicitly; going quiet is what a
         # failed station looks like, and the console cannot tell the two apart.
+        # Events go first, and on their own schedule rather than this tick's.
+        # They are the only thing here that cannot be dropped, so they get the
+        # link before the telemetry that can — and a station coming back from
+        # an outage drains its backlog one acknowledged batch at a time rather
+        # than arriving as a flood.
+        if self.events is not None:
+            self.events.pump()
+
         reports = self._reports()
         if contacts is not None:
             # An empty list here is a real statement: the receiver is alive and
@@ -1575,6 +1599,11 @@ class Agent:
                     time.monotonic() - self._offline_since, 1
                 ) if self._offline_since else 0.0,
             },
+            # Rising `events_pending` is the one delivery fault this contract
+            # calls out by name: telemetry dropping is normal and expected,
+            # events accumulating is a channel that has stopped draining.
+            "events_pending": self.events.pending if self.events else 0,
+            "events_dropped": self.events.dropped if self.events else 0,
             # Two things a remote box cannot be asked in person: whether its
             # link is verified, and whether its clock is disciplined by
             # anything. Both are cheap to state and expensive to guess.
