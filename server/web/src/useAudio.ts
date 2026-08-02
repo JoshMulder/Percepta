@@ -5,6 +5,21 @@ import type { AudioPayload } from "./types";
 export type AudioState = "off" | "blocked" | "playing" | "unsupported";
 
 /**
+ * How far ahead of the clock playback is scheduled.
+ *
+ * The station publishes audio about eight times a second, and each message
+ * carries roughly 120 ms as a handful of 20 ms Opus packets. So the buffer is
+ * refilled in bursts, and the lead has to cover a whole burst interval plus
+ * whatever jitter the link adds — otherwise the queue drains between bursts
+ * and every underrun costs an audible gap.
+ *
+ * 300 ms is about two and a half bursts. It is pure latency, and it does not
+ * matter here: this is a monitoring console, not a duplex radio, and being a
+ * third of a second behind is imperceptible next to speech that stutters.
+ */
+const BURST_LEAD_S = 0.3;
+
+/**
  * Airband audio playback.
  *
  * Two engines, chosen at runtime:
@@ -192,12 +207,21 @@ export function useAudio(enabled: boolean) {
     source.buffer = buffer;
     source.connect(gain);
 
-    // Lead sized from the chunk, for the same reason as the worklet: a fixed
-    // 140 ms was ported from a client that received small chunks many times a
-    // second, and this station sends one second of audio once a second. A lead
-    // shorter than a chunk underruns on the first scrap of jitter and then
-    // re-establishes the same too-short lead, so it never recovers.
-    const lead = Math.max(0.14, buffer.duration * 1.25);
+    // Lead sized from the *arrival* interval, not from the chunk.
+    //
+    // This read `max(0.14, duration * 1.25)`, written when a chunk was a whole
+    // second of audio. Under Opus a chunk is one 20 ms packet — the decoder
+    // emits one `AudioData` per packet — so the formula returns its 140 ms
+    // floor, while frames arrive in bursts every 125 ms. The queue is then
+    // barely one burst deep, any jitter underruns it, and the branch below
+    // jumps the cursor forward and opens an audible gap. Continuously, which
+    // is choppy speech rather than an occasional click.
+    //
+    // The lead has to cover an arrival interval plus the jitter on it, and it
+    // is latency nobody is measuring against anything: this is a monitoring
+    // console, not a duplex radio, and a third of a second behind real time is
+    // imperceptible next to speech that stutters.
+    const lead = Math.max(BURST_LEAD_S, buffer.duration * 1.25);
     const now = ctx.currentTime;
     if (nextTimeRef.current < now + 0.02) nextTimeRef.current = now + lead;
     source.start(nextTimeRef.current);
