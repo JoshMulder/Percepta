@@ -20,7 +20,6 @@ import logging
 log = logging.getLogger(__name__)
 
 _APPLICATION_VOIP = 2048
-_SET_BITRATE = 4002
 _MAX_PACKET = 1024
 
 #: 20 ms, which is Opus's default and the value the contract states.
@@ -39,7 +38,7 @@ class Encoder:
     followed silence, which costs bitrate and sounds worse.
     """
 
-    def __init__(self, rate: int, channels: int = 1, bitrate: int = 24000) -> None:
+    def __init__(self, rate: int, channels: int = 1) -> None:
         name = ctypes.util.find_library("opus") or "libopus.so.0"
         try:
             self._lib = ctypes.CDLL(name)
@@ -74,8 +73,20 @@ class Encoder:
         if not self._state or error.value != 0:
             raise OpusUnavailable(
                 f"opus_encoder_create failed at {rate} Hz: error {error.value}")
-        self._lib.opus_encoder_ctl(self._state, _SET_BITRATE,
-                                   ctypes.c_int32(bitrate))
+        # **The bitrate is left at Opus's own default, deliberately.**
+        #
+        # Setting it means `opus_encoder_ctl`, which is variadic — and ctypes
+        # cannot call a variadic function correctly without knowing which
+        # arguments are variadic. On x86_64 that is survivable, because fixed
+        # and variadic arguments share a calling convention. On aarch64 they do
+        # not, and the call corrupts the stack: the agent segfaulted (exit 139)
+        # about twenty seconds into every run on a Pi 5, restarting forever,
+        # while passing every test on an x86_64 development machine.
+        #
+        # The default is what the measurement was taken against anyway —
+        # 400 ms of speech encoded to 21.7 kbit/s, inside the contract's stated
+        # 16-24. Nothing is bought by setting it, and a variadic ctypes call is
+        # a hazard on every architecture this has not been run on.
 
     def encode(self, pcm: bytes) -> list[bytes]:
         """PCM16 mono to Opus packets, one per 20 ms.

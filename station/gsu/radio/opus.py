@@ -40,13 +40,6 @@ log = logging.getLogger("gsu.radio.opus")
 #: what VOIP mode is tuned for.
 _APPLICATION_VOIP = 2048
 
-#: `OPUS_SET_BITRATE_REQUEST`.
-_SET_BITRATE = 4002
-
-#: What the contract's bandwidth figures assume. Opus is VBR by default and
-#: will sit well under this on a quiet channel.
-DEFAULT_BITRATE = 24000
-
 #: Frame length. 20 ms is Opus's default and the contract's stated value; it is
 #: also the point where the codec's own framing overhead stops mattering.
 FRAME_MS = 20
@@ -83,7 +76,6 @@ def _load() -> ctypes.CDLL:
     library.opus_encode.restype = ctypes.c_int32
     library.opus_encoder_destroy.argtypes = [ctypes.c_void_p]
     library.opus_encoder_destroy.restype = None
-    library.opus_encoder_ctl.restype = ctypes.c_int
     return library
 
 
@@ -97,8 +89,7 @@ class Encoder:
     that away and cost bitrate for nothing.
     """
 
-    def __init__(self, rate: int, channels: int = 1,
-                 bitrate: int = DEFAULT_BITRATE) -> None:
+    def __init__(self, rate: int, channels: int = 1) -> None:
         try:
             self._lib = _load()
         except OSError as exc:
@@ -120,8 +111,20 @@ class Encoder:
             raise OpusUnavailable(
                 f"opus_encoder_create failed for {rate} Hz "
                 f"({channels} channel(s)): error {error.value}")
-        self._lib.opus_encoder_ctl(self._state, _SET_BITRATE,
-                                   ctypes.c_int32(bitrate))
+        # **The bitrate is left at Opus's own default, deliberately.**
+        #
+        # Setting it means `opus_encoder_ctl`, which is variadic — and ctypes
+        # cannot call a variadic function correctly without knowing which
+        # arguments are variadic. On x86_64 that is survivable, because fixed
+        # and variadic arguments share a calling convention. On aarch64 they do
+        # not, and the call corrupts the stack: the agent segfaulted (exit 139)
+        # about twenty seconds into every run on a Pi 5, restarting forever,
+        # while passing every test on an x86_64 development machine.
+        #
+        # The default is what the measurement was taken against anyway —
+        # 400 ms of speech encoded to 21.7 kbit/s, inside the contract's stated
+        # 16-24. Nothing is bought by setting it, and a variadic ctypes call is
+        # a hazard on every architecture this has not been run on.
 
     def encode(self, pcm: bytes) -> list[bytes]:
         """PCM16 mono to a list of Opus packets, one per 20 ms.
