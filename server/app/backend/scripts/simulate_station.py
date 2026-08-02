@@ -31,6 +31,7 @@ from sqlalchemy import select
 from backend.core.config import settings
 from backend.database.models.ground_station import GroundStation
 from backend.database.session import PrivilegedSessionLocal
+from backend.scripts import _opus as opus
 from backend.services.airband_demo import AUDIO_RATE, AirbandDemo, channel_floor_db
 from backend.realtime.bus import command_channel
 from backend.realtime.groups import status_group
@@ -225,6 +226,9 @@ class StationSim:
         #: unasked would be the exact behaviour the leases exist to prevent,
         #: and a reference implementation that did it would teach it.
         self.audio_until = 0.0
+        # Held for the life of the simulator, like a real station's:
+        # Opus carries prediction state between packets.
+        self.opus = opus.Encoder(AUDIO_RATE)
         self.spectrum_until = 0.0
         #: `video.start` is answered honestly rather than ignored: there is no
         #: camera here, and "unavailable, and why" is what a station with no
@@ -441,16 +445,29 @@ class StationSim:
         # lease was added to prevent. A station that has never been asked sends
         # no audio at all.
         #
-        # Base64 in JSON rides the existing fan-out; binary frames and Opus
-        # would cut it further and are the obvious next step.
+        # Opus, raw packets, no container — `contract/schemas/audio.schema.json`.
+        # This used to send base64 PCM16, which contract 2.0 deleted: about
+        # 384 kbit/s per listener against 16–24 for Opus, on a link somebody
+        # pays for by the gigabyte. Being wrong here is worse than being wrong
+        # elsewhere, because `contract/NOTES.md` designates this the reference
+        # implementation and anybody copying it inherits the mistake.
+        #
+        # At least four packets per frame, which the schema requires: fewer is
+        # a JSON envelope per 80 ms of speech, and most of the saving spent on
+        # punctuation.
         if (rssi > threshold or self.monitor) and self.t < self.audio_until:
-            events.append(
-                ("audio", {
-                    "kind": "audio",
-                    "rate": AUDIO_RATE,
-                    "pcm": base64.b64encode(AirbandDemo.to_pcm16(audio)).decode(),
-                })
-            )
+            packets = self.opus.encode(AirbandDemo.to_pcm16(audio))
+            if len(packets) >= 4:
+                events.append(
+                    ("audio", {
+                        "kind": "audio",
+                        "codec": "opus",
+                        "rate": AUDIO_RATE,
+                        "channels": 1,
+                        "frame_ms": opus.FRAME_MS,
+                        "packets": [base64.b64encode(p).decode() for p in packets],
+                    })
+                )
 
         if self.t >= self.health_due:
             self.health_due = self.t + HEALTH_SECONDS

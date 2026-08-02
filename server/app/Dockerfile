@@ -20,6 +20,19 @@ WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
+# libopus, for the station simulator only. Contract 2.0 carries airband audio
+# as Opus, and `contract/NOTES.md` designates the simulator the reference
+# implementation — so it publishing base64 PCM would be teaching the mistake
+# rather than merely making it. Bound through ctypes in
+# `backend/scripts/_opus.py`, which is a second binding by design: neither side
+# of the contract reads the other's code, and two independent implementations
+# of the same four functions is what keeps the simulator honest.
+#
+# The library, not the tools. Nothing here shells out to opusenc.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libopus0 \
+ && rm -rf /var/lib/apt/lists/*
+
 COPY app/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

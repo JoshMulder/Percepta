@@ -245,7 +245,7 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
     const payload = message.payload as { kind?: string };
     if (payload.kind === "audio") {
       const a = message.payload as AudioPayload;
-      audioRef.current.push(a.pcm, a.rate);
+      audioRef.current.push(a);
       return;
     }
     if (payload.kind && payload.kind in DEFAULT_CADENCE_S) {

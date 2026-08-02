@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import type { AudioPayload } from "./types";
+
 export type AudioState = "off" | "blocked" | "playing" | "unsupported";
 
 /**
@@ -35,6 +37,12 @@ export function useAudio(enabled: boolean) {
   const gainRef = useRef<GainNode | null>(null);
   // Scheduled-player cursor: when the next chunk should start.
   const nextTimeRef = useRef(0);
+  // The Opus decoder, its running presentation timestamp, and the rate it was
+  // configured for. Declared with the other refs rather than beside the
+  // decode logic so the teardown below can close it.
+  const decoderRef = useRef<AudioDecoder | null>(null);
+  const timestampRef = useRef(0);
+  const rateRef = useRef(0);
   const [engine, setEngine] = useState<"worklet" | "scheduled" | null>(null);
   const [state, setState] = useState<AudioState>("off");
 
@@ -98,6 +106,9 @@ export function useAudio(enabled: boolean) {
 
     return () => {
       cancelled = true;
+      decoderRef.current?.close();
+      decoderRef.current = null;
+      rateRef.current = 0;
       void ctxRef.current?.close();
       ctxRef.current = null;
       nodeRef.current = null;
@@ -139,14 +150,16 @@ export function useAudio(enabled: boolean) {
     void ctxRef.current?.resume().catch(() => {});
   }, []);
 
-  const push = useCallback((pcmBase64: string, rate: number) => {
+  /**
+   * Hand decoded samples to whichever engine is running.
+   *
+   * Split out of `push` when audio became Opus: decoding is asynchronous and
+   * arrives on the decoder's callback, so the playback half can no longer live
+   * in the same synchronous call as the frame that produced it.
+   */
+  const play = useCallback((samples: Float32Array, rate: number) => {
     const ctx = ctxRef.current;
     if (!ctx || ctx.state === "closed") return;
-
-    const bytes = Uint8Array.from(atob(pcmBase64), (c) => c.charCodeAt(0));
-    const pcm = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.length >> 1);
-    const samples = new Float32Array(pcm.length);
-    for (let i = 0; i < pcm.length; i += 1) samples[i] = pcm[i] / 32768;
 
     const node = nodeRef.current;
     if (node) {
@@ -191,7 +204,110 @@ export function useAudio(enabled: boolean) {
     nextTimeRef.current += buffer.duration;
   }, []);
 
+  /**
+   * Opus in, samples out, through WebCodecs.
+   *
+   * The contract carries **raw Opus packets with no container** — the
+   * parameters a container would hold are stated in the same JSON frame — and
+   * `AudioDecoder` is the one browser API that takes exactly that. Anything
+   * else would mean shipping a wasm decoder to un-wrap a format that was never
+   * wrapped.
+   *
+   * One decoder for the life of the stream, not one per frame. Opus carries
+   * prediction state between packets, so a decoder rebuilt per frame decodes
+   * each one as if it followed silence — which is audible, and wasteful.
+   *
+   * Configured lazily from the first frame that arrives, because the station
+   * states its own rate and channel count and this console does not get to
+   * assume them.
+   */
+  const decoderFor = useCallback((frame: AudioPayload): AudioDecoder | null => {
+    if (decoderRef.current && rateRef.current === frame.rate) {
+      return decoderRef.current;
+    }
+    if (typeof AudioDecoder === "undefined") {
+      // Safari, and Firefox until recently. Reported rather than failed into
+      // silence: an operator who cannot hear a transmission needs to know it
+      // is their browser and not the site.
+      setState("unsupported");
+      return null;
+    }
+    decoderRef.current?.close();
+    timestampRef.current = 0;
+    rateRef.current = frame.rate;
+
+    const decoder = new AudioDecoder({
+      output: (data) => {
+        // `AudioData` is planar float32 for Opus. One channel is all this
+        // contract carries, and taking channel 0 of a stereo frame would be
+        // wrong rather than merely lossy — so it is asserted by the schema
+        // and simply read here.
+        const samples = new Float32Array(data.numberOfFrames);
+        try {
+          data.copyTo(samples, { planeIndex: 0, format: "f32-planar" });
+          play(samples, data.sampleRate);
+        } finally {
+          // Not garbage collected. A decoder whose outputs are never closed
+          // stalls once its internal pool is exhausted, and the symptom is
+          // audio that works for a few seconds and then stops for good.
+          data.close();
+        }
+      },
+      error: () => {
+        // A corrupt packet must not kill the stream. Dropping the decoder
+        // means the next frame builds a fresh one, which costs a moment of
+        // prediction state and nothing else.
+        decoderRef.current?.close();
+        decoderRef.current = null;
+        rateRef.current = 0;
+      },
+    });
+    decoder.configure({
+      codec: "opus",
+      sampleRate: frame.rate,
+      numberOfChannels: frame.channels || 1,
+    });
+    decoderRef.current = decoder;
+    return decoder;
+  }, [play]);
+
+  const push = useCallback((frame: AudioPayload) => {
+    const ctx = ctxRef.current;
+    if (!ctx || ctx.state === "closed") return;
+    if (frame.codec !== "opus") {
+      // Dropped knowingly. The contract fixes the codec, so this is a station
+      // ahead of this console rather than a fault — and playing unknown bytes
+      // as samples is a burst of noise into a room.
+      return;
+    }
+    const decoder = decoderFor(frame);
+    if (!decoder || decoder.state !== "configured") return;
+
+    const perPacket = (frame.frame_ms || 20) * 1000;   // microseconds
+    for (const packet of frame.packets ?? []) {
+      const bytes = Uint8Array.from(atob(packet), (c) => c.charCodeAt(0));
+      decoder.decode(new EncodedAudioChunk({
+        // Opus has no inter-frame dependency of the kind video does: every
+        // packet is decodable on its own, and marking them `key` is what lets
+        // playback start mid-transmission rather than waiting for something
+        // that never comes.
+        type: "key",
+        timestamp: timestampRef.current,
+        data: bytes,
+      }));
+      timestampRef.current += perPacket;
+    }
+  }, [decoderFor]);
+
   const flush = useCallback(() => {
+    // The decoder goes too. It holds prediction state for the channel that was
+    // just left, and the buffer is flushed on retune precisely because playing
+    // out the previous channel after the operator has moved is worse than a
+    // gap — decoding it would be the same mistake one layer down.
+    decoderRef.current?.close();
+    decoderRef.current = null;
+    rateRef.current = 0;
+    timestampRef.current = 0;
     nodeRef.current?.port.postMessage({ cmd: "flush" });
     // Scheduled path: nothing already queued can be unscheduled cheaply, so the
     // cursor is reset and the next chunk starts fresh.

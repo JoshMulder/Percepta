@@ -85,9 +85,18 @@ export type ServerMessage =
 /** Telemetry payloads, discriminated by `kind`. */
 export interface AudioPayload {
   kind: "audio";
+  /** Always `"opus"` today. Carried rather than assumed so a frame in a codec
+   *  this console cannot decode is dropped knowingly instead of played as
+   *  noise. */
+  codec: string;
   rate: number;
-  /** Base64 int16 little-endian PCM. Only sent while the squelch is open. */
-  pcm: string;
+  channels: number;
+  /** Milliseconds of audio per packet. Opus's own default is 20. */
+  frame_ms: number;
+  /** Base64 Opus packets, raw and with no container — the parameters that
+   *  would normally live in one are the fields above. Only sent while the
+   *  squelch is open *and* a lease is live. */
+  packets: string[];
 }
 
 /** One MJPEG frame. Whole independent frames rather than an encoded stream:
