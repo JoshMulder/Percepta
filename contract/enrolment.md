@@ -79,11 +79,17 @@ recoverable would mean the operator could impersonate a customer's station. The
 cost is that an accidental re-claim cuts off a box that had already succeeded,
 which requires someone to physically re-enter the code.
 
-**Claim.** The box sends the token to the enrolment endpoint — plus its public
-key on the mTLS path (§3), which the platform accepts and ignores while
-credentials are bearer secrets, so the station side can send it from the start.
-The platform verifies the token, records the credential against the station,
-and returns everything in §4.
+**Claim.** The box sends the token to the enrolment endpoint. The platform
+verifies it, records the credential against the station, and returns everything
+in §4.
+
+`public_key` is **omitted in this version.** It is reserved for the mTLS path
+(§3) and the platform ignores it, so sending one is harmless — but there is no
+key type, no CSR endpoint and no certificate in the response to send it
+*for*, and a station generating a keypair today would be guessing which
+algorithm will eventually be signed. §2 and §4 previously disagreed about this,
+one inviting a station to send it from the start and the other saying to leave
+it out.
 
 **Operate.** The station authenticates with its credential on every connection.
 The broker ACL pins it to its own channels.
@@ -144,7 +150,7 @@ technician on site.
                                      // comparing - see below - so the station
                                      // sends it unaltered and never has to
                                      // guess the form
-  "public_key": "…",                 // PEM; omitted while using bearer credentials
+  "public_key": null,                // reserved for mTLS (§3); omit in 1.0
   "hardware": {                      // for the fleet inventory, not for trust
     "model": "…",
     "serial": "…",
@@ -237,7 +243,14 @@ technician on site.
                                      // on site can tell at a glance that the
                                      // coordinates are where they stand.
   },
-  "config_version": 3,
+  "config_version": 3,               // what the platform has recorded for this
+                                     // station, for display. The station does
+                                     // NOT adopt it as its own generation - it
+                                     // owns its configuration (§7) and reports
+                                     // what it is actually running in
+                                     // health.config_version. Two copies of
+                                     // one number is the thing §7 forbids for
+                                     // position, and it applies here too.
   "contract_version": "1.0"          // which version of this contract the
                                      // platform speaks. Stated so a station
                                      // learns it at the one moment both sides
@@ -255,18 +268,61 @@ Failures, and the response the technician sees:
 | Cause | Status | Shown as |
 |---|---|---|
 | Token unknown, expired or revoked | `404` | "This code is not valid. Ask for a new one." |
-| Station already in service, and this code predates that | `409` | "This station is already set up." |
+| Station already enrolled, and this code was issued before that | `409` | "This station is already set up." |
 | Too many attempts from one source | `429` | "Too many attempts. Wait a minute and try again." |
 | Malformed request | `422` | — |
+| Platform fault, or no answer at all | `5xx`, timeout, reset | "Could not reach the platform. Retrying." |
+
+**"Already enrolled" means the station holds a credential, and the comparison
+is against the token's issue time.** A code issued *before* the station entered
+service is a stale one somebody found written down, and claiming it would cut
+off working hardware — that is the `409`. A code issued *after* is an admin
+deliberately preparing for a replacement box, and it is allowed through (§2, §8).
+Retrying the same code that did the enrolling is always allowed, which is what
+makes enrolment resumable.
+
+**5xx, timeouts and connection failures are retryable and are not the
+technician's problem.** A station retries them itself with backoff, and must
+not surface "This code is not valid" for any of them — that message sends
+somebody to fetch a replacement code that will fail in exactly the same way.
+Only `404` means the code is wrong. Retrying after a timeout is safe: a claim
+that may or may not have landed can be repeated (§2).
 
 **`429` is retryable and must be treated as such.** It is the one failure here
 that clears on its own, and a station that gave up on it would strand the
 technician the rate limit was never aimed at. Back off and try again.
 
 **The platform canonicalises the token; the station sends what was typed.**
-Upper-case it and discard everything that is not a letter or digit, then
-compare. So `k7mp 3qrt-9wxz` and `K7MP-3QRT-9WXZ` are the same code, because a
-person reading one aloud to another person will produce both.
+Discard every character outside `A–Z`, `a–z` and `0–9`, upper-case the rest
+with an ASCII mapping, then compare. So `k7mp 3qrt-9wxz` and `K7MP-3QRT-9WXZ`
+are the same code, because a person reading one aloud to another person will
+produce both.
+
+**ASCII, deliberately, and stated because "letter or digit" is not a
+definition.** Under a Unicode reading, `ı` upper-cases to `I`, `ß` to `SS` and
+`ﬁ` to `FI` — non-ASCII input landing *on* token characters — while `Ｋ`, `K`
+(U+212A) and `Ⅸ` survive as distinct and match nothing. Upper-casing stops
+being length-preserving, so a length check before canonicalisation is a
+different check from one after. None of that widens the guess space; all of it
+makes the input-to-canonical map implementation-defined, which is the one
+property this rule exists to fix. A locale-sensitive upper-case is the same
+trap: under a Turkish collation `i` becomes `İ` and every code containing an
+`i` stops matching, so canonicalise in the application and never in a database
+collation.
+
+**Reject anything longer than 64 characters before canonicalising it.** This
+endpoint is unauthenticated and its rate limiting fails open by design, so a
+megabyte of "token" is free CPU for whoever sends it.
+
+**Tokens are 12 characters from a 30-character alphabet — about 58 bits.**
+That figure is load-bearing: it is what the security of this endpoint actually
+rests on, since rate limiting fails open. It is stated here because a
+conforming implementer choosing hex would get 48 bits, and digits 40, while
+satisfying every other word of this document. Use an alphabet that excludes
+the characters people confuse when reading aloud — `I`, `L`, `O`, `U`, `0`
+and `1` — and store only a hash **keyed with a secret the database does not
+contain**: 58 bits is beyond guessing at a live endpoint and well within reach
+of anyone who has the table and an unkeyed digest.
 
 Normalising in exactly one place is the point. If both sides did it they could
 do it differently, and if neither did, a station that helpfully stripped the
@@ -288,11 +344,38 @@ would cut off working hardware.
 ### `POST /api/enrol/renew`
 
 Authenticated with the current credential as `Authorization: Bearer <secret>`.
-Returns the same shape as a claim. The old credential remains valid for an
-overlap period (§6).
+The request body is `{}` — everything needed is in the header. A station may
+repeat the `hardware` block to refresh the fleet inventory; the platform
+accepts and ignores anything else.
+
+Returns the same shape as a claim. The old credential remains valid for the
+overlap window (§6).
+
+**Apply `credential` and `broker`. Never apply `station`.**
+
+That sentence is load-bearing in both directions and neither is obvious:
+
+- **`broker` must be applied**, because it is the only route by which a
+  station learns a new CA. The private CA expires, every station is pinned to
+  it, and a pinned station refuses rather than downgrades — so a fleet that
+  treats renewal as credential-only goes dark within the same hour, cannot be
+  reached to be told, and the field that would explain it (`security.tls_failed`)
+  can only travel over the connection that is refusing. The same path carries
+  a moved broker, a changed `media_url`, and a corrected timezone.
+- **`station` must not be applied**, because position flows the other way
+  (§7). The platform echoes back whatever `health.position` last told it, so a
+  station that re-applies it on every renewal quietly reverts an installer's
+  correction — visible only as a map pin that drifts back weeks later.
 
 The station does **not** send its own id. It is derived from the credential, so
 a box holding a valid secret still cannot assert which station it is.
+
+**A credential that has expired may still renew, for 7 days past expiry.**
+Without that window §6 is decorative: a station unreachable for a fortnight
+returns holding a secret that `/renew` rejects and no token for `/enrol`, and
+the only remedy is the site visit the whole section exists to prevent. An
+expired-but-unrevoked credential authenticates for renewal and for nothing
+else — it cannot publish, and a revoked one is refused at any age.
 
 ### `GET /api/enrol/status`
 
@@ -331,6 +414,14 @@ The design target is: **power it on, enter a code, watch for a green light.**
   Anything a human retypes is something a human eventually mistypes, and this is
   the field where a mistake attaches a box to the wrong customer.
 
+**The platform's address is configuration on the box, not part of the code.**
+It is set when the box is built or imaged and is shown, read-only, on the setup
+page — there is one platform, and an address that can be retyped on a roof is a
+station that enrols against nothing. The enrolment token carries no address and
+is not parsed for one. This is stated because everything else about the first
+HTTP request is specified here and its destination was not, leaving each side
+to assume a different provisioning story.
+
 **How the trust roots get onto the box.** The broker's CA bootstraps itself:
 `broker.ca_pem` arrives inside the enrolment response and is persisted beside
 the credential. The API is the chicken-and-egg — the first `POST /api/enrol`
@@ -358,12 +449,17 @@ credential has already expired it cannot renew either. That is a site visit.
   the network because its clock is wrong.
 - If the hardware has no battery-backed clock, this must be stated in the
   station's own docs — it changes the boot sequence.
-- **Renew early and often.** Begin at half the credential's life, retry with
-  backoff, and treat failure to renew as a health alarm reported over telemetry
-  long before it becomes an outage.
+- **Renew early and often.** Begin at `credential.renew_after`, which the
+  platform states in every enrolment and renewal response — never at a fraction
+  a station worked out for itself, which is the policy that field exists to
+  replace. Retry with backoff, and treat failure to renew as a health alarm
+  reported over telemetry long before it becomes an outage. `/status` returns
+  `renew_now`; a station that sees it true renews at once regardless of
+  `renew_after`, which is the platform's lever for bringing a renewal forward.
 - **Overlap.** A renewed credential does not instantly invalidate the previous
-  one; both work for a defined window, so a station that renews and then loses
-  power mid-swap is not locked out.
+  one: **both work for 24 hours**, so a station that renews and then loses power
+  mid-swap is not locked out. Keep the old secret until the new one has
+  successfully authenticated, and fall back to it on a 4401 within that window.
 - **Never let the platform be the only clock authority.** If the platform is
   unreachable the station keeps operating locally, and a credential nearing
   expiry with no way to renew is an alarm, not a shutdown.

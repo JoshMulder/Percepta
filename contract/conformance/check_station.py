@@ -137,6 +137,15 @@ def cadence_from(by_kind: dict[str, list[dict]]) -> dict[str, float]:
 
     `health.cadence` is authoritative per transport.md: a console deriving a
     staleness timeout must use it rather than the table, and so must this.
+
+    **Only the streams already expected are timed by it.** A station reporting
+    its `audio` or `health` cadence — which transport.md's own table invites,
+    since both appear in it — must not thereby be *demanded* to produce them:
+    audio is gated on the squelch and a lease, so a quiet band legitimately
+    produces none, and health is optional by design. An earlier version merged
+    every reported key into the expected set, so an honest station failed
+    `publishes audio` for having a quiet band, and `health` was demanded in
+    contradiction of OPTIONAL_KINDS.
     """
     cadence = dict(DEFAULT_CADENCE)
     for frame in by_kind.get("health", []):
@@ -144,6 +153,8 @@ def cadence_from(by_kind: dict[str, list[dict]]) -> dict[str, float]:
         if not isinstance(reported, dict):
             continue
         for kind, period in reported.items():
+            if str(kind) not in cadence:
+                continue
             if isinstance(period, (int, float)) and not isinstance(period, bool):
                 if period > 0:
                     cadence[str(kind)] = float(period)
@@ -281,6 +292,20 @@ def main() -> int:
             f"station speaks contract {spoken}, this harness checks "
             f"{CONTRACT_VERSION}"
         )
+
+    # Acknowledge anything the station published, so this harness does not
+    # leave it stuck. Without it the station re-sends the same batch for ever,
+    # never advances, and a run of the conformance checker becomes a reason its
+    # event backlog stopped draining.
+    acked = max(
+        (e.get("seq") for f in by_kind.get("events", [])
+         for e in (f.get("events") or []) if isinstance(e.get("seq"), int)),
+        default=None,
+    )
+    if acked is not None:
+        r.publish(cmd_channel,
+                  json.dumps({"kind": "events.ack", "through_seq": acked}))
+        notes.append(f"acknowledged events through seq {acked}")
 
     cadence = cadence_from(by_kind)
     if cadence != DEFAULT_CADENCE:

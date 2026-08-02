@@ -76,7 +76,7 @@
         "aircraft": {
           "type": "array",
           "maxItems": 500,
-          "description": "The complete current picture, not a delta. An empty array means no contacts, which is different from sending nothing - sending nothing is what a failed receiver looks like.\n\nThis is the station's most expensive unconditional stream: at 1 Hz with no lease and no gate, a busy 50-contact picture is roughly 20 kB a frame, ~150 kbit/s, ~1.5 GB a day, and it is genuinely uncompressed on the wire. See transport.md's cadence section. The cap is far above any real receiver's traffic and exists so that one station cannot hand every console watching it an unbounded array to render; a station seeing more contacts than this should send the nearest 500, which is what an operator is looking at anyway. Omitting fields with no value is worth 10-20% and costs nothing - only icao, range_km and bearing_deg are required.",
+          "description": "The complete current picture, not a delta. An empty array means no contacts, which is different from sending nothing - sending nothing is what a failed receiver looks like.\n\nThis is the station's most expensive unconditional stream: at 1 Hz with no lease and no gate, a busy 50-contact picture is roughly 20 kB a frame, ~153 kbit/s, ~1.66 GB a day measured on the wire, and it is genuinely uncompressed. See transport.md's cadence section. The cap is far above any real receiver's traffic and exists so that one station cannot hand every console watching it an unbounded array to render; a station seeing more contacts than this should send the nearest 500, which is what an operator is looking at anyway. Omitting fields with no value is worth 45-55% of the stream and costs nothing - a contact with nine real values is 161 bytes omitted against 356 nulled - so only icao, range_km and bearing_deg are required. The cap is a render bound and NOT a bandwidth one: 500 fully-populated contacts is ~1.5 Mbit/s, ten times the figure above.",
           "items": {
             "$ref": "#/$defs/aircraft"
           }
@@ -129,7 +129,7 @@
           ],
           "minimum": -90,
           "maximum": 90,
-          "description": "Null until a position has been decoded; a Mode S response alone gives none."
+          "description": "Degrees. Present on every reported contact: a return with no decoded position is counted station-side and dropped, not sent with nulls (see this object's description). The null type is retained only so a station that loses position on a contact it is still tracking has a way to say so rather than inventing one - it must then also stop claiming range_km and bearing_deg, which are derived from a position."
         },
         "longitude": {
           "type": [
@@ -525,7 +525,7 @@
         },
         "squelch_open": {
           "type": "boolean",
-          "description": "True whenever audio is flowing, including when held open by monitor."
+          "description": "True when the gate is open - a signal above the threshold, or monitor holding it. **This is the gate, not the uplink.** Audio only flows when the gate is open AND a radio.audio lease is live, so squelch_open true with no audio on the wire is the normal state of a station nobody is listening to, and not a fault. An earlier wording said 'whenever audio is flowing', which is a different claim and made the field mean two things depending on whether anyone had asked."
         },
         "auto_squelch": {
           "type": "boolean",
