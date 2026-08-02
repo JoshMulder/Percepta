@@ -19,6 +19,7 @@ import time
 from sqlalchemy import text
 
 from backend.api.broker import MAX_FRAME_BYTES as BROKER_MAX_FRAME_BYTES
+from backend.api.media import MAX_FRAME_BYTES as MEDIA_MAX_FRAME_BYTES
 from backend.core.config import settings
 from backend.database.session import privileged_engine
 
@@ -28,6 +29,17 @@ logging.basicConfig(
 logger = logging.getLogger("startup")
 
 APP_DIR = "/app"
+
+#: What each endpoint enforces for itself, imported so this file cannot claim a
+#: number the code does not. The relay's is the contract's 512 KiB; the media
+#: path's is sized for H.264. Both are authoritative for their own socket.
+RELAY_MAX_FRAME_BYTES = BROKER_MAX_FRAME_BYTES
+
+#: Slack between those caps and uvicorn's, so that a frame refused anywhere is
+#: refused by the endpoint rather than by the server. A frame in this band gets
+#: `broker.py` or `media.py` logging which station sent how many bytes and
+#: closing 1009; above it, uvicorn closes a socket it cannot describe.
+WS_HEADROOM_BYTES = 256 * 1024
 
 #: Uvicorn's websocket frame cap.
 #:
@@ -40,23 +52,20 @@ APP_DIR = "/app"
 #: station logged `frame with 3149876 bytes exceeds limit of 524288` every two
 #: seconds and no video ever flowed.
 #:
-#: So this is sized for the larger consumer, and **the relay keeps enforcing
-#: its own cap in `broker.py`**, which it did all along — this flag was only
-#: ever defence in depth for the fact that the app-level check runs *after*
-#: `receive_text()` has allocated. That protection is weakened here rather than
-#: removed: 8 MiB is still a bound, still far below uvicorn's own 16 MiB
-#: default, and an authenticated station sending one is closed at 1009 by the
-#: relay on the next line of code.
+#: So this is derived from the largest endpoint cap and deliberately sits a
+#: little above it. **Every socket now enforces its own limit in its own
+#: module** — the relay always did, and `/media/ingest` does since the flag
+#: became its only bound. This is the backstop for the fact that those checks
+#: run *after* `receive()` has allocated, and nothing more: any frame either
+#: endpoint would refuse is refused there first, where the log can name the
+#: station and the close code means something.
 #:
 #: The lesson is worth keeping: a per-app knob cannot express a per-endpoint
 #: rule, and taking the number "from the relay's own so the two cannot drift"
-#: made them agree about the wrong thing.
-WS_MAX_SIZE = 8 * 1024 * 1024
-
-#: What the relay itself enforces, unchanged and still authoritative for
-#: station frames. Imported so this file cannot claim a number the contract
-#: does not.
-RELAY_MAX_FRAME_BYTES = BROKER_MAX_FRAME_BYTES
+#: made them agree about the wrong thing. Deriving it from the widest of the
+#: per-endpoint rules is the version of "cannot drift" that holds.
+WS_MAX_SIZE = max(RELAY_MAX_FRAME_BYTES,
+                  MEDIA_MAX_FRAME_BYTES) + WS_HEADROOM_BYTES
 
 
 def wait_for_postgres(timeout: int = 60) -> None:
@@ -158,8 +167,9 @@ def main() -> None:
         port,
         "--workers",
         workers,
-        # Sized for `/media/ingest`, not for the relay — see WS_MAX_SIZE. The
-        # relay's own 512 KiB cap is enforced in broker.py and is unaffected.
+        # A backstop above every endpoint's own cap — see WS_MAX_SIZE. The
+        # relay enforces 512 KiB in broker.py and the media path 8 MiB in
+        # media.py; neither is affected by this number.
         "--ws-max-size",
         str(WS_MAX_SIZE),
         # Socket liveness, and the numbers are the contract's — the timings

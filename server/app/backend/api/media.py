@@ -48,6 +48,20 @@ router = APIRouter(tags=["media"])
 #: or find useful in a log days later.
 TICKET_SECONDS = 60
 
+#: A frame larger than this is dropped and the socket closed (1009). The same
+#: rule the relay has always had in `broker.py`, at the size *this* endpoint
+#: needs: H.264, where a multi-megabyte fMP4 fragment is ordinary and the
+#: largest seen on the bench was a little over three.
+#:
+#: Uvicorn's `--ws-max-size` is deliberately set *above* this one in
+#: `start_app.py`, and the ordering is the entire point. An app-wide limit
+#: cannot name the endpoint or the station it closed: when it tripped here the
+#: only evidence anywhere was the websockets library's own `PayloadTooBig`
+#: text, arriving at the station as a close reason and appearing in no
+#: platform log at all. That is how a 512 KiB cap on this socket stayed
+#: invisible while no video flowed.
+MAX_FRAME_BYTES = 8 * 1024 * 1024
+
 #: Issued tickets, by id. In-process for the same reason the relay is: the
 #: socket it authorises must land on this worker anyway.
 _tickets: dict[str, dict] = {}
@@ -144,6 +158,22 @@ async def media_ingest(websocket: WebSocket) -> None:
                 break
 
             data = message.get("bytes")
+            text = message.get("text") or ""
+
+            # One bound, both frame types, before either is used - a control
+            # frame is small by nature, so an oversized one is as much a bug
+            # upstream as an oversized fragment. Checked after `receive()` has
+            # already allocated, exactly as the relay's is: this cannot stop
+            # the allocation, only the socket that keeps making them.
+            size = len(data) if data is not None else len(text)
+            if size > MAX_FRAME_BYTES:
+                log.warning(
+                    "Station %s sent a %d byte media frame; the cap is %d. "
+                    "Closing.", station_id, size, MAX_FRAME_BYTES,
+                )
+                await websocket.close(code=1009)
+                return
+
             if data is not None:
                 # The first binary frame of a session is the initialisation
                 # segment. Everything after it is a media fragment.
@@ -156,7 +186,6 @@ async def media_ingest(websocket: WebSocket) -> None:
             # when a new encoder session begins and what its encoder produced -
             # the two things the relay cannot work out for itself without
             # parsing the media, which is exactly what it must not do.
-            text = message.get("text") or ""
             if text == "init":
                 # Discards the segment and fragments, and deliberately NOT the
                 # codec. The documented order is codec, then `init`, then the
