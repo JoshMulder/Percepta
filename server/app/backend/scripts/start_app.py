@@ -29,10 +29,34 @@ logger = logging.getLogger("startup")
 
 APP_DIR = "/app"
 
-#: Uvicorn's websocket frame cap, taken from the relay's own so the two cannot
-#: drift. A transport that enforces a limit at one size and allocates at
-#: another is a disagreement nothing reports.
-WS_MAX_SIZE = BROKER_MAX_FRAME_BYTES
+#: Uvicorn's websocket frame cap.
+#:
+#: **This cannot be the relay's 512 KiB, and setting it there broke video
+#: entirely.** Uvicorn applies one limit to every WebSocket on the app, and two
+#: endpoints have completely different needs: the station relay carries JSON
+#: telemetry where 512 KiB is a generous ceiling, and `/media/ingest` carries
+#: H.264 where a single fMP4 segment of three megabytes is ordinary. Sharing
+#: the relay's number closed the media socket on the first real frame — the
+#: station logged `frame with 3149876 bytes exceeds limit of 524288` every two
+#: seconds and no video ever flowed.
+#:
+#: So this is sized for the larger consumer, and **the relay keeps enforcing
+#: its own cap in `broker.py`**, which it did all along — this flag was only
+#: ever defence in depth for the fact that the app-level check runs *after*
+#: `receive_text()` has allocated. That protection is weakened here rather than
+#: removed: 8 MiB is still a bound, still far below uvicorn's own 16 MiB
+#: default, and an authenticated station sending one is closed at 1009 by the
+#: relay on the next line of code.
+#:
+#: The lesson is worth keeping: a per-app knob cannot express a per-endpoint
+#: rule, and taking the number "from the relay's own so the two cannot drift"
+#: made them agree about the wrong thing.
+WS_MAX_SIZE = 8 * 1024 * 1024
+
+#: What the relay itself enforces, unchanged and still authoritative for
+#: station frames. Imported so this file cannot claim a number the contract
+#: does not.
+RELAY_MAX_FRAME_BYTES = BROKER_MAX_FRAME_BYTES
 
 
 def wait_for_postgres(timeout: int = 60) -> None:
@@ -134,13 +158,8 @@ def main() -> None:
         port,
         "--workers",
         workers,
-        # The station relay caps a frame at 512 KiB and closes the socket on
-        # anything larger — but it checks *after* `receive_text()` has already
-        # read and allocated it. Uvicorn's own default is 16 MiB, so without
-        # this an authenticated station could force 16 MiB allocations against
-        # a cap the code believes is 512 KiB. Bounded and it needs a valid
-        # credential, so it is a hardening rather than a hole; the fix is one
-        # flag and the alternative is buffering the read ourselves.
+        # Sized for `/media/ingest`, not for the relay — see WS_MAX_SIZE. The
+        # relay's own 512 KiB cap is enforced in broker.py and is unaffected.
         "--ws-max-size",
         str(WS_MAX_SIZE),
         # Socket liveness, and the numbers are the contract's — the timings
