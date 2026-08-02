@@ -32,15 +32,15 @@ function contact(overrides: Partial<Aircraft> = {}): Aircraft {
     callsign: "ANZ759M",
     latitude: -44.53,
     longitude: 171.56,
-    altitude: 3500,
-    track: 213,
-    speed: 262,
+    altitude_m: 3500,
+    track_deg: 213,
+    speed_kt: 262,
     range_km: 34.39,
-    bearing: 130.5,
+    bearing_deg: 130.5,
     alert: false,
     altitude_type: "pressure",
     altitude_corrected_m: null,
-    vertical_speed: 1.6,
+    vertical_speed_ms: 1.6,
     emitter_type: 2,
     squawk: 5235,
     seconds_since_contact: 1,
@@ -78,7 +78,7 @@ function rowLabels(): string[] {
 
 describe("altitude, which is what the panel is for", () => {
   it("leads with it, in metres and feet", () => {
-    show({ altitude: 3500 });
+    show({ altitude_m: 3500 });
     // Both units, neither treated as the real one: this console is metric and
     // the reader is likely to think in feet.
     expect(text()).toContain("3500 m");
@@ -105,7 +105,7 @@ describe("altitude, which is what the panel is for", () => {
   });
 
   it("says so rather than showing nothing when there is no altitude", () => {
-    show({ altitude: null });
+    show({ altitude_m: null });
     expect(text()).toMatch(/Altitude not reported/i);
     expect(text()).not.toContain("NaN");
     // And emphatically not a zero, which would read as ground level.
@@ -115,7 +115,7 @@ describe("altitude, which is what the panel is for", () => {
   it("renders a genuine zero as an altitude, not as missing", () => {
     // An aircraft at the pressure datum. Rare, real, and exactly the case a
     // falsy check gets wrong.
-    show({ altitude: 0 });
+    show({ altitude_m: 0 });
     expect(text()).toContain("0 m");
     expect(text()).not.toMatch(/Altitude not reported/i);
   });
@@ -126,7 +126,7 @@ describe("the corrected altitude", () => {
     // What the receiver said and what it means against this station's
     // barometer are two facts. A panel showing only the second cannot show its
     // working, and the second is the one derived from another sensor.
-    show({ altitude: 3500, altitude_corrected_m: 3472 });
+    show({ altitude_m: 3500, altitude_corrected_m: 3472 });
     expect(text()).toContain("3500 m");
     expect(text()).toContain("3472 m");
     expect(text()).toMatch(/barometer/i);
@@ -144,7 +144,7 @@ describe("the corrected altitude", () => {
 describe("fields the aircraft did not send", () => {
   it("reads as not reported, one wording for all of them", () => {
     show({
-      speed: null, track: null, squawk: null, vertical_speed: null,
+      speed_kt: null, track_deg: null, squawk: null, vertical_speed_ms: null,
     });
     // Four absent fields, four identical statements — the component has a
     // single place that turns a null into words, and this is what keeps it
@@ -153,7 +153,7 @@ describe("fields the aircraft did not send", () => {
   });
 
   it("never turns an absent field into a zero", () => {
-    show({ speed: null, track: null, squawk: null, vertical_speed: null });
+    show({ speed_kt: null, track_deg: null, squawk: null, vertical_speed_ms: null });
     const panel = text();
     expect(panel).not.toMatch(/\b0 kt\b/);
     expect(panel).not.toContain("000°");
@@ -177,19 +177,19 @@ describe("zeros that mean something", () => {
   });
 
   it("shows a stopped aircraft as 0 kt", () => {
-    show({ speed: 0 });
+    show({ speed_kt: 0 });
     expect(text()).toContain("0 kt");
   });
 
   it("shows a due-north track as 000, not as missing", () => {
-    show({ track: 0 });
+    show({ track_deg: 0 });
     expect(text()).toContain("000°");
   });
 
   it("calls a zero vertical rate level rather than absent", () => {
     // Level flight is a fact the receiver reported. "not reported" would be a
     // different, wrong statement.
-    show({ vertical_speed: 0 });
+    show({ vertical_speed_ms: 0 });
     expect(text()).toMatch(/level/i);
     expect(text()).not.toMatch(/Vertical\s*not reported/i);
   });
@@ -197,13 +197,13 @@ describe("zeros that mean something", () => {
 
 describe("vertical rate", () => {
   it("shows a climb in feet per minute", () => {
-    show({ vertical_speed: 1.6 });
+    show({ vertical_speed_ms: 1.6 });
     expect(text()).toContain("315 ft/min");
     expect(text()).toContain("▲");
   });
 
   it("shows a descent as a descent, not a negative climb", () => {
-    show({ vertical_speed: -3.5 });
+    show({ vertical_speed_ms: -3.5 });
     expect(text()).toContain("▼");
     // The arrow carries the sign, so the number must not also be negative.
     expect(text()).toContain("689 ft/min");

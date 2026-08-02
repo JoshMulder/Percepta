@@ -144,11 +144,11 @@ class Contact:
             "callsign": self.callsign,
             "latitude": round(lat, 5),
             "longitude": round(lon, 5),
-            "altitude": round(self.altitude),
-            "track": round(track, 1),
-            "speed": round(self.speed_kt),
+            "altitude_m": round(self.altitude),
+            "track_deg": round(track, 1),
+            "speed_kt": round(self.speed_kt),
             "range_km": round(self.range_km, 2),
-            "bearing": round(bearing, 1),
+            "bearing_deg": round(bearing, 1),
             # Low and close is what an operator wants flagged. The threshold is
             # arbitrary here; a real deployment would make it configurable per
             # station and feed it from the alerting path, not the display.
@@ -159,7 +159,7 @@ class Contact:
             # plausible corrected altitude would put a number in front of an
             # operator that no barometer ever produced.
             "altitude_corrected_m": None,
-            "vertical_speed": self.vertical_speed,
+            "vertical_speed_ms": self.vertical_speed,
             "emitter_type": self.emitter_type,
             "squawk": self.squawk,
             "seconds_since_contact": round(random.uniform(0.5, 4.0), 1),

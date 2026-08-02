@@ -123,16 +123,19 @@ export interface Aircraft {
    *  only a Mode S response has been heard and no position yet. */
   latitude: number | null;
   longitude: number | null;
-  /** Metres. */
-  altitude: number | null;
-  /** Degrees true. */
-  track: number | null;
-  /** Knots. */
-  speed: number | null;
+  /* The unit is in the name, and was not until contract 2.0. Every other
+     measured value carried its unit and the contact object was the exception:
+     `altitude` (metres) sat beside `altitude_corrected_m`, and `speed` (knots)
+     beside `vertical_speed` (metres per second). Aviation convention is feet,
+     so an unsuffixed altitude was a 3.28x error waiting to happen in the
+     highest-volume payload here. */
+  altitude_m: number | null;
+  track_deg: number | null;
+  speed_kt: number | null;
   /** Kilometres from the station. */
   range_km: number;
   /** Degrees true, from the station to the aircraft. */
-  bearing: number;
+  bearing_deg: number;
   /** Set when the aircraft is close enough to be worth flagging. */
   alert?: boolean;
 
@@ -143,16 +146,17 @@ export interface Aircraft {
      zero — `field ?? 0` anywhere in here is a bug. */
 
   /** `pressure` (referenced to 1013.25 hPa, not local QNH) or `geometric`.
-   *  Null when the receiver did not say, which is why `altitude` alone cannot
-   *  be labelled. */
+   *  Null when the receiver did not say, which is why `altitude_m` alone
+   *  cannot be labelled. */
   altitude_type?: string | null;
   /** The pressure altitude re-referenced to the station's own barometer, when
-   *  that correction is switched on and possible. Carried *beside* `altitude`,
+   *  that correction is switched on and possible. Carried *beside*
+   *  `altitude_m`,
    *  never instead of it: what the receiver said and what it means locally are
    *  two facts, and a panel that shows only one cannot show its working. */
   altitude_corrected_m?: number | null;
   /** Metres per second, positive climbing. */
-  vertical_speed?: number | null;
+  vertical_speed_ms?: number | null;
   /** `ADSB_EMITTER_TYPE` as reported, unmapped — naming it is this console's
    *  job (`emitterKind`). 0 means the receiver was not told, which is a
    *  different statement from a category it does not recognise. */

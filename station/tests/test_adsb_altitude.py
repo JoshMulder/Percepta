@@ -227,7 +227,7 @@ class DriverTests(unittest.TestCase):
 
     def test_a_driver_with_no_reference_publishes_null_rather_than_failing(self):
         payload = self._contact(None)
-        self.assertEqual(payload["altitude"], 3000)
+        self.assertEqual(payload["altitude_m"], 3000)
         self.assertIsNone(payload["altitude_corrected_m"])
 
     def test_the_corrected_altitude_travels_beside_the_reported_one(self):
@@ -235,7 +235,7 @@ class DriverTests(unittest.TestCase):
         reference.update(995.0)
         payload = self._contact(reference)
         # Both, always. The corrected value never replaces what was received.
-        self.assertEqual(payload["altitude"], 3000)
+        self.assertEqual(payload["altitude_m"], 3000)
         self.assertIsNotNone(payload["altitude_corrected_m"])
         self.assertLess(payload["altitude_corrected_m"], 3000)
         self.assertEqual(payload["altitude_type"], "pressure")
@@ -245,7 +245,7 @@ class DriverTests(unittest.TestCase):
         reference.update(995.0)
         payload = self._contact(reference, mavlink.ALTITUDE_TYPE_GEOMETRIC)
         self.assertEqual(payload["altitude_type"], "geometric")
-        self.assertEqual(payload["altitude"], 3000)
+        self.assertEqual(payload["altitude_m"], 3000)
         self.assertIsNone(payload["altitude_corrected_m"])
 
 

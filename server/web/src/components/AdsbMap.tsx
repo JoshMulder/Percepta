@@ -401,7 +401,7 @@ function AdsbMapInner({
         // contact that sent no track is left pointing north rather than being
         // asserted to be heading north — `track ?? 0` would invent a heading.
         const track =
-          !icon.noRotate && contact.track !== null ? contact.track : 0;
+          !icon.noRotate && contact.track_deg !== null ? contact.track_deg : 0;
         svg.style.transform = `rotate(${track}deg)`;
         // One property tints the whole silhouette: the shapes fill with
         // `currentColor` and keep their own dark outline, which is what makes

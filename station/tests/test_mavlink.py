@@ -161,8 +161,8 @@ class FlagsAreNotZeroesTests(unittest.TestCase):
         driver = PingRxAdsb(source, latitude=-43.5, longitude=172.6)
         contact = driver.poll(1.0)[0].to_payload()
         for name in (
-            "callsign", "altitude", "track", "speed", "squawk",
-            "vertical_speed", "altitude_type", "altitude_corrected_m",
+            "callsign", "altitude_m", "track_deg", "speed_kt", "squawk",
+            "vertical_speed_ms", "altitude_type", "altitude_corrected_m",
             "on_ground",
         ):
             self.assertIsNone(contact[name], f"{name} was published as {contact[name]!r}")
@@ -263,7 +263,7 @@ class EverythingTheReceiverSaidTests(unittest.TestCase):
         self.assertEqual(got["squawk"], 4321)
         self.assertEqual(got["emitter_type"], 7)
         self.assertEqual(got["altitude_type"], "geometric")
-        self.assertAlmostEqual(got["vertical_speed"], 5.1, places=6)
+        self.assertAlmostEqual(got["vertical_speed_ms"], 5.1, places=6)
         self.assertEqual(got["seconds_since_contact"], 3)
         self.assertIs(got["simulated"], True)
         self.assertEqual(got["source"], "uat")
@@ -360,7 +360,7 @@ class DriverTests(unittest.TestCase):
         for contact in contacts:
             payload = contact.to_payload()
             self.assertIn("range_km", payload)
-            self.assertIsNotNone(payload["altitude"])
+            self.assertIsNotNone(payload["altitude_m"])
 
 
 class SimulationCoverageTests(unittest.TestCase):

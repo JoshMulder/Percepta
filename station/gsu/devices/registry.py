@@ -144,9 +144,9 @@ REGISTRY: tuple[DeviceType, ...] = (
         connection="serial",
         driver="gsu.devices.pingrx:PingRxAdsb",
         parameters=MAVLINK_SERIAL_PARAMETERS,
-        provides=("icao", "callsign", "latitude", "longitude", "altitude",
-                  "track", "speed", "range_km", "bearing", "alert",
-                  "altitude_type", "vertical_speed", "emitter_type", "squawk",
+        provides=("icao", "callsign", "latitude", "longitude", "altitude_m",
+                  "track_deg", "speed_kt", "range_km", "bearing_deg", "alert",
+                  "altitude_type", "vertical_speed_ms", "emitter_type", "squawk",
                   "seconds_since_contact", "simulated", "source"),
         # ADSB_VEHICLE has no airborne/surface status field. The only ground
         # evidence in the message is the emitter type: 17, 18 and 19 are surface
@@ -173,8 +173,8 @@ REGISTRY: tuple[DeviceType, ...] = (
             Parameter("gain", "Gain", "text", "auto", required=False),
             Parameter("sample_rate", "Sample rate", "number", 2_400_000, required=False),
         ),
-        provides=("icao", "callsign", "latitude", "longitude", "altitude",
-                  "track", "speed", "range_km", "bearing", "alert",
+        provides=("icao", "callsign", "latitude", "longitude", "altitude_m",
+                  "track_deg", "speed_kt", "range_km", "bearing_deg", "alert",
                   "altitude_type", "vertical_speed", "squawk", "on_ground",
                   "seconds_since_contact", "source"),
         # SBS output carries an on-ground flag, which the MAVLink receiver does
@@ -192,9 +192,9 @@ REGISTRY: tuple[DeviceType, ...] = (
         connection="simulated",
         driver="gsu.devices.pingrx:SimulatedPingRx",
         simulated=True,
-        provides=("icao", "callsign", "latitude", "longitude", "altitude",
-                  "track", "speed", "range_km", "bearing", "alert",
-                  "altitude_type", "vertical_speed", "emitter_type", "squawk",
+        provides=("icao", "callsign", "latitude", "longitude", "altitude_m",
+                  "track_deg", "speed_kt", "range_km", "bearing_deg", "alert",
+                  "altitude_type", "vertical_speed_ms", "emitter_type", "squawk",
                   "seconds_since_contact", "simulated", "source"),
         absent=("on_ground",),
         notes="Generates real MAVLink ADSB_VEHICLE frames and decodes them "

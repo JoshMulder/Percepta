@@ -100,23 +100,38 @@ class Aircraft:
     source: str | None = None
 
     def to_payload(self) -> dict:
+        """The wire shape, with the unit in every name that has one.
+
+        Five fields gained a suffix in contract 2.0 — `altitude_m`, `speed_kt`,
+        `vertical_speed_ms`, `track_deg`, `bearing_deg` — and the rename is the
+        easiest breaking change in the contract to miss. A contact object has
+        no `additionalProperties: false`, so a publisher that keeps the old
+        names produces a payload that *fails validation* rather than anything
+        louder: the frame is well-formed, the console renders a contact with no
+        altitude and no speed, and nothing logs an error.
+
+        `speed_kt` is knots and `vertical_speed_ms` is metres per second, which
+        looks inconsistent until you notice both match what the wire actually
+        carries: ADS-B reports ground speed in knots and vertical rate in feet
+        per minute, and exactly one of those is worth converting.
+        """
         return {
             "icao": self.icao,
             "callsign": self.callsign,
             "latitude": None if self.latitude is None else round(self.latitude, 5),
             "longitude": None if self.longitude is None else round(self.longitude, 5),
-            "altitude": None if self.altitude is None else round(self.altitude),
-            "track": None if self.track is None else round(self.track % 360, 1),
-            "speed": None if self.speed is None else round(self.speed),
+            "altitude_m": None if self.altitude is None else round(self.altitude),
+            "track_deg": None if self.track is None else round(self.track % 360, 1),
+            "speed_kt": None if self.speed is None else round(self.speed),
             "range_km": round(self.range_km, 2),
-            "bearing": round(self.bearing % 360, 1),
+            "bearing_deg": round(self.bearing % 360, 1),
             "alert": self.alert,
             "altitude_type": self.altitude_type,
             "altitude_corrected_m": (
                 None if self.altitude_corrected_m is None
                 else round(self.altitude_corrected_m)
             ),
-            "vertical_speed": (
+            "vertical_speed_ms": (
                 None if self.vertical_speed is None else round(self.vertical_speed, 1)
             ),
             "emitter_type": self.emitter_type,

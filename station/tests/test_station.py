@@ -85,22 +85,21 @@ class PayloadTests(unittest.TestCase):
                 errors = sorted(TELEMETRY.iter_errors(payload), key=str)
                 self.assertFalse(errors, f"{kind}: {[e.message for e in errors]}")
 
-    @unittest.expectedFailure
     def test_adsb_matches_the_schema(self):
-        """KNOWN GAP against contract 1.0: the aircraft fields were renamed.
+        """The unit is in the name, which it was not until 2.0.
 
-        Every other measured value in the contract carries its unit, and the
+        Every other measured value in the contract carried its unit and the
         contact object was the exception — `altitude` (metres) sat beside
         `altitude_corrected_m`, and `speed` (knots) beside `vertical_speed`
         (metres per second). Aviation convention is feet, so an unsuffixed
-        `altitude` is a 3.28x error waiting to happen in the highest-volume
-        payload in the system. 1.0 renamed them to `altitude_m`, `speed_kt`,
-        `vertical_speed_ms`, `track_deg` and `bearing_deg` while a rename was
-        still free.
+        `altitude` was a 3.28x error waiting to happen in the highest-volume
+        payload in the system.
 
-        This station still emits the old names. Delete this decorator once the
-        publisher is updated; until then the failure is the work, not a
-        regression.
+        This assertion earns its place because the failure it catches is
+        quiet: a contact object has no `additionalProperties: false`, so a
+        publisher left on the old names produces a well-formed frame that
+        fails *validation* rather than anything louder — the console renders a
+        contact with no altitude and no speed, and nothing logs an error.
         """
         payloads = self.by_kind("adsb")
         self.assertTrue(payloads, "the busy profile should have produced adsb")
