@@ -92,17 +92,16 @@ services:
       # station could not build broker trust at all, and a pre-provisioned one
       # could never be superseded by enrolment. Pre-provisioning is opt-in:
       # set GSU_CA_FILE in .env and mount the file in.
-      # The console must be reachable from outside the container to be reachable
-      # at all, so it binds 0.0.0.0 *inside* and is published to loopback only
-      # by `ports:` below. The container's network namespace is the boundary.
+      # The console must be reachable from outside the container to be
+      # reachable at all, so it binds 0.0.0.0 *inside*. What the host exposes
+      # is decided by `ports:` below, and the agent refuses to serve the page
+      # at all without a password hash — so the password, not the interface,
+      # is what protects it.
       GSU_SETUP_HOST: 0.0.0.0
 
     volumes:
       # State: credential, pinned broker CA, device inventory, events,
-      # recordings. A bind mount rather than a named volume so that the files
-      # are in the same place as on the systemd path — `ls /var/lib/percepta-gsu`
-      # works whichever way the station was deployed, which matters at 2am.
-      # A named volume rather than a host path: nothing outside the container
+      # recordings. A named volume rather than a host path: nothing outside the container
       # needs to read it, and the credential inside it is rotated by the
       # station itself. It deliberately does NOT come from the environment —
       # renewal writes a new secret, an environment variable cannot be written
@@ -177,7 +176,19 @@ services:
     # physical presence, or an SSH tunnel, is the control — and publishing it on
     # 0.0.0.0 would put an unauthenticated setup page on the public internet.
     ports:
-      - "127.0.0.1:8088:8088"
+      # Loopback by default, and a site can open it to the LAN.
+      #
+      # The default is the safe one: an unauthenticated setup page on a routable
+      # interface is the failure this whole path guards against. But the agent
+      # now refuses to serve the page at all without a password hash — that is
+      # what `bootstrap.sh` collects — so once one is set, "reachable only from
+      # a shell on the box itself" stops being a security property and becomes
+      # an obstacle. An installer standing at the site with a laptop cannot
+      # reach a page published to the Pi's own loopback.
+      #
+      # Set GSU_SETUP_BIND=0.0.0.0 in .env to open it. The password is what
+      # protects it then, and the agent enforces that itself.
+      - "${GSU_SETUP_BIND:-127.0.0.1}:8088:8088"
 
     # Numeric because the container's /etc/group is the image's and the host's
     # is the host's, and only the numbers are shared. Check with
