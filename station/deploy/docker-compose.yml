@@ -109,6 +109,21 @@ services:
       # back to, and a station whose credential lives in one silently stops
       # renewing and dies at expiry.
       - gsu-state:/var/lib/percepta-gsu
+      # Read-only, and empty on most boxes. It exists for one case: a platform
+      # behind a private CA, where the station has to be given that root
+      # *before* it can verify anything — including the enrolment call that
+      # would otherwise deliver it. That is the bootstrap problem, and there is
+      # no way round it except putting the certificate on the box by hand.
+      #
+      # Opt in by setting GSU_CA_FILE=/etc/percepta/ca.crt in .env. Leave it
+      # unset for a platform behind a publicly trusted certificate, where the
+      # system trust store is the right answer and pinning would only mean a
+      # site visit whenever the certificate is renewed.
+      #
+      # The mount is unconditional because a missing bind source is a container
+      # that will not start, and a station that will not start over a directory
+      # it was never going to read is the worse failure.
+      - /etc/percepta:/etc/percepta:ro
       # The host's whole /dev, so that device nodes appear and disappear inside
       # the container exactly as they do outside it.
       #
