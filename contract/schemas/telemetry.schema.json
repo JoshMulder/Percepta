@@ -731,7 +731,8 @@
               "ppm": false,
               "tx_capable": false,
               "spectrum": false,
-              "span_hz": false
+              "span_hz": false,
+              "audio_lease_remaining_s": false
             }
           }
         }

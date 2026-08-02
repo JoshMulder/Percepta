@@ -62,7 +62,13 @@ PERIODS = 4
 MIN_WAIT = 8.0
 
 #: Longest this will listen for the opening survey, whatever the cadences say.
+#: Raise it with --listen-for for a station on a deliberately slow cadence.
 MAX_WAIT = 45.0
+
+#: transport.md's default health cadence. The opening window stretches to at
+#: least this, because health carries the cadences everything else is judged
+#: against and a shorter window discovers them only by luck.
+HEALTH_PERIOD = 30.0
 
 #: Kinds the contract defines but does not require in a short window. `health`
 #: because a station is not less conformant for staying quiet about itself;
@@ -110,6 +116,14 @@ notes: list[str] = []
 #: different answers, and reporting the second as the first is how correct
 #: hardware gets rejected on a hillside.
 skipped: list[str] = []
+
+#: Required telemetry streams this run never observed because the station
+#: declared a cadence longer than the listening window. Tracked separately
+#: from other skips because they decide the verdict: a stream nobody watched
+#: is not a stream that passed, and `health.cadence` is a number the station
+#: supplies — believing it without bound would let a station opt out of its
+#: own telemetry checks and still collect a certificate.
+skipped_streams: list[str] = []
 
 
 def check(label: str, ok: bool, detail: str = "") -> None:
@@ -221,7 +235,38 @@ class Relay:
         )
 
     def read_frame(self, deadline: float) -> str | None:
-        """One text payload, or None on a control frame or a timeout."""
+        """One text payload, or None on a control frame or a timeout.
+
+        Reassembles fragments. RFC 6455 permits any message to be split, and
+        most client libraries split large ones — which is precisely a station
+        batching events or audio. Treating each fragment as a whole message
+        rejected such a station on every single check.
+        """
+        parts: list[bytes] = []
+        while True:
+            piece = self._read_one(deadline)
+            if piece is None:
+                return None
+            data, opcode, fin = piece
+            if parts and opcode != 0x0:
+                self.envelope_faults.append(
+                    "a new message began before the previous one finished")
+                parts = []
+            if not parts and opcode == 0x0:
+                self.envelope_faults.append("continuation frame with nothing to continue")
+                return None
+            parts.append(data)
+            if sum(len(p) for p in parts) > 512 * 1024:
+                self.envelope_faults.append(
+                    "reassembled message exceeds 512 KiB")
+                self.close(1009)
+                raise ConnectionError("message too large")
+            if fin:
+                break
+        return b"".join(parts).decode("utf-8", "replace")
+
+    def _read_one(self, deadline: float) -> tuple[bytes, int, bool] | None:
+        """One physical frame: `(payload, opcode, fin)`, or None if control."""
         first, second = self._recv(2, deadline)
         fin, opcode = first & 0x80, first & 0x0F
         masked, length = second & 0x80, second & 0x7F
@@ -239,6 +284,10 @@ class Relay:
         if masked:
             data = bytes(b ^ mask[i % 4] for i, b in enumerate(data))
 
+        if opcode in (0x8, 0x9, 0xA) and len(data) > 125:
+            self.envelope_faults.append(
+                f"control frame carries {len(data)} bytes; RFC 6455 allows 125")
+            data = data[:125]
         if opcode == 0x8:                       # close
             self.closed = True
             raise ConnectionError("station closed the socket")
@@ -251,11 +300,9 @@ class Relay:
             self.envelope_faults.append(
                 "binary frame on the relay; transport.md carries JSON text")
             return None
-        if not fin:
-            self.envelope_faults.append("fragmented frame")
         if not masked:
             self.envelope_faults.append("unmasked frame from a client (RFC 6455)")
-        return data.decode("utf-8", "replace")
+        return data, opcode, bool(fin)
 
     def write(self, data: bytes, opcode: int = 0x1) -> None:
         header = bytearray([0x80 | opcode])
@@ -280,9 +327,24 @@ class Relay:
 
     # -- the contract's envelope -----------------------------------------
 
-    def send_command(self, payload: dict) -> None:
-        self.write(json.dumps({"stream": COMMAND_STREAM,
-                               "payload": payload}).encode())
+    def send_command(self, payload: dict) -> bool:
+        """Send, or record that the socket has gone. Never raises.
+
+        The contract requires stations to reconnect on backoff, and this
+        harness itself closes the socket with 1009 on an oversized frame — so a
+        disconnect mid-run is ordinary, not exceptional. Raising here aborted
+        the run before the block that puts the receiver back, leaving a
+        commissioned site tuned to whatever frequency the test chose.
+        """
+        if self.closed:
+            return False
+        try:
+            self.write(json.dumps({"stream": COMMAND_STREAM,
+                                   "payload": payload}).encode())
+            return True
+        except OSError:
+            self.closed = True
+            return False
 
     def read_payload(self, deadline: float) -> tuple[str, dict] | None:
         """One `(kind, payload)`, checking the envelope on the way through."""
@@ -505,6 +567,10 @@ def main() -> int:
                     help="interface to listen on; 0.0.0.0 for another machine")
     ap.add_argument("--wait", type=float, default=120.0,
                     help="seconds to wait for the station to connect")
+    ap.add_argument("--listen-for", type=float, default=MAX_WAIT, dest="listen_for",
+                    help="longest to listen for a slow stream, in seconds "
+                         f"(default {MAX_WAIT:g}); raise it for a station on a "
+                         "very slow cadence")
     ap.add_argument("--tls", nargs=2, metavar=("CERT", "KEY"),
                     help="serve wss:// with this certificate and key")
     args = ap.parse_args()
@@ -513,6 +579,7 @@ def main() -> int:
     audio_schema = load("audio.schema.json")
     events_schema = load("events.schema.json")
 
+    max_listen = max(MIN_WAIT, args.listen_for)
     relay = await_station(args.port, args.host, args.tls, args.wait)
 
     print("0. Connection")
@@ -549,23 +616,39 @@ def main() -> int:
         notes.append(f"station speaks contract {spoken}, this checks "
                      f"{CONTRACT_VERSION}")
 
-    cadence = cadence_from(by_kind)
+    def absorb(window: float) -> None:
+        relay.send_command(audio_request)
+        for stream, payload in collect(relay, window):
+            seen.append((stream, payload))
+            key = "audio" if stream == "audio" else (
+                "events" if stream == "events" else str(payload.get("kind")))
+            by_kind.setdefault(key, []).append(payload)
+
+    listened = MIN_WAIT
+    # Health arrives every 30 s by default and carries the cadences everything
+    # below is judged against, so a first window of 8 s discovers it about one
+    # run in four. Without it the harness falls back to the defaults, believes
+    # it waited long enough, and fails a station that told it otherwise — the
+    # outcome depending on where the station's health tick happened to land.
+    if not by_kind.get("health") and listened < HEALTH_PERIOD + 2:
+        extra = min(max_listen, HEALTH_PERIOD + 2) - listened
+        if extra > 0:
+            absorb(extra)
+            listened += extra
+
+    cadence = cadence_from(by_kind)          # health may have only just arrived
     if cadence != DEFAULT_CADENCE:
         stated = ", ".join(f"{k} {v:g}s" for k, v in sorted(cadence.items())
                            if DEFAULT_CADENCE.get(k) != v)
         notes.append(f"station reports its own cadence: {stated}")
-    listened = MIN_WAIT
+
     missing = [k for k in cadence if not by_kind.get(k)]
     if missing:
-        extra = min(MAX_WAIT, max(cadence[k] * PERIODS for k in missing)) - MIN_WAIT
+        want = min(max_listen, max(cadence[k] * PERIODS for k in missing))
+        extra = want - listened
         if extra > 0:
-            relay.send_command(audio_request)
+            absorb(extra)
             listened += extra
-            for stream, payload in collect(relay, extra):
-                seen.append((stream, payload))
-                key = "audio" if stream == "audio" else (
-                    "events" if stream == "events" else str(payload.get("kind")))
-                by_kind.setdefault(key, []).append(payload)
 
     for kind in cadence:
         payloads = by_kind.get(kind, [])
@@ -592,9 +675,10 @@ def main() -> int:
             # Reporting it as a failure — with a duration the harness never
             # actually waited — is how correctly-configured hardware gets
             # rejected on site.
+            skipped_streams.append(kind)
             skip(f"publishes {kind}",
                  f"reported cadence needs {needed:g}s and this run listened "
-                 f"for {listened:g}s; re-run with a longer --wait-for")
+                 f"for {listened:g}s; re-run with --listen-for {needed:.0f}")
         else:
             check(f"publishes {kind}", bool(payloads),
                   f"nothing received in {listened:g}s")
@@ -681,7 +765,9 @@ def main() -> int:
             skip(f"{kind} -> {report_kind}.{field}",
                  f"{report_kind} is declared unavailable")
             continue
-        relay.send_command({"kind": kind, **body})
+        if not relay.send_command({"kind": kind, **body}):
+            skip(f"{kind} -> {report_kind}.{field}", "the station disconnected")
+            continue
         got, ok = await_report(relay, report_kind, field, expect, COMMAND_TIMEOUT)
         check(f"{kind} -> {report_kind}.{field}", ok, f"reported {got!r}")
         exercised += 1
@@ -714,13 +800,39 @@ def main() -> int:
     # Put the receiver back where it was found. This runs against commissioned
     # hardware on a real site, and a station left listening to whatever
     # frequency a test chose is a station that stopped doing its job quietly.
-    was = next((p.get("freq_hz") for p in by_kind.get("radio", [])
-                if p.get("freq_hz")), None)
-    if was and "radio" not in unavailable_kinds:
-        relay.send_command({"kind": "radio.tune", "freq_hz": was})
-        _, back = await_report(relay, "radio", "freq_hz", was, COMMAND_TIMEOUT)
-        notes.append(f"receiver returned to {was / 1e6:.3f} MHz" if back else
-                     f"COULD NOT return the receiver to {was / 1e6:.3f} MHz")
+    # Restore from what the site was observed doing, not from an assumption.
+    # The command list ends with `auto_squelch on` because that pair tests both
+    # directions — but a site deliberately running a fixed threshold against a
+    # known interferer would then be left in AUTO with its hand-set threshold
+    # discarded, and nobody would connect that to having run a test.
+    first_radio = next((p for p in by_kind.get("radio", [])
+                        if p.get("freq_hz")), {})
+    was = first_radio.get("freq_hz")
+    was_auto = first_radio.get("auto_squelch")
+    was_threshold = first_radio.get("threshold_db")
+    if was_auto is False and "radio" not in unavailable_kinds:
+        relay.send_command({"kind": "radio.squelch", "db": was_threshold})
+        _, back = await_report(relay, "radio", "threshold_db", was_threshold,
+                               COMMAND_TIMEOUT)
+        notes.append(
+            f"squelch returned to a fixed {was_threshold} dB"
+            if back else
+            f"COULD NOT return the squelch to {was_threshold} dB — this site "
+            "was on a fixed threshold and is now on AUTO; check it")
+    if "radio" not in unavailable_kinds and any(
+            k == "radio.tune" for k, *_ in COMMANDS):
+        if not was:
+            notes.append("COULD NOT return the receiver: this run never saw a "
+                         "frequency to put it back to, and it was tuned to "
+                         "119.500 MHz — check the site")
+        elif not relay.send_command({"kind": "radio.tune", "freq_hz": was}):
+            notes.append(f"COULD NOT return the receiver to {was / 1e6:.3f} MHz: "
+                         "the station disconnected — check the site")
+        else:
+            _, back = await_report(relay, "radio", "freq_hz", was, COMMAND_TIMEOUT)
+            notes.append(f"receiver returned to {was / 1e6:.3f} MHz" if back else
+                         f"COULD NOT return the receiver to {was / 1e6:.3f} MHz "
+                         "— check the site")
     relay.send_command({"kind": "radio.spectrum", "on": False})
     relay.close()
 
@@ -737,6 +849,15 @@ def main() -> int:
     if failures:
         print(f"FAILED: {len(failures)} check(s): {failures}")
         return 1
+    if skipped_streams:
+        print(
+            f"INCONCLUSIVE: {', '.join(skipped_streams)} never observed. The\n"
+            "station declared a cadence longer than this run listened for, so\n"
+            "those streams were not tested — and the cadence is a number the\n"
+            "station itself supplies, so this is not evidence of anything.\n"
+            "Re-run with --listen-for long enough to see them."
+        )
+        return 2
     if exercised == 0:
         # A station that declares every stream unavailable skips every command
         # check and reaches this point with nothing tested but its ability to
