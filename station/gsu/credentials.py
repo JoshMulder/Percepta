@@ -51,9 +51,10 @@ class Broker:
     telemetry_topic: str
     audio_topic: str
     command_topic: str
-    #: Pinned CA for the production broker. `contract/enrolment.md` §11: not
-    #: sent yet because the development broker has no TLS. Expect it; do not
-    #: require it.
+    #: The broker's pinned trust root, from `broker.ca_pem` in the enrolment
+    #: response (`contract/enrolment.md` §4) — the broker's CA, never the
+    #: API's. Persisted beside the credential. When `ca_mode` is "pinned" and
+    #: there is nothing to pin, `tls.py` refuses rather than downgrades.
     ca_pem: str | None = None
     #: How to verify the broker: `"pinned"` against `ca_pem`, or `"system"`
     #: when the platform is behind a publicly trusted certificate and has said

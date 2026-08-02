@@ -651,7 +651,7 @@ class Agent:
 
         Resumable by construction: this can be called again after a dropped
         connection, and the platform re-issues rather than refusing
-        (`contract/enrolment.md` §11) — the failure that matters is a technician
+        (`contract/enrolment.md` §4) — the failure that matters is a technician
         stuck on a hillside with a used code.
         """
         enrolment = self.client.claim(token, HARDWARE)

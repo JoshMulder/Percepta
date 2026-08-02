@@ -4,14 +4,14 @@ Raised, not changed. Nothing in `contract/` has been edited by this side — eac
 item below is something the station ran into while being built, with the shape
 of a proposed change and what the station does about it.
 
-**Items 1, 2, 3, 7, 8, 12, 13 and 14 are settled and implemented**, station side
-done and conformant. They are kept here with what shipped, because the reasoning
-is why the schema and the harness look the way they do.
+**Items 1, 2, 3, 6, 7, 8, 10, 12, 13 and 14 are settled and implemented**,
+station side done and conformant. They are kept here with what shipped, because
+the reasoning is why the schema and the harness look the way they do.
 
-**Open: 4, 6, 9, 10, 11, 15 and 16.** The event channel (4) is the one that
+**Open: 4, 9, 11, 15 and 16.** The event channel (4) is the one that
 matters most now that video is closed — it is the only thing the station buffers
-during an outage with nowhere to send it afterwards. 10 is the stale TLS wording
-in `enrolment.md`; 11 is that nothing can tell a station to look for an update.
+during an outage with nowhere to send it afterwards. 11 is that nothing can
+tell a station to look for an update.
 **16 needs a console answer as well as a contract one**: the station now
 streams H.265 from a camera that speaks it, so the media channel's codec string
 is sometimes `hvc1.…`, and a browser that cannot decode HEVC shows black
@@ -263,18 +263,27 @@ only when something was already wrong. `tests/test_station.py` now validates
 
 It costs about 90 bytes/s at 30-second cadence.
 
-**Three fields the station sends are not in the schema**: `security` (which link
-is verified and against which CA), `clock` (what is disciplining the clock, and
-whether an RTC is fitted), and `resources` (SDR tuners by serial). The schema
-allows additional properties, so they are valid rather than merely tolerated,
-and the platform is free to ignore them. Proposing them properly: the first two
-answer questions about an unattended box that are otherwise unanswerable from a
-desk — *is that station's traffic actually encrypted, and is its clock being
-kept* — and `clock` is the early warning for the §6 failure that strands a site.
+**The extra fields the station sends are now in the schema**: `security` (which
+link is verified and against which CA), `clock` (what is disciplining the clock,
+and whether an RTC is fitted) and `resources` (SDR tuners by serial), defined in
+`health` alongside `cadence` and `video`. They had been valid only because
+health allows unknown fields; now they are stated. The first two answer
+questions about an unattended box that are otherwise unanswerable from a desk —
+*is that station's traffic actually encrypted, and is its clock being kept* —
+and `clock` is the early warning for the §6 failure that strands a site.
 
 ---
 
-## 6. `config.set` is specified in prose and absent from the schema
+## 6. `config.set` is specified in prose and absent from the schema — **RESOLVED**
+
+**Shipped.** `command.schema.json` now defines `config.set` with exactly the
+shape this station implemented — `version` plus a `config` object whose unknown
+keys are ignored — so the provisional shape became the contract shape. The
+schema also records that the platform currently never sends it: it holds no
+site policy of its own, and position must not be settable from two ends
+(`enrolment.md` §7). The station stays ready for the day that changes.
+
+The original:
 
 `enrolment.md` §7 describes configuration delivery on the command channel and
 the platform lists it as still owed. `command.schema.json` has no entry, so its
@@ -374,13 +383,24 @@ function (`gsu/radio/audio.py`) as the schema asks.
 
 ---
 
-## 10. TLS has landed, and four things about it are now under-specified
+## 10. TLS has landed, and four things about it are now under-specified — **RESOLVED**
 
-**Where** `enrolment.md` §4, §11, §3; `transport.md` "Broker".
+**Shipped, all five.** 10a is stated in `enrolment.md` §4 beside `ca_pem` (the
+CA must carry `basicConstraints` and `keyUsage`, and `redis-cli` accepting one
+proves nothing). 10b landed earlier: the comment names the field as *the
+broker's trust root, not the API's*, and `ca_mode` says how to use it. 10c is
+the "How the trust roots get onto the box" paragraph in §5. 10d is the
+credential-free note on `broker.url` in §4, with the redis-py trap it guards
+against in `transport.md`. 10e is gone at the root: enrolment.md's deviations
+appendix (§11) was folded into the body, so there is no stale wording left to
+read as permission, and `transport.md`'s "Broker" and "Identity" sections
+describe the transports as they run.
+
+The original observations, in descending order of how much they would have cost
+to get wrong:
 
 The station now connects over `rediss://` and `https://`, verifying both against
-the `ca_pem` from the enrolment response, pinned and persisted 0600. Five
-observations, in descending order of how much they would cost to get wrong.
+the `ca_pem` from the enrolment response, pinned and persisted 0600.
 
 ### 10a. The CA needs `basicConstraints` and `keyUsage`, and nothing says so
 

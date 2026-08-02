@@ -534,7 +534,7 @@ for another is cheap and audited.
 
 **Enrolment is resumable.** If the link drops halfway, run it again with the
 same code. The platform re-issues rather than refusing (`contract/enrolment.md`
-§11) — the failure that matters is a technician stranded with a used code.
+§4) — the failure that matters is a technician stranded with a used code.
 
 Which *interface* the setup page belongs on is still an open decision
 (`DECISIONS.md`, open decision 2) — a dedicated Ethernet port and a laptop, or a
@@ -1011,7 +1011,7 @@ rather than a smear. Lower `stream_bitrate_kbps` or `stream_fps` with
 **It enrolled and now the credential is refused.**
 `credential.revoked` means an admin revoked it, or another box claimed this
 station's enrolment — a re-claim cuts off the box that had already succeeded
-(`contract/enrolment.md` §11). Get a new code and re-enrol. The station keeps
+(`contract/enrolment.md` §2). Get a new code and re-enrol. The station keeps
 recording throughout; it is cut off, not disabled.
 
 **Start again from nothing.**

@@ -641,6 +641,13 @@
           "type": "object",
           "description": "The live stream and the sensor behind it: which encoder was probed, who currently holds the camera, and the stream state that `video.start` / `video.stop` report their effect through (`health.video.stream`). Loosely specified on purpose - the station owns the detail, and a console reads what it recognises. This is where a console learns a station's camera state; there is no video telemetry channel (transport.md)."
         },
+        "resources": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "description": "Shared hardware the station's slots draw on - SDR tuners by serial, and which slot holds each. Reported so a console can explain 'two receivers configured, one dongle fitted' as a shortage rather than showing two faults."
+        },
         "security": {
           "type": "object",
           "description": "Which link protections are active - TLS to the broker and the API, and what each is verified against. Reported so a misconfigured trust root is visible from a console rather than only from a shell on the box."

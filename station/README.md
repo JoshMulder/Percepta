@@ -109,12 +109,12 @@ keep the transport behind a small interface and none of the rest cares.
 
 ## Known gaps you will hit
 
-- **Enrolment is built on the platform, not on the box.** `POST /api/enrol` with
-  a code an admin issues you, and you get back a credential, your broker
-  username, and the exact topics you may use. That is yours to implement:
-  `../contract/enrolment.md` §10 lists it, and §11 records where the platform
-  deviated from the spec and why. Read §6 before designing the boot sequence —
-  clock, expiry and renewal are what strand a remote site.
+- **Enrolment is built on both sides.** `POST /api/enrol` with a code an admin
+  issues you, and you get back a credential, your broker username, and the
+  exact topics you may use — implemented in `gsu/enrolment.py` and
+  `gsu/credentials.py`. `../contract/enrolment.md` describes the exchange as it
+  runs; read §6 before touching the boot sequence, because clock, expiry and
+  renewal are what strand a remote site.
 - **The broker's `default` user is now closed** and the transport is TLS only.
   This station authenticates as `gsu:{station_id}` and verifies the broker
   against the CA it was pinned at enrolment — see `gsu/tls.py`. It was written
