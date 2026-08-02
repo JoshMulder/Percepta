@@ -13,3 +13,8 @@ __pycache__/
 .claude/worktrees/
 
 percepta.txt
+# A site's own settings, written by the bootstrap scripts. Never committed:
+# `git pull` is the update path, and it must not be able to clobber the answers
+# somebody gave when the box was commissioned.
+station/deploy/.env
+server/.env

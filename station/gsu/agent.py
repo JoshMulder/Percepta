@@ -510,7 +510,7 @@ class Agent:
         nastier failure — the old driver held a live picamera2 handle and
         reopened it lazily, so an abandoned instance could reacquire the sensor
         *after* its replacement was built and leak the acquisition for the life
-        of the process. That handle is gone (see camera/picsi.py), and the
+        of the process. That driver is gone with the Pi 2B, and the
         sensor lease now refuses a stale holder's release outright, so retiring
         is no longer the only thing standing between the station and a wedge.
         It is kept because a capture already in flight on the outgoing instance
@@ -549,7 +549,7 @@ class Agent:
             if front_end is not None else None
         )
         # Constructed here and read from the preview thread. Constructing it
-        # must stay cheap for that reason — `camera/picsi.py` opens nothing and
+        # must stay cheap for that reason — a network camera opens nothing and
         # runs no subprocess until the first capture, which happens off this
         # loop. The context carries the sensor lease, so the new driver
         # contends with the outgoing one through the same arbiter rather than
@@ -1241,7 +1241,7 @@ class Agent:
         Separated out of the driver's free-text `detail` because it answers a
         question people ask directly — "why is the camera slow" — and a setup
         page should be able to answer it without an SSH session. The reason is
-        the driver's own (`camera/picsi.py`), never inferred here: a station
+        the driver's own, never inferred here: a station
         that guesses at this would send somebody to site for a camera fault
         that is really a virtual environment built without
         `--system-site-packages`.

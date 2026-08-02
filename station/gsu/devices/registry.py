@@ -444,38 +444,13 @@ REGISTRY: tuple[DeviceType, ...] = (
     ),
 
     # --- camera --------------------------------------------------------
-    DeviceType(
-        id="raspberry-pi-csi",
-        slot="camera",
-        label="Raspberry Pi camera (CSI ribbon)",
-        connection="csi",
-        driver="gsu.camera.picsi:PiCsiCamera",
-        parameters=(
-            Parameter("resolution", "Resolution", "select", "640x480",
-                      choices=("640x480", "1280x720", "1920x1080"), required=False,
-                      help="The size of the setup page's preview frame. It "
-                           "costs no bandwidth — nothing is published — so "
-                           "pick whatever is easiest to aim the camera by. "
-                           "The live stream's size is separate and is set by "
-                           "the site's policy."),
-            Parameter("quality", "JPEG quality", "number", 75, required=False,
-                      help="1-100, as libjpeg means it. Below about 50 the "
-                           "picture is visibly blocked; above about 85 the file "
-                           "grows fast for very little."),
-            Parameter("rotation", "Rotation", "select", 0, choices=(0, 180),
-                      required=False,
-                      help="180 for a camera mounted upside down. Only these "
-                           "two: the sensor rotates in 180° steps and anything "
-                           "else would be a CPU-side rotate of every frame."),
-        ),
-        provides=("video",),
-        notes="No address and no credentials: it is a ribbon cable, not a "
-              "network device. Bookworm, so libcamera: the driver captures "
-              "through rpicam-jpeg, one subprocess per frame, and holds the "
-              "sensor only while a frame is being taken. Live video is the "
-              "stream's job; this camera's stills exist for the setup page's "
-              "preview and go nowhere else.",
-    ),
+    #
+    # The Raspberry Pi CSI camera was here and is gone with the Pi 2B. It was
+    # the only driver that needed libcamera, a Raspberry Pi archive key, a
+    # device node and a `/dev` bind mount — for a preview frame on the setup
+    # page that no longer has a supported board to run on. A network camera is
+    # a URL, needs none of that, and is what the live stream path was built
+    # around anyway.
     DeviceType(
         id="simulated-camera",
         slot="camera",

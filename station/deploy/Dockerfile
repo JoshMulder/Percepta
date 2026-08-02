@@ -1,33 +1,40 @@
-# The ground station agent as a container image. **This is the deployment path**
-# (DEPLOYMENT.md; DECISIONS.md item 35c). The systemd unit beside this file is
-# the documented alternative.
+# The ground station agent as a container image. **This is the deployment path,
+# and now the only one.**
 #
-# Containers won on the constraint that actually matters here: *"once these
-# stations are installed they are going to be difficult to physically access."*
-# An update is atomic and a rollback is a tag already on the disk — see
-# deploy/gsu-update.sh, which is the reason this path is preferred rather than
-# merely tolerated.
-#
-#   docker buildx build --platform linux/arm/v7 -f deploy/Dockerfile -t percepta/gsu:0.1.0 .
+#   cd station/deploy && docker compose up -d --build
 #
 # Build context is station/, not deploy/ — the package is what goes in.
 #
-# ---------------------------------------------------------------------------
-# Base image: pinned by digest, and the digest is the multi-arch *index* so that
-# `--platform linux/arm/v7` still selects the right manifest. Verified against
-# the registry rather than assumed: python:3.11-slim-bookworm publishes
-# linux/arm/v7 (manifest sha256:d2091b0d…, 39.9 MB compressed across 4 layers),
-# which is the architecture a Pi 2B runs.
+# Containers won on the constraint that actually matters here: once these
+# stations are installed they are difficult to physically access. An update is
+# `git pull` and a restart; a rollback is `git checkout` of a tag already on the
+# disk, which needs no download over the link that may be the reason you are
+# rolling back.
 #
-# 3.11 is the floor, not a preference: the agent uses datetime.UTC. Bookworm's
-# own Python is 3.11.2, so the container and the systemd path run the same
-# interpreter version — worth keeping true, because otherwise the two paths can
-# fail differently and nobody knows which one they are debugging.
-FROM --platform=$TARGETPLATFORM python:3.11-slim-bookworm@sha256:b18992999dbe963a45a8a4da40ac2b1975be1a776d939d098c647482bcad5cba
+# ---------------------------------------------------------------------------
+# WHAT WENT WITH THE PI 2B
+#
+# This file used to pin the base by its multi-arch *index* digest so that
+# `--platform linux/arm/v7` still selected the right manifest, and then spent a
+# paragraph explaining that numpy publishes no 32-bit ARM wheels — so the
+# recommendation was to run the agent under systemd against the distribution's
+# numpy instead. That produced two deployment paths that could fail
+# differently, and nobody debugging one knew which they were in.
+#
+# amd64 and arm64 only now. Every dependency is a wheel and nothing compiles.
+#
+# **The digest pin stays.** Only `--platform=$TARGETPLATFORM` went with armv7.
+# The digest is still the multi-arch *index*, so it selects the right manifest
+# for whichever of the two remaining architectures is building — dropping it
+# would have traded a reproducible build for nothing at all, which is the kind
+# of thing that goes unnoticed when it rides along with an unrelated change.
+#
+# 3.11 is the floor, not a preference: the agent uses datetime.UTC.
+FROM python:3.11-slim-bookworm@sha256:b18992999dbe963a45a8a4da40ac2b1975be1a776d939d098c647482bcad5cba
 
-# PYTHONDONTWRITEBYTECODE: no .pyc files. On a Pi the container's writable layer
-# is on the SD card, and the card is the most likely hardware failure at a
-# remote site. Every write avoided is worth having.
+# PYTHONDONTWRITEBYTECODE: no .pyc files. The container's writable layer sits on
+# whatever storage the box has, and at a remote site that is the most likely
+# hardware failure. Every write avoided is worth having.
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -59,10 +66,16 @@ ENV PYTHONUNBUFFERED=1 \
 #
 # The library only, not the `rtl-sdr` tools: the station drives the device
 # through libusb via ctypes and never shells out to rtl_fm or rtl_tcp.
+#
+# libopus0 is the airband codec. Contract 2.0 fixes audio as Opus, and the
+# station binds this library through ctypes for the same reason as the SDR —
+# carrying a pip package to wrap four C functions buys nothing, and the apt
+# dependency exists either way.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ffmpeg \
       librtlsdr0 \
+      libopus0 \
  && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --system --gid 10001 gsu \
@@ -83,12 +96,14 @@ WORKDIR /opt/percepta/station
 # perfectly and is then invisible to the only Python in the image, which is the
 # same class of mistake as installing it on the host.
 #
-# On arm64 and amd64 this is a wheel and nothing compiles. An armv7 build would
-# have to compile it, because numpy publishes no 32-bit ARM wheels — that is a
-# real cost, and it is why the 2B runs the agent under systemd against the
-# system numpy rather than out of this image.
+# On arm64 and amd64 this is a wheel and nothing compiles.
+#
+# `redis` was installed here and is gone with the Redis transport: contract 2.0
+# defines one transport, and the station speaks it over a WebSocket it writes
+# out itself. The agent's only runtime dependency is now numpy, and only when a
+# receiver is fitted.
 COPY requirements.txt ./
-RUN pip install --no-cache-dir "redis>=5.0" "numpy>=1.24"
+RUN pip install --no-cache-dir "numpy>=1.24"
 
 # Docs before code, so that the last layer in the image is the one that changes
 # most often. A code-only update then ships **one 91 KB layer** and nothing
@@ -99,8 +114,8 @@ RUN pip install --no-cache-dir "redis>=5.0" "numpy>=1.24"
 COPY README.md DECISIONS.md DEPLOYMENT.md HARDWARE.md CONTRACT-QUESTIONS.md ./
 COPY gsu/ ./gsu/
 
-# Root-owned and not writable by the agent, matching the systemd path: a
-# compromised agent should not be able to rewrite the thing that restarts it.
+# Root-owned and not writable by the agent: a compromised agent should not be
+# able to rewrite the thing that restarts it.
 RUN chown -R root:root /opt/percepta/station && chmod -R go-w /opt/percepta/station
 
 USER gsu

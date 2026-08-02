@@ -407,10 +407,9 @@ class StreamSeamTests(unittest.TestCase):
         self.assertFalse(sensor_exclusive(fitted_camera()))
         self.assertFalse(sensor_exclusive(SyntheticCamera()))
         self.assertFalse(sensor_exclusive(None))
-
-        from gsu.camera.picsi import PiCsiCamera
-
-        self.assertTrue(sensor_exclusive(PiCsiCamera()))
+        # The `True` half of this test went with the CSI driver: it was the
+        # only camera that owned a local sensor, and every remaining source is
+        # a reader of a stream somebody else produces.
 
     def test_the_preview_keeps_working_while_a_network_camera_streams(self):
         """No lease is taken for a camera that owns no local sensor.

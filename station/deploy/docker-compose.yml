@@ -1,7 +1,11 @@
 # The ground station agent, as a container. **This is the deployment path.**
 #
-#   cd /opt/percepta/station
-#   docker compose -f deploy/docker-compose.yml up -d
+#   cd station/deploy
+#   ./bootstrap.sh          # writes .env, then brings it up
+#
+# Updating is `git pull` and `docker compose up -d --build`. There is no
+# updater daemon and no image registry: the source of truth is the checkout,
+# and a rollback is `git checkout` of a tag that is already on the disk.
 #
 # ---------------------------------------------------------------------------
 # DEVICE ACCESS IS DELIBERATELY BROAD, AND THAT IS A DECISION
@@ -33,7 +37,7 @@
 # than needed and one more thing to reason about when something misbehaves.
 #
 # Find the numeric group ids for `group_add` on the host with:
-#   getent group dialout plugdev video
+#   getent group dialout plugdev
 # The names cannot be used here — they resolve inside the container, where the
 # ids differ from the host's.
 # ---------------------------------------------------------------------------
@@ -46,17 +50,10 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
 
-    # A local moving tag, never a registry tag, and never `latest`.
-    #
-    # deploy/gsu-update.sh owns this name: it pulls the new image, retags the
-    # one currently running as `percepta/gsu:previous`, points `current` at the
-    # new one, and — if the new one does not prove itself — points `current`
-    # back. Compose therefore always starts "whatever passed last", and a
-    # rollback is a retag of something already on the disk rather than a
-    # download over a link that may be why you are rolling back.
-    image: percepta/gsu:current
-    # Never go to a registry for `current`: it is a local name and a pull would
-    # either fail or, worse, find something unrelated.
+    # Built from this checkout, never pulled. There is no registry in this
+    # deployment: `git pull && docker compose up -d --build` is the update, and
+    # the checkout is the thing that gets rolled back if it goes wrong.
+    image: percepta/gsu:local
     pull_policy: never
     container_name: percepta-gsu
 
@@ -75,8 +72,11 @@ services:
     # handler, so this is belt and braces rather than load-bearing.
     init: true
 
+    # Beside this file, and gitignored, so that `git pull` cannot clobber a
+    # site's settings and a secret never reaches the repository. `bootstrap.sh`
+    # writes it; `gsu.env.example` documents every key.
     env_file:
-      - /etc/percepta/gsu.env
+      - .env
     environment:
       # Overridden here rather than in the env file: inside the container the
       # state directory is always this path, whatever the host maps to it.
@@ -85,14 +85,13 @@ services:
       # the normal enrolment flow — this file used to, and the first real Pi
       # paid for it. The broker CA normally *arrives in the enrolment
       # response* and is persisted at $GSU_HOME/broker-ca.pem, which is on the
-      # writable state mount. Pointing GSU_CA_FILE at /etc/percepta instead
-      # names a file on a read-only mount that exists only if somebody
-      # pre-provisioned it — and a set-but-unreadable GSU_CA_FILE is a hard
+      # writable state volume. Pointing GSU_CA_FILE somewhere else names a
+      # file that exists only if somebody pre-provisioned it — and a
+      # set-but-unreadable GSU_CA_FILE is a hard
       # refusal, never a fallback (gsu/tls.py), so an un-pre-provisioned
       # station could not build broker trust at all, and a pre-provisioned one
       # could never be superseded by enrolment. Pre-provisioning is opt-in:
-      # uncomment GSU_CA_FILE in /etc/percepta/gsu.env (the path is the same
-      # inside and outside the container) — exactly as on the systemd path.
+      # set GSU_CA_FILE in .env and mount the file in.
       # The console must be reachable from outside the container to be reachable
       # at all, so it binds 0.0.0.0 *inside* and is published to loopback only
       # by `ports:` below. The container's network namespace is the boundary.
@@ -103,8 +102,13 @@ services:
       # recordings. A bind mount rather than a named volume so that the files
       # are in the same place as on the systemd path — `ls /var/lib/percepta-gsu`
       # works whichever way the station was deployed, which matters at 2am.
-      - /var/lib/percepta-gsu:/var/lib/percepta-gsu
-      - /etc/percepta:/etc/percepta:ro
+      # A named volume rather than a host path: nothing outside the container
+      # needs to read it, and the credential inside it is rotated by the
+      # station itself. It deliberately does NOT come from the environment —
+      # renewal writes a new secret, an environment variable cannot be written
+      # back to, and a station whose credential lives in one silently stops
+      # renewing and dies at expiry.
+      - gsu-state:/var/lib/percepta-gsu
       # The host's whole /dev, so that device nodes appear and disappear inside
       # the container exactly as they do outside it.
       #
@@ -143,14 +147,15 @@ services:
     #   166  USB CDC-ACM (ttyACM*) — some GPS receivers enumerate here
     #   204  on-chip serial (ttyAMA*) — the Pi's own GPIO-header UART
     #   189  USB raw (/dev/bus/usb/*) — libusb, so the RTL-SDR
-    #    81  video4linux (video*, media*) — the CSI camera on Bookworm
     #   249  pps (pps*) — the GPS pulse-per-second line, when it arrives
+    #
+    # 81 (video4linux) was here for the CSI camera and went with it. A network
+    # camera is a URL and needs no device node at all.
     device_cgroup_rules:
       - 'c 188:* rmw'
       - 'c 166:* rmw'
       - 'c 204:* rmw'
       - 'c 189:* rmw'
-      - 'c 81:* rmw'
       - 'c 249:* rmw'
 
     # The console is published to loopback only. It has no authentication —
@@ -159,17 +164,15 @@ services:
     ports:
       - "127.0.0.1:8088:8088"
 
-    # Numeric because the container's /etc/group is Debian's and the host's is
-    # the Pi's, and only the numbers are shared. Check with
-    # `getent group dialout plugdev video` on the host and correct these.
+    # Numeric because the container's /etc/group is the image's and the host's
+    # is the host's, and only the numbers are shared. Check with
+    # `getent group dialout plugdev` on the host and correct these if they
+    # differ. 20/46 are the Debian defaults.
     #   20 dialout — the USB-UARTs
     #   46 plugdev — the SDR
-    #   44 video   — the camera
-    # (20/44/46 are the Debian defaults, which Raspberry Pi OS inherits.)
     group_add:
       - "20"
       - "46"
-      - "44"
 
     # --- hardening, matched as closely as it can be to the systemd unit ------
     security_opt:
@@ -190,13 +193,13 @@ services:
     # --- logs, which are what fills an SD card -------------------------------
     # Docker's default json-file driver has NO rotation. On a station that logs
     # a line per health condition for months, an unrotated container log will
-    # eventually fill the card and take the site down — a slow, silent failure
+    # eventually fill the disk and take the site down — a slow, silent failure
     # with a very annoying cause. 10 MB × 3 is about a fortnight here.
-    #
-    # The systemd path does not need this: journald has rotation and disk limits
-    # configured out of the box.
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
+
+volumes:
+  gsu-state:

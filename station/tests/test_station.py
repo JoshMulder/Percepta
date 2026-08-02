@@ -779,7 +779,7 @@ class DemoSensorStampTests(unittest.TestCase):
     def test_one_station_can_be_half_real(self):
         # The whole point of moving the flag off the station.
         agent = self.agent_with(
-            weather="simulated-weather", camera="raspberry-pi-csi",
+            weather="simulated-weather", camera="onvif-network-camera",
         )
         self.assertIs(
             agent._stamp_simulated({"kind": "weather"}).get("simulated"), True)

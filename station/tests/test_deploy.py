@@ -1,10 +1,10 @@
 """The deployment: the serial path, the clock, and the files that install it.
 
 These are the things that will be wrong on the first real box, and none of them
-can be proved here — there is no Pi, no UART, no camera and no SDR on this
-machine. So the tests cover what *can* be checked without hardware: that the
-failures are specific rather than generic, that the shipped inventory says what
-this station actually has, and that the unit file has not quietly lost a line.
+can be proved here — there is no UART, no camera and no SDR on this machine. So
+the tests cover what *can* be checked without hardware: that the failures are
+specific rather than generic, that the shipped inventory says what this station
+actually has, and that the compose file has not quietly lost a line.
 """
 
 from __future__ import annotations
@@ -111,13 +111,13 @@ class ClockTests(unittest.TestCase):
 
 
 class ShippedInventoryTests(unittest.TestCase):
-    """deploy/devices.pi.json must describe the box in HARDWARE.md."""
+    """deploy/devices.example.json must describe the box in HARDWARE.md."""
 
     def setUp(self):
         self._dir = tempfile.TemporaryDirectory()
         self.home = Path(self._dir.name)
         (self.home / "devices.json").write_text(
-            (DEPLOY / "devices.pi.json").read_text()
+            (DEPLOY / "devices.example.json").read_text()
         )
         self.agent = Agent(AgentConfig(home=self.home, setup_enabled=False,
                                        single_instance=False, demo=True))
@@ -131,7 +131,7 @@ class ShippedInventoryTests(unittest.TestCase):
         self.assertEqual(fitted["adsb"], "uavionix-ping-rx-pro")
         self.assertEqual(fitted["weather"], "airmar-110wx")
         self.assertEqual(fitted["radio"], "rtlsdr-airband")
-        self.assertEqual(fitted["camera"], "raspberry-pi-csi")
+        self.assertEqual(fitted["camera"], "onvif-network-camera")
 
     def test_nothing_is_simulated(self):
         for report in self.agent.inventory.report():
@@ -151,18 +151,20 @@ class ShippedInventoryTests(unittest.TestCase):
         self.assertTrue(reports["radio"].driver_available)
 
     def test_the_camera_says_what_is_missing_on_this_machine(self):
-        # The CSI camera has a driver now. On anything that is not a Pi it
-        # reports what is absent rather than "unsupported": the distinction is
+        # Whatever is missing, the slot reports what is *absent* rather than
+        # "unsupported": the distinction is
         # the whole point of the message, because one of them is fixed by
-        # installing a package and the other cannot be fixed at all.
+        # configuring something and the other cannot be fixed at all.
         #
-        # It names one package and not two. `python3-picamera2` used to be the
-        # faster of two capture paths and is no longer used at all — it was the
-        # only thing putting libcamera inside this process, which is the only
-        # thing that can wedge a camera for the life of a run.
+        # This used to name a missing `rpicam` binary, back when the shipped
+        # camera was the one on the CSI ribbon. A network camera needs no
+        # package on the box at all — what it can be missing is an address,
+        # and saying so is the difference between "not fitted yet" and
+        # "fitted and broken".
         detail = {r.slot: r for r in self.agent.inventory.report()}["camera"].detail
-        self.assertIn("rpicam", detail)
+        self.assertIn("address", detail)
         self.assertNotIn("picamera2", detail)
+        self.assertNotIn("rpicam", detail)
 
     def test_the_streams_with_no_driver_are_declared_unavailable(self):
         sent: list[dict] = []
@@ -194,92 +196,20 @@ class ShippedInventoryTests(unittest.TestCase):
         self.assertIn("rtlsdr", conflicts[0])
 
 
-class InstallerTests(unittest.TestCase):
-    """The installer and the environment it ships.
-
-    This was UnitFileTests, holding `gsu.service` to the directives that were
-    easy to lose. The unit is gone: the station ran as a plain systemd service
-    only because a CSI camera could not stream from the container image, and
-    CSI is no longer supported. What survives here is everything that was
-    never really about the unit — the paths, and the shipped defaults.
-    """
-
-    @classmethod
-    def setUpClass(cls):
-        cls.install = (DEPLOY / "install.sh").read_text()
-
-    def test_the_unit_file_is_gone(self):
-        self.assertFalse(
-            (DEPLOY / "gsu.service").exists(),
-            "gsu.service is back; there is one deployment path and it is the "
-            "container",
-        )
-
-    def test_the_installer_removes_a_unit_left_by_an_older_install(self):
-        # Not merely stops installing it. A box upgraded from the systemd path
-        # has an enabled unit pointing at a venv this installer no longer
-        # builds; left in place that is two agents on one channel, and the
-        # console alternating between two independent worlds reads as a
-        # platform bug rather than as a stale unit.
-        self.assertIn('rm -f "/etc/systemd/system/$UNIT"', self.install)
-        self.assertIn('systemctl disable --now "$UNIT"', self.install)
-        # And a box already looping or parked in `failed` must not stay there.
-        self.assertIn("systemctl reset-failed", self.install)
-
-    def test_the_installer_offers_no_second_path(self):
-        for gone in ("--path", "DEPLOY_PATH", "python3 -m venv"):
-            self.assertNotIn(gone, self.install, f"{gone} survived")
-
-    def test_the_shipped_environment_requires_tls(self):
-        env = (DEPLOY / "gsu.env.example").read_text()
-        self.assertIn("GSU_REQUIRE_TLS=1", env)
-        self.assertRegex(env, r"GSU_PLATFORM_URL=https://")
-        # GSU_BROKER_URL ships empty: the platform states the broker address at
-        # enrolment, and it is the relay on the platform's own host. What still
-        # has to hold is that nothing here suggests a plaintext one — the
-        # assertion used to be `rediss://`, which stopped being true when the
-        # setting stopped having a default at all, and asserting the old
-        # literal would have meant shipping a default that is wrong behind a
-        # proxy just to keep a test green.
-        for scheme in ("redis://", "ws://", "http://", "mqtt://"):
-            self.assertNotRegex(
-                env, rf"^GSU_\w+={scheme}", f"a plaintext {scheme} default")
-        # The setup page must not be shipped bound to anything routable. It
-        # now has authentication, but the shipped default is still the one
-        # that is safe on a box whose address is public.
-        self.assertIn("GSU_SETUP_HOST=127.0.0.1", env)
-        # The switch that used to be able to un-pin everything is gone.
-        self.assertNotIn("GSU_TLS_TRUST", env)
-
-    def test_the_shipped_environment_carries_no_setup_password(self):
-        """An image-wide password is one password for every station.
-
-        The example file documents how to generate one and leaves it commented
-        out, so a box that has not been provisioned with its own cannot serve
-        the setup page anywhere but loopback.
-        """
-        env = (DEPLOY / "gsu.env.example").read_text()
-        live = [
-            line for line in env.splitlines()
-            if line.strip() and not line.lstrip().startswith("#")
-        ]
-        for line in live:
-            self.assertFalse(
-                line.startswith(("GSU_SETUP_PASSWORD=", "GSU_SETUP_PASSWORD_HASH=")),
-                f"a password is live in the shipped environment file: {line}",
-            )
-        # ...but it is documented, or nobody will know it is what unlocks the
-        # page an installer is standing in front of.
-        self.assertIn("GSU_SETUP_PASSWORD_HASH", env)
-        self.assertIn("python -m gsu setup-password", env)
-
-    def test_the_shipped_setup_window_is_not_pinned_open(self):
-        # 0 means the page answers on the LAN for as long as the station runs,
-        # which is the permanent back door the design exists to refuse.
-        env = (DEPLOY / "gsu.env.example").read_text()
-        match = re.search(r"^GSU_SETUP_WINDOW_MINUTES=(\S+)", env, re.M)
-        self.assertIsNotNone(match, "the window is not set in the shipped file")
-        self.assertGreater(float(match.group(1)), 0)
+# InstallerTests, ServiceAccountTests and UpdaterTests are gone with the host
+# installer, the systemd unit and the updater timer.
+#
+# They tested a real deployment path: install.sh provisioned the host, a
+# systemd unit ran the agent directly, and gsu-update.{sh,timer,service} pulled
+# a new image, retagged the running one as `previous`, and rolled back if the
+# new one did not prove itself.
+#
+# All of it existed because the agent ran on the host, and the agent ran on the
+# host because the CSI camera could not stream from inside a container. The
+# camera is out of scope; the second path went with it. Updating is `git pull`
+# and a container restart, and rolling back is `git checkout` of a tag already
+# on the disk — which needs no tooling and, on the link that may be the reason
+# you are rolling back, no download.
 
 
 class ContainerTests(unittest.TestCase):
@@ -347,9 +277,11 @@ class ContainerTests(unittest.TestCase):
     def test_the_device_cgroup_allows_every_major_this_station_can_use(self):
         # Visibility is not permission: without these, open() returns EPERM on
         # a node that is plainly there.
+        # 81 (video4linux) went with the CSI camera. A network camera is a
+        # URL and needs no device node at all.
         for major, what in ((188, "USB serial"), (166, "CDC-ACM"),
                             (204, "on-chip UART"), (189, "USB raw / libusb"),
-                            (81, "video4linux"), (249, "pps")):
+                            (249, "pps")):
             self.assertIn(f"c {major}:* rmw", self.directives, what)
 
     def test_privileged_is_still_not_used(self):
@@ -420,9 +352,17 @@ class ContainerTests(unittest.TestCase):
         self.assertIn('- "127.0.0.1:8088:8088"', self.directives)
         self.assertNotIn('- "8088:8088"', self.directives)
 
-    def test_the_state_directory_is_the_same_path_as_the_systemd_path(self):
-        # `ls /var/lib/percepta-gsu` should work whichever way it was deployed.
-        self.assertIn("/var/lib/percepta-gsu:/var/lib/percepta-gsu", self.directives)
+    def test_the_state_is_a_named_volume_that_survives_a_rebuild(self):
+        """The credential lives here, and `up -d --build` must not lose it.
+
+        A named volume rather than a host path: nothing outside the container
+        needs to read it. It is deliberately not an environment variable
+        either — renewal writes a new secret, an environment variable cannot
+        be written back to, and a station whose credential lives in one
+        silently stops renewing and dies at expiry.
+        """
+        self.assertIn("gsu-state:/var/lib/percepta-gsu", self.directives)
+        self.assertIn("volumes:\n  gsu-state:", self.compose)
 
     def test_the_sdr_and_camera_are_not_mapped_while_they_have_no_driver(self):
         # Mapping a device nothing opens is access granted for no reason. Both
@@ -436,167 +376,3 @@ class ContainerTests(unittest.TestCase):
         self.assertIn("var/", ignored)
 
 
-class ServiceAccountTests(unittest.TestCase):
-    """One uid for the host account and the image — the convention the first
-    real Pi forced.
-
-    The installer used to let `useradd --system` pick a floating uid while the
-    image pinned 10001, so the bind-mounted state directory was readable by one
-    and not the other. The host account outlived the systemd path: the
-    container runs as that uid, and the state directory is bind-mounted into
-    it, so the two still have to agree.
-    """
-
-    @classmethod
-    def setUpClass(cls):
-        cls.install = (DEPLOY / "install.sh").read_text()
-        cls.dockerfile = (DEPLOY / "Dockerfile").read_text()
-        cls.compose = (DEPLOY / "docker-compose.yml").read_text()
-        cls.compose_directives = "\n".join(
-            line for line in cls.compose.splitlines()
-            if line.strip() and not line.lstrip().startswith("#")
-        )
-
-    def test_the_host_account_and_both_images_agree_on_the_uid(self):
-        # The whole convention is one number in four places. A drift in any of
-        # them recreates the field failure: state owned by a uid the container
-        # is not.
-        installer = re.search(r"^SERVICE_UID=(\d+)", self.install, re.M)
-        self.assertIsNotNone(installer, "install.sh no longer pins the uid")
-        uid = installer.group(1)
-        self.assertIn(f"--uid {uid}", self.dockerfile,
-                      "Dockerfile pins a different uid")
-        self.assertIn(f"--gid {uid}", self.dockerfile,
-                      "Dockerfile pins a different gid")
-
-    def test_the_installer_creates_the_account_with_the_pinned_uid(self):
-        # `useradd --system` with no --uid picks a floating number, which is
-        # exactly the bug. The uid must be passed explicitly.
-        self.assertRegex(self.install, r'useradd --system --uid "\$SERVICE_UID"')
-        self.assertRegex(self.install, r'groupadd --system --gid "\$SERVICE_UID"')
-
-    def test_the_state_directory_is_reowned_on_every_run(self):
-        # A path flip must never need a manual chown again — the installer
-        # repairs ownership unconditionally, and with a shared uid the repair
-        # is a no-op on a healthy box.
-        self.assertRegex(
-            self.install, r'chown -R "\$SERVICE_USER:\$SERVICE_USER" "\$STATE"')
-
-    def test_an_existing_account_on_the_wrong_uid_is_migrated_not_ignored(self):
-        # Idempotence has to include installs made before the convention:
-        # the first real Pi already has a floating-uid gsu on it.
-        self.assertIn('usermod -u "$SERVICE_UID"', self.install)
-        self.assertIn('groupmod -g "$SERVICE_UID"', self.install)
-
-    def test_the_compose_file_does_not_shadow_the_enrolment_delivered_ca(self):
-        # GSU_CA_FILE set in the environment block points at a read-only mount
-        # that exists only when pre-provisioned — and a set-but-unreadable
-        # GSU_CA_FILE is a hard refusal, never a fallback (gsu/tls.py). The
-        # enrolment response is where the broker CA normally comes from, and
-        # compose must not override that for every container station.
-        self.assertNotIn("GSU_CA_FILE", self.compose_directives)
-        # ...while the opt-in stays documented where a person would set it.
-        env_example = (DEPLOY / "gsu.env.example").read_text()
-        self.assertIn("#GSU_CA_FILE=", env_example)
-
-    def test_ca_certificates_are_installed_as_the_public_material_they_are(self):
-        # 0640 root:gsu blocked the container's user from the trust root it
-        # was configured to verify the broker against. A CA certificate has no
-        # secret in it; gsu.env does, and keeps its tighter mode.
-        self.assertRegex(self.install, r'install -m 0644 -o root -g root "\$1" "\$2"')
-        self.assertIn('install -m 0640 -o root -g "$SERVICE_USER" '
-                      '"$SRC/deploy/gsu.env.example"', self.install)
-
-
-if __name__ == "__main__":
-    unittest.main()
-
-
-class UpdaterTests(unittest.TestCase):
-    """The update mechanism (DECISIONS.md item 39).
-
-    Its decision logic is exercised properly against a stubbed Docker in
-    `scratchpad/updatelab` — 21 scenarios covering accept, gate failure,
-    rollback, rollback verification, rejected-digest suppression, failed pull
-    and no-op. **It has never driven a real container.**
-
-    What is checked here is the shape that scenario harness cannot: that the
-    protective behaviours are still written into the script and the units, so
-    that a later edit cannot quietly remove one and leave the tests green.
-    """
-
-    @classmethod
-    def setUpClass(cls):
-        cls.script = (DEPLOY / "gsu-update.sh").read_text()
-        cls.timer = (DEPLOY / "gsu-update.timer").read_text()
-        cls.service = (DEPLOY / "gsu-update.service").read_text()
-
-    def test_the_script_is_executable(self):
-        self.assertTrue(os.access(DEPLOY / "gsu-update.sh", os.X_OK))
-
-    def test_the_gate_requires_publishing_not_merely_starting(self):
-        # The condition that earns the gate its keep: a container can start,
-        # log cheerfully and publish nothing, and that is invisible to a
-        # "did it start?" check.
-        self.assertIn("published", self.script)
-        self.assertIn("enrolled", self.script)
-        self.assertRegex(self.script, r'\[ "\$published" -gt "\$baseline" \]')
-
-    def test_a_failed_gate_rolls_back(self):
-        self.assertIn("rollback ", self.script)
-        self.assertIn("did not pass the health gate", self.script)
-
-    def test_the_rollback_is_itself_gated(self):
-        # So that "the rollback worked" is a fact, not an assumption — and so
-        # that an old image which also fails is reported as NOT an update fault.
-        rollback = self.script.split("rollback() {", 1)[1].split("\n}", 1)[0]
-        self.assertIn("if gate;", rollback)
-        self.assertIn("ALARM", rollback)
-
-    def test_a_rejected_digest_is_not_retried(self):
-        # Otherwise a bad image is re-pulled every timer tick for ever.
-        self.assertIn("REJECTED=", self.script)
-        self.assertIn("not being retried", self.script)
-
-    def test_a_failed_pull_changes_nothing(self):
-        pull = self.script.split('if ! docker pull', 1)[1].split("fi", 1)[0]
-        self.assertIn("return 0", pull)
-        self.assertIn("untouched", pull)
-
-    def test_the_previous_image_is_kept_before_the_swap(self):
-        # The rollback target has to exist before there is anything to roll
-        # back from, and it is captured by image id so a later retag cannot
-        # move it.
-        self.assertIn("PREVIOUS_TAG", self.script)
-        self.assertIn('docker tag "$before" "$PREVIOUS_TAG"', self.script)
-
-    def test_the_timer_is_jittered_and_not_at_boot(self):
-        # Without jitter a whole fleet checks in the same minute and a bad
-        # image takes all of them out together.
-        self.assertRegex(self.timer, r"RandomizedDelaySec=\d+h")
-        self.assertIn("OnBootSec=", self.timer)
-        self.assertNotIn("OnBootSec=0", self.timer)
-        self.assertIn("Persistent=true", self.timer)
-
-    def test_the_updater_runs_on_the_host_as_root(self):
-        # A container that can reach the docker socket can replace itself with
-        # anything, which would make the gate decorative.
-        self.assertIn("User=root", self.service)
-        self.assertNotIn("docker.sock", (DEPLOY / "docker-compose.yml").read_text())
-
-    def test_nothing_updates_until_a_reference_is_configured(self):
-        # A station that keeps running what it has is the safe default for a
-        # box nobody can reach.
-        self.assertIn("GSU_UPDATE_REF", self.script)
-        self.assertIn("Nothing to track", self.script)
-        env = (DEPLOY / "gsu.env.example").read_text()
-        self.assertIn("GSU_UPDATE_REF=", env)
-        self.assertIn("GSU_GATE_SECONDS", env)
-
-    def test_the_dockerfile_keeps_code_as_the_last_layer(self):
-        # A code-only update then ships one ~91 KB layer. Moving a COPY below
-        # this would quietly make every update a bigger download.
-        dockerfile = (DEPLOY / "Dockerfile").read_text()
-        copies = [line for line in dockerfile.splitlines()
-                  if line.startswith("COPY")]
-        self.assertTrue(copies[-1].startswith("COPY gsu/"), copies)

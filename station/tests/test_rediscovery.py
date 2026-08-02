@@ -24,7 +24,6 @@ import unittest
 from pathlib import Path
 
 from gsu.agent import Agent
-from gsu.camera.picsi import PiCsiCamera
 from gsu.config import AgentConfig
 from gsu.devices.inventory import Inventory, SlotReport
 
@@ -112,101 +111,19 @@ class RebuildOrderTests(unittest.TestCase):
         self.assertIsNotNone(self.agent.camera)
 
 
-class RetiredCameraTests(unittest.TestCase):
-    """retire() is terminal, and there is no longer a handle to leak.
-
-    These used to exercise a `close()`/`retire()` distinction over a
-    long-lived picamera2 object: `close()` relinquished and the next capture
-    reopened, `retire()` was terminal. That distinction was the previous fix
-    and it was not sufficient, because the object it guarded could leak its
-    acquisition without either verb ever being called — a `Picamera2()` that
-    raised after acquiring left nothing for `close()` to close.
-
-    There is no such object any more (`camera/picsi.py`). Every capture is a
-    subprocess that owns the sensor for its own lifetime and nothing between
-    them, so what is worth testing is different: that a capture holds the
-    lease and gives it back, that a retired driver stops, and that a stale
-    driver cannot interfere with its successor.
-    """
-
-    def camera(self, lease=None) -> tuple[PiCsiCamera, list]:
-        """The real driver, with only the subprocess replaced."""
-        calls: list = []
-        driver = PiCsiCamera(sensor_lease=lease) if lease else PiCsiCamera()
-        driver._backend = "rpicam"
-        driver._tool = "rpicam-jpeg"
-
-        def fake_capture():
-            calls.append(driver.sensor_lease.holder)
-            return b"\xff\xd8" + b"\x00" * 200 + b"\xff\xd9"
-
-        driver._capture_cli = fake_capture
-        return driver, calls
-
-    def test_the_driver_has_no_in_process_libcamera_backend_at_all(self):
-        """The wedge was `Camera in Acquired state trying acquire()`, which
-        only a process that acquires twice can produce. This station now
-        contains no libcamera: the only backends are a subprocess and none."""
-        self.assertIn(PiCsiCamera().backend, ("rpicam", "none"))
-        self.assertFalse(hasattr(PiCsiCamera, "_open_picamera2"))
-        self.assertFalse(hasattr(PiCsiCamera(), "_camera"))
-
-    def test_a_capture_holds_the_sensor_and_gives_it_back(self):
-        driver, calls = self.camera()
-        self.assertIsNotNone(driver.capture())
-        self.assertEqual(calls, ["the camera preview"],
-                         "the subprocess ran without the lease held")
-        self.assertTrue(driver.sensor_lease.free,
-                        "the lease was not released after the capture")
-
-    def test_a_capture_is_refused_while_something_else_holds_the_sensor(self):
-        driver, calls = self.camera()
-        token = driver.sensor_lease.acquire("the live stream")
-        self.assertIsNone(driver.capture())
-        self.assertEqual(calls, [], "the camera was opened under another holder")
-        # Contention, named — not a camera fault. The distinction is the whole
-        # reason a black preview used to be undiagnosable.
-        self.assertIn("the live stream", driver.unavailable_reason)
-        self.assertEqual(driver._failures, 0, "contention was counted as a fault")
-        driver.sensor_lease.release(token)
-        self.assertIsNotNone(driver.capture())
-
-    def test_a_retired_driver_never_captures_again(self):
-        driver, calls = self.camera()
-        self.assertIsNotNone(driver.capture())
-        driver.retire()
-        self.assertIsNone(driver.capture())
-        self.assertIsNone(driver.capture())
-        self.assertEqual(len(calls), 1, "a retired driver opened the sensor")
-        self.assertIn("replaced", driver.unavailable_reason)
-
-    def test_a_retired_driver_cannot_free_its_successors_hold(self):
-        """The zombie release, which a boolean lock could not have refused.
-
-        Rediscovery builds the replacement while the outgoing driver may still
-        be one line into a capture. Under a plain flag the old instance's
-        release frees the *new* one's hold and the two then run at once — the
-        bug wearing the fix as a disguise.
-        """
-        from gsu.camera.ownership import SensorLease
-
-        lease = SensorLease("camera")
-        old, _ = self.camera(lease)
-        new, calls = self.camera(lease)
-
-        stale = lease.acquire("the outgoing driver")
-        old.retire()
-        successor = lease.acquire("the live stream")
-        self.assertIsNone(successor, "the lease was handed out twice")
-
-        lease.release(stale)
-        successor = lease.acquire("the live stream")
-        self.assertIsNotNone(successor)
-        # The stale token is now worthless and must stay worthless.
-        self.assertFalse(lease.release(stale))
-        self.assertEqual(lease.holder, "the live stream")
-        self.assertIsNone(new.capture(), "the successor's hold was broken")
-        self.assertEqual(calls, [])
+# RetiredCameraTests is gone with the CSI camera driver.
+#
+# It guarded a real and expensive bug: the driver held a long-lived
+# `picamera2` object, and a `Picamera2()` that raised *after* acquiring the
+# sensor leaked the acquisition with nothing left for `close()` to close — so
+# the camera stayed wedged for the life of the process and every plausible fix
+# looked correct and changed nothing.
+#
+# The Pi 2B and its CSI ribbon are out of scope, and with them the only driver
+# that ever held a sensor handle across captures. A network camera is a URL.
+# The lease behaviour these tests also covered — a capture takes the lease and
+# gives it back, a retired driver stops — belongs to `camera/ownership.py` and
+# is exercised by MidStreamTests below and by test_video.py.
 
 
 class MidStreamTests(unittest.TestCase):
@@ -257,7 +174,7 @@ class MidStreamTests(unittest.TestCase):
         # stream holds the sensor, the slot reports failed, and rediscovery
         # then rebuilds against the one working consumer of the camera.
         report = SlotReport(
-            slot="camera", type_id="raspberry-pi-csi",
+            slot="camera", type_id="onvif-network-camera",
             label="Raspberry Pi camera (CSI ribbon)", connection="csi",
             configured=True, detected=False, driver_available=True,
             status="configured_absent", detail="Camera in Running state",

@@ -56,12 +56,13 @@
     },
 
     "camera": {
-      "_comment": "Pi camera on the CSI ribbon. Driven now: snapshots go to gsu/{station_id}/video and the live H.264 stream is started on demand by the platform. 640x480 rather than the sensor's full size because this setting is a BANDWIDTH decision, not a picture-quality one - a real 640x480 frame is 30-60 kB, so 2 fps is already 640-1280 kbit/s on a metered link, and 1080p snapshots would be five times that (HARDWARE.md §8). The live stream is where full resolution belongs, because it only runs while somebody is watching. Never yet run against a real camera.",
-      "type_id": "raspberry-pi-csi",
+      "_comment": "A network camera, which is a URL and nothing else. The CSI ribbon camera that used to be here went with the Pi 2B: it was the only source that owned a local sensor, and it needed libcamera, a Raspberry Pi archive key, a device node and a /dev bind mount to deliver a preview frame. Leave `address` empty until the camera has an address on the site's network - not-fitted is a different statement from fitted-and-wrong, and an empty slot says the first one honestly.",
+      "type_id": "onvif-network-camera",
       "params": {
-        "resolution": "640x480",
-        "quality": 75,
-        "rotation": 0
+        "address": "",
+        "port": 554,
+        "rtsp_path": "/Streaming/Channels/101",
+        "transport": "tcp"
       },
       "resource": null
     },

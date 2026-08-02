@@ -17,7 +17,6 @@ and most easily assumes.
 
 Two implementations behind one interface, exactly as `sensors/` does it:
 
-    picsi.py       the real CSI camera, through `rpicam-jpeg` — a subprocess
                    per frame, and no libcamera inside this process. There used
                    to be a second, faster backend holding a camera object open
                    between frames; it was the only thing that could wedge the

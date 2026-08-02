@@ -1,16 +1,16 @@
-# One runtime dependency. Everything else the station needs is in the standard
-# library on purpose: an unattended box in the field should boot with what is in
-# its image and never need to install anything.
+# **No runtime dependencies at all**, for a station with no receiver fitted.
+#
+# Everything the agent needs is in the standard library on purpose: an
+# unattended box in the field should boot with what is in its image and never
+# need to install anything.
 #
 #   python -m venv .venv && .venv/bin/pip install -r requirements.txt
 #
-# 5.0 is a floor, not a preference. The station passes ssl_cert_reqs,
-# ssl_check_hostname and ssl_ca_certs explicitly rather than trusting redis-py's
-# defaults, which have differed between versions — and an older client that does
-# not accept them is refused at start-up rather than connected on weaker terms
-# (gsu/transport/redis_transport.py). Pure Python, so there is nothing to
-# compile on ARMv7 and no toolchain needed on the Pi.
-redis>=5.0
+# `redis>=5.0` used to be the one entry here and went with the Redis transport.
+# Contract 2.0 defines a single transport — one authenticated WebSocket to the
+# platform's /broker — and the station writes that client out itself, for the
+# same reason it writes out the SDR driver: a protocol this small is less to
+# carry than a library that speaks it.
 
 # Development only: the offline schema tests read contract/schemas/ directly.
 jsonschema>=4.0    # tests
@@ -34,33 +34,28 @@ jsonschema>=4.0    # tests
 #
 # The cost, honestly
 #
-# On the Pi 5 (aarch64) there is nothing to think about: PyPI ships manylinux
-# aarch64 wheels and `pip install numpy` takes seconds.
-#
-# On the Pi 2B (ARMv7) there is. PyPI publishes no armv7l wheels for numpy. On
-# Raspberry Pi OS, pip is preconfigured to use piwheels, which has prebuilt ARM
-# wheels, so it still installs from a binary — but that is a property of that
-# image, not of pip, and on any other armhf base it falls back to building from
-# source: a BLAS toolchain and the better part of an hour. `apt install
-# python3-numpy` with a venv made `--system-site-packages` is the reliable route
-# there, the same shape of answer as picamera2 in gsu/camera/picsi.py.
+# On amd64 and arm64 — the only architectures this ships to — PyPI publishes
+# manylinux wheels and `pip install numpy` takes seconds. The long note that
+# used to be here about armv7, piwheels and a BLAS toolchain went with the Pi
+# 2B: 32-bit ARM was the only target where this compiled from source, and it
+# was the reason the station carried a second deployment path at all.
 #
 # Why that does not spoil the property this file exists to protect
 #
-# The station still boots, enrols, senses and publishes with redis alone. numpy
-# is imported lazily and only by the RTL-SDR driver; a box without it reports
-# "numpy is not installed" against the radio slot and carries on, exactly as a
-# box with no dongle plugged in does. So the one-dependency guarantee holds for
-# every station that has not been fitted with a receiver, and the cost is paid
-# only where the capability is wanted.
+# The station still boots, enrols, senses and publishes with nothing installed.
+# numpy is imported lazily and only by the RTL-SDR driver; a box without it
+# reports "numpy is not installed" against the radio slot and carries on,
+# exactly as a box with no dongle plugged in does. So the no-dependency
+# guarantee holds for every station that has not been fitted with a receiver,
+# and the cost is paid only where the capability is wanted.
 #
 # scipy is NOT needed and should not be added. Remote-Radio's DSP used
 # `scipy.signal.firwin` and `lfilter`; both are reimplemented in
 # gsu/radio/am.py, which is some thirty lines against a large compiled
-# dependency that has no armv7 story at all.
+# dependency.
 #
-# The RTL-SDR driver also needs the librtlsdr shared library, which is not a pip
-# package: `sudo apt install librtlsdr0` (and `rtl-sdr` for the command-line
-# tools worth having when a dongle misbehaves). It is GPL-2.0 and deliberately
-# not vendored — see the licence note at the top of gsu/radio/rtl2832.py, which
-# is a decision for DECISIONS.md before this ships as an appliance image.
+# The RTL-SDR driver also needs the librtlsdr shared library, and the Opus
+# encoder needs libopus — neither is a pip package. Both are installed in
+# deploy/Dockerfile, which is where they belong: installing them on the *host*
+# makes the radio work from a shell on that box and not at all from the agent,
+# because the host's packages are invisible inside the container.

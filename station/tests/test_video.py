@@ -35,7 +35,6 @@ from jsonschema import Draft202012Validator
 
 from gsu.agent import Agent
 from gsu.camera import Frame, complete_jpeg, font, jpeg, parse_resolution
-from gsu.camera.picsi import PiCsiCamera
 from gsu.camera.synthetic import SyntheticCamera
 from gsu.config import AgentConfig, SiteConfig
 from gsu.credentials import Broker
@@ -541,68 +540,16 @@ class SyntheticCameraTests(unittest.TestCase):
         self.assertEqual(base64.b64decode(payload["jpeg"]), frame.jpeg)
 
 
-class PiCameraTests(unittest.TestCase):
-    """The real driver, on a machine that is not a Pi.
+# The CSI camera's own tests are gone with the driver. They asserted that it
+# reported absence rather than pretending on a machine with no libcamera, and
+# that constructing it opened no hardware — both real properties, and both
+# only meaningful for a driver that owned a sensor. Nothing left in this
+# station does.
 
-    This is the whole of what can be tested without hardware, and it is stated
-    that way in HARDWARE.md §7 rather than implied here.
-    """
 
-    def test_it_reports_absence_rather_than_pretending(self):
-        camera = PiCsiCamera()
-        if camera._backend != "none":  # pragma: no cover - a real Pi
-            self.skipTest("this machine has a libcamera stack")
-        self.assertEqual(camera.status, "absent")
-        self.assertIsNone(camera.capture())
-        self.assertIn("rpicam", camera.unavailable_reason)
-        self.assertFalse(camera.describe().present)
-        self.assertFalse(camera.describe().simulated, "never claims to be a simulation")
-
-    def test_it_says_which_capture_path_it_took_and_why(self):
-        # One path now, and the sentence says what it costs. The two-path
-        # explanation this used to carry — picamera2 versus a subprocess, and
-        # the venv packaging trap that silently chose between them — went with
-        # the backend it described.
-        camera = PiCsiCamera()
-        self.assertTrue(camera.backend_reason, "a backend with no explanation")
-        self.assertIn(camera._backend, ("rpicam", "none"))
-        if camera._backend == "rpicam":  # pragma: no cover - needs rpicam-apps
-            self.assertIn("subprocess per frame", camera.backend_reason)
-
-    def test_the_only_libcamera_in_this_process_is_a_subprocess(self):
-        """What actually closes the wedge, asserted as a property of the code.
-
-        `Camera in Acquired state trying acquire()` comes from libcamera's own
-        `Camera::acquire`, and it can only be reached by a process that already
-        holds the camera in its own `CameraManager`. This station no longer has
-        one: `picamera2` is not imported anywhere, under any condition, so the
-        error is unreachable rather than defended against.
-        """
-        import subprocess as sp
-        import sys
-
-        source = Path(__file__).resolve().parent.parent / "gsu"
-        # An import statement, not prose: the history of why this backend went
-        # away is worth keeping in the comments, and grepping for the word
-        # alone would forbid explaining the fix in the file that made it.
-        offenders = sp.run(
-            ["grep", "-rnE", r"^\s*(import|from)\s+picamera2", "--include=*.py",
-             str(source)],
-            capture_output=True, text=True, check=False,
-        ).stdout.splitlines()
-        self.assertEqual(offenders, [], "picamera2 is imported somewhere")
-        self.assertNotIn("picamera2", sys.modules)
-
-    def test_construction_touches_no_hardware(self):
-        # It runs inside a sensing tick, so it must not open a camera or start
-        # a subprocess. Anything that slow belongs on the preview thread, where
-        # a second of latency costs a frame instead of the loop.
-        started = time.monotonic()
-        PiCsiCamera(resolution="1280x720", quality=80, rotation=180)
-        self.assertLess(time.monotonic() - started, 0.5)
-
-    def test_the_registry_can_build_both_cameras(self):
-        for type_id in ("simulated-camera", "raspberry-pi-csi", "onvif-network-camera"):
+class CameraRegistryTests(unittest.TestCase):
+    def test_the_registry_can_build_every_camera(self):
+        for type_id in ("simulated-camera", "onvif-network-camera"):
             device = registry.get(type_id)
             self.assertIsNotNone(device, type_id)
             self.assertEqual(device.slot, "camera")
