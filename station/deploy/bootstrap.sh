@@ -91,6 +91,31 @@ esac
 
 ask GSU_SITE_NAME "A name for this site (shown on the local setup page)" "ground station"
 
+# The setup page needs a password, and the station is right to insist.
+#
+# It binds 0.0.0.0 *inside the container* — the container's network namespace
+# is the boundary, and compose publishes the port to the host's loopback only.
+# But the agent cannot see that from inside, so it applies the rule it can
+# check: an unauthenticated form must never be offered on a routable
+# interface. Without a password it demotes itself to the container's own
+# loopback, which Docker's port forward cannot reach, and the page is then
+# unreachable from anywhere at all.
+#
+# So this is not optional hardening; it is what makes the page exist.
+if [ -z "${GSU_SETUP_PASSWORD_HASH:-}" ]; then
+  echo
+  echo "The setup page needs a password. It is published to this host's"
+  echo "loopback only, so reaching it remotely still needs an SSH tunnel."
+  read -r -s -p "Setup page password: " SETUP_PW || true
+  echo
+  if [ -n "${SETUP_PW:-}" ]; then
+    GSU_SETUP_PASSWORD_HASH=$(printf '%s' "$SETUP_PW" \
+      | docker compose run --rm -T gsu setup-password --stdin 2>/dev/null | tail -1)
+    unset SETUP_PW
+  fi
+fi
+GSU_SETUP_PASSWORD_HASH="${GSU_SETUP_PASSWORD_HASH:-}"
+
 umask 077
 cat > "$ENV_FILE" <<EOF
 # Written by bootstrap.sh. Gitignored on purpose: this holds a site's settings
@@ -98,6 +123,7 @@ cat > "$ENV_FILE" <<EOF
 # this station understands.
 GSU_PLATFORM_URL=$GSU_PLATFORM_URL
 GSU_SITE_NAME=$GSU_SITE_NAME
+GSU_SETUP_PASSWORD_HASH=$GSU_SETUP_PASSWORD_HASH
 EOF
 
 printf '\nWrote %s.\n\n' "$ENV_FILE"
@@ -110,8 +136,8 @@ Running.
 
   Enrol it        docker compose run --rm gsu enrol --token XXXX-XXXX-XXXX
   Check hardware  docker compose run --rm gsu preflight --probe
-  Setup page      http://127.0.0.1:8088   (loopback only, no password --
-                  physical presence or an SSH tunnel is the control)
+  Setup page      http://127.0.0.1:8088   (this host's loopback only; from
+                  elsewhere: ssh -L 8088:127.0.0.1:8088 <this host>)
   Logs            docker compose logs -f
   Update          git pull && docker compose up -d --build
 
