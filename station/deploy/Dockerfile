@@ -111,6 +111,13 @@ RUN pip install --no-cache-dir "numpy>=1.24"
 # unchanged. On a metered Starlink link that is the difference between an update
 # being routine and an update being a decision. Measured, not assumed —
 # DECISIONS.md item 40 has the numbers and how they were taken.
+# Demo airband broadcasts: a 16-bit WAV named `<freq_hz>.wav` goes on air at
+# that frequency. Same convention as the platform's own simulator, and the
+# reason a demo station tuned to 127.200 now says something instead of
+# producing voice-shaped noise. Above the code COPY because it changes far
+# less often than the package does.
+COPY assets/ ./assets/
+
 COPY README.md DECISIONS.md DEPLOYMENT.md HARDWARE.md CONTRACT-QUESTIONS.md ./
 COPY gsu/ ./gsu/
 

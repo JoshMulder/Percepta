@@ -168,7 +168,10 @@ class SyntheticCamera:
     def render(self, at) -> Canvas:
         canvas = Canvas(self.columns, self.rows, (12, 14, 22))
         self._background(canvas)
-        bars = max(2, self.rows // 12)
+        # A quarter of the height, not a twelfth. The bars are the part of this
+        # card that proves colour survives the encoder, and at a twelfth they
+        # were a stripe you had to look for.
+        bars = max(3, self.rows // 4)
         width = max(1, self.columns // len(BARS))
         for index, colour in enumerate(BARS):
             last = index == len(BARS) - 1
@@ -207,11 +210,31 @@ class SyntheticCamera:
         return canvas
 
     def _background(self, canvas: Canvas) -> None:
-        """A coarse vertical gradient, so a frozen frame and a black one are
-        different things to look at."""
-        for row in range(canvas.rows):
-            shade = 10 + (row * 26) // max(1, canvas.rows)
-            canvas.fill(0, row, canvas.columns, 1, (shade, shade + 2, shade + 10))
+        """A coarse mosaic, so a frozen frame and a black one are different
+        things to look at.
+
+        This was a vertical gradient from RGB 10 to 36 — near-black top to
+        bottom. With the colour bars only a twelfth of the height, some ninety
+        percent of the test card was a dark smudge, and the one thing a test
+        card exists to prove is that the picture path works at all. A dark
+        frame and a dead camera looked the same, which is exactly backwards.
+
+        Muted rather than saturated: the bars above are the colour reference
+        and this must not compete with them, but it does have to be plainly
+        *lit* so a glance separates "the camera is fine" from "the sensor is
+        giving me nothing".
+        """
+        palette = (
+            (54, 60, 78), (68, 74, 96), (44, 52, 70), (78, 84, 104),
+            (60, 68, 88), (50, 58, 76),
+        )
+        block = max(2, canvas.rows // 10)
+        for row in range(0, canvas.rows, block):
+            for column in range(0, canvas.columns, block):
+                shade = palette[((row // block) + (column // block)) % len(palette)]
+                canvas.fill(column, row,
+                            min(block, canvas.columns - column),
+                            min(block, canvas.rows - row), shade)
 
     def _sweep(self, canvas: Canvas) -> None:
         """A block that moves one column per frame.

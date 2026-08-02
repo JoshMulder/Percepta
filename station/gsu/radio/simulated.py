@@ -16,9 +16,12 @@ the audio path, and `off` silences it for a quiet demonstration.
 
 from __future__ import annotations
 
+import array
 import logging
 import math
 import random
+import wave
+from pathlib import Path
 
 from ..sensors import Device
 from . import dsp
@@ -40,6 +43,65 @@ TRAFFIC = {
     "low": ((70.0, 220.0), (3.0, 8.0)),
     "busy": ((6.0, 25.0), (3.0, 9.0)),
 }
+
+
+#: Silence between loops of a demo broadcast, in seconds.
+BROADCAST_GAP_S = 5.0
+
+#: Where `<freq_hz>.wav` files live. Same convention as the platform's own
+#: demo (`server/app/backend/services/airband_demo.py`): drop a 16-bit WAV
+#: named for the frequency in hertz and it goes on air there.
+ASSETS = Path(__file__).resolve().parent.parent.parent / "assets"
+
+
+def _load_broadcast(freq_hz: int) -> list[float] | None:
+    """A demo broadcast for this channel, resampled to AUDIO_RATE, or None.
+
+    **This is why tuning the demo receiver to 127.200 used to be silent.** The
+    platform's simulator has played WAVs keyed by frequency since it was
+    written; the station's demo receiver synthesised three sine partials under
+    a syllabic envelope and never read a file. Two different demos, and the one
+    an operator actually listens to on a real station was the one with nothing
+    to say.
+
+    Resampled with linear interpolation and the standard library's `wave`,
+    deliberately: numpy is optional on a station and only the real SDR driver
+    requires it, so a demo that needed it would make the no-dependency
+    guarantee untrue for every box with no receiver fitted.
+    """
+    path = ASSETS / f"{int(freq_hz)}.wav"
+    if not path.exists():
+        return None
+    try:
+        with wave.open(str(path), "rb") as handle:
+            if handle.getsampwidth() != 2:
+                log.warning("%s is not 16-bit; ignoring it.", path.name)
+                return None
+            channels = handle.getnchannels()
+            rate = handle.getframerate()
+            raw = handle.readframes(handle.getnframes())
+    except (OSError, wave.Error) as exc:
+        log.warning("Could not read %s: %s", path.name, exc)
+        return None
+
+    samples = array.array("h")
+    samples.frombytes(raw)
+    if channels > 1:
+        samples = array.array("h", samples[::channels])
+
+    ratio = AUDIO_RATE / float(rate)
+    out = [0.0] * int(len(samples) * ratio)
+    for index in range(len(out)):
+        source = index / ratio
+        left = int(source)
+        first = samples[left] if left < len(samples) else 0
+        second = samples[left + 1] if left + 1 < len(samples) else first
+        out[index] = (first + (second - first) * (source - left)) / 32768.0
+    out.extend([0.0] * int(BROADCAST_GAP_S * AUDIO_RATE))
+    log.info("Demo broadcast on %.3f MHz: %s (%.0fs loop, %.0fs gap)",
+             freq_hz / 1e6, path.name,
+             len(out) / AUDIO_RATE - BROADCAST_GAP_S, BROADCAST_GAP_S)
+    return out
 
 
 def channel_noise_dbfs(freq_hz: int) -> float:
@@ -70,12 +132,21 @@ class SimulatedFrontEnd:
         self._phase = 0.0
         self._syllable = 0.0
         self._f0 = 140.0
+        #: A recorded broadcast for this channel, if one is fitted, and where
+        #: playback has reached. When present it *replaces* the random traffic
+        #: model: the message loops with a fixed gap and the gate follows it,
+        #: which is what makes a demo station say something recognisable
+        #: instead of producing voice-shaped noise.
+        self._broadcast = _load_broadcast(self._freq_hz)
+        self._cursor = 0
 
     # --- tuner ----------------------------------------------------------
 
     def tune(self, freq_hz: int) -> None:
         if freq_hz != self._freq_hz:
             self._freq_hz = int(freq_hz)
+            self._broadcast = _load_broadcast(self._freq_hz)
+            self._cursor = 0
             # A retune does not reset the traffic on the channel: broadcasts
             # advance whether or not anyone is listening, so tuning in joins a
             # transmission already in progress.
@@ -147,6 +218,17 @@ class SimulatedFrontEnd:
         return Block(spectrum_db=spectrum, bin_hz=dsp.BIN_HZ, seconds=seconds)
 
     def _advance_traffic(self, seconds: float) -> None:
+        if self._broadcast:
+            # The recording decides. `_transmitting` is simply "is there audio
+            # under the cursor", so the gate opens for the message and closes
+            # for the gap — no random model, because a demo whose message is
+            # cut in half by an invented gap is worse than no demo.
+            self._transmitting = any(
+                self._broadcast[self._cursor:self._cursor + int(seconds * AUDIO_RATE)]
+            )
+            if self._transmitting:
+                self._snr_db = 22.0
+            return
         gap, length = TRAFFIC[self._traffic]
         self._remaining -= seconds
         if self._remaining > 0:
@@ -177,6 +259,15 @@ class SimulatedFrontEnd:
         if samples <= 0:
             return []
         rate = AUDIO_RATE
+        if self._broadcast:
+            out = []
+            for _ in range(samples):
+                value = self._broadcast[self._cursor]
+                self._cursor = (self._cursor + 1) % len(self._broadcast)
+                # A little hiss even under a strong signal: an AM channel with
+                # a perfectly clean floor is the one thing that never happens.
+                out.append(value + self._rng.gauss(0.0, 0.02))
+            return out
         out: list[float] = []
         clarity = 0.0 if not self._transmitting else min(1.0, max(0.0, (self._snr_db - 4) / 24))
         hiss = 0.12 * (1.0 - clarity) + 0.02
