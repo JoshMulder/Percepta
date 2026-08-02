@@ -349,7 +349,12 @@ class ContainerTests(unittest.TestCase):
     def test_the_console_is_published_to_loopback_only(self):
         # It has no authentication. On 0.0.0.0 this would be an unauthenticated
         # setup page on the public internet.
-        self.assertIn('- "127.0.0.1:8088:8088"', self.directives)
+        # The binding is configurable now, so what matters is the *default*:
+        # an unauthenticated page on a routable interface is the failure this
+        # guards, and a site that opens it to the LAN has set a password to do
+        # so (the agent refuses to serve the page without one).
+        self.assertIn('"${GSU_SETUP_BIND:-127.0.0.1}:8088:8088"', self.directives)
+        self.assertNotIn('- "0.0.0.0:8088', self.directives)
         self.assertNotIn('- "8088:8088"', self.directives)
 
     def test_the_state_is_a_named_volume_that_survives_a_rebuild(self):

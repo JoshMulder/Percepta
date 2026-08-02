@@ -83,6 +83,16 @@ from .setup_access import COOKIE_NAME, Gate, is_loopback_host
 
 log = logging.getLogger("gsu.console")
 
+
+#: How long the setup page waits for a newly-saved device to report itself.
+#:
+#: A receiver's presence is only knowable after the sensing loop has polled it,
+#: and that loop runs at 1 Hz — so a verdict taken at save time is always taken
+#: before the answer exists. Two seconds covers a tick with room, and the wait
+#: ends early the moment the slot reports present, so a genuinely absent device
+#: still says so almost immediately.
+DETECT_GRACE_S = 2.0
+
 #: A setup form is a few hundred bytes. This is three orders of magnitude of
 #: headroom and still small enough that a hostile `Content-Length` cannot make
 #: a 1 GB box swap. Read in bounded chunks rather than trusting the header.
@@ -1074,7 +1084,34 @@ class Console:
             self.message = ("good", f"{slot}: saved. Applies when the live "
                                     f"stream stops.{note}")
             return slot
-        report = {r.slot: r for r in self.agent.inventory.report()}[slot]
+        # **Give the new driver one sensing tick before judging it.**
+        #
+        # A receiver's presence is not knowable at construction. `describe()`
+        # reports `present` only once the driver has actually produced
+        # something — for ADS-B that is `status == "streaming"`, which needs a
+        # parsed MAVLink frame — and this runs microseconds after
+        # `build_devices()`, before the sensing loop has polled anything.
+        #
+        # So every save of a working receiver reported "saved, but not
+        # detected", including the demo one, which cannot be absent because it
+        # generates its own frames. The same race is visible at start-up, where
+        # `devices.absent` is raised and then cleared about seventy
+        # milliseconds later by the first tick.
+        #
+        # Waiting is the honest fix rather than softening the wording: the
+        # question "is it there?" genuinely has no answer yet, and the loop
+        # that answers it runs at 1 Hz. Bounded, and it returns the moment the
+        # slot reports present, so a device that really is absent still says so
+        # promptly.
+        deadline = time.monotonic() + DETECT_GRACE_S
+        while True:
+            report = {r.slot: r for r in self.agent.inventory.report()}[slot]
+            if report.status == "present" or not type_id:
+                break
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.2)
+
         if not type_id:
             self.message = ("good", f"{slot}: nothing fitted.")
         elif report.status == "present":
