@@ -139,6 +139,7 @@ class SimulatedFrontEnd:
         #: instead of producing voice-shaped noise.
         self._broadcast = _load_broadcast(self._freq_hz)
         self._cursor = 0
+        self._block = (0, 0)
 
     # --- tuner ----------------------------------------------------------
 
@@ -147,6 +148,7 @@ class SimulatedFrontEnd:
             self._freq_hz = int(freq_hz)
             self._broadcast = _load_broadcast(self._freq_hz)
             self._cursor = 0
+        self._block = (0, 0)
             # A retune does not reset the traffic on the channel: broadcasts
             # advance whether or not anyone is listening, so tuning in joins a
             # transmission already in progress.
@@ -219,13 +221,28 @@ class SimulatedFrontEnd:
 
     def _advance_traffic(self, seconds: float) -> None:
         if self._broadcast:
-            # The recording decides. `_transmitting` is simply "is there audio
-            # under the cursor", so the gate opens for the message and closes
-            # for the gap — no random model, because a demo whose message is
-            # cut in half by an invented gap is worse than no demo.
-            self._transmitting = any(
-                self._broadcast[self._cursor:self._cursor + int(seconds * AUDIO_RATE)]
-            )
+            # **The cursor advances here, not in `demodulate`.**
+            #
+            # It was in `demodulate`, and that deadlocked: the receiver only
+            # demodulates while the gate is open, the gate opens only when this
+            # says a transmission is in progress, and this read the sample
+            # under the cursor. The recording starts near silence, so the gate
+            # never opened, the cursor never moved, and the demo sat frozen on
+            # the first frame for ever.
+            #
+            # `read()` runs every tick whether or not anyone is listening —
+            # which is the whole point of a receiver — so the recording plays
+            # on regardless and tuning in joins it mid-message, exactly as a
+            # real channel behaves.
+            block = max(1, int(seconds * AUDIO_RATE))
+            self._block = (self._cursor, block)
+            window = [self._broadcast[(self._cursor + i) % len(self._broadcast)]
+                      for i in range(block)]
+            self._cursor = (self._cursor + block) % len(self._broadcast)
+            # An amplitude test, not `any()`: a recording with dither is never
+            # exactly zero, and the five-second gap has to read as silence.
+            peak = max((abs(v) for v in window), default=0.0)
+            self._transmitting = peak > 0.02
             if self._transmitting:
                 self._snr_db = 22.0
             return
@@ -260,13 +277,17 @@ class SimulatedFrontEnd:
             return []
         rate = AUDIO_RATE
         if self._broadcast:
+            # The window `_advance_traffic` just passed over, resampled to
+            # whatever the caller asked for. It does not advance the cursor —
+            # that already happened, and doing it twice would play the
+            # recording at double speed whenever the gate was open.
+            start, block = self._block
             out = []
-            for _ in range(samples):
-                value = self._broadcast[self._cursor]
-                self._cursor = (self._cursor + 1) % len(self._broadcast)
+            for index in range(samples):
+                source = (start + (index * block) // max(1, samples)) % len(self._broadcast)
                 # A little hiss even under a strong signal: an AM channel with
                 # a perfectly clean floor is the one thing that never happens.
-                out.append(value + self._rng.gauss(0.0, 0.02))
+                out.append(self._broadcast[source] + self._rng.gauss(0.0, 0.02))
             return out
         out: list[float] = []
         clarity = 0.0 if not self._transmitting else min(1.0, max(0.0, (self._snr_db - 4) / 24))
