@@ -1770,7 +1770,7 @@ class Console:
             ("Platform API", state.get("platform") or "not set"),
             ("Broker", security.get("broker_url")
              or "not known until this station enrols"),
-            ("Publishing to", state.get("telemetry_topic") or "—"),
+            ("Contract", state.get("contract_version") or "—"),
             ("Station id", state.get("station_id") or "not enrolled"),
         ]
         out = ["<h2>Where this box talks</h2><div class=card>"]

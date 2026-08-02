@@ -1,35 +1,38 @@
-"""The broker, reached over 443.
+"""The station transport, reached over 443.
 
-    WS   /broker      station ↔ platform, `{topic, payload}` JSON frames
+    WS   /broker      station <-> platform, `{stream, payload}` JSON frames
 
-**This is the deployment path for station traffic.** Redis on 6380 works on a
+**This is the only transport contract 2.0 defines.** Redis on 6380 works on a
 LAN and nowhere else: behind a reverse proxy — which is what a public
-deployment is — that port is shut, and 443 is the one that is open at every
-site, on every corporate network, over Starlink.
+deployment is — that port is shut, and 443 is the one open at every site, on
+every corporate network, over Starlink.
 
 A RELAY, NOT A PROXY
 --------------------
 Nothing here speaks RESP to the station. Tunnelling Redis would let a box
-`SUBSCRIBE` to any channel on this platform, which is every other station's
+subscribe to any channel on this platform, which is every other station's
 telemetry and every other organisation's commands. What crosses this socket is
-one JSON object per message, and this endpoint decides what may be published.
+one JSON object of exactly two keys: a one-letter stream code and a payload.
 
-**The station's identity comes from the credential, never from the frame.**
-That is `contract/README.md` rule 1, the same rule `/media/ingest` states: a
-box holding a valid secret still cannot claim to be a different station. Here
-it has teeth — the topic a station may publish to is *derived* from the
-authenticated id and compared, and anything else is refused and counted rather
-than published. Without that check this endpoint would be a way for one
-compromised station to forge every other station's telemetry.
+**The station's identity comes from the credential, and there is nowhere in the
+frame to put one.** Under the draft this superseded, a station named its own
+topic and the platform compared it against a derived set — which worked, and
+depended on the comparison being right. There is now no name to compare: a
+station sends `t` and the platform decides what `t` means for whoever this
+credential belongs to. Confinement is structural rather than checked, which is
+the difference between a rule that holds and a rule that holds until somebody
+edits the wrong branch.
 
-Downstream sees nothing new: accepted messages are published into the same
-Redis channels the direct transport uses, so `station_ingest` cannot tell which
-way a station arrived.
+Downstream sees nothing new: accepted payloads are published into the same
+internal channels the ingest already listens on, through
+`station_topics.channel_for_stream`, which is the one place the wire and the
+fan-out meet.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import uuid
@@ -48,17 +51,30 @@ log = logging.getLogger(__name__)
 
 router = APIRouter(tags=["broker"])
 
-#: What a station may publish, formatted with its own id. Anything else is
-#: refused. From `station_topics` rather than built here, so what this accepts
-#: cannot drift from what enrolment promised and the ACL granted.
-def _permitted(station_id: uuid.UUID) -> frozenset[str]:
-    return station_topics.published_by_station(station_id)
-
-
-#: A frame larger than this is dropped and the connection closed. Matches the
-#: station's own cap; anything bigger is a bug upstream and a socket that
-#: stalls under it is a worse way to find out.
+#: A frame larger than this is dropped and the connection closed (1009).
+#: Matches the station's own cap; anything bigger is a bug upstream, and a
+#: socket that stalls under it is a worse way to find out.
 MAX_FRAME_BYTES = 512 * 1024
+
+
+def _supersede_channel(station_id: uuid.UUID) -> str:
+    """Where a newly-arrived socket announces itself to any older one.
+
+    Contract 2.0: a second socket on the same credential supersedes the first
+    and the platform closes the older one. This is not hypothetical — the ping
+    rule has a station reconnect the moment its link goes quiet, and the
+    platform cannot distinguish the socket that died from one having a quiet
+    minute, so for a while it holds both.
+
+    Commands and `events.ack` must go to exactly one of them. Send them to the
+    older and the station on the newer never sees its acknowledgement, re-sends
+    the same batch for ever, and the platform stores it again on every round.
+
+    Broadcast through Redis rather than an in-process registry because the two
+    sockets routinely land on different workers, and an in-process set would
+    hold "the newest socket *this worker* has seen", which is not the rule.
+    """
+    return f"supersede/gsu/{station_id}"
 
 
 @router.websocket("/broker")
@@ -66,6 +82,23 @@ async def broker(websocket: WebSocket) -> None:
     """A station's telemetry up and its commands down, on one socket."""
     auth = websocket.headers.get("authorization", "")
     secret = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+
+    # **Accept first, then close 4401.** Never reject the upgrade.
+    #
+    # This is a contract rule (`transport.md`, the relay's wire format) and it
+    # reads like a technicality until you follow it through. There is no socket
+    # to carry a close code until the handshake completes, so closing before
+    # `accept()` makes Starlette answer with an HTTP 403 and the station sees no
+    # close code at all.
+    #
+    # 4401 is the entire recovery path for a box whose credential expired while
+    # it was offline: it renews once and reconnects. Without the code the box
+    # reconnects on a five-minute backoff for ever and never calls `/renew` —
+    # so the seven-day grace window in `enrolment.md` §4, which exists purely to
+    # make that a non-event, is defeated by the absence of one frame. That is a
+    # site visit per station, and it is what this endpoint used to do.
+    await websocket.accept()
+
     if not secret:
         await websocket.close(code=4401)
         return
@@ -81,33 +114,35 @@ async def broker(websocket: WebSocket) -> None:
         credential_id = credential.id
         db.commit()
 
-    await websocket.accept()
-    permitted = _permitted(station_id)
-    log.info("Broker relay open for station %s.", station_id)
+    connection = uuid.uuid4()
+    log.info("Broker relay open for station %s (connection %s).",
+             station_id, connection)
     await _announce(organization_id, station_id, online=True)
 
-    # Commands travel the other way on the same socket. Subscribed here rather
-    # than through the shared ingest listener because this is one station's
-    # channel and this connection is the only thing that wants it — there is no
-    # leader election to do and nothing to coordinate between workers.
     client = aioredis.Redis.from_url(settings.redis_url)
     pubsub = client.pubsub()
-    await pubsub.subscribe(command_channel(station_id))
-    commands = asyncio.create_task(_pump_commands(websocket, pubsub, station_id))
+    await pubsub.subscribe(command_channel(station_id),
+                           _supersede_channel(station_id))
+    pump = asyncio.create_task(
+        _pump_down(websocket, pubsub, station_id, connection))
     # Authentication happens once, when the socket opens. Without this a
     # revoked station keeps publishing until something else drops its
-    # connection — which on a healthy link is never. See
-    # `enrolment.close_when_revoked`.
+    # connection — which on a healthy link is never.
     revoked = asyncio.create_task(enrolment.close_when_revoked(
         credential_id, station_id, lambda: websocket.close(code=4401),
     ))
+    # Announce last, so an older socket is displaced only once this one is
+    # actually able to receive what it is taking over.
+    await client.publish(_supersede_channel(station_id),
+                         json.dumps({"connection": str(connection)}))
 
     refused = 0
     try:
         while True:
             raw = await websocket.receive_text()
             if len(raw) > MAX_FRAME_BYTES:
-                log.warning("Station %s sent %d bytes; closing.", station_id, len(raw))
+                log.warning("Station %s sent %d bytes; closing.",
+                            station_id, len(raw))
                 await websocket.close(code=1009)
                 return
             try:
@@ -116,62 +151,63 @@ async def broker(websocket: WebSocket) -> None:
                 continue
             if not isinstance(message, dict):
                 continue
-            topic = message.get("topic")
+            stream = message.get("stream")
             payload = message.get("payload")
-            if not isinstance(topic, str) or not isinstance(payload, dict):
+            if not isinstance(stream, str) or not isinstance(payload, dict):
                 continue
 
-            if topic not in permitted:
-                # Told, not ignored. A station silently dropping everything it
-                # publishes looks exactly like a station with nothing to say,
-                # and this is the fault most likely to be a misconfiguration
-                # rather than an attack.
+            channel = station_topics.channel_for_stream(stream, station_id)
+            if channel is None:
+                # Told, not ignored. `c` upward is the likely case — a station
+                # echoing what it received — and the socket stays up because a
+                # refusal is a diagnosis, not a disconnection.
                 refused += 1
                 if refused <= 3:
-                    log.warning("Station %s tried to publish to %s.",
-                                station_id, topic)
+                    log.warning("Station %s published on stream %r.",
+                                station_id, stream)
                 await websocket.send_text(json.dumps({
                     "type": "refused",
-                    "topic": topic,
-                    "reason": "not a topic this station may publish to",
+                    "stream": stream,
+                    "reason": "a station may publish on t, a or e only",
                 }))
                 continue
 
-            await client.publish(topic, json.dumps(payload))
+            await client.publish(channel, json.dumps(payload))
     except WebSocketDisconnect:
         pass
     except Exception:  # noqa: BLE001 - one station must not take the worker down
         log.exception("Broker relay failed for station %s.", station_id)
     finally:
-        commands.cancel()
+        pump.cancel()
         revoked.cancel()
-        try:
-            await pubsub.unsubscribe(command_channel(station_id))
+        with contextlib.suppress(Exception):
+            await pubsub.unsubscribe(command_channel(station_id),
+                                     _supersede_channel(station_id))
             await pubsub.aclose()
             await client.aclose()
-        except Exception:  # noqa: BLE001 - teardown, on a socket already gone
-            pass
         # The socket closing is the earliest and most certain evidence a
         # station has gone. Offline was otherwise a timeout — telemetry stops,
         # last_seen_at ages, and the console decides it is stale some seconds
         # later. This is what MQTT would have given us as a Last Will, and the
         # relay gets it for free by knowing when its own socket ends.
         await _announce(organization_id, station_id, online=False)
-        log.info("Broker relay closed for station %s.", station_id)
+        log.info("Broker relay closed for station %s (connection %s).",
+                 station_id, connection)
 
 
 async def _announce(organization_id: uuid.UUID, station_id: uuid.UUID,
                     *, online: bool) -> None:
     """Tell the console a station arrived or left, on the org status channel."""
-    try:
+    with contextlib.suppress(Exception):
+        # A console notice must never break the link.
         await hub.publish_status(organization_id, station_id, {"online": online})
-    except Exception:  # noqa: BLE001 - a console notice must never break the link
-        log.debug("Could not announce station %s.", station_id, exc_info=True)
 
 
-async def _pump_commands(websocket: WebSocket, pubsub, station_id: uuid.UUID) -> None:
-    """Forward this station's commands down the socket it is already holding."""
-    topic = command_channel(station_id)
+async def _pump_down(websocket: WebSocket, pubsub, station_id: uuid.UUID,
+                     connection: uuid.UUID) -> None:
+    """Commands down the socket, and the notice that a newer one has arrived."""
+    commands = command_channel(station_id)
+    supersede = _supersede_channel(station_id)
     try:
         async for message in pubsub.listen():
             if message.get("type") != "message":
@@ -179,14 +215,29 @@ async def _pump_commands(websocket: WebSocket, pubsub, station_id: uuid.UUID) ->
             data = message.get("data")
             if isinstance(data, bytes):
                 data = data.decode("utf-8", "replace")
+            channel = message.get("channel")
+            if isinstance(channel, bytes):
+                channel = channel.decode("utf-8", "replace")
             try:
                 payload = json.loads(data)
             except (TypeError, ValueError):
                 continue
             if not isinstance(payload, dict):
                 continue
+
+            if channel == supersede:
+                if payload.get("connection") != str(connection):
+                    log.info("Station %s opened a newer socket; closing %s.",
+                             station_id, connection)
+                    with contextlib.suppress(Exception):
+                        await websocket.close(code=1012)
+                    return
+                continue
+
+            # Commands, unrequested. No subscribe handshake exists: the
+            # credential already determined whose these are.
             await websocket.send_text(json.dumps({
-                "topic": topic, "payload": payload,
+                "stream": "c", "payload": payload,
             }))
     except asyncio.CancelledError:
         raise

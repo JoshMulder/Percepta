@@ -33,16 +33,29 @@ Handler = Callable[[dict], str]
 
 
 class CommandRouter:
-    def __init__(self, command_topic: str, handlers: dict[str, Handler]) -> None:
-        self.command_topic = command_topic
+    """Everything that arrives on the downward stream, dispatched by `kind`.
+
+    There is no channel to check any more. Under contract 2.0 a station has one
+    socket and one downward stream, and the platform already resolved whose
+    commands these are from the credential before it sent them — so a command
+    that arrives here is by construction this station's own.
+
+    That deleted a whole class of fault rather than fixing it. The old router
+    compared an inbound channel name against the one enrolment had handed out,
+    and the interesting case was the near-miss: the platform's internal naming
+    uses colons where the station boundary used slashes, and a station given
+    the wrong form subscribed successfully, received everything, and dropped
+    all of it — indistinguishable from a station ignoring its operator. There
+    is now no name on the wire to get wrong.
+    """
+
+    def __init__(self, handlers: dict[str, Handler]) -> None:
         self.handlers = handlers
         self.applied = 0
         self.ignored = 0
         self.last: str | None = None
 
-    def dispatch(self, channel: str, payload: dict) -> bool:
-        if not self.accepts(channel):
-            return False
+    def dispatch(self, payload: dict) -> bool:
         kind = str(payload.get("kind", ""))
         handler = self.handlers.get(kind)
         if handler is None:
@@ -60,24 +73,6 @@ class CommandRouter:
         self.last = f"{kind}: {effect}"
         log.info("Applied %s -> %s", kind, effect)
         return True
-
-    def accepts(self, channel: str) -> bool:
-        if channel == self.command_topic:
-            return True
-        if ":" in channel and channel.replace(":", "/") == self.command_topic:
-            log.error(
-                "Command arrived on %r but this station's channel is %r. That is "
-                "the platform's internal naming, not the station boundary; "
-                "everything on it is being dropped.",
-                channel, self.command_topic,
-            )
-            return False
-        log.error(
-            "Command arrived on an unrecognised channel %r; expected %r. Dropping it.",
-            channel, self.command_topic,
-        )
-        return False
-
 
 def build_handlers(radio, light, on_config, stream=None) -> dict[str, Handler]:
     """Wire the contract's commands to the things that carry them out.

@@ -55,15 +55,55 @@ def command(station_id: StationId) -> str:
     return f"cmd/gsu/{station_id}"
 
 
+def events(station_id: StationId) -> str:
+    """Station -> platform, and the only channel here that is a ledger.
+
+    Everything else on this list is current state and may be dropped. An event
+    has no newer version, so this one is acknowledged and the station keeps
+    re-sending until it is.
+    """
+    return f"gsu/{station_id}/events"
+
+
+#: Relay stream code -> the internal channel it lands on. **This is the whole
+#: translation between the wire and the platform's fan-out**, and it exists in
+#: one place for the reason the rest of this module does.
+#:
+#: Contract 2.0 took the names off the wire: a station sends a one-letter code
+#: and cannot name a channel, a tenant or itself. So the asymmetry this module
+#: was written to prevent — the station being *told* a name it was not
+#: *granted* — is now structurally impossible on the station's side. What
+#: remains is the platform's own two-sided mistake: a channel published here
+#: and not subscribed to by the ingest, which is still silent at both ends.
+_STREAMS = {
+    "t": telemetry,
+    "a": audio,
+    "e": events,
+}
+
+
+def channel_for_stream(stream: str, station_id: StationId) -> str | None:
+    """Where a stream code's payload goes, or None if a station may not send it.
+
+    None is a refusal, not an error: the station is told on the socket and the
+    socket stays up. A station silently dropping everything it publishes looks
+    exactly like a station with nothing to say, and this is the fault most
+    likely to be a misconfiguration rather than an attack.
+    """
+    builder = _STREAMS.get(stream)
+    return builder(station_id) if builder else None
+
+
 def published_by_station(station_id: StationId) -> frozenset[str]:
     """Everything a station may publish to, and nothing else.
 
-    This is the set `/broker` compares an incoming frame's topic against. A
-    frozenset of exact names rather than a `gsu/{id}/` prefix test: a prefix
-    would also admit topics nobody consumes, and a station inventing channels
-    on a shared broker is precisely what that check is there to prevent.
+    No longer what `/broker` compares against — under 2.0 the relay maps a
+    stream code through `channel_for_stream` and there is no name to compare —
+    but still what the Redis ACL grants, and still the answer to "what can this
+    station reach".
     """
-    return frozenset({telemetry(station_id), audio(station_id)})
+    return frozenset({telemetry(station_id), audio(station_id),
+                      events(station_id)})
 
 
 def granted_to_station(station_id: StationId) -> tuple[str, ...]:
@@ -78,7 +118,8 @@ def granted_to_station(station_id: StationId) -> tuple[str, ...]:
     """
     return tuple(
         f"&{name}" for name in (
-            telemetry(station_id), audio(station_id), command(station_id),
+            telemetry(station_id), audio(station_id), events(station_id),
+            command(station_id),
         )
     )
 
@@ -91,4 +132,4 @@ def subscribed_by_platform() -> tuple[str, ...]:
     out by hand keeps matching *something* after names move, and matching the
     wrong set is silent — no error, no data.
     """
-    return (telemetry("*"), audio("*"))
+    return (telemetry("*"), audio("*"), events("*"))

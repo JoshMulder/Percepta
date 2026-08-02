@@ -52,13 +52,16 @@ from sqlalchemy import select, update
 from backend.core.config import settings
 from backend.database.models.ground_station import GroundStation
 from backend.database.session import PrivilegedSessionLocal
+from backend.realtime.bus import command_channel
 from backend.realtime.hub import hub
-from backend.services import geocode, station_topics
+from backend.services import geocode, station_events, station_topics
 from backend.services.enrolment import has_valid_credential
 
 log = logging.getLogger(__name__)
 
-TELEMETRY_PATTERN, AUDIO_PATTERN = station_topics.subscribed_by_platform()
+TELEMETRY_PATTERN, AUDIO_PATTERN, EVENTS_PATTERN = (
+    station_topics.subscribed_by_platform()
+)
 
 #: Payload kinds the platform understands. Anything else is dropped rather than
 #: rejected: a station may legitimately be newer than the platform, and the
@@ -250,7 +253,7 @@ class StationIngest:
         # (station/gsu/video.py); live video goes over the media WebSocket
         # instead. Nothing has published here for some time, and subscribing to
         # it suggested otherwise.
-        await pubsub.psubscribe(TELEMETRY_PATTERN, AUDIO_PATTERN)
+        await pubsub.psubscribe(TELEMETRY_PATTERN, AUDIO_PATTERN, EVENTS_PATTERN)
         try:
             next_renew = time.monotonic() + RENEW_SECONDS
             while True:
@@ -344,6 +347,41 @@ class StationIngest:
                 return None
             return org_id
 
+    async def _handle_events(self, station_id: uuid.UUID, payload: dict) -> None:
+        """Store a batch, then acknowledge it on the command channel.
+
+        The acknowledgement is a *command* — `events.ack` is in
+        `command.schema.json` like any other — so it needs no second path down
+        to the station: it rides the socket the station is already holding.
+
+        **Acknowledged only after the rows are committed, never on receipt.**
+        Acking what is still in memory is how a crash silently loses a site's
+        history: the station has been told it may delete, and it has.
+        """
+        org_id = await self._organization(station_id)
+        if org_id is None:
+            # No ack. An unknown or deactivated station keeps its events
+            # locally and re-sends, which is the right outcome — the
+            # alternative tells a box that may simply be waiting on an admin to
+            # throw its history away.
+            return
+
+        through_seq = await asyncio.to_thread(
+            self._store_events, org_id, station_id, payload)
+        if through_seq is None or self._redis is None:
+            return
+        await self._redis.publish(command_channel(station_id), json.dumps({
+            "kind": "events.ack", "through_seq": through_seq,
+        }))
+
+    def _store_events(self, org_id: uuid.UUID, station_id: uuid.UUID,
+                      payload: dict) -> int | None:
+        with PrivilegedSessionLocal() as db:
+            return station_events.accept_batch(
+                db, organization_id=org_id, station_id=station_id,
+                payload=payload,
+            )
+
     async def _organization(self, station_id: uuid.UUID) -> uuid.UUID | None:
         now = datetime.now(UTC)
         cached = self._registry.get(station_id)
@@ -394,6 +432,10 @@ class StationIngest:
             log.warning("Ignoring non-JSON payload on %s.", channel)
             return
         if not isinstance(payload, dict):
+            return
+
+        if stream == "events":
+            await self._handle_events(station_id, payload)
             return
 
         kind = str(payload.get("kind", ""))

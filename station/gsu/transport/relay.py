@@ -1,38 +1,34 @@
-"""The broker, reached over the same 443 the console is on.
+"""The platform, reached over the same 443 the console is on.
 
-**This is the deployment transport.** `redis_transport.py` remains for a bench
-where the broker is directly reachable, and is selected by URL scheme, but a
-station at a real site talks to the platform here.
+**This is the transport.** Contract 2.0 defines one, and this is it: a single
+authenticated WebSocket to `/broker` carrying frames of two keys.
 
-WHY THIS EXISTS
----------------
-A station's broker is Redis on 6380. That works on a LAN and nowhere else: put
-the platform behind a reverse proxy — which is what a public deployment is —
-and 6380 is shut, while 443 is the one port that is open everywhere, at every
-customer site, behind every corporate firewall, on Starlink. "Only 443 is open"
-is not a quirk to work around once; it is the normal condition.
+WHY IT IS SHAPED LIKE THIS
+--------------------------
+443 is the one port open at every site, on every corporate network, behind
+every reverse proxy, over Starlink. "Only 443 is open" is not a quirk to work
+around once; it is the normal condition.
 
-**It is a message relay, not a Redis proxy, and that is the security argument.**
-Tunnelling RESP would give a station the ability to `SUBSCRIBE` to any channel
-on the platform's broker, including other stations' telemetry and other
-organisations' commands. What goes over this socket is `{topic, payload}`, the
-platform derives the station's identity from the credential rather than from
-the frame, and it refuses any topic that is not this station's own. A stolen
-box can impersonate nothing.
-
-The frames are the same JSON the Redis transport publishes, so nothing above
-`Transport` changes and nothing on the platform's side of the relay changes
-either: the endpoint republishes into the same Redis channels, and
-`station_ingest` cannot tell the difference.
+**It is a message relay, not a broker proxy, and that is the security
+argument.** Tunnelling RESP would give a station the ability to subscribe to
+any channel on the platform, including other stations' telemetry and other
+organisations' commands. What goes over this socket is `{stream, payload}` —
+a one-letter code and an object. The platform derives the station's identity
+from the credential, and there is no field in which a station could name a
+channel, a tenant or itself even if it wanted to. A stolen box can impersonate
+nothing, structurally rather than by a check that might be forgotten.
 
 WHAT IT DOES NOT DO
 -------------------
-**It does not queue.** The rule is the same as everywhere else on this path and
-it is in the ABC: telemetry is current state, not a ledger. A frame that cannot
-be sent now is worth less than the one along in a second, and replaying stale
-readings into a live console is worse than a gap. Frames that cannot go are
-counted and dropped, and the count is in health telemetry so a station quietly
-dropping everything does not look like a quiet site.
+**It does not queue.** Telemetry is current state, not a ledger. A frame that
+cannot be sent now is worth less than the one along in a second, and replaying
+stale readings into a live console is worse than a gap. Frames that cannot go
+are counted and dropped, and the count is in health telemetry so a station
+quietly dropping everything does not look like a quiet site.
+
+The events stream is the exception to that and it is handled a layer up, in
+`gsu/events.py`, because at-least-once delivery is built out of a durable store
+and acknowledgements rather than out of anything a socket can offer.
 
 **It does not block the sensing loop.** `start` returns immediately and a
 background thread connects; `publish` from the sensing thread either writes to
@@ -47,7 +43,7 @@ import random
 import threading
 import time
 
-from . import Handler, Transport
+from . import PUBLISHABLE, Handler, Transport
 from .. import tls
 from ..media.websocket import WebSocket, WebSocketError
 
@@ -56,12 +52,24 @@ log = logging.getLogger("gsu.transport")
 #: Reconnect backoff. Jittered, because a platform restart otherwise brings a
 #: whole fleet back in the same second — the herd is the problem, not the wait.
 BACKOFF_MIN_S = 1.0
-BACKOFF_MAX_S = 30.0
+BACKOFF_MAX_S = 300.0
 
-#: A frame bigger than this is not sent. Audio at 125 ms and a spectrum are the
-#: largest things that legitimately go up here; a megabyte is a bug upstream,
-#: and discovering it as a stalled socket rather than as a log line is worse.
+#: A frame bigger than this is not sent. The platform enforces the same cap by
+#: closing the socket (1009), and discovering it that way costs a reconnect and
+#: takes telemetry and commands down with it, so it is cheaper to notice here.
 MAX_FRAME_BYTES = 512 * 1024
+
+#: Socket liveness, from the timings table in `contract/transport.md`. Ping
+#: after this long with nothing sent or received; treat no pong within
+#: PONG_TIMEOUT_S as a dead socket and reconnect.
+#:
+#: This is not the heartbeat the contract's liveness rule rules out. That one
+#: is about whether a *station* is alive and is still derived from publishing.
+#: This is about whether the *socket* is, and nothing else can tell you: a
+#: dropped NAT mapping on CGNAT looks exactly like a quiet minute, because
+#: commands are unrequested and an hour without one is ordinary.
+PING_IDLE_S = 20.0
+PONG_TIMEOUT_S = 10.0
 
 
 def _is_loopback(url: str) -> bool:
@@ -71,33 +79,37 @@ def _is_loopback(url: str) -> bool:
 
 
 class RelayTransport(Transport):
-    """`{topic, payload}` over one WebSocket, both directions."""
+    """`{stream, payload}` over one WebSocket, both directions."""
 
-    def __init__(self, url: str, username: str | None = None,
-                 password: str | None = None, trust=None) -> None:
+    def __init__(self, url: str, secret: str | None = None, trust=None) -> None:
         self.url = url
-        self.username = username
-        self.password = password
+        self.secret = secret
         self.trust = trust
         self._socket: WebSocket | None = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self._handlers: dict[str, Handler] = {}
+        self._handler: Handler | None = None
         self._dropped = 0
         self._refusals: dict[str, str] = {}
         self._last_error: str | None = None
+        self._last_activity = time.monotonic()
+        self._ping_sent_at: float | None = None
         #: A certificate this station will not accept, as distinct from a link
-        #: that is down — `agent._update_link_state` raises a different health
-        #: condition for each, because an operator does different things about
-        #: weather and about a trust root. The Redis transport has always
-        #: reported this; the relay did not, so the deployment transport was
-        #: the one that could fail on TLS and say nothing.
+        #: that is down — the agent raises a different health condition for
+        #: each, because an operator does different things about weather and
+        #: about a trust root.
         self.tls_failed = False
         #: Set once the platform has accepted the credential, so "connected"
         #: means "usable" rather than "a socket exists". A TCP connection to a
         #: proxy that then refuses the upgrade is not a working link.
         self._ready = threading.Event()
+        #: Set when the platform closes with 4401. The agent renews once and
+        #: reconnects rather than giving up, because 4401 covers both "revoked,
+        #: and will never work again" and "expired while you were offline, and
+        #: renewal will fix it" — and a station that stopped on the first would
+        #: need a site visit after a transient.
+        self.credential_refused = threading.Event()
 
     # --- lifecycle -------------------------------------------------------
 
@@ -116,77 +128,100 @@ class RelayTransport(Transport):
         if thread is not None:
             thread.join(timeout=5)
 
-    def set_credentials(self, username: str, password: str) -> None:
+    def set_credential(self, secret: str) -> None:
         with self._lock:
-            self.username, self.password = username, password
+            self.secret = secret
         # Not an immediate reconnect: the old credential keeps working through
-        # the overlap window, so the next reconnect picks this up and nothing
-        # is interrupted to achieve it.
+        # the 24 h overlap, so the next reconnect picks this up and nothing is
+        # interrupted to achieve it.
 
     # --- sending ---------------------------------------------------------
 
-    def publish(self, topic: str, payload: dict) -> bool:
+    def publish(self, stream: str, payload: dict) -> bool:
+        if stream not in PUBLISHABLE:
+            # Caught here rather than earned as a `refused` frame. A station
+            # publishing on `c` is a bug in this station, and the platform
+            # telling us so a round trip later is a worse way to learn it.
+            log.error("Refusing to publish on stream %r; a station may send "
+                      "only %s.", stream, ", ".join(sorted(PUBLISHABLE)))
+            self._dropped += 1
+            return False
         socket = self._socket
         if socket is None or not socket.connected or not self._ready.is_set():
             self._dropped += 1
             return False
         try:
-            frame = json.dumps({"topic": topic, "payload": payload})
+            frame = json.dumps({"stream": stream, "payload": payload},
+                               separators=(",", ":"), allow_nan=False)
         except (TypeError, ValueError) as exc:
-            # Not a link fault, and not something a retry fixes.
-            log.warning("Dropping unserialisable payload for %s: %s", topic, exc)
+            # `allow_nan=False` is what makes this fire on NaN and Infinity.
+            # They are not JSON, and NaN in particular passes every numeric
+            # bound in the schemas because comparisons against it are false —
+            # so a station emitting one produces a frame that validates and
+            # means nothing. Not a link fault, and not something a retry fixes.
+            log.warning("Dropping an unserialisable %s payload: %s", stream, exc)
             self._dropped += 1
             return False
         if len(frame) > MAX_FRAME_BYTES:
-            log.warning("Dropping %d byte frame for %s; the cap is %d.",
-                        len(frame), topic, MAX_FRAME_BYTES)
+            log.warning("Dropping a %d byte %s frame; the cap is %d.",
+                        len(frame), stream, MAX_FRAME_BYTES)
             self._dropped += 1
             return False
         if not socket.send_text(frame):
             self._dropped += 1
             return False
+        self._last_activity = time.monotonic()
         return True
 
-    def subscribe(self, topic: str, handler: Handler) -> None:
+    def on_command(self, handler: Handler) -> None:
         with self._lock:
-            self._handlers[topic] = handler
+            self._handler = handler
         # Nothing is sent to ask for it. The platform knows which station this
-        # is from the credential and sends that station's commands; a
-        # subscribe request would be the station naming a channel, which is
-        # exactly what this design refuses to accept from a station.
+        # is from the credential and sends that station's commands from the
+        # moment the socket opens; a subscribe request would be the station
+        # naming a channel, which is what this design refuses to accept.
 
     # --- receiving -------------------------------------------------------
 
     def _on_message(self, _opcode: int, data: bytes) -> None:
+        self._last_activity = time.monotonic()
         try:
             message = json.loads(data.decode("utf-8", "replace"))
         except (TypeError, ValueError):
-            log.warning("Dropping a malformed frame from the relay.")
+            log.warning("Dropping a malformed frame from the platform.")
             return
         if not isinstance(message, dict):
             return
-        # A refusal is the platform telling this station a topic is not its
-        # own. Reported rather than retried: an ACL fault and an unreachable
-        # broker are completely different problems and used to look identical.
+
+        # `type` before `stream`, and the order is load-bearing. Both downward
+        # frames carry `stream` and only the command carries `payload`, so
+        # dispatching on `stream` first raises KeyError on a refusal — and the
+        # refusal a station is most likely to provoke is for publishing on `c`,
+        # which arrives as `stream: "c"` and looks exactly like a command. The
+        # frame written to explain a misconfiguration would crash the station
+        # that made it.
         if message.get("type") == "refused":
-            topic = str(message.get("topic", ""))
+            stream = str(message.get("stream", "?"))
             reason = str(message.get("reason", "refused"))
-            self._refusals[topic] = reason
-            log.warning("The platform refused %s: %s", topic, reason)
+            if self._refusals.get(stream) != reason:
+                log.warning("The platform refused stream %s: %s", stream, reason)
+            self._refusals[stream] = reason
             return
-        topic = message.get("topic")
+
+        if message.get("stream") != "c":
+            return
         payload = message.get("payload")
-        if not isinstance(topic, str) or not isinstance(payload, dict):
+        if not isinstance(payload, dict):
             return
         with self._lock:
-            handler = self._handlers.get(topic)
+            handler = self._handler
         if handler is None:
-            log.info("No handler for %s; ignoring.", topic)
+            log.info("A command arrived before anything was listening.")
             return
         try:
-            handler(topic, payload)
+            handler(payload)
         except Exception:  # noqa: BLE001 - one bad command must not end the link
-            log.exception("A command handler failed for %s.", topic)
+            log.exception("A command handler failed.")
 
     # --- the connection ---------------------------------------------------
 
@@ -195,13 +230,7 @@ class RelayTransport(Transport):
         while not self._stop.is_set():
             if self._connect():
                 backoff = BACKOFF_MIN_S
-                # Connected. Wait here until the reader thread notices the
-                # socket has gone; there is nothing to poll while it is up.
-                while not self._stop.is_set():
-                    socket = self._socket
-                    if socket is None or not socket.connected:
-                        break
-                    self._stop.wait(1.0)
+                self._hold()
                 self._ready.clear()
                 if not self._stop.is_set():
                     log.info("Relay closed; reconnecting.")
@@ -210,9 +239,38 @@ class RelayTransport(Transport):
                 return
             backoff = min(backoff * 2, BACKOFF_MAX_S)
 
+    def _hold(self) -> None:
+        """Stay here while the socket is up, pinging when it goes quiet."""
+        self._ping_sent_at = None
+        while not self._stop.is_set():
+            socket = self._socket
+            if socket is None or not socket.connected:
+                return
+            now = time.monotonic()
+            if self._ping_sent_at is not None:
+                if socket.last_pong >= self._ping_sent_at:
+                    self._ping_sent_at = None            # answered; still there
+                elif now - self._ping_sent_at > PONG_TIMEOUT_S:
+                    # Nothing came back. On a healthy link this is impossible:
+                    # the platform answers a ping, and the only thing that
+                    # swallows one silently is a socket that no longer reaches
+                    # anybody. Reconnecting is the only move that recovers a
+                    # dropped NAT mapping, and without this the station would
+                    # publish into the hole until the OS noticed, which is
+                    # unbounded.
+                    log.warning("No pong in %.0fs; the socket is half-open. "
+                                "Reconnecting.", PONG_TIMEOUT_S)
+                    self._last_error = "the platform stopped answering pings"
+                    self._close()
+                    return
+            elif now - self._last_activity >= PING_IDLE_S:
+                self._ping_sent_at = now
+                socket.send_ping()
+            self._stop.wait(1.0)
+
     def _connect(self) -> bool:
         with self._lock:
-            secret = self.password
+            secret = self.secret
         if not secret:
             self._last_error = "no credential yet"
             return False
@@ -234,25 +292,22 @@ class RelayTransport(Transport):
         try:
             socket = WebSocket(
                 self.url,
-                # The same bearer the media uplink presents, and the same rule
-                # behind it: the station proves who it is and the platform
-                # decides what that means. The credential is a header rather
-                # than a query parameter because a URL is logged by every proxy
-                # between here and there.
+                # A header rather than a query parameter because a URL is
+                # logged by every proxy between here and there.
                 headers={"Authorization": f"Bearer {secret}"},
                 trust=self.trust,
                 on_message=self._on_message,
-                what="the broker relay",
+                what="the platform relay",
             )
             socket.connect()
         except tls.Refusal as exc:
             # A refusal is a decision, not a link fault, and it is permanent
-            # until someone changes something. Retrying it forever would bury
-            # the reason under reconnect noise — but *dropping* it is worse and
-            # is what used to happen: `Refusal` is a RuntimeError, so it fell
-            # straight through the clause below, killed this thread, and left
-            # `last_error` None. The console then showed a station with no
-            # broker and nothing at all to say about why.
+            # until someone changes something. Retrying forever would bury the
+            # reason under reconnect noise — but dropping it is worse, and is
+            # what used to happen: `Refusal` is a RuntimeError, so it fell
+            # through the clause below, killed this thread, and left
+            # `last_error` None. The console then showed a station with no link
+            # and nothing at all to say about why.
             self._last_error = str(exc)
             self.tls_failed = True
             log.error("%s", exc)
@@ -261,10 +316,18 @@ class RelayTransport(Transport):
         except (WebSocketError, OSError) as exc:
             self._last_error = str(exc)
             self.tls_failed = tls.looks_like_tls_failure(str(exc))
+            if "4401" in str(exc):
+                # The platform completed the handshake and then closed 4401:
+                # the credential was refused. Flagged rather than retried
+                # blindly, because the agent's answer is to renew once and come
+                # back — which is the whole recovery path for a box whose
+                # credential expired while it was offline.
+                self.credential_refused.set()
             log.warning("Relay could not connect: %s", exc)
             return False
         self._socket = socket
         self._ready.set()
+        self._last_activity = time.monotonic()
         self._last_error = None
         log.info("Relay open to %s.", self.url)
         return True

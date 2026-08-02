@@ -1,20 +1,30 @@
-"""The only part of this station that knows what the broker is.
+"""The only part of this station that knows how it reaches the platform.
 
-`contract/transport.md`: a WebSocket relay on 443 in production, Redis pub/sub
-direct on a bench, and the difference confined to one place. This is that
-place, and the interface is deliberately narrow enough that it can be: publish
-a JSON payload
-to a topic, subscribe to a topic, and say whether the link is up.
+`contract/transport.md`: one authenticated WebSocket to `/broker`, carrying
+frames of exactly two keys.
 
-Both transports are fire-and-forget from the station's point of view and the
-contract assumes nothing stronger, so `publish` returns whether the frame left
-the box and *no caller waits for an acknowledgement*. A False is a dropped
-frame, which telemetry is explicitly allowed to be.
+    ->  {"stream": "t", "payload": {…}}     telemetry
+    ->  {"stream": "a", "payload": {…}}     audio
+    ->  {"stream": "e", "payload": {…}}     an events batch
+    <-  {"stream": "c", "payload": {…}}     commands, unrequested
 
-Topic strings come from the enrolment response, not from string-building here.
-The station is told its three channels (`contract/enrolment.md` §4) and uses
-exactly those, which is also why MQTT needs no translation layer: the same
-slash-separated names are valid MQTT topics.
+**There is nothing here for a station to name.** No channel, no topic, no
+station id — the platform resolves all three from the credential on the socket.
+That is not a simplification, it is the confinement: a station cannot address
+another station's channel because there is no field in which to say one. This
+interface is narrow for the same reason, and the narrowness is the point.
+
+Until 2.0 this took a topic string and the topic strings came from the
+enrolment response. Both are gone. A transport that still accepted a topic
+would be asking every caller to hold a name that means nothing and asking
+enrolment to keep issuing names the contract deleted.
+
+Publishing is fire-and-forget and no caller waits for an acknowledgement — a
+False is a dropped frame, which telemetry is explicitly allowed to be. The one
+exception is the events stream, which is a ledger rather than current state;
+its delivery guarantee lives in `gsu/events.py`, above this layer, because it
+is built out of acknowledgements and re-sends rather than out of anything a
+socket can promise.
 """
 
 from __future__ import annotations
@@ -22,55 +32,52 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Callable
 
-#: Called with (topic, payload) for every message received on a subscription.
-Handler = Callable[[str, dict], None]
+#: The contract this station speaks, reported in every health frame.
+#:
+#: Declared, never negotiated. A platform reads it to know what a station is
+#: capable of; there is no handshake and nothing to agree. Bump the minor when
+#: this station starts *emitting* something a 2.0 platform would not recognise
+#: — that is free and requires no coordination. Bumping the major is a fleet
+#: operation and is not a thing to do by editing this line.
+CONTRACT_VERSION = "2.0"
 
+#: Relay stream codes, per `contract/transport.md`. A station publishes on the
+#: first three and only ever receives on the fourth.
+TELEMETRY = "t"
+AUDIO = "a"
+EVENTS = "e"
+COMMAND = "c"
 
-def split_credentials(url: str) -> tuple[str, str | None, str | None]:
-    """Separate any `user:pass@` in a broker URL from the address.
+#: Streams a station is permitted to publish on. Anything else earns a
+#: `refused` frame from the platform with the socket left up.
+PUBLISHABLE = frozenset({TELEMETRY, AUDIO, EVENTS})
 
-    This exists because of a genuine trap in redis-py: `ConnectionPool.from_url`
-    ends with `kwargs.update(url_options)`, so **the URL wins over the keyword
-    arguments**. A URL carrying its own credentials silently discards the
-    station's identity — which either fails as `WRONGPASS`, or succeeds as
-    whoever the URL names, which is much worse. A station that authenticates as
-    something other than `gsu:{station_id}` has quietly left the tenancy model
-    the whole platform rests on.
-
-    So the address and the identity are separated here and the identity is
-    always passed as arguments. The platform's `broker.url` is deliberately
-    credential-free; this defends the case where someone puts a password into
-    `GSU_BROKER_URL` because it worked in `redis-cli`.
-    """
-    scheme, separator, rest = url.partition("://")
-    if not separator:
-        return url, None, None
-    authority, slash, tail = rest.partition("/")
-    if "@" not in authority:
-        return url, None, None
-    userinfo, _, host = authority.rpartition("@")
-    username, _, password = userinfo.partition(":")
-    return f"{scheme}://{host}{slash}{tail}", (username or None), (password or None)
+#: Called with one command payload. No channel argument: there is exactly one
+#: downward stream and the platform already knows whose commands these are.
+Handler = Callable[[dict], None]
 
 
 def redact_url(url: str | None) -> str | None:
     """A URL safe to show on the console and to publish in health telemetry.
 
     The local console has no authentication and health frames cross the wire;
-    neither is a place to render a password that somebody pasted into an
-    environment variable.
+    neither is a place to render a secret somebody pasted into an environment
+    variable. The platform's `broker.url` is credential-free by contract, so
+    this defends against a hand-edited one rather than against the normal case.
     """
     if not url:
         return url
-    address, username, password = split_credentials(url)
-    if username is None and password is None:
+    scheme, separator, rest = url.partition("://")
+    if not separator or "@" not in rest.partition("/")[0]:
         return url
-    scheme, _, rest = address.partition("://")
-    return f"{scheme}://{'user' if username else ''}:***@{rest}"
+    authority, slash, tail = rest.partition("/")
+    userinfo, _, host = authority.rpartition("@")
+    username, _, _ = userinfo.partition(":")
+    return f"{scheme}://{'user' if username else ''}:***@{host}{slash}{tail}"
 
 
 class Transport(ABC):
-    """One link to the platform. Everything above this is broker-agnostic."""
+    """One link to the platform. Everything above this is transport-agnostic."""
 
     @abstractmethod
     def start(self) -> None:
@@ -81,8 +88,8 @@ class Transport(ABC):
     def stop(self) -> None: ...
 
     @abstractmethod
-    def publish(self, topic: str, payload: dict) -> bool:
-        """Send one JSON payload. True if it left the box.
+    def publish(self, stream: str, payload: dict) -> bool:
+        """Send one payload on one stream. True if it left the box.
 
         Never raises, never blocks for long, never queues. Telemetry is current
         state, not a ledger — a frame that cannot be sent now is worth less than
@@ -91,16 +98,20 @@ class Transport(ABC):
         """
 
     @abstractmethod
-    def subscribe(self, topic: str, handler: Handler) -> None:
-        """Deliver messages on `topic` to `handler`, and keep the subscription
-        alive across reconnects. A station whose command subscription silently
-        dies looks identical to one that ignores commands."""
+    def on_command(self, handler: Handler) -> None:
+        """Deliver every command to `handler`, across reconnects.
+
+        Nothing is sent to ask for this. There is no subscribe handshake in 2.0:
+        commands arrive from the moment the socket opens because the credential
+        already determines whose they are, and a station that tried to subscribe
+        would be naming a channel.
+        """
 
     @abstractmethod
-    def set_credentials(self, username: str, password: str) -> None:
-        """Use these from the next connection. Called after a renewal; the old
-        credential keeps working through the overlap window, so this does not
-        need to interrupt anything."""
+    def set_credential(self, secret: str) -> None:
+        """Use this from the next connection. Called after a renewal; the old
+        credential keeps working through the 24 h overlap, so this does not need
+        to interrupt anything to take effect."""
 
     @property
     @abstractmethod
@@ -115,56 +126,38 @@ class Transport(ABC):
 
     @property
     def refusals(self) -> dict[str, str]:
-        """Topics the broker refused this station, and what it said.
+        """Streams the platform refused this station, and what it said.
 
-        A refused channel and an unreachable broker both come back as a failed
-        publish, and they are completely different faults: the first is an ACL
-        that does not grant what the station was built to send, and it will
-        never fix itself. Kept per topic because it is per topic — a station may
-        be entitled to publish telemetry and not video, which is exactly the
-        state the video channel is in today (CONTRACT-QUESTIONS.md item 12).
-
-        Not abstract: a transport that cannot tell the difference reports none
-        rather than being unable to exist.
+        A refusal and an unreachable platform both surface as a failed publish
+        and are completely different faults: the first will never fix itself.
+        Kept per stream because that is the granularity the platform refuses at.
         """
         return {}
 
 
-def build_transport(
-    url: str,
-    username: str | None,
-    password: str | None,
-    trust=None,
-) -> Transport:
-    """Pick a transport from the broker URL the platform handed out.
+def build_transport(url: str, secret: str | None, trust=None) -> Transport:
+    """The relay, which is the only transport contract 2.0 defines.
 
-    Two transports: `wss://` is the deployment one — the relay in `relay.py`,
-    which reaches the broker over the only port that is open everywhere — and
-    `rediss://` is the direct connection, for a bench where the broker's own
-    port is reachable.
+    There were two. `redis_transport.py` connected to the broker directly for a
+    bench where 6380 was reachable, and it was deleted with 2.0 rather than
+    ported: it spoke a topic-based protocol that no contract document describes
+    any more, and it was the only reason this interface needed to stay
+    topic-shaped. A second wire format that nothing tests is not a convenience.
 
-    There was a third, `mqtt.py`, which was a stub that never connected to
-    anything. MQTT is the better protocol for this traffic and it lost on one
-    thing: port 8883, which is shut wherever 6380 is. Carrying a second broker
-    and a client library to arrive at what the relay does in two files with no
-    dependency was not worth it. See DECISIONS.md.
+    The bench case is better served now than it was — `contract/conformance/
+    check_station.py` is a platform that speaks this exact protocol, needs no
+    Redis, no database and no station id, and answers whether the station is
+    *conformant* rather than whether bytes moved.
 
-    `trust` is the station's pinned CA (`gsu/tls.py`). Every transport takes it
-    and every transport must refuse rather than connect without it, which is
-    why it is a parameter here and not a lookup inside one implementation.
+    `trust` is the station's pinned CA (`gsu/tls.py`), passed rather than looked
+    up because a transport must refuse instead of connecting without it.
     """
     scheme = (url.split("://", 1)[0] or "").lower()
-    if scheme in ("redis", "rediss", "unix"):
-        from .redis_transport import RedisTransport
-
-        return RedisTransport(url, username=username, password=password, trust=trust)
     if scheme in ("ws", "wss"):
-        # The deployment transport. See relay.py: 443 is the one port open
-        # everywhere, and this is a message relay rather than a Redis proxy so
-        # that a station can reach the broker without being able to address
-        # anybody else's channels.
         from .relay import RelayTransport
 
-        return RelayTransport(url, username=username, password=password,
-                              trust=trust)
-    raise ValueError(f"No transport knows how to speak {scheme!r} (from {url!r})")
+        return RelayTransport(url, secret=secret, trust=trust)
+    raise ValueError(
+        f"No transport knows how to speak {scheme!r} (from {url!r}). "
+        "Contract 2.0 defines one transport: wss:// to the platform's /broker."
+    )

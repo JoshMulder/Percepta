@@ -46,11 +46,23 @@ class Credential:
 
 @dataclass(frozen=True)
 class Broker:
+    """Where the platform is, and how to verify it. Nothing else.
+
+    Contract 2.0 removed `username` and the three topic names from this
+    response. They are gone rather than optional: a station never names a
+    channel and never sends its own id, so there was nothing left for them to
+    do, and a station still holding them would be holding facts it cannot act
+    on and cannot check.
+
+    The removal closed a real fault class rather than tidying one. The names
+    were built independently in five production places, and the asymmetry was
+    the danger — if the ACL and the enrolment response ever disagreed, the
+    station was *told* a channel it was not *granted*, the publish failed, and
+    what an operator saw was a box that enrolled perfectly and published
+    nothing, with nothing logged as an error at either end.
+    """
+
     url: str
-    username: str
-    telemetry_topic: str
-    audio_topic: str
-    command_topic: str
     #: The broker's pinned trust root, from `broker.ca_pem` in the enrolment
     #: response (`contract/enrolment.md` §4) — the broker's CA, never the
     #: API's. Persisted beside the credential. When `ca_mode` is "pinned" and
@@ -125,10 +137,6 @@ class Enrolment:
             ),
             broker=Broker(
                 url=broker["url"],
-                username=broker["username"],
-                telemetry_topic=broker["telemetry_topic"],
-                audio_topic=broker["audio_topic"],
-                command_topic=broker["command_topic"],
                 ca_pem=broker.get("ca_pem"),
                 ca_mode=broker.get("ca_mode"),
                 media_url=broker.get("media_url"),

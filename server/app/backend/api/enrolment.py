@@ -24,7 +24,7 @@ from sqlalchemy import select
 
 from backend.database.models.organization import Organization
 from backend.database.session import PrivilegedSessionLocal
-from backend.services import broker_acl, enrolment, station_topics
+from backend.services import broker_acl, enrolment
 from backend.services.audit import record
 
 log = logging.getLogger(__name__)
@@ -80,10 +80,22 @@ class BrokerOut(BaseModel):
     #: null `ca_pem` cannot distinguish "not sent yet" from "use the public
     #: roots", and a station that guesses either way guesses wrong somewhere.
     ca_mode: str = "pinned"
-    telemetry_topic: str
-    audio_topic: str
-    command_topic: str
-    username: str
+    # `telemetry_topic`, `audio_topic`, `command_topic` and `username` were
+    # here until contract 2.0 and are gone rather than deprecated.
+    #
+    # A station never names a channel and never sends its own id: it publishes
+    # a one-letter stream code and the platform resolves the rest from the
+    # credential. So there was nothing left for these to do, and continuing to
+    # issue them would have handed every station four facts it cannot act on
+    # and cannot check.
+    #
+    # Removing them closed the fault they made possible. The names were built
+    # in five independent places, and the asymmetry was the danger: if the ACL
+    # and this response ever disagreed, the station was *told* a channel it
+    # was not *granted*, its publish was refused, and what an operator saw was
+    # a box that enrolled perfectly and published nothing — with nothing
+    # logged as an error at either end. That failure needs a name on the wire
+    # to exist, and there is no longer one.
     #: Where the live H.264 goes (`WS /media/ingest`). Not a broker channel —
     #: video is bulk data and deliberately does not touch the broker — but it
     #: is stated here because it is the same credential, the same enrolment
@@ -228,10 +240,6 @@ def _broker(station_id: uuid.UUID, request: Request | None = None) -> BrokerOut:
         url=url or settings.redis_url,
         ca_pem=ca_pem,
         ca_mode=ca_mode,
-        telemetry_topic=station_topics.telemetry(station_id),
-        audio_topic=station_topics.audio(station_id),
-        command_topic=station_topics.command(station_id),
-        username=broker_acl.principal(station_id),
         media_url=media_url,
     )
 

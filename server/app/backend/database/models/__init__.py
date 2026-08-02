@@ -16,6 +16,7 @@ from backend.database.models.organization_membership import OrganizationMembersh
 from backend.database.models.password_reset_token import PasswordResetToken
 from backend.database.models.power_sample import PowerSample
 from backend.database.models.station_credential import StationCredential
+from backend.database.models.station_event import StationEvent
 from backend.database.models.station_enrolment_token import (
     StationEnrolmentToken,
 )
@@ -34,6 +35,7 @@ __all__ = [
     "PowerSample",
     "StationCredential",
     "StationEnrolmentToken",
+    "StationEvent",
     "StationGrant",
     "User",
     "UserRole",

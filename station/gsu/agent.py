@@ -41,7 +41,10 @@ from .health import Health
 from .radio.receiver import RadioController
 from .store import LocalStore
 from .stream import StreamSession
-from .transport import Transport, build_transport, redact_url
+from .transport import (
+    AUDIO, CONTRACT_VERSION, EVENTS, TELEMETRY,
+    Transport, build_transport, redact_url,
+)
 from .video import CameraPreview
 
 log = logging.getLogger("gsu.agent")
@@ -674,16 +677,16 @@ class Agent:
 
             self._persist_ca(enrolment)
 
-            # The platform states its own broker address, which on a development
-            # stack is frequently only routable from inside it. The override
-            # exists for that; the username and topics still come from
-            # enrolment, because those are identity rather than deployment.
+            # The platform states its own address, which on a development stack
+            # is frequently only routable from inside it. The override exists
+            # for that. Nothing else comes from enrolment any more: contract 2.0
+            # took channel names and the broker username off the wire, so the
+            # credential is the whole of the station's identity here.
             url = self.config.broker_url or enrolment.broker.url
             try:
                 self.transport = build_transport(
                     url,
-                    username=enrolment.broker.username,
-                    password=enrolment.credential.secret,
+                    secret=enrolment.credential.secret,
                     trust=self.trust,
                 )
             except tls.Refusal as exc:
@@ -706,9 +709,9 @@ class Agent:
             handlers = build_handlers(
                 self.radio, self.light, self._apply_config, self.stream,
             )
-            self.router = CommandRouter(enrolment.broker.command_topic, handlers)
+            self.router = CommandRouter(handlers)
             if self.transport is not None:
-                self.transport.subscribe(enrolment.broker.command_topic, self._on_command)
+                self.transport.on_command(self._on_command)
 
             # The site's own details are things the station needs while the
             # platform is unreachable, so they come from the stored enrolment
@@ -740,10 +743,11 @@ class Agent:
             self.renewer.start()
 
             log.info(
-                "Station %s (%s) attached: publishing to %s, listening on %s as %s.",
+                "Station %s (%s) attached to %s. Contract %s: the credential "
+                "is the whole identity — nothing names a channel on the wire.",
                 enrolment.site.name, enrolment.station_id,
-                enrolment.broker.telemetry_topic, enrolment.broker.command_topic,
-                enrolment.broker.username,
+                redact_url(self.config.broker_url or enrolment.broker.url),
+                CONTRACT_VERSION,
             )
 
     def factory_reset(self) -> list[str]:
@@ -850,9 +854,7 @@ class Agent:
         # rotated CA arrives on a station that never re-enrols.
         self._persist_ca(enrolment)
         if self.transport is not None:
-            self.transport.set_credentials(
-                enrolment.broker.username, enrolment.credential.secret
-            )
+            self.transport.set_credential(enrolment.credential.secret)
         self.store.record_event(
             "credential.renewed", "info",
             f"Credential renewed; expires {enrolment.credential.expires_at.isoformat()}.",
@@ -860,9 +862,9 @@ class Agent:
 
     # --- commands -------------------------------------------------------
 
-    def _on_command(self, channel: str, payload: dict) -> None:
+    def _on_command(self, payload: dict) -> None:
         if self.router is not None:
-            self.router.dispatch(channel, payload)
+            self.router.dispatch(payload)
 
     def _apply_config(self, payload: dict) -> str:
         """`config.set`: apply, persist, and report the new version.
@@ -1163,10 +1165,7 @@ class Agent:
         # or not a console existed to hear it. The platform asks and renews;
         # silence stops it. See `RadioController.want_audio`.
         if self.radio.audio_wanted:
-            self._publish(
-                self.enrolment.broker.audio_topic if self.enrolment else None,
-                audio,
-            )
+            self._publish(AUDIO, audio)
         return audio
 
     def _sleep_pumping_radio(self, until: float) -> None:
@@ -1295,8 +1294,7 @@ class Agent:
         }
 
     def _publish_telemetry(self, payload: dict) -> bool:
-        topic = self.enrolment.broker.telemetry_topic if self.enrolment else None
-        return self._publish(topic, self._stamp_simulated(payload))
+        return self._publish(TELEMETRY, self._stamp_simulated(payload))
 
     def _stamp_simulated(self, payload: dict) -> dict:
         """Mark a stream whose source is a demo sensor.
@@ -1322,10 +1320,10 @@ class Agent:
             return payload
         return {**payload, "simulated": True}
 
-    def _publish(self, topic: str | None, payload: dict) -> bool:
-        if topic is None or self.transport is None:
+    def _publish(self, stream: str, payload: dict) -> bool:
+        if self.transport is None:
             return False
-        sent = self.transport.publish(topic, payload)
+        sent = self.transport.publish(stream, payload)
         if sent:
             self._published += 1
         return sent
@@ -1558,6 +1556,11 @@ class Agent:
         payload = {
             "kind": "health",
             "agent_version": AGENT_VERSION,
+            # Declared, never negotiated. The platform reads this to know what
+            # this station is capable of emitting — it is the only lever that
+            # makes any non-advisory addition safe to send to a fleet, because
+            # a 2.0 box ignores a field it does not know and says nothing.
+            "contract_version": CONTRACT_VERSION,
             "config_version": self.site.version,
             # The contract's summary vocabulary (ok | degraded | failing), which
             # is deliberately not the per-condition severity vocabulary
@@ -1704,7 +1707,7 @@ class Agent:
             "enrolled": self.enrolment is not None,
             "station": self.enrolment.site.name if self.enrolment else None,
             "station_id": self.enrolment.station_id if self.enrolment else None,
-            "telemetry_topic": self.enrolment.broker.telemetry_topic if self.enrolment else None,
+            "contract_version": CONTRACT_VERSION,
             "broker": redact_url(self.config.broker_url or self.enrolment.broker.url)
             if self.enrolment else None,
             "platform": self.config.platform_url,

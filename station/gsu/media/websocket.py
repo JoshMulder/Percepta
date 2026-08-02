@@ -38,6 +38,7 @@ import socket
 import ssl
 import struct
 import threading
+import time
 
 log = logging.getLogger("gsu.media")
 
@@ -134,6 +135,14 @@ class WebSocket:
         self.close_reason = ""
         self.sent_frames = 0
         self.sent_bytes = 0
+        #: When a pong last arrived. `contract/transport.md` requires both ends
+        #: to ping and to answer one, because it is the only way either notices
+        #: a half-open socket: a station on CGNAT whose NAT mapping is dropped
+        #: goes on publishing into a hole indefinitely, and nothing arrives
+        #: downward on a healthy link either — commands are unrequested, so a
+        #: quiet hour is normal and proves nothing. Seeded at construction so
+        #: "no pong yet" and "no pong for a while" are the same test.
+        self.last_pong = time.monotonic()
 
     # --- connecting ------------------------------------------------------
 
@@ -221,6 +230,15 @@ class WebSocket:
     def send_json(self, payload: dict) -> bool:
         return self.send_text(json.dumps(payload, separators=(",", ":")))
 
+    def send_ping(self, payload: bytes = b"gsu") -> bool:
+        """Ask the far end to prove the socket is still there.
+
+        The answer arrives on the reader thread and moves `last_pong`; nothing
+        waits here. A caller decides how long a silence is too long, because
+        that is a policy question and this class holds no policy.
+        """
+        return self._send(OP_PING, payload)
+
     def send_binary(self, data: bytes) -> bool:
         return self._send(OP_BINARY, data)
 
@@ -301,6 +319,8 @@ class WebSocket:
                 opcode, payload = frame
                 if opcode == OP_PING:
                     self._send(OP_PONG, payload)
+                elif opcode == OP_PONG:
+                    self.last_pong = time.monotonic()
                 elif opcode == OP_CLOSE:
                     reason = payload[2:].decode("utf-8", "replace") if len(payload) > 2 else ""
                     self._fail(f"the platform closed {self.what}: {reason or 'no reason given'}")

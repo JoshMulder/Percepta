@@ -33,6 +33,7 @@ from . import AGENT_VERSION, clock, tls
 from .agent import AUDIO_TICK_S, Agent
 from .config import AgentConfig
 from .devices.serialio import list_ports
+from .transport import CONTRACT_VERSION
 
 
 def _logging(verbose: bool) -> None:
@@ -995,9 +996,8 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(
             f"Enrolled as {enrolment.site.name} ({enrolment.station_id}).\n"
-            f"  broker      {enrolment.broker.url} as {enrolment.broker.username}\n"
-            f"  telemetry   {enrolment.broker.telemetry_topic}\n"
-            f"  commands    {enrolment.broker.command_topic}\n"
+            f"  platform    {enrolment.broker.url}\n"
+            f"  contract    {CONTRACT_VERSION}\n"
             f"  expires     {enrolment.credential.expires_at.isoformat()}\n"
             f"  renew after {enrolment.credential.renew_after.isoformat()}"
         )
@@ -1012,8 +1012,8 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"{enrolment.site.name} ({enrolment.station_id})\n"
             f"  agent       {AGENT_VERSION}\n"
-            f"  broker      {config.broker_url or enrolment.broker.url} "
-            f"as {enrolment.broker.username}\n"
+            f"  contract    {CONTRACT_VERSION}\n"
+            f"  platform    {config.broker_url or enrolment.broker.url}\n"
             f"  credential  expires {enrolment.credential.expires_at.isoformat()}, "
             f"renew after {enrolment.credential.renew_after.isoformat()}"
         )
