@@ -716,8 +716,27 @@ class Agent:
                 )
             else:
                 self.health.clear("uplink.refused")
-                self.transport.start()
 
+            # **Everything that receives is wired up before anything connects.**
+            #
+            # `start()` returns immediately and a background thread opens the
+            # socket, and `transport.md` is explicit that "commands arrive from
+            # the moment the socket opens, because the credential already
+            # determines whose they are" — there is no subscribe handshake to
+            # delay them. So starting first left a window, however short, in
+            # which a command could arrive with no handler registered and be
+            # dropped with nothing but a log line.
+            #
+            # The first thing a platform sends is the one that matters least
+            # for being late and most for being lost: the conformance harness
+            # opens with `radio.audio`, and a dropped audio lease is a station
+            # that stays silent while looking perfectly healthy. A console
+            # asking for audio the moment a box reconnects is the same shape,
+            # and a station reconnects on every link blip.
+            #
+            # Ordering costs nothing. The handler is set on the transport
+            # object, not on the socket, so registering it before the thread
+            # exists is exactly as valid and closes the window entirely.
             if self.transport is not None:
                 self.events = EventSender(self.store, self.transport.publish)
             handlers = build_handlers(
@@ -727,6 +746,7 @@ class Agent:
             self.router = CommandRouter(handlers)
             if self.transport is not None:
                 self.transport.on_command(self._on_command)
+                self.transport.start()
 
             # The site's own details are things the station needs while the
             # platform is unreachable, so they come from the stored enrolment

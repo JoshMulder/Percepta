@@ -848,6 +848,25 @@ def main() -> int:
                 absorb(extra)
                 listened += extra
 
+        # Audio is the one thing worth waiting for that no cadence describes.
+        #
+        # It is not a telemetry kind and it has no period: it arrives when
+        # somebody keys a microphone, which on a real channel may be minutes
+        # apart. The extension above only stretches for a *missing telemetry
+        # stream*, so a station publishing everything else promptly finished
+        # the window in eight seconds and reported the two audio rules
+        # untested — and `--listen-for`, the flag whose entire purpose is to
+        # wait longer, did nothing at all because nothing was missing.
+        #
+        # So: if this station has a receiver and has not yet sent audio, wait
+        # out the rest of the budget. Costs nothing on a busy channel, because
+        # `absorb` stops as soon as the window closes, and it is the difference
+        # between certifying the expensive rules and skipping them.
+        if ("radio" not in unavailable_now(by_kind) and by_kind.get("radio")
+                and not by_kind.get("audio") and listened < max_listen):
+            absorb(max_listen - listened)
+            listened = max_listen
+
         for kind in cadence:
             payloads = by_kind.get(kind, [])
             unavailable = [p for p in payloads if p.get("available") is False]
