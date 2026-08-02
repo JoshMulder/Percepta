@@ -103,6 +103,18 @@ class Encoder:
         self.rate = rate
         self.channels = channels
         self.frame_samples = rate * FRAME_MS // 1000
+        #: PCM left over from the last call, shorter than one frame.
+        #:
+        #: Without this, every call discarded its tail. The sensing loop hands
+        #: over 125 ms at a time and a frame is 20 ms, so 6 frames went out and
+        #: 5 ms was dropped — every tick, eight times a second, forty
+        #: milliseconds a second of a live transmission simply missing. It is
+        #: not a glitch you can hear as a click; it is heard as continuously
+        #: choppy speech, which reads as a bad link rather than as a bug here.
+        #:
+        #: Carrying it makes the stream lossless: what goes out is exactly what
+        #: came in, delayed by at most one frame.
+        self._residual = b""
 
         error = ctypes.c_int(0)
         self._state = self._lib.opus_encoder_create(
@@ -138,6 +150,9 @@ class Encoder:
             raise OpusUnavailable("this encoder has been closed")
 
         frame_bytes = self.frame_samples * 2 * self.channels
+        if self._residual:
+            pcm = self._residual + pcm
+            self._residual = b""
         packets: list[bytes] = []
         buffer = (ctypes.c_ubyte * _MAX_PACKET)()
 
@@ -153,6 +168,10 @@ class Encoder:
                 log.warning("opus_encode returned %d; dropping a frame.", written)
                 continue
             packets.append(bytes(buffer[:written]))
+        # Whatever did not fill a whole frame waits for the next call rather
+        # than being thrown away.
+        whole = (len(pcm) // frame_bytes) * frame_bytes
+        self._residual = pcm[whole:]
         return packets
 
     def close(self) -> None:
