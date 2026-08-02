@@ -1,41 +1,45 @@
 #!/usr/bin/env python3
 """Check a running station against the contract.
 
-    python contract/conformance/check_station.py --station <uuid>
+    python contract/conformance/check_station.py
+    python contract/conformance/check_station.py --port 8099
 
-Subscribes to what the station publishes, validates every message against the
-schemas, and reports what is missing or wrong. Then issues each command and
-checks the station reports the effect back — because a command that is accepted
-and quietly ignored is the failure this platform is least able to notice.
+**This stands in for the platform.** It listens on the relay endpoint, the
+station connects to it, and everything the station sends is validated against
+the schemas in `../schemas/`. Then it issues each command and checks the
+station reports the effect back — because a command that is accepted and
+quietly ignored is the failure this platform is least able to notice.
 
-Neutral about implementation: it talks to the broker, not to anyone's code. The
-simulator passes it, and so must real hardware.
+Point a station at it and run it:
 
-**KNOWN GAP — this harness cannot yet reach a station built to contract 1.0.**
-It subscribes to per-station channel names on a direct pub/sub connection,
-which is how the boundary worked before the relay. A station built to the
-current contract opens one authenticated WebSocket to `/broker` and sends
-`{"stream":"t","payload":{…}}`; it never names a channel and never puts its own
-id on the wire, so nothing here can see it.
+    GSU_PLATFORM_URL=... GSU_BROKER_URL=ws://127.0.0.1:8099/broker python -m gsu run
+    python contract/conformance/check_station.py
 
-Until that is rewritten, this checks payload shapes, cadence, audio gating and
-command effects against a station reachable on the older path. It does not
-check the relay envelope, `refused`, the frame cap, close codes, reconnect
-behaviour, or either video lease — the whole of the newest surface. Read a pass
-as "the payloads are right", not "this station is conformant".
+Neutral about implementation: it speaks the wire format in `transport.md` and
+knows nothing about anyone's code. It needs no broker, no database and no
+station id — under contract 2.0 a station never puts its id on the wire, so
+there is nothing to tell this harness and nothing for it to get wrong.
+
+Dependencies: `jsonschema`. The WebSocket server is written out below rather
+than imported, for the same reason the station writes its client out — this
+file should run anywhere Python does.
+
+**Plaintext by default, and that is a test.** A station configured to require
+TLS *should* refuse to connect here, and refusing is correct behaviour rather
+than a failure. Use --tls to check the other path.
 """
 
 import argparse
+import base64
+import hashlib
 import json
 import os
+import socket
+import ssl
+import struct
 import sys
 import time
 from pathlib import Path
-
-try:
-    import redis
-except ImportError:
-    sys.exit("pip install redis")
 
 try:
     from jsonschema import Draft202012Validator
@@ -45,10 +49,10 @@ except ImportError:
 SCHEMAS = Path(__file__).resolve().parent.parent / "schemas"
 
 #: Every telemetry kind a station is expected to produce, and the default
-#: seconds between frames from transport.md's cadence table. These are only the
-#: defaults: a station reporting `health.cadence` is believed instead, because
-#: the contract says a site may legitimately slow a stream down to save
-#: bandwidth and must not be failed for it.
+#: seconds between frames from transport.md's cadence table. Only the defaults:
+#: a station reporting `health.cadence` is believed instead, because the
+#: contract says a site may legitimately slow a stream down to save bandwidth
+#: and must not be failed for it.
 DEFAULT_CADENCE = {"adsb": 1.0, "power": 1.0, "radio": 1.0, "light": 1.0,
                    "weather": 5.0}
 
@@ -58,37 +62,33 @@ PERIODS = 4
 MIN_WAIT = 8.0
 
 #: Longest this will listen for the opening survey, whatever the cadences say.
-#: A station reporting a very slow weather period would otherwise stall the run.
 MAX_WAIT = 45.0
 
-#: Kinds the contract defines but does not require a station to send in a short
-#: window. Validated when present - a station that reports these must report
-#: them correctly - and never demanded. `health` because a station is not less
-#: conformant for staying quiet about itself; `events` because a station with
-#: nothing to report has nothing to send, and manufacturing an event to be
-#: observed is not something a harness can ask for.
+#: Kinds the contract defines but does not require in a short window. `health`
+#: because a station is not less conformant for staying quiet about itself;
+#: `events` because a station with nothing to report has nothing to send.
 OPTIONAL_KINDS = {"health", "events"}
-
-#: What this harness checks against.
-CONTRACT_VERSION = "1.0"
 
 #: How long a command has to be reflected in telemetry.
 COMMAND_TIMEOUT = 8.0
+
+#: What this harness checks against.
+CONTRACT_VERSION = "2.0"
+
+#: Relay stream codes, per transport.md. A station may publish the first three
+#: and only receive on the fourth.
+STREAM_KIND = {"t": "telemetry", "a": "audio", "e": "events"}
+COMMAND_STREAM = "c"
 
 #: Each command, and the telemetry field that must reflect it. This pairing is
 #: the contract's core promise: nothing is confirmed by the platform, so every
 #: command has to be observable in what the station reports.
 #:
-#: Commands against a stream the station has declared unavailable are skipped -
-#: there is no hardware to obey them, and failing a station for that would mean
-#: the only way to pass is to pretend.
-#:
 #: Each pair that changes state is followed by one that puts it back, because
 #: this runs against real commissioned hardware. `radio.gain` and `radio.ppm`
-#: are deliberately absent for the same reason: they are calibration settings
-#: trimmed once for a site, and a harness that left one changed would desense a
-#: receiver in a way nobody would connect to having run a test. Tuning is the
-#: one exception, and it is restored below from what the station first reported.
+#: are deliberately absent: they are calibration settings trimmed once for a
+#: site, and a harness that left one changed would desense a receiver in a way
+#: nobody would connect to having run a test.
 COMMANDS = [
     ("radio.tune", {"freq_hz": 119_500_000}, "radio", "freq_hz", 119_500_000),
     ("radio.auto_squelch", {"on": False}, "radio", "auto_squelch", False),
@@ -96,6 +96,7 @@ COMMANDS = [
     ("radio.monitor", {"on": True}, "radio", "monitor", True),
     ("radio.monitor", {"on": False}, "radio", "monitor", False),
     ("radio.auto_squelch", {"on": True}, "radio", "auto_squelch", True),
+    ("radio.spectrum", {"on": True, "lease_seconds": 15}, "radio", "span_hz", None),
     ("light.set", {"on": True}, "light", "on", True),
     ("light.set", {"on": False}, "light", "on", False),
 ]
@@ -111,54 +112,250 @@ def check(label: str, ok: bool, detail: str = "") -> None:
 
 
 def load(name: str) -> Draft202012Validator:
-    return Draft202012Validator(json.loads((SCHEMAS / name).read_text()))
+    return Draft202012Validator(
+        json.loads((SCHEMAS / name).read_text(encoding="utf-8"))
+    )
 
 
-def read(pubsub, timeout: float) -> dict | None:
-    """One decoded payload, or None if nothing arrived in time."""
-    message = pubsub.get_message(ignore_subscribe_messages=True, timeout=timeout)
-    if not message:
-        return None
-    data = message.get("data")
-    if isinstance(data, bytes):
-        data = data.decode()
+# --- the relay, written out ------------------------------------------------
+#
+# Enough of RFC 6455 to be the far end of one station's socket: the handshake,
+# text frames, close and ping. No extensions are negotiated, so nothing here
+# has to deal with compression — which also keeps the bandwidth figures in
+# transport.md honest, since permessage-deflate would change them.
+
+_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+
+class Refused(Exception):
+    """The station did not connect in a way this harness can accept."""
+
+
+class Relay:
+    """One station's socket, from the platform's side."""
+
+    def __init__(self, sock: socket.socket) -> None:
+        self.sock = sock
+        self.buf = b""
+        self.credential: str | None = None
+        self.path = ""
+        self.closed = False
+        #: Anything the station sent that the wire format does not allow.
+        self.envelope_faults: list[str] = []
+
+    # -- framing ----------------------------------------------------------
+
+    def _fill(self, deadline: float) -> None:
+        """One read into the buffer. Never consumes."""
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            raise TimeoutError
+        self.sock.settimeout(min(remaining, 1.0))
+        try:
+            chunk = self.sock.recv(65536)
+        except socket.timeout:
+            return
+        if not chunk:
+            self.closed = True
+            raise ConnectionError("station closed the socket")
+        self.buf += chunk
+
+    def _recv(self, want: int, deadline: float) -> bytes:
+        while len(self.buf) < want:
+            self._fill(deadline)
+        out, self.buf = self.buf[:want], self.buf[want:]
+        return out
+
+    def handshake(self, deadline: float) -> None:
+        while b"\r\n\r\n" not in self.buf:
+            self._fill(deadline)
+            if len(self.buf) > 65536:
+                raise Refused("request head too large")
+        head, _, rest = self.buf.partition(b"\r\n\r\n")
+        self.buf = rest
+        lines = head.decode("latin-1").split("\r\n")
+        self.path = lines[0].split(" ")[1] if " " in lines[0] else ""
+        headers = {}
+        for line in lines[1:]:
+            name, _, value = line.partition(":")
+            headers[name.strip().lower()] = value.strip()
+
+        auth = headers.get("authorization", "")
+        if auth.lower().startswith("bearer "):
+            self.credential = auth[7:].strip()
+
+        key = headers.get("sec-websocket-key")
+        if not key:
+            self.sock.sendall(b"HTTP/1.1 400 Bad Request\r\n\r\n")
+            raise Refused("not a WebSocket upgrade")
+        accept = base64.b64encode(
+            hashlib.sha1((key + _GUID).encode()).digest()
+        ).decode()
+        self.sock.sendall(
+            b"HTTP/1.1 101 Switching Protocols\r\n"
+            b"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+            b"Sec-WebSocket-Accept: " + accept.encode() + b"\r\n\r\n"
+        )
+
+    def read_frame(self, deadline: float) -> str | None:
+        """One text payload, or None on a control frame or a timeout."""
+        first, second = self._recv(2, deadline)
+        fin, opcode = first & 0x80, first & 0x0F
+        masked, length = second & 0x80, second & 0x7F
+        if length == 126:
+            length = struct.unpack("!H", self._recv(2, deadline))[0]
+        elif length == 127:
+            length = struct.unpack("!Q", self._recv(8, deadline))[0]
+        if length > 512 * 1024:
+            # transport.md: frames are capped at 512 KiB, enforced by closing.
+            self.envelope_faults.append(f"frame of {length} bytes exceeds 512 KiB")
+            self.close(1009)
+            raise ConnectionError("frame too large")
+        mask = self._recv(4, deadline) if masked else b""
+        data = self._recv(length, deadline) if length else b""
+        if masked:
+            data = bytes(b ^ mask[i % 4] for i, b in enumerate(data))
+
+        if opcode == 0x8:                       # close
+            self.closed = True
+            raise ConnectionError("station closed the socket")
+        if opcode == 0x9:                       # ping
+            self.write(data, opcode=0xA)
+            return None
+        if opcode == 0xA:                       # pong
+            return None
+        if opcode == 0x2:
+            self.envelope_faults.append(
+                "binary frame on the relay; transport.md carries JSON text")
+            return None
+        if not fin:
+            self.envelope_faults.append("fragmented frame")
+        if not masked:
+            self.envelope_faults.append("unmasked frame from a client (RFC 6455)")
+        return data.decode("utf-8", "replace")
+
+    def write(self, data: bytes, opcode: int = 0x1) -> None:
+        header = bytearray([0x80 | opcode])
+        n = len(data)
+        if n < 126:
+            header.append(n)
+        elif n < 65536:
+            header.append(126)
+            header += struct.pack("!H", n)
+        else:
+            header.append(127)
+            header += struct.pack("!Q", n)
+        self.sock.sendall(bytes(header) + data)
+
+    def close(self, code: int = 1000) -> None:
+        try:
+            self.write(struct.pack("!H", code), opcode=0x8)
+            self.sock.close()
+        except Exception:
+            pass
+        self.closed = True
+
+    # -- the contract's envelope -----------------------------------------
+
+    def send_command(self, payload: dict) -> None:
+        self.write(json.dumps({"stream": COMMAND_STREAM,
+                               "payload": payload}).encode())
+
+    def read_payload(self, deadline: float) -> tuple[str, dict] | None:
+        """One `(kind, payload)`, checking the envelope on the way through."""
+        raw = self.read_frame(deadline)
+        if raw is None:
+            return None
+        try:
+            frame = json.loads(raw)
+        except ValueError:
+            self.envelope_faults.append("frame is not JSON")
+            return None
+        if not isinstance(frame, dict):
+            self.envelope_faults.append("frame is not an object")
+            return None
+        stream, payload = frame.get("stream"), frame.get("payload")
+        extra = set(frame) - {"stream", "payload"}
+        if extra:
+            self.envelope_faults.append(
+                f"envelope carries {sorted(extra)}; transport.md defines two keys")
+        if stream == COMMAND_STREAM:
+            self.envelope_faults.append(
+                "station published on stream 'c', which is downward only")
+            self.write(json.dumps({"type": "refused", "stream": "c",
+                                   "reason": "c is platform to station"}).encode())
+            return None
+        if stream not in STREAM_KIND:
+            self.envelope_faults.append(f"unknown stream code {stream!r}")
+            self.write(json.dumps({"type": "refused", "stream": str(stream),
+                                   "reason": "not a stream code"}).encode())
+            return None
+        if not isinstance(payload, dict):
+            self.envelope_faults.append(f"payload on {stream!r} is not an object")
+            return None
+        return STREAM_KIND[stream], payload
+
+
+def await_station(port: int, host: str, tls: tuple[str, str] | None,
+                  seconds: float) -> Relay:
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind((host, port))
+    server.listen(1)
+    scheme = "wss" if tls else "ws"
+    print(f"Listening on {scheme}://{host}:{port}/broker — start the station.\n")
+    server.settimeout(seconds)
     try:
-        frame = json.loads(data)
-    except (TypeError, ValueError):
-        return None
-    return frame if isinstance(frame, dict) else None
+        sock, _ = server.accept()
+    except socket.timeout:
+        sys.exit(
+            f"No station connected within {seconds:.0f}s.\n"
+            f"Point one at {scheme}://{host}:{port}/broker and run it.\n"
+            "If the station requires TLS it is right to refuse a ws:// URL — "
+            "pass --tls to test that path instead."
+        )
+    finally:
+        server.close()
+    if tls:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(tls[0], tls[1])
+        sock = context.wrap_socket(sock, server_side=True)
+    relay = Relay(sock)
+    relay.handshake(time.time() + 10)
+    return relay
 
 
-def collect(pubsub, seconds: float) -> list[dict]:
+# --- checks ----------------------------------------------------------------
+
+
+def collect(relay: Relay, seconds: float) -> list[tuple[str, dict]]:
     """Everything the station published in the window, in order.
 
     Order matters for the audio-gating check: it pairs each audio frame with
-    the squelch state the station last reported, so the frames have to arrive
-    in the sequence they were sent.
+    the squelch state either side of it, so frames must arrive as sent.
     """
-    out: list[dict] = []
-    end = time.time() + seconds
-    while time.time() < end:
-        frame = read(pubsub, 1.0)
-        if frame is not None:
-            out.append(frame)
+    out: list[tuple[str, dict]] = []
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        try:
+            got = relay.read_payload(deadline)
+        except (TimeoutError, socket.timeout):
+            break
+        except ConnectionError as exc:
+            notes.append(f"socket ended during collection: {exc}")
+            break
+        if got is not None:
+            out.append(got)
     return out
 
 
 def cadence_from(by_kind: dict[str, list[dict]]) -> dict[str, float]:
     """What this station says its cadences are, falling back to the defaults.
 
-    `health.cadence` is authoritative per transport.md: a console deriving a
-    staleness timeout must use it rather than the table, and so must this.
-
     **Only the streams already expected are timed by it.** A station reporting
-    its `audio` or `health` cadence — which transport.md's own table invites,
-    since both appear in it — must not thereby be *demanded* to produce them:
-    audio is gated on the squelch and a lease, so a quiet band legitimately
-    produces none, and health is optional by design. An earlier version merged
-    every reported key into the expected set, so an honest station failed
-    `publishes audio` for having a quiet band, and `health` was demanded in
-    contradiction of OPTIONAL_KINDS.
+    its `audio` or `health` cadence must not thereby be *demanded* to produce
+    them: audio is gated on the squelch and a lease, so a quiet band
+    legitimately produces none, and health is optional by design.
     """
     cadence = dict(DEFAULT_CADENCE)
     for frame in by_kind.get("health", []):
@@ -175,7 +372,6 @@ def cadence_from(by_kind: dict[str, list[dict]]) -> dict[str, float]:
 
 
 def unavailable_now(by_kind: dict[str, list[dict]]) -> set[str]:
-    """Streams the station has declared it has no source for."""
     return {
         k for k, payloads in by_kind.items()
         if any(p.get("available") is False for p in payloads)
@@ -183,6 +379,8 @@ def unavailable_now(by_kind: dict[str, list[dict]]) -> set[str]:
 
 
 def matches(got, expect) -> bool:
+    if expect is None:                       # presence is the assertion
+        return got is not None
     if got == expect:
         return True
     # Frequencies and thresholds are snapped and rounded station-side, so an
@@ -195,21 +393,30 @@ def matches(got, expect) -> bool:
     )
 
 
-def await_report(pubsub, kind: str, field: str, expect, seconds: float):
+def await_report(relay: Relay, kind: str, field: str, expect, seconds: float):
     """Wait until the station reports `field` as `expect`, or time out.
 
-    Returns the last value seen and whether it matched. Polling for the answer
-    rather than sampling a window and taking the final value is what makes this
-    check deterministic: the old version could miss a correct report simply
-    because the window ended a moment too early.
+    Polling for the answer rather than sampling a window is what makes this
+    deterministic: the old version could miss a correct report because the
+    window ended a moment early.
     """
     got = None
-    end = time.time() + seconds
-    while time.time() < end:
-        frame = read(pubsub, 0.5)
-        if frame is None or frame.get("kind") != kind or field not in frame:
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        try:
+            frame = relay.read_payload(deadline)
+        except (TimeoutError, socket.timeout):
+            break
+        except ConnectionError:
+            break
+        if frame is None:
             continue
-        got = frame[field]
+        stream, payload = frame
+        if stream != "telemetry" or payload.get("kind") != kind:
+            continue
+        if field not in payload:
+            continue
+        got = payload[field]
         if matches(got, expect):
             return got, True
     return got, False
@@ -217,135 +424,80 @@ def await_report(pubsub, kind: str, field: str, expect, seconds: float):
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--station", required=True, help="station uuid")
-    # 6380, not 6379: that is where compose publishes the platform's broker, on
-    # loopback. A development host frequently has its own Redis on 6379, and
-    # connecting to it looks identical to a station that is publishing nothing.
-    # rediss by default: the broker is TLS-only, and a plaintext default would
-    # send a station credential in clear the first time someone pasted one in.
-    ap.add_argument(
-        "--redis",
-        default=os.environ.get("PERCEPTA_BROKER_URL", "rediss://localhost:6380/0"),
-        help="broker URL; PERCEPTA_BROKER_URL is used if set",
-    )
-    ap.add_argument(
-        "--ca",
-        default=os.environ.get("PERCEPTA_CA_FILE"),
-        help="CA certificate to verify the broker against; PERCEPTA_CA_FILE if set",
-    )
-    ap.add_argument(
-        "--insecure", action="store_true",
-        help="skip certificate verification (development only)",
-    )
+    ap.add_argument("--port", type=int,
+                    default=int(os.environ.get("PERCEPTA_RELAY_PORT", 8099)))
+    ap.add_argument("--host", default="127.0.0.1",
+                    help="interface to listen on; 0.0.0.0 for another machine")
+    ap.add_argument("--wait", type=float, default=120.0,
+                    help="seconds to wait for the station to connect")
+    ap.add_argument("--tls", nargs=2, metavar=("CERT", "KEY"),
+                    help="serve wss:// with this certificate and key")
     args = ap.parse_args()
 
-    # TLS: the broker requires it, and the certificate is verified against the
-    # platform's CA rather than the system trust store - the same CA a station
-    # is given to pin at enrolment. --insecure exists for a developer poking at
-    # a stack they built five minutes ago, and says so loudly, because a harness
-    # that quietly skips verification teaches people that skipping is normal.
-    kwargs = {}
-    if args.redis.startswith("rediss://"):
-        if args.insecure:
-            kwargs["ssl_cert_reqs"] = None
-            print("  ! certificate verification DISABLED (--insecure)\n")
-        elif args.ca:
-            kwargs["ssl_ca_certs"] = args.ca
-        else:
-            sys.exit(
-                "This broker uses TLS. Pass --ca <path to ca.crt> so the "
-                "certificate can be verified, or --insecure to skip it."
-            )
-    r = redis.Redis.from_url(args.redis, **kwargs)
     telemetry_schema = load("telemetry.schema.json")
     audio_schema = load("audio.schema.json")
     events_schema = load("events.schema.json")
 
-    sub = r.pubsub()
-    sub.subscribe(
-        f"gsu/{args.station}/telemetry",
-        f"gsu/{args.station}/audio",
-        f"gsu/{args.station}/events",
-    )
-    cmd_channel = f"cmd/gsu/{args.station}"
+    relay = await_station(args.port, args.host, args.tls, args.wait)
 
-    print(f"\nListening to station {args.station}\n")
+    print("0. Connection")
+    check("authenticates with a bearer credential", bool(relay.credential),
+          "no Authorization header")
+    if relay.credential:
+        shown = relay.credential[:4] + "…" if len(relay.credential) > 4 else "…"
+        notes.append(f"credential presented ({shown}), not verified by this harness")
+    check("connects to /broker", relay.path.startswith("/broker"),
+          f"path was {relay.path!r}")
 
     # Ask for audio before listening. A station that obeys the contract sends
-    # none at all unless somebody has asked - so without this, the gating check
+    # none at all unless somebody has asked — so without this, the gating check
     # below would have nothing to judge and would silently pass every
     # lease-respecting station while only ever testing the ones that ignore it.
-    # Renewed through the survey, exactly as the platform does it.
     audio_request = {"kind": "radio.audio", "on": True, "lease_seconds": 30}
-    r.publish(cmd_channel, json.dumps(audio_request))
+    relay.send_command(audio_request)
 
-    print("1. Telemetry")
-    # One pass at the defaults, then extend if the station reports slower
-    # cadences of its own. Two short listens rather than one long one, so a
-    # station running at the defaults is not made to wait for the worst case.
-    seen = collect(sub, MIN_WAIT)
+    print("\n1. Telemetry")
+    seen = collect(relay, MIN_WAIT)
     by_kind: dict[str, list[dict]] = {}
-    for payload in seen:
-        by_kind.setdefault(str(payload.get("kind")), []).append(payload)
+    for stream, payload in seen:
+        key = "audio" if stream == "audio" else (
+            "events" if stream == "events" else str(payload.get("kind")))
+        by_kind.setdefault(key, []).append(payload)
 
-    # What the station says it speaks. Reported, never failed on: the contract
-    # is explicit that a version is declared rather than negotiated, and a
-    # harness that refused an older box would be the refusal the contract
-    # deliberately does not make.
     spoken = next(
         (f.get("contract_version") for f in by_kind.get("health", [])
          if f.get("contract_version")), None)
     if spoken is None:
-        notes.append(
-            f"station declares no contract_version; this harness checks "
-            f"{CONTRACT_VERSION}"
-        )
+        notes.append(f"station declares no contract_version; this checks "
+                     f"{CONTRACT_VERSION}")
     elif spoken != CONTRACT_VERSION:
-        notes.append(
-            f"station speaks contract {spoken}, this harness checks "
-            f"{CONTRACT_VERSION}"
-        )
-
-    # This harness deliberately does NOT acknowledge events.
-    #
-    # An earlier version did, to avoid leaving the station re-sending. That was
-    # the wrong trade and it destroyed data: `events.ack` means "durably
-    # stored, delete your copy", this stores nothing and exits, and the file
-    # runs against commissioned hardware on real sites. Running a conformance
-    # check must never cost a site its undelivered history.
-    #
-    # The consequence is honest and bounded: the station keeps its backlog and
-    # re-sends on its own schedule once a real platform is listening.
-    if by_kind.get("events"):
-        notes.append(
-            "events seen and validated but NOT acknowledged - this harness "
-            "stores nothing, and acking would tell the station to delete them"
-        )
+        notes.append(f"station speaks contract {spoken}, this checks "
+                     f"{CONTRACT_VERSION}")
 
     cadence = cadence_from(by_kind)
     if cadence != DEFAULT_CADENCE:
-        stated = ", ".join(
-            f"{k} {v:g}s" for k, v in sorted(cadence.items())
-            if DEFAULT_CADENCE.get(k) != v
-        )
+        stated = ", ".join(f"{k} {v:g}s" for k, v in sorted(cadence.items())
+                           if DEFAULT_CADENCE.get(k) != v)
         notes.append(f"station reports its own cadence: {stated}")
     missing = [k for k in cadence if not by_kind.get(k)]
     if missing:
         extra = min(MAX_WAIT, max(cadence[k] * PERIODS for k in missing)) - MIN_WAIT
         if extra > 0:
-            r.publish(cmd_channel, json.dumps(audio_request))
-            for payload in collect(sub, extra):
-                seen.append(payload)
-                by_kind.setdefault(str(payload.get("kind")), []).append(payload)
+            relay.send_command(audio_request)
+            for stream, payload in collect(relay, extra):
+                seen.append((stream, payload))
+                key = "audio" if stream == "audio" else (
+                    "events" if stream == "events" else str(payload.get("kind")))
+                by_kind.setdefault(key, []).append(payload)
 
     for kind in cadence:
         payloads = by_kind.get(kind, [])
         unavailable = [p for p in payloads if p.get("available") is False]
         if unavailable:
-            # A station saying "I have no receiver for this" is conformant. The
-            # alternative - demanding a payload it cannot honestly fill - is
-            # what makes a station invent numbers, which is the one outcome
-            # this harness exists to prevent.
+            # A station saying "I have no receiver for this" is conformant.
+            # Demanding a payload it cannot honestly fill is what makes a
+            # station invent numbers, which is what this harness exists to
+            # prevent.
             reason = unavailable[-1].get("unavailable_reason") or "no reason given"
             check(f"publishes {kind}", True)
             notes.append(f"{kind} declared unavailable: {reason}")
@@ -353,9 +505,13 @@ def main() -> int:
             check(f"publishes {kind}", bool(payloads),
                   f"nothing received in {cadence[kind] * PERIODS:g}s")
 
-    print("\n2. Schema")
-    # Every frame, not the first of each kind. A station that alternates valid
-    # and invalid payloads used to pass this outright.
+    print("\n2. Envelope")
+    # The relay format is the newest surface in the contract and the one with
+    # no schema, so it is checked here rather than by a validator.
+    check("frames match the relay envelope", not relay.envelope_faults,
+          "; ".join(sorted(set(relay.envelope_faults))[:3]))
+
+    print("\n3. Schema")
     for kind, payloads in sorted(by_kind.items()):
         if kind == "audio":
             schema = audio_schema
@@ -378,64 +534,85 @@ def main() -> int:
             detail += f"  ({bad} of {len(payloads)} frame(s))"
         check(f"{kind} matches schema ({len(payloads)} frame(s))", not bad, detail)
 
-    print("\n3. Audio is gated")
-    # Tests the rule directly: every audio frame must sit after a radio frame
-    # reporting the squelch open. Earlier versions were weaker - looking only at
-    # the last radio frame in the window failed an honest station whose squelch
-    # closed before the window ended, and skipping whenever the squelch was ever
-    # open never failed anyone.
-    #
-    # The tolerance below matters for real hardware. A station may publish audio
-    # on a faster sub-tick than its 1 Hz radio telemetry, so a transmission
-    # starting mid-interval legitimately puts audio on the wire before the radio
-    # frame that announces the open gate. Frames are therefore judged against
-    # the squelch state either side of them, and only audio that is surrounded
+    # Events are validated and deliberately NOT acknowledged: `events.ack`
+    # means "durably stored, delete your copy", this stores nothing, and the
+    # file runs against real sites. A conformance check must never cost a
+    # station its undelivered history.
+    if by_kind.get("events"):
+        notes.append("events validated but NOT acknowledged — this harness "
+                     "stores nothing, and acking would tell the station to "
+                     "delete them")
+
+    print("\n4. Audio is gated")
+    # Every audio frame must sit against a squelch that was open. A station may
+    # publish audio on a faster sub-tick than its 1 Hz radio telemetry, so a
+    # transmission starting mid-interval legitimately puts audio on the wire
+    # just before the radio frame announcing the open gate — frames are
+    # therefore judged against the state either side, and only audio bracketed
     # by a closed gate is a failure.
+    ordered = [p for _, p in seen]
     if "radio" in unavailable_now(by_kind):
         notes.append("radio unavailable, so audio gating was not tested")
     elif not by_kind.get("radio"):
         check("audio only while squelch is open", False, "no radio telemetry")
     elif not by_kind.get("audio"):
-        # Silence is conformant - the band may simply have been quiet - but it
-        # means this check proved nothing, and saying so is the point.
         check("audio only while squelch is open", True)
-        notes.append(
-            "no audio in the window, so gating was not exercised; run again "
-            "on a busy channel to test it"
-        )
+        notes.append("no audio in the window, so gating was not exercised; "
+                     "run again on a busy channel to test it")
     else:
         def open_at(index: int, step: int) -> bool | None:
-            """The nearest reported squelch state in one direction."""
             i = index + step
-            while 0 <= i < len(seen):
-                if seen[i].get("kind") == "radio":
-                    return bool(seen[i].get("squelch_open") or seen[i].get("monitor"))
+            while 0 <= i < len(ordered):
+                if ordered[i].get("kind") == "radio":
+                    return bool(ordered[i].get("squelch_open")
+                                or ordered[i].get("monitor"))
                 i += step
             return None
 
         ungated = 0
-        for index, payload in enumerate(seen):
+        for index, payload in enumerate(ordered):
             if payload.get("kind") != "audio":
                 continue
             before, after = open_at(index, -1), open_at(index, 1)
             if before is False and after is not True:
                 ungated += 1
         check("audio only while squelch is open", ungated == 0,
-              f"{ungated} audio frame(s) sent with the squelch closed either side")
+              f"{ungated} audio frame(s) with the squelch closed either side")
 
-    print("\n4. Commands take effect")
+    print("\n5. Commands take effect")
     unavailable_kinds = unavailable_now(by_kind)
     for kind, body, report_kind, field, expect in COMMANDS:
         if report_kind in unavailable_kinds:
-            notes.append(f"{kind} not checked - {report_kind} is unavailable")
+            notes.append(f"{kind} not checked — {report_kind} is unavailable")
             continue
-        r.publish(cmd_channel, json.dumps({"kind": kind, **body}))
-        # Wait for the reported value rather than sampling a fixed window and
-        # taking whatever was last. A station that obeys promptly now passes
-        # promptly, and one that never obeys still fails - but a slow tick or a
-        # burst of audio frames no longer decides the outcome.
-        got, ok = await_report(sub, report_kind, field, expect, COMMAND_TIMEOUT)
+        relay.send_command({"kind": kind, **body})
+        got, ok = await_report(relay, report_kind, field, expect, COMMAND_TIMEOUT)
         check(f"{kind} -> {report_kind}.{field}", ok, f"reported {got!r}")
+
+    print("\n6. Audio stops when the lease lapses")
+    # The second gate, and the expensive one. Checking only squelch gating
+    # would pass a station that ignores the lease entirely and streams whenever
+    # the band is busy — which is precisely the behaviour the lease was added
+    # to prevent, and which the reference implementation once shipped. So: ask
+    # for a short lease, stop asking, and confirm the audio stops.
+    if "radio" in unavailable_kinds:
+        notes.append("radio unavailable, so the audio lease was not tested")
+    elif not by_kind.get("audio"):
+        notes.append("no audio seen at all, so lease expiry was not tested")
+    else:
+        relay.send_command({"kind": "radio.audio", "on": True, "lease_seconds": 5})
+        collect(relay, 9.0)                      # let it lapse, unrenewed
+        after = collect(relay, 6.0)
+        leftover = [p for _, p in after if p.get("kind") == "audio"]
+        opened = any(p.get("kind") == "radio"
+                     and (p.get("squelch_open") or p.get("monitor"))
+                     for _, p in after)
+        check("audio stops when the lease lapses", not leftover,
+              f"{len(leftover)} audio frame(s) sent with no live lease")
+        if not opened and not leftover:
+            notes.append("the band was quiet after the lease lapsed, so silence "
+                         "there proves less than it looks; re-run on a busy "
+                         "channel to be sure")
 
     # Put the receiver back where it was found. This runs against commissioned
     # hardware on a real site, and a station left listening to whatever
@@ -443,14 +620,12 @@ def main() -> int:
     was = next((p.get("freq_hz") for p in by_kind.get("radio", [])
                 if p.get("freq_hz")), None)
     if was and "radio" not in unavailable_kinds:
-        r.publish(cmd_channel, json.dumps({"kind": "radio.tune", "freq_hz": was}))
-        _, back = await_report(sub, "radio", "freq_hz", was, COMMAND_TIMEOUT)
-        notes.append(
-            f"receiver returned to {was / 1e6:.3f} MHz" if back else
-            f"COULD NOT return the receiver to {was / 1e6:.3f} MHz - check it"
-        )
-
-    sub.close()
+        relay.send_command({"kind": "radio.tune", "freq_hz": was})
+        _, back = await_report(relay, "radio", "freq_hz", was, COMMAND_TIMEOUT)
+        notes.append(f"receiver returned to {was / 1e6:.3f} MHz" if back else
+                     f"COULD NOT return the receiver to {was / 1e6:.3f} MHz")
+    relay.send_command({"kind": "radio.spectrum", "on": False})
+    relay.close()
 
     if notes:
         print("\nNotes")
@@ -461,7 +636,7 @@ def main() -> int:
     if failures:
         print(f"FAILED: {len(failures)} check(s): {failures}")
         return 1
-    print("All checks passed - this station satisfies the contract.")
+    print("All checks passed — this station satisfies the contract.")
     return 0
 
 
