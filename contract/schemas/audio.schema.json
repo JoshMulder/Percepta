@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://percepta/contract/v1/audio.schema.json",
+  "$id": "https://percepta/contract/v1.0/audio.schema.json",
   "contractVersion": "1.0",
   "title": "Ground station audio",
   "description": "One object per message on gsu/{station_id}/audio.\n\nOpus, because this is the platform's largest single consumer and the link is metered. Uncompressed 24 kHz 16-bit mono is 384 kbit/s, and base64 inside a JSON envelope made it ~512; Opus at 16-24 kbit/s is transparent for voice and reaches the same console for a twentieth of the bandwidth. That saving is the whole reason this stream is shaped the way it is, and it is why the format is fixed here rather than left to a station.\n\nPublished ONLY when both gates are open: the squelch is open, AND the platform has asked within a live `radio.audio` lease. A station nobody has asked sends nothing at all. See contract/transport.md.",
@@ -18,10 +18,9 @@
       "const": "audio"
     },
     "codec": {
-      "enum": [
-        "opus"
-      ],
-      "description": "Always `opus` in this version. The field exists so a future codec is an additive change rather than a break: a consumer branches on it instead of assuming, and a station that only knows one value still says which."
+      "description": "Always `opus` in this version. A string rather than a closed enum precisely so a future codec is the additive change this field exists to allow - a validator that rejected an unknown value would make that promise false, and every consumer validates. **A consumer that does not recognise the value must drop the frame**, not attempt to decode it: unlike a telemetry field, guessing here produces noise in somebody's ear.",
+      "type": "string",
+      "maxLength": 32
     },
     "rate": {
       "enum": [
@@ -60,7 +59,8 @@
     "seq": {
       "type": "integer",
       "minimum": 0,
-      "description": "Message counter, increasing by one, wrapping at 2^32. Optional, and the reason to send it: this transport is explicitly droppable, so a console that receives seq 41 after seq 39 knows a chunk was lost and can conceal the gap rather than playing the next audio as though it were continuous. Without it, loss is inaudible to the consumer and sounds like a glitch to the listener. Resets when a station restarts."
+      "description": "Message counter, increasing by one, wrapping at 2^32. Optional, and the reason to send it: this transport is explicitly droppable, so a console that receives seq 41 after seq 39 knows a chunk was lost and can conceal the gap rather than playing the next audio as though it were continuous. Without it, loss is inaudible to the consumer and sounds like a glitch to the listener. Resets when a station restarts.",
+      "maximum": 4294967295
     }
   }
 }

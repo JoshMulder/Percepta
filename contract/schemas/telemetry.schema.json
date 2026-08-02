@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://percepta/contract/v1/telemetry.schema.json",
+  "$id": "https://percepta/contract/v1.0/telemetry.schema.json",
   "contractVersion": "1.0",
   "title": "Ground station telemetry",
   "description": "One object per message on gsu/{station_id}/telemetry. Discriminated by `kind`. Unknown fields are ignored by the platform, and unknown kinds are dropped rather than erroring - so a new sensor can be added station-side before the platform renders it.\n\nEvery stream shares the availability fields in $defs/availability: a payload may carry `available: false` to declare that the station has no source for that stream, and its usual fields are then not required, because there is nothing to put in them.",
@@ -43,12 +43,9 @@
           "description": "Short, human-readable, for an operator rather than a parser - 'no ADS-B receiver connected', 'weather station not responding'. Only meaningful when available is false."
         },
         "unavailable_cause": {
-          "enum": [
-            "not_fitted",
-            "not_detected",
-            "stopped"
-          ],
-          "description": "The same fact as unavailable_reason, in one word a consumer can branch on. not_fitted is a complete station with nothing selected for this slot and is not a fault; not_detected and stopped both are. Carried on the stream rather than only in health because a console that has just connected or switched station would otherwise wait a full health period - 30 seconds - to tell an empty slot from a broken sensor, and must show something in the meantime. Absent means unknown, which consumers should treat as they did before this field existed."
+          "description": "The same fact as unavailable_reason, in one word a consumer can branch on. Known values: `not_fitted` - a complete station with nothing selected for this slot, which is not a fault; `not_detected` - it was specified and cannot be found; `stopped` - it was found and has stopped answering; `unsupported` - it is fitted and this build cannot drive it, which is a software gap rather than a hardware fault and needs a different response. The last three are faults.\n\nCarried on the stream rather than only in health because a console that has just connected or switched station would otherwise wait a full health period - 30 seconds - to tell an empty slot from a broken sensor. **Treat an unrecognised value as `not_detected`** rather than rejecting the payload: this vocabulary may gain members in a minor version, and a consumer that refused one would turn an additive change into a break. Absent means unknown.",
+          "type": "string",
+          "maxLength": 40
         },
         "simulated": {
           "type": "boolean",
@@ -79,7 +76,7 @@
         "aircraft": {
           "type": "array",
           "maxItems": 500,
-          "description": "The complete current picture, not a delta. An empty array means no contacts, which is different from sending nothing - sending nothing is what a failed receiver looks like.\n\nThis is the station's most expensive unconditional stream: at 1 Hz with no lease and no gate, a busy 50-contact picture is roughly 20 kB a frame, ~150 kbit/s, ~1.5 GB a day, and it is genuinely uncompressed on the wire. See transport.md's cadence section. The cap is far above any real receiver's traffic and exists so that one station cannot hand every console watching it an unbounded array to render; a station seeing more contacts than this should send the nearest 500, which is what an operator is looking at anyway. Omitting fields with no value is worth 10-20% and costs nothing - only icao, range_km and bearing are required.",
+          "description": "The complete current picture, not a delta. An empty array means no contacts, which is different from sending nothing - sending nothing is what a failed receiver looks like.\n\nThis is the station's most expensive unconditional stream: at 1 Hz with no lease and no gate, a busy 50-contact picture is roughly 20 kB a frame, ~150 kbit/s, ~1.5 GB a day, and it is genuinely uncompressed on the wire. See transport.md's cadence section. The cap is far above any real receiver's traffic and exists so that one station cannot hand every console watching it an unbounded array to render; a station seeing more contacts than this should send the nearest 500, which is what an operator is looking at anyway. Omitting fields with no value is worth 10-20% and costs nothing - only icao, range_km and bearing_deg are required.",
           "items": {
             "$ref": "#/$defs/aircraft"
           }
@@ -97,6 +94,15 @@
             "required": [
               "aircraft"
             ]
+          },
+          "then": {
+            "description": "Nothing to report, so nothing may be reported. A station that declares it has no source for this stream must not also send the stream's fields - the two together are a contradiction a consumer cannot resolve, and the availability flag exists precisely so that an empty payload and a dead sensor are distinguishable.",
+            "required": [
+              "unavailable_reason"
+            ],
+            "properties": {
+              "aircraft": false
+            }
           }
         }
       ]
@@ -106,13 +112,15 @@
       "properties": {
         "icao": {
           "type": "string",
-          "description": "24-bit address, hex. The identity the platform tracks a contact by."
+          "description": "24-bit address, hex. The identity the platform tracks a contact by.",
+          "maxLength": 12
         },
         "callsign": {
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "maxLength": 16
         },
         "latitude": {
           "type": [
@@ -131,14 +139,16 @@
           "minimum": -180,
           "maximum": 180
         },
-        "altitude": {
+        "altitude_m": {
           "type": [
             "number",
             "null"
           ],
-          "description": "Metres. Which datum this is depends on altitude_type; a pressure altitude is not height above the station's ground and can be several hundred feet out on a low-pressure day."
+          "description": "Metres, and suffixed so it cannot be read as feet - aviation convention is feet and this is not. Which datum this is depends on altitude_type; a pressure altitude is not height above the station's ground and can be several hundred feet out on a low-pressure day.",
+          "minimum": -1000,
+          "maximum": 100000
         },
-        "track": {
+        "track_deg": {
           "type": [
             "number",
             "null"
@@ -147,19 +157,22 @@
           "exclusiveMaximum": 360,
           "description": "Degrees true. Null if unknown - the console draws a dot rather than pointing it in an invented direction."
         },
-        "speed": {
+        "speed_kt": {
           "type": [
             "number",
             "null"
           ],
-          "description": "Knots."
+          "description": "Knots.",
+          "minimum": 0,
+          "maximum": 5000
         },
         "range_km": {
           "type": "number",
           "minimum": 0,
-          "description": "From the station."
+          "description": "From the station.",
+          "maximum": 1000
         },
-        "bearing": {
+        "bearing_deg": {
           "type": "number",
           "minimum": 0,
           "exclusiveMaximum": 360,
@@ -186,14 +199,18 @@
             "number",
             "null"
           ],
-          "description": "The pressure altitude re-referenced to the station's own measured barometer, in metres. Present only when altitude_type is `pressure` and the station has a working barometric sensor; null otherwise. Never a substitute for `altitude` - both travel, so the console can show what was received and what it means locally."
+          "description": "The pressure altitude re-referenced to the station's own measured barometer, in metres. Present only when altitude_type is `pressure` and the station has a working barometric sensor; null otherwise. Never a substitute for `altitude_m` - both travel, so the console can show what was received and what it means locally.",
+          "minimum": -1000,
+          "maximum": 100000
         },
-        "vertical_speed": {
+        "vertical_speed_ms": {
           "type": [
             "number",
             "null"
           ],
-          "description": "Metres per second, positive climbing. Null when the receiver's vertical-velocity flag was not set."
+          "description": "Metres per second, positive climbing. Null when the receiver's vertical-velocity flag was not set.",
+          "minimum": -500,
+          "maximum": 500
         },
         "emitter_type": {
           "type": [
@@ -209,14 +226,18 @@
             "integer",
             "null"
           ],
-          "description": "Mode A code as four octal digits carried as an integer, so 7700 is 7700. Null when the receiver's squawk flag was not set."
+          "description": "Mode A code as four octal digits carried as an integer, so 7700 is 7700. Null when the receiver's squawk flag was not set.",
+          "minimum": 0,
+          "maximum": 7777
         },
         "seconds_since_contact": {
           "type": [
             "number",
             "null"
           ],
-          "description": "ADSB_VEHICLE's tslc. How long since this contact was last heard from - a track still on the map at 30 seconds is a memory, not an aircraft."
+          "description": "ADSB_VEHICLE's tslc. How long since this contact was last heard from - a track still on the map at 30 seconds is a memory, not an aircraft.",
+          "minimum": 0,
+          "maximum": 86400
         },
         "on_ground": {
           "type": [
@@ -248,9 +269,9 @@
       "required": [
         "icao",
         "range_km",
-        "bearing"
+        "bearing_deg"
       ],
-      "description": "One contact. A contact with no decoded position is NOT reported - transmitting position is the primary function of ADS-B, so a positionless return (a bare Mode S reply) is counted station-side and dropped rather than sent with nulls. range_km and bearing are therefore always present."
+      "description": "One contact. A contact with no decoded position is NOT reported - transmitting position is the primary function of ADS-B, so a positionless return (a bare Mode S reply) is counted station-side and dropped rather than sent with nulls. range_km and bearing_deg are therefore always present."
     },
     "weather": {
       "type": "object",
@@ -263,11 +284,13 @@
         },
         "wind_kt": {
           "type": "number",
-          "minimum": 0
+          "minimum": 0,
+          "maximum": 500
         },
         "gust_kt": {
           "type": "number",
-          "minimum": 0
+          "minimum": 0,
+          "maximum": 500
         },
         "wind_dir_deg": {
           "type": "number",
@@ -276,7 +299,9 @@
           "description": "Direction the wind comes FROM - meteorological convention, the opposite of a movement vector. Getting this backwards is the classic wind-rose bug."
         },
         "temperature_c": {
-          "type": "number"
+          "type": "number",
+          "minimum": -100,
+          "maximum": 100
         },
         "humidity_pct": {
           "type": "number",
@@ -288,13 +313,17 @@
           "type": [
             "number",
             "null"
-          ]
+          ],
+          "minimum": 0,
+          "maximum": 2000
         },
         "visibility_km": {
           "type": [
             "number",
             "null"
-          ]
+          ],
+          "minimum": 0,
+          "maximum": 1000
         },
         "sky": {
           "enum": [
@@ -311,12 +340,14 @@
         },
         "rain_rate_mmh": {
           "type": "number",
-          "minimum": 0
+          "minimum": 0,
+          "maximum": 2000
         },
         "rain_mm_today": {
           "type": "number",
           "minimum": 0,
-          "description": "Running total since local midnight, in the station's own timezone."
+          "description": "Running total since local midnight, in the station's own timezone.",
+          "maximum": 20000
         }
       },
       "allOf": [
@@ -334,6 +365,25 @@
               "wind_dir_deg",
               "temperature_c"
             ]
+          },
+          "then": {
+            "description": "Nothing to report, so nothing may be reported. A station that declares it has no source for this stream must not also send the stream's fields - the two together are a contradiction a consumer cannot resolve, and the availability flag exists precisely so that an empty payload and a dead sensor are distinguishable.",
+            "required": [
+              "unavailable_reason"
+            ],
+            "properties": {
+              "wind_kt": false,
+              "gust_kt": false,
+              "wind_dir_deg": false,
+              "temperature_c": false,
+              "humidity_pct": false,
+              "pressure_hpa": false,
+              "visibility_km": false,
+              "sky": false,
+              "is_day": false,
+              "rain_rate_mmh": false,
+              "rain_mm_today": false
+            }
           }
         }
       ]
@@ -354,30 +404,42 @@
           "description": "Battery state of charge. Recorded to history at one sample per minute."
         },
         "battery_v": {
-          "type": "number"
+          "type": "number",
+          "minimum": -1000,
+          "maximum": 1000
         },
         "pv_w": {
           "type": "number",
-          "description": "In from the array."
+          "description": "In from the array.",
+          "minimum": -1000000,
+          "maximum": 1000000
         },
         "load_w": {
           "type": "number",
-          "description": "Out to the load."
+          "description": "Out to the load.",
+          "minimum": -1000000,
+          "maximum": 1000000
         },
         "runtime_h": {
           "type": [
             "number",
             "null"
           ],
-          "description": "Hours left at the current draw; null while charging."
+          "description": "Hours left at the current draw; null while charging.",
+          "minimum": 0,
+          "maximum": 100000
         },
         "battery_w": {
           "type": "number",
-          "description": "Signed battery power in watts: positive charging, negative discharging. Sent rather than left to be derived, because with four possible sources the console cannot work out the battery's direction from the others without knowing about conversion losses and which source is carrying the load. The station measures it; a consumer subtracting pv_w from load_w would be guessing."
+          "description": "Signed battery power in watts: positive charging, negative discharging. Sent rather than left to be derived, because with four possible sources the console cannot work out the battery's direction from the others without knowing about conversion losses and which source is carrying the load. The station measures it; a consumer subtracting pv_w from load_w would be guessing.",
+          "minimum": -1000000,
+          "maximum": 1000000
         },
         "mains_w": {
           "type": "number",
-          "description": "Watts drawn from the AC mains input. Present only when a mains input is fitted — a site with no grid connection omits this and mains_present entirely, the same way a weather head with no RH module omits humidity. Absent is 'no such source', which is different from 0 W."
+          "description": "Watts drawn from the AC mains input. Present only when a mains input is fitted — a site with no grid connection omits this and mains_present entirely, the same way a weather head with no RH module omits humidity. Absent is 'no such source', which is different from 0 W.",
+          "minimum": -1000000,
+          "maximum": 1000000
         },
         "mains_present": {
           "type": "boolean",
@@ -385,7 +447,9 @@
         },
         "generator_w": {
           "type": "number",
-          "description": "Watts being delivered by the backup generator. Present only when one is fitted."
+          "description": "Watts being delivered by the backup generator. Present only when one is fitted.",
+          "minimum": -1000000,
+          "maximum": 1000000
         },
         "generator_running": {
           "type": "boolean",
@@ -404,6 +468,24 @@
             "required": [
               "soc_pct"
             ]
+          },
+          "then": {
+            "description": "Nothing to report, so nothing may be reported. A station that declares it has no source for this stream must not also send the stream's fields - the two together are a contradiction a consumer cannot resolve, and the availability flag exists precisely so that an empty payload and a dead sensor are distinguishable.",
+            "required": [
+              "unavailable_reason"
+            ],
+            "properties": {
+              "soc_pct": false,
+              "battery_v": false,
+              "pv_w": false,
+              "load_w": false,
+              "runtime_h": false,
+              "battery_w": false,
+              "mains_w": false,
+              "mains_present": false,
+              "generator_w": false,
+              "generator_running": false
+            }
           }
         }
       ]
@@ -425,15 +507,21 @@
         },
         "rssi_db": {
           "type": "number",
-          "description": "In-channel signal, dBFS."
+          "description": "In-channel signal, dBFS.",
+          "minimum": -300,
+          "maximum": 100
         },
         "noise_floor_db": {
           "type": "number",
-          "description": "Measured OUTSIDE the channel - see contract/README.md rule 3."
+          "description": "Measured OUTSIDE the channel - see contract/README.md rule 3.",
+          "minimum": -300,
+          "maximum": 100
         },
         "threshold_db": {
           "type": "number",
-          "description": "Squelch threshold currently applied, whether set by hand or by AUTO."
+          "description": "Squelch threshold currently applied, whether set by hand or by AUTO.",
+          "minimum": -300,
+          "maximum": 100
         },
         "squelch_open": {
           "type": "boolean",
@@ -454,20 +542,27 @@
               "const": "auto"
             },
             {
-              "type": "number"
+              "type": "number",
+              "minimum": -100,
+              "maximum": 100
             }
           ]
         },
         "gains": {
           "type": "array",
           "items": {
-            "type": "number"
+            "type": "number",
+            "minimum": -100,
+            "maximum": 100
           },
-          "description": "Gains this hardware offers, so the console can list them rather than guess."
+          "description": "Gains this hardware offers, so the console can list them rather than guess.",
+          "maxItems": 64
         },
         "ppm": {
           "type": "integer",
-          "description": "Crystal correction currently applied."
+          "description": "Crystal correction currently applied.",
+          "minimum": -1000,
+          "maximum": 1000
         },
         "tx_capable": {
           "type": "boolean",
@@ -476,14 +571,18 @@
         "spectrum": {
           "type": "array",
           "items": {
-            "type": "integer"
+            "type": "integer",
+            "minimum": -300,
+            "maximum": 100
           },
           "maxItems": 256,
           "description": "Per-bin power in dBFS across span_hz, centred on freq_hz, for a spectrum display. Present only while a console has asked for it (the radio.spectrum command): sending it continuously is on the order of 50-100 MB a day on a metered link, for a display that is open for minutes at commissioning. Decimated by peak rather than mean — an airband channel is a handful of bins wide and averaging buries a real carrier — and rounded to whole dB, which is all a canvas can render. (An earlier note here said 150 MB, which was the arithmetic for 241 bins as decimal floats; this field is whole-dB integers and the station decimates to 128 bins before sending.)"
         },
         "span_hz": {
           "type": "number",
-          "description": "Total width the spectrum array covers, centred on freq_hz. Present only alongside spectrum."
+          "description": "Total width the spectrum array covers, centred on freq_hz. Present only alongside spectrum.",
+          "minimum": 0,
+          "maximum": 1000000000
         }
       },
       "allOf": [
@@ -504,6 +603,27 @@
               "auto_squelch",
               "tx_capable"
             ]
+          },
+          "then": {
+            "description": "Nothing to report, so nothing may be reported. A station that declares it has no source for this stream must not also send the stream's fields - the two together are a contradiction a consumer cannot resolve, and the availability flag exists precisely so that an empty payload and a dead sensor are distinguishable.",
+            "required": [
+              "unavailable_reason"
+            ],
+            "properties": {
+              "freq_hz": false,
+              "rssi_db": false,
+              "noise_floor_db": false,
+              "threshold_db": false,
+              "squelch_open": false,
+              "auto_squelch": false,
+              "monitor": false,
+              "gain": false,
+              "gains": false,
+              "ppm": false,
+              "tx_capable": false,
+              "spectrum": false,
+              "span_hz": false
+            }
           }
         }
       ]
@@ -534,6 +654,15 @@
             "required": [
               "on"
             ]
+          },
+          "then": {
+            "description": "Nothing to report, so nothing may be reported. A station that declares it has no source for this stream must not also send the stream's fields - the two together are a contradiction a consumer cannot resolve, and the availability flag exists precisely so that an empty payload and a dead sensor are distinguishable.",
+            "required": [
+              "unavailable_reason"
+            ],
+            "properties": {
+              "on": false
+            }
           }
         }
       ]
@@ -551,7 +680,8 @@
         "contract_version": {
           "type": "string",
           "pattern": "^[0-9]+\\.[0-9]+$",
-          "description": "Which version of this contract the station speaks, `major.minor`. **Declared, not negotiated**: the platform records it, logs a mismatch, and carries on - a station is never refused for it, because refusing a box on a hillside over a version string turns a compatibility note into a site visit.\n\nA major bump means something changed meaning or went away, and the two sides need looking at. A minor bump means fields or kinds were added, which both sides already tolerate by design. Absent means a station older than this field, which is the same as 1.0.\n\nIt exists because the first question of every remote debugging session is which contract that box is on, and until this field there was no way to answer it: config_version is site policy and agent_version is a build string."
+          "description": "Which version of this contract the station speaks, `major.minor`. **Declared, not negotiated**: the platform records it, logs a mismatch, and carries on - a station is never refused for it, because refusing a box on a hillside over a version string turns a compatibility note into a site visit.\n\nA major bump means something changed meaning or went away, and the two sides need looking at. A minor bump means fields or kinds were added, which both sides already tolerate by design. Absent means a station older than this field, which is the same as 1.0.\n\nIt exists because the first question of every remote debugging session is which contract that box is on, and until this field there was no way to answer it: config_version is site policy and agent_version is a build string.",
+          "maxLength": 16
         },
         "status": {
           "type": "string",
@@ -592,22 +722,37 @@
           }
         },
         "agent_version": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 64
         },
         "config_version": {
           "type": "integer",
-          "description": "The configuration generation the station has actually applied, reported so the platform can record and display what is running. The platform does not currently push configuration - see enrolment.md §7 - so this is a display of fact, not half of a sync."
+          "description": "The configuration generation the station has actually applied, reported so the platform can record and display what is running. The platform does not currently push configuration - see enrolment.md §7 - so this is a display of fact, not half of a sync.",
+          "minimum": 0,
+          "maximum": 2147483647
         },
         "uptime_s": {
           "type": "number",
-          "minimum": 0
+          "minimum": 0,
+          "maximum": 1000000000000
         },
         "position": {
-          "type": ["object", "null"],
+          "type": [
+            "object",
+            "null"
+          ],
           "description": "Where this station says it is. **The station owns this** - enrolment sets the initial value, and from then on the box is the one place it is edited, because the person standing at the site is the one who knows. The platform stores what it is told and its console renders the position read-only; two editable copies of one fact disagree, and the disagreement is invisible from both ends.\n\nOnly ever the station's own configuration. Echoing the platform's value back as though the station had confirmed it would launder a guess into a measurement.\n\nOmitting the field means 'nothing to say' and leaves the stored position alone - a station that predates this sends nothing, and reading that as a retraction would take the map away from every station in the field. Retracting is explicit and is `null`.",
           "properties": {
-            "latitude": {"type": "number", "minimum": -90, "maximum": 90},
-            "longitude": {"type": "number", "minimum": -180, "maximum": 180},
+            "latitude": {
+              "type": "number",
+              "minimum": -90,
+              "maximum": 90
+            },
+            "longitude": {
+              "type": "number",
+              "minimum": -180,
+              "maximum": 180
+            },
             "elevation_m": {
               "type": "number",
               "minimum": -500,
@@ -616,18 +761,24 @@
             },
             "source": {
               "type": "string",
-              "description": "How the station came by this: `configured` for a position typed at the box, `gps` for one a receiver fixed. Carried so the platform can tell a typed position from a surveyed one the day a GPS is fitted, rather than having to guess which it is looking at."
+              "description": "How the station came by this: `configured` for a position typed at the box, `gps` for one a receiver fixed. Carried so the platform can tell a typed position from a surveyed one the day a GPS is fitted, rather than having to guess which it is looking at.",
+              "maxLength": 32
             }
           },
-          "required": ["latitude", "longitude"]
+          "required": [
+            "latitude",
+            "longitude"
+          ]
         },
         "cadence": {
           "type": "object",
           "additionalProperties": {
             "type": "number",
-            "exclusiveMinimum": 0
+            "exclusiveMinimum": 0,
+            "maximum": 86400
           },
-          "description": "Seconds between publishes, per telemetry kind, as this station is actually running them. Consumers deriving a staleness timeout must use this rather than the defaults in transport.md: the weather period is a site setting, and a station legitimately slowed down to save bandwidth would otherwise be marked faulty by a console still assuming the default. Absent on an older agent, which means the defaults."
+          "description": "Seconds between publishes, per telemetry kind, as this station is actually running them. Consumers deriving a staleness timeout must use this rather than the defaults in transport.md: the weather period is a site setting, and a station legitimately slowed down to save bandwidth would otherwise be marked faulty by a console still assuming the default. Absent on an older agent, which means the defaults.",
+          "maxProperties": 32
         },
         "uplink": {
           "type": "object",
@@ -638,11 +789,13 @@
             },
             "dropped_frames": {
               "type": "integer",
-              "minimum": 0
+              "minimum": 0,
+              "maximum": 1000000000000
             },
             "offline_seconds": {
               "type": "number",
-              "minimum": 0
+              "minimum": 0,
+              "maximum": 1000000000000
             }
           }
         },
@@ -651,11 +804,13 @@
           "description": "Renewal health. A station that has stopped renewing is the failure that costs a site visit (enrolment.md section 6), and it is visible here long before the credential actually expires.",
           "properties": {
             "expires_at": {
-              "type": "string"
+              "type": "string",
+              "maxLength": 64
             },
             "renewal_failures": {
               "type": "integer",
-              "minimum": 0
+              "minimum": 0,
+              "maximum": 1000000000
             }
           }
         },
@@ -698,32 +853,52 @@
                 "viewers": {
                   "type": "integer",
                   "minimum": 0,
-                  "description": "How many the platform has told it about, through repeated `video.start`."
+                  "description": "How many the platform has told it about, through repeated `video.start`.",
+                  "maximum": 100000
                 },
                 "since": {
-                  "type": ["string", "null"],
-                  "description": "When the current stream started, ISO 8601. Null when not streaming."
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "When the current stream started, ISO 8601. Null when not streaming.",
+                  "maxLength": 64
                 },
                 "lease_remaining_s": {
                   "type": "number",
                   "minimum": 0,
-                  "description": "Seconds before this stream stops on its own unless renewed. Zero when not streaming. A console watching this fall and not reset is watching the platform fail to renew."
+                  "description": "Seconds before this stream stops on its own unless renewed. Zero when not streaming. A console watching this fall and not reset is watching the platform fail to renew.",
+                  "maximum": 86400
                 },
                 "codec": {
-                  "type": ["string", "null"],
-                  "description": "The codec string sent on the media socket, derived from the bitstream: `avc1.PPCCLL` or `hvc1.P.C.TLL.CC`. Reported so a console can tell before playing whether this browser can decode it."
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The codec string sent on the media socket, derived from the bitstream: `avc1.PPCCLL` or `hvc1.P.C.TLL.CC`. Reported so a console can tell before playing whether this browser can decode it.",
+                  "maxLength": 64
                 },
-                "frames": {"type": "integer", "minimum": 0},
+                "frames": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1000000000000
+                },
                 "dropped": {
                   "type": "integer",
                   "minimum": 0,
-                  "description": "Fragments discarded because the link could not carry them. Rising is a bandwidth problem, not a camera fault - the station drops rather than queues, per transport.md."
+                  "description": "Fragments discarded because the link could not carry them. Rising is a bandwidth problem, not a camera fault - the station drops rather than queues, per transport.md.",
+                  "maximum": 1000000000000
                 },
-                "bitrate_bps": {"type": "integer", "minimum": 0},
+                "bitrate_bps": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 10000000000
+                },
                 "fps_measured": {
                   "type": "number",
                   "minimum": 0,
-                  "description": "What the encoder actually achieved, which is not always what was asked for. The gap between this and the requested rate is the difference between a hardware and a software encoder, and it is information rather than a fault."
+                  "description": "What the encoder actually achieved, which is not always what was asked for. The gap between this and the requested rate is the difference between a hardware and a software encoder, and it is information rather than a fault.",
+                  "maximum": 1000
                 }
               }
             },
@@ -731,18 +906,32 @@
               "type": "object",
               "description": "The sensor and how it is being read.",
               "properties": {
-                "fitted": {"type": "boolean"},
+                "fitted": {
+                  "type": "boolean"
+                },
                 "backend": {
-                  "type": ["string", "null"],
-                  "description": "Which capture path is in use. Named rather than inferred because a slow path and broken hardware look identical from a console, and the difference is a packaging problem somebody can fix."
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Which capture path is in use. Named rather than inferred because a slow path and broken hardware look identical from a console, and the difference is a packaging problem somebody can fix.",
+                  "maxLength": 64
                 },
                 "backend_reason": {
-                  "type": ["string", "null"],
-                  "description": "Why that path and not a better one. This is the field that saves an SSH session."
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Why that path and not a better one. This is the field that saves an SSH session.",
+                  "maxLength": 200
                 },
                 "encoder": {
-                  "type": ["string", "null"],
-                  "description": "Hardware block or software, probed at start-up rather than assumed, so moving between boards is a setting and not a rewrite."
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Hardware block or software, probed at start-up rather than assumed, so moving between boards is a setting and not a rewrite.",
+                  "maxLength": 64
                 }
               }
             },
@@ -751,15 +940,28 @@
               "description": "Who holds the camera right now. One sensor, one owner: a camera that is *busy* and a camera that is *broken* looked identical from the platform for the whole life of a bug that survived four fixes, and this is the field that separates them.",
               "properties": {
                 "holder": {
-                  "type": ["string", "null"],
-                  "description": "The named holder, or null when nobody has it."
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The named holder, or null when nobody has it.",
+                  "maxLength": 64
                 },
-                "held_for_s": {"type": "number", "minimum": 0},
-                "grants": {"type": "integer", "minimum": 0},
+                "held_for_s": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1000000000
+                },
+                "grants": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1000000000
+                },
                 "refusals": {
                   "type": "integer",
                   "minimum": 0,
-                  "description": "How often somebody asked and was refused. Climbing means two things want one camera."
+                  "description": "How often somebody asked and was refused. Climbing means two things want one camera.",
+                  "maximum": 1000000000
                 }
               }
             },
@@ -774,7 +976,10 @@
           "maxItems": 64,
           "items": {
             "type": "object",
-            "required": ["id", "kind"],
+            "required": [
+              "id",
+              "kind"
+            ],
             "properties": {
               "id": {
                 "type": "string",
@@ -786,9 +991,18 @@
                 "maxLength": 40,
                 "description": "What sort of thing it is - `rtlsdr`, `serial`."
               },
-              "serial": {"type": "string", "maxLength": 100},
-              "model": {"type": "string", "maxLength": 100},
-              "detail": {"type": "string", "maxLength": 200}
+              "serial": {
+                "type": "string",
+                "maxLength": 100
+              },
+              "model": {
+                "type": "string",
+                "maxLength": 100
+              },
+              "detail": {
+                "type": "string",
+                "maxLength": 200
+              }
             }
           },
           "description": "Physical hardware the station's device slots draw on, found rather than configured. Reported so a console can say 'two receivers configured, one dongle fitted' as a single shortage instead of showing two unrelated faults - which is what a slot-by-slot view does when several slots want one contended device."
@@ -798,14 +1012,26 @@
           "description": "Which link protections are actually active. Reported because \"is that station's traffic encrypted, and against which root\" should not require a shell on the box or a packet capture, and because the answer being *no* is exactly the case nobody would think to check.\n\n**No secret ever appears here.** `broker_url` is redacted of any credential before it travels.",
           "properties": {
             "broker_url": {
-              "type": ["string", "null"],
-              "description": "Where this station publishes, with any credential redacted."
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Where this station publishes, with any credential redacted.",
+              "maxLength": 500
             },
             "broker_tls": {
-              "type": ["boolean", "null"],
+              "type": [
+                "boolean",
+                "null"
+              ],
               "description": "Whether the broker connection is encrypted. False on a station that should be publishing is a fault worth acting on immediately."
             },
-            "platform_tls": {"type": ["boolean", "null"]},
+            "platform_tls": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
             "publishing": {
               "type": "boolean",
               "description": "Whether the uplink is up at all. A station can be sensing, recording and alerting locally while this is false - it is cut off, not broken."
@@ -829,12 +1055,16 @@
           "description": "What is keeping this station's clock. A remote site with a wrong clock cannot authenticate and, if its credential has expired, cannot renew either - that is the failure that costs a site visit (enrolment.md section 6), so this is the early warning for it and not a curiosity.",
           "properties": {
             "synchronised": {
-              "type": ["boolean", "null"],
+              "type": [
+                "boolean",
+                "null"
+              ],
               "description": "Whether the time source considers itself locked. Null means the station could not tell, which is not the same as no - and both are worth showing differently from yes."
             },
             "source": {
               "type": "string",
-              "description": "What is disciplining it: `ntp`, `gps`, `rtc-only`, `none`, `unknown`. `rtc-only` is a box holding time across a reboot with nothing correcting drift; `none` is a box whose clock is whatever it was when it booted."
+              "description": "What is disciplining it. Known values: `ntp`, `gps`, `rtc-only` - a box holding time across a reboot with nothing correcting drift - `none`, and `unknown`. **Treat an unrecognised value as `unknown`.** A station may learn a new time source before the platform does.",
+              "maxLength": 40
             },
             "detail": {
               "type": "string",
@@ -850,18 +1080,24 @@
         "unsourced_streams": {
           "type": "array",
           "items": {
-            "type": "string"
+            "type": "string",
+            "maxLength": 40
           },
-          "description": "Telemetry kinds the station has no source for. The same fact as `available: false` on those streams, gathered in one place."
+          "description": "Telemetry kinds the station has no source for. The same fact as `available: false` on those streams, gathered in one place.",
+          "maxItems": 32
         },
         "unsourced_fields": {
           "type": "object",
           "additionalProperties": {
             "type": "array",
-            "items": {"type": "string"},
+            "items": {
+              "type": "string",
+              "maxLength": 64
+            },
             "maxItems": 64
           },
-          "description": "Per telemetry kind, the field names the fitted instrument cannot measure - `{\"weather\": [\"humidity_pct\"]}` for an Airmar without the RH module. Distinct from an unsourced *stream*: the sensor is present and working and simply does not produce that value, so the console strikes the reading through rather than showing the dashes it shows while waiting."
+          "description": "Per telemetry kind, the field names the fitted instrument cannot measure - `{\"weather\": [\"humidity_pct\"]}` for an Airmar without the RH module. Distinct from an unsourced *stream*: the sensor is present and working and simply does not produce that value, so the console strikes the reading through rather than showing the dashes it shows while waiting.",
+          "maxProperties": 32
         },
         "storage": {
           "type": "object",
@@ -870,15 +1106,25 @@
             "events": {
               "type": "integer",
               "minimum": 0,
-              "description": "Events on local storage."
+              "description": "Events on local storage.",
+              "maximum": 1000000000
             },
             "events_pending": {
               "type": "integer",
               "minimum": 0,
-              "description": "Recorded and not yet acknowledged by the platform - the backlog on `gsu/{station_id}/events`. Falls to zero as the platform acknowledges. Persistently non-zero on a station whose uplink is up is a delivery fault worth chasing."
+              "description": "Recorded and not yet acknowledged by the platform - the backlog on `gsu/{station_id}/events`. Falls to zero as the platform acknowledges. Persistently non-zero on a station whose uplink is up is a delivery fault worth chasing.",
+              "maximum": 1000000000
             },
-            "recordings": {"type": "integer", "minimum": 0},
-            "recordings_mb": {"type": "number", "minimum": 0}
+            "recordings": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000000
+            },
+            "recordings_mb": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1000000000
+            }
           }
         }
       },
@@ -893,7 +1139,10 @@
       "description": "How one connection is verified. There are two of these and they are reported separately, because 'which CA is this box trusting' has two answers and merging them is what produced a station pinning the broker's private CA against an API behind a public certificate.",
       "properties": {
         "mode": {
-          "enum": ["pinned", "system"],
+          "enum": [
+            "pinned",
+            "system"
+          ],
           "description": "`pinned` - this CA and no other issuer, which is stronger than public PKI rather than weaker. `system` - the OS trust store, correct when the far end is behind a publicly trusted certificate."
         },
         "source": {
@@ -902,8 +1151,12 @@
           "description": "Where the root came from: the enrolment response, a pre-provisioned file, or the system store. A station that cannot say where its trust came from cannot be audited."
         },
         "fingerprint": {
-          "type": ["string", "null"],
-          "description": "SHA-256 of the pinned certificate, so a person can compare what the box trusts against what was issued without extracting anything from it. Null when the mode is `system`."
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "SHA-256 of the pinned certificate, so a person can compare what the box trusts against what was issued without extracting anything from it. Null when the mode is `system`.",
+          "maxLength": 128
         },
         "require_tls": {
           "type": "boolean",
@@ -917,17 +1170,21 @@
       "properties": {
         "slot": {
           "type": "string",
-          "description": "What the device is for - adsb, radio, weather, power, light, camera. One slot per job; which product fills it is type_id."
+          "description": "What the device is for. Known values: `adsb`, `radio`, `weather`, `power`, `light`, `camera`. One slot per job; which product fills it is type_id. A station may report a slot this version does not name; consumers display it rather than rejecting the payload.",
+          "maxLength": 40
         },
         "type_id": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 64
         },
         "label": {
           "type": "string",
-          "description": "For an operator, not a parser."
+          "description": "For an operator, not a parser.",
+          "maxLength": 100
         },
         "connection": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 200
         },
         "configured": {
           "type": "boolean",
@@ -942,17 +1199,12 @@
         },
         "status": {
           "type": "string",
-          "enum": [
-            "present",
-            "not_fitted",
-            "configured_absent",
-            "stalled",
-            "unsupported"
-          ],
-          "description": "The one field a console should branch on. `not_fitted` - nothing was ever meant to be here. `configured_absent` - it was specified and cannot be found. `stalled` - it was found and has stopped answering. The last two are faults; the first is not, and showing them the same way teaches operators to ignore all three."
+          "description": "The one field a console should branch on. Known values: `present`; `not_fitted` - nothing was ever meant to be here; `configured_absent` - it was specified and cannot be found; `stalled` - it was found and has stopped answering; `unsupported` - fitted, and this build has no driver for it. The last three are faults; the first two are not, and showing them the same way teaches operators to ignore all five. **Treat an unrecognised value as `stalled`** - the conservative reading - rather than rejecting the payload.",
+          "maxLength": 40
         },
         "detail": {
-          "type": "string"
+          "type": "string",
+          "maxLength": 500
         },
         "simulated": {
           "type": "boolean",
@@ -961,20 +1213,25 @@
         "provides": {
           "type": "array",
           "items": {
-            "type": "string"
-          }
+            "type": "string",
+            "maxLength": 64
+          },
+          "maxItems": 32
         },
         "absent": {
           "type": "array",
           "items": {
-            "type": "string"
-          }
+            "type": "string",
+            "maxLength": 64
+          },
+          "maxItems": 32
         },
         "telemetry_kind": {
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "maxLength": 40
         }
       },
       "required": [

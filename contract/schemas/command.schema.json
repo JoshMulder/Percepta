@@ -1,124 +1,267 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://percepta/contract/v1/command.schema.json",
+  "$id": "https://percepta/contract/v1.0/command.schema.json",
   "contractVersion": "1.0",
   "title": "Platform command to a ground station",
   "description": "One object per message on cmd/gsu/{station_id}. A command is a request, never a guarantee: the platform confirms nothing itself and waits to see the effect in the station's own telemetry. Every command below therefore has a field in a telemetry payload that reports its result - if you add a command, add that field too. Unknown commands must be ignored, not rejected: an older station and a newer platform have to coexist.\n\nThe leased commands (radio.audio, video.start) share one shape: the platform repeats the command while the demand exists, a repeat is a renewal rather than a second start, and the lease expiring is the stop signal. Silence has to be the off switch because most consumers never say goodbye - a closed laptop, a dropped link, a crashed platform - and every one of those must stop a station transmitting to nobody on a metered link.",
   "type": "object",
-  "required": ["kind"],
+  "required": [
+    "kind"
+  ],
   "oneOf": [
     {
       "type": "object",
       "properties": {
-        "kind": { "const": "radio.tune" },
-        "freq_hz": { "type": "integer", "minimum": 108000000, "maximum": 137000000, "description": "Already snapped to the nearest kHz by the platform. Reported back as radio.freq_hz." }
+        "kind": {
+          "const": "radio.tune"
+        },
+        "freq_hz": {
+          "type": "integer",
+          "minimum": 108000000,
+          "maximum": 137000000,
+          "description": "Already snapped to the nearest kHz by the platform. Reported back as radio.freq_hz."
+        }
       },
-      "required": ["kind", "freq_hz"]
+      "required": [
+        "kind",
+        "freq_hz"
+      ]
     },
     {
       "type": "object",
       "properties": {
-        "kind": { "const": "radio.squelch" },
-        "db": { "type": "number", "minimum": -110, "maximum": -10, "description": "Fixed threshold. Setting one implies leaving AUTO, exactly as moving the slider does on a real receiver. Reported back as radio.threshold_db." }
+        "kind": {
+          "const": "radio.squelch"
+        },
+        "db": {
+          "type": "number",
+          "minimum": -110,
+          "maximum": -10,
+          "description": "Fixed threshold. Setting one implies leaving AUTO, exactly as moving the slider does on a real receiver. Reported back as radio.threshold_db."
+        }
       },
-      "required": ["kind", "db"]
+      "required": [
+        "kind",
+        "db"
+      ]
     },
     {
       "type": "object",
       "properties": {
-        "kind": { "const": "radio.auto_squelch" },
-        "on": { "type": "boolean", "description": "On: ride 8 dB above the measured floor. Off: FREEZE the threshold where it was - do not keep tracking, or the control appears to do nothing. Reported back as radio.auto_squelch." }
+        "kind": {
+          "const": "radio.auto_squelch"
+        },
+        "on": {
+          "type": "boolean",
+          "description": "On: ride 8 dB above the measured floor. Off: FREEZE the threshold where it was - do not keep tracking, or the control appears to do nothing. Reported back as radio.auto_squelch."
+        }
       },
-      "required": ["kind", "on"]
+      "required": [
+        "kind",
+        "on"
+      ]
     },
     {
       "type": "object",
       "properties": {
-        "kind": { "const": "radio.monitor" },
-        "on": { "type": "boolean", "description": "Momentary squelch defeat - the MON button. Station-wide: there is one gate, so this pushes hiss to every listener. Expected to be held, never latched.\n\n**The station releases it on its own** after the timeout in transport.md's timings table, and reports monitor false when it does. A console that means to keep it held re-sends before then. Holding the gate open makes squelch_open true, so audio flows continuously up a metered link, and the console holding it can close, crash or be signed out without ever sending the release - the same reason the audio and video leases expire rather than waiting to be told. A station that means to keep it open sends the command again. Reported back as radio.monitor." }
+        "kind": {
+          "const": "radio.monitor"
+        },
+        "on": {
+          "type": "boolean",
+          "description": "Momentary squelch defeat - the MON button. Station-wide: there is one gate, so this pushes hiss to every listener. Expected to be held, never latched.\n\n**The station releases it on its own** after the timeout in transport.md's timings table, and reports monitor false when it does. A console that means to keep it held re-sends before then. Holding the gate open makes squelch_open true, so audio flows continuously up a metered link, and the console holding it can close, crash or be signed out without ever sending the release - the same reason the audio and video leases expire rather than waiting to be told. A station that means to keep it open sends the command again. Reported back as radio.monitor."
+        }
       },
-      "required": ["kind", "on"]
+      "required": [
+        "kind",
+        "on"
+      ]
     },
     {
       "type": "object",
       "properties": {
-        "kind": { "const": "radio.gain" },
-        "gain": { "oneOf": [{ "const": "auto" }, { "type": "number" }], "description": "Site configuration, set once. Prefer fixed: the tuner AGC desenses near strong transmitters badly enough that a stronger signal reads lower. Reported back as radio.gain." }
+        "kind": {
+          "const": "radio.gain"
+        },
+        "gain": {
+          "oneOf": [
+            {
+              "const": "auto"
+            },
+            {
+              "type": "number"
+            }
+          ],
+          "description": "Site configuration, set once. Prefer fixed: the tuner AGC desenses near strong transmitters badly enough that a stronger signal reads lower. Reported back as radio.gain.",
+          "minimum": -100,
+          "maximum": 100
+        }
       },
-      "required": ["kind", "gain"]
+      "required": [
+        "kind",
+        "gain"
+      ]
     },
     {
       "type": "object",
       "properties": {
-        "kind": { "const": "radio.ppm" },
-        "ppm": { "type": "integer", "minimum": -1000, "maximum": 1000, "description": "Crystal correction, trimmed once at commissioning. Reported back as radio.ppm." }
+        "kind": {
+          "const": "radio.ppm"
+        },
+        "ppm": {
+          "type": "integer",
+          "minimum": -1000,
+          "maximum": 1000,
+          "description": "Crystal correction, trimmed once at commissioning. Reported back as radio.ppm."
+        }
       },
-      "required": ["kind", "ppm"]
+      "required": [
+        "kind",
+        "ppm"
+      ]
     },
     {
       "type": "object",
       "properties": {
-        "kind": { "const": "radio.spectrum" },
-        "on": { "type": "boolean", "description": "Somebody is looking at the spectrum display, or has stopped. Demand-driven and leased for the same reason as audio and video: a console that crashes stops the traffic without saying goodbye, and the full sweep is tens of megabytes a day on a metered link for a display that is open for minutes at commissioning. Reported back as radio.spectrum and radio.span_hz, present only while asked for.\n\n`false` stops it immediately rather than waiting for the lease, because unlike audio there is no cost to a stop that never arrives - the lease already covers that case." },
-        "lease_seconds": { "type": "number", "exclusiveMinimum": 0, "description": "How long this request is good for. Defaults and bounds are in transport.md's timings table; the station clamps to them." }
+        "kind": {
+          "const": "radio.spectrum"
+        },
+        "on": {
+          "type": "boolean",
+          "description": "Somebody is looking at the spectrum display, or has stopped. Demand-driven and leased for the same reason as audio and video: a console that crashes stops the traffic without saying goodbye, and the full sweep is tens of megabytes a day on a metered link for a display that is open for minutes at commissioning. Reported back as radio.spectrum and radio.span_hz, present only while asked for.\n\n`false` stops it immediately rather than waiting for the lease, because unlike audio there is no cost to a stop that never arrives - the lease already covers that case."
+        },
+        "lease_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "How long this request is good for. Defaults and bounds are in transport.md's timings table; the station clamps to them.",
+          "maximum": 86400
+        }
       },
-      "required": ["kind", "on"]
+      "required": [
+        "kind",
+        "on"
+      ]
     },
     {
       "type": "object",
       "description": "Somebody is listening: let audio flow up the link (squelch permitting) for lease_seconds. Repeated while any console holds the audio subscription; a repeat is a renewal. There is no stop command - the lease expiring is the stop signal - and local recording is never gated by this: a transmission nobody had a console open for is still written to disk. Reported back as audio frames on gsu/{station_id}/audio while the squelch is open.",
       "properties": {
-        "kind": { "const": "radio.audio" },
-        "on": { "const": true, "description": "Always true. False is deliberately not defined: an unsubscribe-style stop would leave a station transmitting forever when the stopper never arrives, so stopping is the lease's job alone." },
-        "lease_seconds": { "type": "number", "exclusiveMinimum": 0, "description": "How long this request is good for. Defaults and bounds are in transport.md's timings table; the station clamps to them, so an absurd lease cannot pin the uplink open." }
+        "kind": {
+          "const": "radio.audio"
+        },
+        "on": {
+          "const": true,
+          "description": "Always true. False is deliberately not defined: an unsubscribe-style stop would leave a station transmitting forever when the stopper never arrives, so stopping is the lease's job alone."
+        },
+        "lease_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "How long this request is good for. Defaults and bounds are in transport.md's timings table; the station clamps to them, so an absurd lease cannot pin the uplink open.",
+          "maximum": 86400
+        }
       },
-      "required": ["kind"]
+      "required": [
+        "kind"
+      ]
     },
     {
       "type": "object",
       "description": "The first viewer attached: start the live H.264 stream to the media WebSocket (transport.md) and keep it running for lease_seconds. Repeated while anyone is watching; treat a repeat as a renewal, never a second start - there is one camera, and a second encoder on it reads as broken hardware. If the lease expires unrenewed the station stops on its own, so a crashed platform or a dropped link cannot leave it paying for a picture nobody can see. Reported back in health.video.stream.",
       "properties": {
-        "kind": { "const": "video.start" },
-        "lease_seconds": { "type": "number", "exclusiveMinimum": 0, "description": "How long this request is good for. Defaults and bounds are in transport.md's timings table; the station clamps to them." },
-        "viewers": { "type": "integer", "minimum": 1, "description": "How many are watching right now. Advisory and reported straight back in health.video.stream.viewers, so an operator can see that a station is streaming for four people rather than one. It must not change what the station sends: there is one encoder and one stream regardless, and a station that tried to act on this would be optimising for a number it cannot verify." }
+        "kind": {
+          "const": "video.start"
+        },
+        "lease_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "How long this request is good for. Optional: transport.md's timings table states the default a station applies when the platform names none, and the clamp it applies either way.",
+          "maximum": 86400
+        },
+        "viewers": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "How many are watching right now. Advisory and reported straight back in health.video.stream.viewers, so an operator can see that a station is streaming for four people rather than one. It must not change what the station sends: there is one encoder and one stream regardless, and a station that tried to act on this would be optimising for a number it cannot verify.",
+          "maximum": 100000
+        }
       },
-      "required": ["kind", "lease_seconds"]
+      "required": [
+        "kind"
+      ]
     },
     {
       "type": "object",
       "description": "The last viewer left. A courtesy that ends the stream sooner than the lease would; the lease expiring remains the guarantee, so a station that never hears this still stops. Reported back in health.video.stream.",
       "properties": {
-        "kind": { "const": "video.stop" },
-        "reason": { "type": "string", "maxLength": 200, "description": "For the station's log, so 'stopped by the platform' can say why." }
+        "kind": {
+          "const": "video.stop"
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 200,
+          "description": "For the station's log, so 'stopped by the platform' can say why."
+        }
       },
-      "required": ["kind"]
+      "required": [
+        "kind"
+      ]
     },
     {
       "type": "object",
       "description": "Apply site configuration. Defined so both sides agree on the shape, and currently never sent: the platform holds no site policy of its own, and the settings it does share with the station (position, elevation) must not be editable from two ends - see enrolment.md §7 for when this changes. The station applies what it recognises, persists, and reports back as health.config_version; it never assumes the platform saw the change take.",
       "properties": {
-        "kind": { "const": "config.set" },
-        "version": { "type": "integer", "description": "The configuration generation this payload represents, echoed back in health.config_version once applied." },
-        "config": { "type": "object", "description": "The settings to merge. Keys the station does not know are ignored, not rejected: a newer platform must be able to talk to an older station." }
+        "kind": {
+          "const": "config.set"
+        },
+        "version": {
+          "type": "integer",
+          "description": "The configuration generation this payload represents, echoed back in health.config_version once applied.",
+          "minimum": 0,
+          "maximum": 2147483647
+        },
+        "config": {
+          "type": "object",
+          "description": "The settings to merge. Keys the station does not know are ignored, not rejected: a newer platform must be able to talk to an older station.",
+          "maxProperties": 128
+        }
       },
-      "required": ["kind"]
+      "required": [
+        "kind"
+      ]
     },
     {
       "type": "object",
       "description": "The platform has stored every event up to and including through_seq; the station may delete them. **The only acknowledgement in this contract**, and it exists because the events channel is the only one carrying facts that have no newer version - everything else is current state and may be dropped. Sent after each batch is durably stored, never on receipt: acknowledging what is still in memory is how a crash silently loses a site's history. A lost ack costs a re-send, which is why events carry a stable id to deduplicate on.",
       "properties": {
-        "kind": { "const": "events.ack" },
-        "through_seq": { "type": "integer", "minimum": 0, "description": "The highest seq durably stored. The station may delete everything up to and including this and must not re-send it." }
+        "kind": {
+          "const": "events.ack"
+        },
+        "through_seq": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The highest seq durably stored. The station may delete everything up to and including this and must not re-send it.",
+          "maximum": 9007199254740991
+        }
       },
-      "required": ["kind", "through_seq"]
+      "required": [
+        "kind",
+        "through_seq"
+      ]
     },
     {
       "type": "object",
       "properties": {
-        "kind": { "const": "light.set" },
-        "on": { "type": "boolean", "description": "Reported back as light.on once the hardware has actually done it." }
+        "kind": {
+          "const": "light.set"
+        },
+        "on": {
+          "type": "boolean",
+          "description": "Reported back as light.on once the hardware has actually done it."
+        }
       },
-      "required": ["kind", "on"]
+      "required": [
+        "kind",
+        "on"
+      ]
     }
   ]
 }

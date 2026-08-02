@@ -271,7 +271,7 @@ repeated JSON key names, and none of it is compressed on the wire.
 
 Three things follow, none of which needs a schema change:
 
-1. **Omit what has no value.** Only `icao`, `range_km` and `bearing` are
+1. **Omit what has no value.** Only `icao`, `range_km` and `bearing_deg` are
    required. Sending explicit nulls for the other sixteen fields is 10–20% of
    the stream, and the weather payload already omits rather than nulls.
 2. **The array is capped at 500 contacts** — far above any real receiver, and

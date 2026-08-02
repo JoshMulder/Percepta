@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://percepta/contract/v1/events.schema.json",
+  "$id": "https://percepta/contract/v1.0/events.schema.json",
   "contractVersion": "1.0",
   "title": "Ground station events",
   "description": "One object per message on gsu/{station_id}/events, carrying a batch of things that happened.\n\n**This is the one channel that is a ledger rather than a stream, and every rule elsewhere in this contract inverts here.** Telemetry is current state and may be dropped, because a newer frame replaces it in a second. An event has no newer version: a transmission recorded at 03:12, a proximity alert, a credential renewal that failed, a floodlight that drew no current. Losing it loses the fact.\n\nThat is why the station buffers events through an outage and telemetry is discarded, and why this channel is acknowledged when nothing else is. A station keeps every unacknowledged event on local storage - across reboots - and re-sends until the platform says it has them.\n\nDelivery is **at-least-once**, never exactly-once: an acknowledgement can be lost after the platform has stored a batch, in which case the station sends it again. Consumers deduplicate on `id`, which is why `id` is required and must be globally unique.",
@@ -43,7 +43,8 @@
         "seq": {
           "type": "integer",
           "minimum": 0,
-          "description": "Monotonic within the station's current local store, increasing by one. This is the **acknowledgement cursor**, not the identity - `events.ack` names a seq and the station may then delete everything up to it.\n\nIt can go backwards exactly once per store rebuild, which is not an error: the platform acknowledges what it is sent and keeps deduplicating on `id`, so a restarted counter costs nothing. Kept separate from `id` because the two jobs are different, and one field doing both is what makes a rebuilt store lose data."
+          "description": "Monotonic within the station's current local store, increasing by one. This is the **acknowledgement cursor**, not the identity - `events.ack` names a seq and the station may then delete everything up to it.\n\nIt can go backwards exactly once per store rebuild, which is not an error: the platform acknowledges what it is sent and keeps deduplicating on `id`, so a restarted counter costs nothing. Kept separate from `id` because the two jobs are different, and one field doing both is what makes a rebuilt store lose data.",
+          "maximum": 9007199254740991
         },
         "at": {
           "type": "string",
@@ -77,7 +78,8 @@
         },
         "data": {
           "type": "object",
-          "description": "Anything structured the event carries - a frequency, a contact's icao, a recording's local name. Free-form by design and **non-normative**: consumers may display it and must not require any particular key, because the set differs per `type` and the station is the side that learns new ones first."
+          "description": "Anything structured the event carries - a frequency, a contact's icao, a recording's local name. Free-form by design and **non-normative**: consumers may display it and must not require any particular key, because the set differs per `type` and the station is the side that learns new ones first.",
+          "maxProperties": 64
         }
       }
     }

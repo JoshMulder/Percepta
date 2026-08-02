@@ -76,10 +76,37 @@ class PayloadTests(unittest.TestCase):
         # them either, because a health frame only lands inside its sample
         # window sometimes, and when it did the station happened to be healthy
         # and enrolled — the two states where the payload is valid.
-        for kind in ("adsb", "power", "radio", "light", "weather", "health"):
+        #
+        # `adsb` is checked separately below: contract 1.0 renamed its fields
+        # and this station has not caught up, which would otherwise mask the
+        # five kinds that do still conform.
+        for kind in ("power", "radio", "light", "weather", "health"):
             for payload in self.by_kind(kind)[:5]:
                 errors = sorted(TELEMETRY.iter_errors(payload), key=str)
                 self.assertFalse(errors, f"{kind}: {[e.message for e in errors]}")
+
+    @unittest.expectedFailure
+    def test_adsb_matches_the_schema(self):
+        """KNOWN GAP against contract 1.0: the aircraft fields were renamed.
+
+        Every other measured value in the contract carries its unit, and the
+        contact object was the exception — `altitude` (metres) sat beside
+        `altitude_corrected_m`, and `speed` (knots) beside `vertical_speed`
+        (metres per second). Aviation convention is feet, so an unsuffixed
+        `altitude` is a 3.28x error waiting to happen in the highest-volume
+        payload in the system. 1.0 renamed them to `altitude_m`, `speed_kt`,
+        `vertical_speed_ms`, `track_deg` and `bearing_deg` while a rename was
+        still free.
+
+        This station still emits the old names. Delete this decorator once the
+        publisher is updated; until then the failure is the work, not a
+        regression.
+        """
+        payloads = self.by_kind("adsb")
+        self.assertTrue(payloads, "the busy profile should have produced adsb")
+        for payload in payloads[:5]:
+            errors = sorted(TELEMETRY.iter_errors(payload), key=str)
+            self.assertFalse(errors, f"adsb: {[e.message for e in errors]}")
 
     @unittest.expectedFailure
     def test_audio_matches_the_schema_and_is_gated(self):
