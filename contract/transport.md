@@ -2,29 +2,40 @@
 
 ## Direction and channels
 
-A station publishes upward on channels named for itself, and subscribes to one
-channel for commands. It has no other route in or out — in particular it never
-talks to a browser (`server/docs/00-topology.md`, rule 8).
+A station has four streams on one authenticated socket, and no other route in
+or out — in particular it never talks to a browser
+(`server/docs/00-topology.md`, rule 8).
 
-| Direction | Channel | Payload |
-|---|---|---|
-| station → platform | `gsu/{station_id}/telemetry` | one telemetry object, JSON |
-| station → platform | `gsu/{station_id}/audio` | one audio object, JSON |
-| station → platform | `gsu/{station_id}/events` | one batch of events, JSON |
-| platform → station | `cmd/gsu/{station_id}` | one command object, JSON |
+| Direction | Stream | Code | Payload |
+|---|---|---|---|
+| station → platform | telemetry | `t` | one telemetry object, JSON |
+| station → platform | audio | `a` | one audio object, JSON |
+| station → platform | events | `e` | one batch of events, JSON |
+| platform → station | commands | `c` | one command object, JSON |
 
-`{station_id}` is the UUID the platform issued at enrolment. A station publishes
-under its own id and nothing else; the broker ACL enforces that, so a compromised
-station cannot publish into another tenant's namespace or read anything back.
+**A station never names a channel, and never sends its own id.** The socket is
+authenticated, so the credential already says which station this is; the one
+letter says which of its four streams a frame belongs to. The platform maps
+that onto whatever per-station channels it uses internally, and those names are
+its own business.
 
-**The platform resolves the organisation from the station id**, via its device
-registry. Nothing in the payload says which tenant this is, and nothing should.
+This is worth stating as a property rather than an optimisation. There is no
+field in which a station could name another tenant's channel, so the whole
+class of fault where one is *told* a topic it is not *granted* — a station that
+enrols perfectly and publishes nothing, with no error at either end — cannot
+occur. It is also the cheapest byte saving available here: the id is 36
+characters, sent four times a second, for something the far end derives from
+the credential anyway.
+
+**The platform resolves the organisation from the authenticated identity**, via
+its device registry. Nothing in the payload says which tenant this is, and
+nothing should.
 
 ## What the platform does with what you send
 
 | | |
 |---|---|
-| Station id | Taken from the **channel name**, never from the payload |
+| Station id | Derived from the **credential** on the socket, never from anything in the frame |
 | Organisation | Resolved from the platform's own registry. A station id that is unknown or deactivated is dropped and nothing reaches any subscriber |
 | Unknown `kind` | Dropped, as this contract promises, so a station may be newer than the platform |
 | Malformed JSON | Dropped |
@@ -129,6 +140,31 @@ which is the whole point of on-demand on a metered link.
 second start. Both commands, and the identically shaped `radio.audio` lease for
 audio, are defined in `schemas/command.schema.json`.
 
+### The station decides the picture, not the platform
+
+**`video.start` carries no bitrate, resolution or frame rate, and will not.**
+The station streams what its camera is configured for and what its link will
+carry — nothing here caps it, and there is deliberately no field for the
+platform to ask for less.
+
+That is a decision rather than an omission, and the reasoning is that the
+platform is the wrong party to hold it. It cannot see the camera's
+configuration, cannot see what the link is doing minute to minute, and would be
+negotiating a number it has no way to verify against a station that already
+knows both. The station is where both facts live, so the choice lives there
+too.
+
+Two rules make it safe to leave it there. The stream is **on demand**, so the
+expensive case only exists while somebody is watching. And back-pressure is
+**drop, never queue** — a station that cannot push its configured bitrate sends
+fewer fragments rather than buffering a picture that is already out of date,
+and says so in `health.video.stream.dropped`.
+
+What the platform gets instead of a lever is the truth: `bitrate_bps`,
+`fps_measured` and `dropped` in every health frame, beside the `requested`
+settings, so an operator can see what a site is actually costing and change it
+where it is configured.
+
 ## Streams with no source
 
 Send `available: false` with a short `unavailable_reason` rather than an empty
@@ -175,10 +211,10 @@ plaintext scheme fails to connect rather than quietly sending its credential in
 clear, because a silent downgrade is the failure nobody finds out about.
 
 **`broker.url` carries no credentials**, and a station must not accept one that
-does. Identity comes from `broker.username` and the station's own secret. This
-is a requirement rather than a convention because at least one widely used
-client library lets credentials in a URL silently override the ones passed
-alongside it — see `NOTES.md`.
+does. Identity travels in the `Authorization` header and nowhere else. This is
+a requirement rather than a convention because at least one widely used client
+library lets credentials in a URL silently override the ones passed alongside
+it — see `NOTES.md`.
 
 ## Broker
 
@@ -200,30 +236,24 @@ URL this version does not define.
 ```
 wss://<platform>/broker            Authorization: Bearer <credential>
 
-  ->  {"topic": "gsu/{id}/telemetry", "payload": { … }}   one JSON text frame
-  <-  {"topic": "cmd/gsu/{id}",       "payload": { … }}   commands, unrequested
-  <-  {"type": "refused", "topic": "…", "reason": "…"}    a topic you may not use
+  ->  {"stream": "t", "payload": { … }}                 telemetry
+  ->  {"stream": "a", "payload": { … }}                 audio
+  ->  {"stream": "e", "payload": { … }}                 an events batch
+  <-  {"stream": "c", "payload": { … }}                 commands, unrequested
+  <-  {"type": "refused", "stream": "…", "reason": "…"}  a stream you may not use
 ```
 
-- **The station id is never *asserted*.** The topic string does contain it —
-  send the full name, exactly as issued at enrolment, or the frame is refused.
-  What the id does not do is establish identity: the credential decides which
-  station this is, and the topic is *checked against* it rather than trusted
-  from it. A box holding a valid secret cannot publish as anyone else by
-  naming them.
-- **Substitute `{station_id}` yourself.** The topics arrive at enrolment with
-  the id already filled in; the braces in this document are notation.
-- **There is no subscribe handshake** *on this transport*. Commands arrive on
-  the same socket from the moment it opens, because the credential already
-  determines the one command channel this station may receive, and a station
-  that tries to subscribe is refused. On a broker that requires subscription
-  (see *Broker* below) a station must of course subscribe to its command
-  channel — the rule here is about the relay, not about pub/sub in general.
-- **`refused` is a frame, not a disconnection.** Publishing to a topic outside
-  the enrolment response's three gets one of these and the socket stays up —
-  a station silently dropping everything it publishes looks exactly like a
-  station with nothing to say, and this is the fault most likely to be a
-  misconfiguration.
+- **Two keys, and neither is an identity.** `stream` is one of the four codes
+  in the table above; `payload` is the object. A station sends nothing else,
+  and there is nowhere for it to name a station, a channel or a tenant.
+- **There is no subscribe handshake.** Commands arrive from the moment the
+  socket opens, because the credential already determines whose they are. A
+  station that tries to subscribe is refused.
+- **`refused` is a frame, not a disconnection.** Sending an unknown or
+  wrong-direction stream code — `c` upward, say — gets one of these and the
+  socket stays up. A station silently dropping everything it publishes looks
+  exactly like a station with nothing to say, and this is the fault most
+  likely to be a misconfiguration.
 - **Frames are capped at 512 KiB**, both directions, enforced by closing the
   socket (1009). A station that needs to send more than that is wrong about
   something; telemetry is current state.
@@ -285,17 +315,17 @@ limits are stated here rather than left to a `maxLength`.
 
 Each station authenticates with its own credential — a bearer token today, with
 mTLS client certificates still to come (`enrolment.md` §3) — and that identity
-is granted **exactly the four channels** in the table above, by name. Not a
-`gsu/{station_id}/` prefix: a prefix would also admit channels nobody consumes,
-and a station inventing its own on a shared broker is what the check exists to
-prevent. **A new channel is a change to the contract and to the grant,
-together**, and a topic granted in one place and not the other produces a
-station that enrols perfectly and publishes nothing.
+is what the platform resolves everything from. A station is confined to
+**exactly the four streams** in the table above and cannot express anything
+else: there is no field for a channel name, so the confinement is structural
+rather than checked. That closes a fault this contract used to carry — a topic
+granted in one place and not another produced a station that enrolled
+perfectly and published nothing, with no error at either end.
 
-Where the transport can distinguish publish from subscribe, it must: a station
-publishes to its three upward channels and only receives on its command
-channel. Some brokers cannot express that in a grant, in which case the
-constraint is enforced by whatever terminates the connection.
+Direction is enforced too. `t`, `a` and `e` are upward only and `c` is
+downward only; a station sending `c` is refused. **A new stream is a change to
+the contract, to the code table, and to whatever the platform grants behind
+it** — all in the same commit.
 
 ## Cadence and bandwidth
 
@@ -414,7 +444,7 @@ choose something reasonable and not match.
 | What | Value | Owned by |
 |---|---|---|
 | `radio.audio` lease, when `lease_seconds` is absent | 30 s | station default |
-| `video.start` lease, when the platform states none | 30 s | station default |
+| `video.start` lease, when the platform states none | 10 s | station default |
 | `radio.spectrum` lease, when `lease_seconds` is absent | 15 s | station default |
 | Any lease the station will honour | clamped to **5–300 s** | station |
 | Renewal, for every lease | at or before **one third** of the lease | platform |
@@ -429,6 +459,14 @@ choose something reasonable and not match.
 | Revocation takes effect within | 30 s | platform |
 
 Four rules go with the table, because the numbers alone do not settle it.
+
+**Video's lease is the short one because video is the expensive one.** Every
+other stream costs tens of kilobits per second and video costs megabits, so the
+tail after a viewer vanishes is worth an order of magnitude more than anywhere
+else: at 3 Mbit/s a 30-second lease throws away about 11 MB per abandoned
+view, and 10 seconds throws away under 4. The renewals that buys — one every
+3.3 seconds, a few hundred bits — are free by comparison. Size a lease against
+what it gates, not for symmetry.
 
 **A lease the platform states always wins, inside the clamp.** The defaults
 above are what a station uses when told nothing. They are not a ceiling and not

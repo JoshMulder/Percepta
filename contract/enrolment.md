@@ -203,11 +203,13 @@ technician on site.
                                      // platform) means "pinned", so a station
                                      // that has nothing to pin refuses rather
                                      // than downgrading.
-    "username": "gsu:{station_id}",  // the broker principal to authenticate as
-    "telemetry_topic": "gsu/{station_id}/telemetry",
-    "audio_topic": "gsu/{station_id}/audio",
-    "events_topic": "gsu/{station_id}/events",
-    "command_topic": "cmd/gsu/{station_id}",
+                                     // No topics and no username. A station
+                                     // names a stream with one letter and
+                                     // authenticates with the credential
+                                     // below (transport.md); it never names a
+                                     // channel, so there is nothing to issue
+                                     // and nothing that can disagree with
+                                     // what the platform granted.
     "media_url": "wss://platform.example/media/ingest"
                                      // where the live H.264 goes. Not a
                                      // broker channel - video is bulk data

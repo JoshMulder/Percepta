@@ -166,7 +166,7 @@
     },
     {
       "type": "object",
-      "description": "The first viewer attached: start the live H.264 stream to the media WebSocket (transport.md) and keep it running for lease_seconds. Repeated while anyone is watching; treat a repeat as a renewal, never a second start - there is one camera, and a second encoder on it reads as broken hardware. If the lease expires unrenewed the station stops on its own, so a crashed platform or a dropped link cannot leave it paying for a picture nobody can see. Reported back in health.video.stream.",
+      "description": "The first viewer attached: start the live H.264 stream to the media WebSocket (transport.md) and keep it running for lease_seconds. Repeated while anyone is watching; treat a repeat as a renewal, never a second start - there is one camera, and a second encoder on it reads as broken hardware. If the lease expires unrenewed the station stops on its own, so a crashed platform or a dropped link cannot leave it paying for a picture nobody can see. Reported back in health.video.stream.\n\n**No bitrate, resolution or frame rate, deliberately.** The station streams what its camera is configured for and what its link will carry; the platform cannot see either and would be asking for a number it has no way to verify. On-demand plus drop-never-queue is what makes that safe, and health.video.stream reports what was actually achieved. See transport.md.",
       "properties": {
         "kind": {
           "const": "video.start"
