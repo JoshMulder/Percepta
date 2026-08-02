@@ -357,7 +357,7 @@ overlap window (§6).
 **Apply `credential`, `broker`, and `station.timezone`/`station.name`. Never
 apply the position.**
 
-That sentence is load-bearing in both directions and neither is obvious:
+Each of those three is load-bearing and none is obvious:
 
 - **`broker` must be applied**, because it is the only route by which a
   station learns a new CA. The private CA expires, every station is pinned to
@@ -367,18 +367,33 @@ That sentence is load-bearing in both directions and neither is obvious:
   can only travel over the connection that is refusing. The same path carries
   a moved broker and a changed `media_url`.
 
-**The one exception inside `station`: `timezone` and `name` are applied;
-position is not.** Splitting the block by field rather than wholesale is
-deliberate. A wrong timezone is a daily data fault — `rain_mm_today` is a total
-since local midnight — and renewal is the only channel that carries a
-correction, so refusing the whole block would leave it uncorrectable from
-anywhere but the setup page at the site. Position is the opposite: the station
-authors it (§7), so applying the platform's echo would revert an installer's
-work on every renewal cycle.
-- **`station` must not be applied**, because position flows the other way
-  (§7). The platform echoes back whatever `health.position` last told it, so a
-  station that re-applies it on every renewal quietly reverts an installer's
-  correction — visible only as a map pin that drifts back weeks later.
+- **But a new CA is adopted, never trusted on sight.** Keep the CA that is
+  currently working until a connection verified against the new one has
+  actually succeeded, and fall back to the old one if verification fails —
+  exactly the rule §6 states for the credential, for exactly the same reason.
+  Both must survive a reboot, and the old one is discarded only once the new
+  one has carried a connection.
+
+  Without that, applying `broker` is the same outage from the other side: a
+  station that overwrites a working trust root with one it has never used, and
+  is wrong about, has destroyed the only thing that let it reach the platform
+  — and it cannot be told, because the channel that would carry the news is
+  the one that is now refusing. A rotation is the moment this is most likely,
+  which is the moment it would take the fleet.
+
+  The rule is stated as an event rather than a window on purpose. A credential
+  can be given an overlap because both are equally usable; a CA cannot, because
+  a station has no way to know a new root is good except by reaching something
+  with it.
+
+- **`station.timezone` and `station.name` are applied; the position is not.**
+  Splitting the block by field rather than wholesale is deliberate. A wrong
+  timezone is a daily data fault — `rain_mm_today` is a total since local
+  midnight — and renewal is the only channel that carries a correction, so
+  refusing the whole block would leave it uncorrectable from anywhere but the
+  setup page at the site. Position is the opposite: the station authors it
+  (§7), so applying the platform's echo would revert an installer's work on
+  every renewal cycle, visible only as a map pin that drifts back weeks later.
 
 The station does **not** send its own id. It is derived from the credential, so
 a box holding a valid secret still cannot assert which station it is.
@@ -474,6 +489,11 @@ That is a site visit, and the grace window exists to make it a narrow one.
   one: **both work for 24 hours**, so a station that renews and then loses power
   mid-swap is not locked out. Keep the old secret until the new one has
   successfully authenticated, and fall back to it on a 4401 within that window.
+- **The same discipline applies to the CA**, which a renewal may also carry
+  (§4) — keep the working one until a connection verified against the new one
+  has succeeded. There is no window for this one, only the event: an unusable
+  credential gets you refused, and an unusable trust root gets you nothing at
+  all, on the channel that would have told you.
 - **Never let the platform be the only clock authority.** If the platform is
   unreachable the station keeps operating locally, and a credential nearing
   expiry with no way to renew is an alarm, not a shutdown.
