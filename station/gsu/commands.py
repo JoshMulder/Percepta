@@ -181,20 +181,16 @@ def build_handlers(radio, light, on_config, stream=None) -> dict[str, Handler]:
         return stream.stop(str(payload.get("reason") or "stopped by the platform"))
 
     if stream is not None:
-        # Not in command.schema.json yet — proposed in CONTRACT-QUESTIONS.md
-        # item 12, and the platform is building the other half now. Both are
-        # handled here so the station is ready, and both report their actual
-        # effect in `health.video.stream` rather than being assumed to have
-        # worked: `video.start` on a station with no camera is a state of
-        # `unavailable` and a reason, not silence.
+        # Both report their actual effect in `health.video.stream` rather than
+        # being assumed to have worked: `video.start` on a station with no
+        # camera is a state of `unavailable` and a reason, not silence.
         handlers["video.start"] = video_start
         handlers["video.stop"] = video_stop
 
     if on_config is not None:
-        # Not in command.schema.json yet: `contract/enrolment.md` §7 describes
-        # config.set and the platform lists it as still owed. Handled here so a
-        # station is ready for it, and raised in CONTRACT-QUESTIONS.md rather
-        # than being invented into the schema.
+        # Defined in command.schema.json and currently never sent — the
+        # platform holds no site policy of its own (`contract/enrolment.md`
+        # §7). Handled so a station is ready the day that changes.
         handlers["config.set"] = on_config
 
     # radio.transmit is deliberately absent. It is ungrantable on the platform

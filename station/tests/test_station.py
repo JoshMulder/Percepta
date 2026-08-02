@@ -226,7 +226,10 @@ class CommandTests(unittest.TestCase):
         self.agent = agent_in(self._dir.name)
         self.router = CommandRouter(
             f"cmd/gsu/{STATION}",
-            build_handlers(self.agent.radio, self.agent.light, self.agent._apply_config),
+            build_handlers(
+                self.agent.radio, self.agent.light, self.agent._apply_config,
+                self.agent.stream,
+            ),
         )
 
     def tearDown(self):

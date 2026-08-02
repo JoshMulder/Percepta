@@ -3,10 +3,10 @@
 How a physical box becomes a ground station the platform will accept data from,
 and everything it needs to know to operate afterwards.
 
-**The platform side is built** (`server/app/backend/services/enrolment.py`,
-`api/enrolment.py`, `api/station_enrolment.py`). The station side is not. What
-follows is still the specification; §11 records where the implementation differs
-from it and why, and every difference there is deliberate.
+**Both sides are built** — the platform in
+`server/app/backend/services/enrolment.py`, `api/enrolment.py` and
+`api/station_enrolment.py`, the station in `station/gsu/enrolment.py` and
+`gsu/credentials.py` — and this document describes the behaviour as it runs.
 
 It was written before either side existed because enrolment is where the
 platform's tenancy guarantee is actually established — every other isolation
@@ -67,17 +67,28 @@ issuing anything new.
 map extent. It exists, belongs to exactly one org, and has no credential — so it
 can be configured and granted to users before any hardware exists.
 
-**Issue.** The admin generates an enrolment token for that record. Single-use,
-short-lived (**24 hours** by default), bound to that one station id. Displayed
-once and stored only as a hash — the same treatment DroneOps gives its calendar
-feed token, and for the same reason: it is both a secret and a lookup key, so it
-is hashed for lookup and never recoverable afterwards. Losing it means issuing
-another, which is cheap and auditable.
+**Issue.** The admin generates an enrolment token for that record. Short-lived
+(**24 hours** by default), bound to that one station id. Displayed once and
+stored only as a hash — it is both a secret and a lookup key, so it is hashed
+for lookup and never recoverable afterwards. Losing it means issuing another,
+which is cheap and auditable, and issuing a new code revokes any outstanding
+one.
 
-**Claim.** The box generates its own keypair, keeps the private half, and sends
-the token plus its public key to the enrolment endpoint. The platform verifies
-the token, marks it used, records the credential against the station, and
-returns everything in §4.
+A token stays claimable until it expires or is revoked, rather than being
+strictly single-use, and `claim_count` records how often it was used. This is
+what makes enrolment resumable: a technician who loses signal mid-claim retries
+with the same code and no admin involvement. Each claim issues a *fresh*
+credential and revokes the previous one — secrets are stored hashed and are
+unrecoverable, so the same credential cannot be returned twice, and making it
+recoverable would mean the operator could impersonate a customer's station. The
+cost is that an accidental re-claim cuts off a box that had already succeeded,
+which requires someone to physically re-enter the code.
+
+**Claim.** The box sends the token to the enrolment endpoint — plus its public
+key on the mTLS path (§3), which the platform accepts and ignores while
+credentials are bearer secrets, so the station side can send it from the start.
+The platform verifies the token, records the credential against the station,
+and returns everything in §4.
 
 **Operate.** The station authenticates with its credential on every connection.
 The broker ACL pins it to its own channels.
@@ -122,9 +133,11 @@ can impersonate a customer's station.
 
 ### `POST /api/enrol`
 
-Unauthenticated — the token *is* the authentication. Rate limited by source, and
-tokens are single-use, so a brute-force attempt is bounded by the entropy of the
-token rather than by the rate limit alone.
+Unauthenticated — the token *is* the authentication. Rate limited by source,
+though the real defence against guessing is the token's ~58 bits of entropy,
+not the limit: rate limiting deliberately **fails open** if its backing store is
+unavailable, because an outage in an unrelated component should not strand a
+technician on site.
 
 ```jsonc
 // request
@@ -154,10 +167,20 @@ token rather than by the rate limit alone.
   },
   "broker": {
     "url": "wss://platform.example/broker",
+                                     // Carries no credentials, ever. redis-py
+                                     // lets a URL's credentials silently
+                                     // override keyword arguments - see
+                                     // transport.md - so the address is an
+                                     // address and identity travels separately.
     "ca_pem": "…",                   // the CA to pin, when ca_mode is
                                      // "pinned". Persist it beside the
                                      // credential. It is the broker's trust
-                                     // root, not the API's.
+                                     // root, not the API's. Must carry
+                                     // basicConstraints CA:TRUE and keyUsage
+                                     // keyCertSign: redis-cli accepts a CA
+                                     // without them and Python's ssl refuses
+                                     // it, so a bare CA passes a command-line
+                                     // check and fails every real station.
     "ca_mode": "pinned" | "system",  // HOW to verify the broker. "pinned" =
                                      // against ca_pem and nothing else.
                                      // "system" = against the OS trust store,
@@ -179,10 +202,28 @@ token rather than by the rate limit alone.
     "command_topic": "cmd/gsu/{station_id}"
   },
   "station": {
+    // What the station is told it is, at the moment it enrols. Name and
+    // position are settled here and frozen afterwards - a station that needs
+    // a different position has moved, and a box that has moved is
+    // recommissioned rather than edited.
     "name": "Kaikoura Ridge",
     "timezone": "Pacific/Auckland",
     "latitude": -42.4004,
-    "longitude": 173.68
+    "longitude": 173.68,
+    "elevation_m": 310,              // part of the position. The station's
+                                     // barometric altitude correction is
+                                     // computed from this and refuses without
+                                     // it rather than assuming sea level.
+    "organization": "Coastal Aero",  // which tenant this box now belongs to,
+                                     // echoed back so the person at the box
+                                     // can see they enrolled it into the
+                                     // right one - a code carries no visible
+                                     // clue whose it is.
+    "locality": "Kaikoura, Canterbury"
+                                     // where the position is, in words,
+                                     // derived by the platform - so a person
+                                     // on site can tell at a glance that the
+                                     // coordinates are where they stand.
   },
   "config_version": 3
 }
@@ -192,19 +233,19 @@ Failures, and the response the technician sees:
 
 | Cause | Status | Shown as |
 |---|---|---|
-| Token unknown, expired or already used | `404` | "This code is not valid. Ask for a new one." |
-| Token valid, station already enrolled | `409` | "This station is already set up." |
+| Token unknown, expired or revoked | `404` | "This code is not valid. Ask for a new one." |
+| Station already enrolled by a different token | `409` | "This station is already set up." |
 | Malformed request | `422` | — |
 
-**Deliberately not distinguished:** unknown, expired and already-used all return
-the same thing. Telling an attacker which of those a guess was is free
-information about the token space, and none of the three changes what the
-technician does.
+**Deliberately not distinguished:** unknown, expired and revoked all return the
+same thing. Telling an attacker which of those a guess was is free information
+about the token space, and none of the three changes what the technician does.
 
-**Idempotent within the window.** A retry with the same token *from the same
-station* after a dropped connection returns the same credential rather than
-failing — the failure mode this prevents is a technician stuck on a hillside
-with a used token and no way to finish.
+**A retry supersedes.** Claiming the same token again issues a fresh credential
+and revokes the earlier one (§2) — a technician who loses signal mid-enrolment
+finishes without an admin issuing anything new. The `409` exists for the other
+case: a station already in service under a *different* token, where re-enrolling
+would cut off working hardware.
 
 ### `POST /api/enrol/renew`
 
@@ -252,6 +293,18 @@ The design target is: **power it on, enter a code, watch for a green light.**
   Anything a human retypes is something a human eventually mistypes, and this is
   the field where a mistake attaches a box to the wrong customer.
 
+**How the trust roots get onto the box.** The broker's CA bootstraps itself:
+`broker.ca_pem` arrives inside the enrolment response and is persisted beside
+the credential. The API is the chicken-and-egg — the first `POST /api/enrol`
+carries the token over a connection the station cannot yet have been told how to
+verify. Where the platform sits behind a publicly trusted certificate, the
+system trust store covers it and nothing need be carried. Where the platform
+serves its own private CA, that CA must reach the box out of band — copied on at
+install, its fingerprint checked by eye — because trusting the first thing the
+network shows you would let whoever intercepts that first call issue the
+credential. The station refuses to enrol over a link it cannot verify, rather
+than trusting on first use.
+
 ---
 
 ## 6. Clock, expiry and the failure this causes
@@ -262,10 +315,9 @@ credential has already expired it cannot renew either. That is a site visit.
 - The station syncs time before enrolling and refuses to enrol with an
   implausible clock, saying so.
 - **A GPS receiver is the intended long-term time source.** It solves this
-  properly on hardware with no battery-backed clock, which is the case on the
-  current Raspberry Pi. Until one is fitted, an RTC module is the cheap interim;
-  NTP alone does not help a box that cannot reach the network because its clock
-  is wrong.
+  properly on hardware with no battery-backed clock. Until one is fitted, an RTC
+  module is the cheap interim; NTP alone does not help a box that cannot reach
+  the network because its clock is wrong.
 - If the hardware has no battery-backed clock, this must be stated in the
   station's own docs — it changes the boot sequence.
 - **Renew early and often.** Begin at half the credential's life, retry with
@@ -364,9 +416,9 @@ These need a human, and the station agent should not invent answers.
 
 ---
 
-## 10. What each side builds
+## 10. What each side built
 
-**Platform — built**
+**Platform**
 - `station_enrolment_tokens` and `station_credentials`, both hashed, both under
   RLS. A credential decides which tenant a box may publish as, so a query
   against it that escaped its org scope would be the worst leak in the schema
@@ -374,61 +426,19 @@ These need a human, and the station agent should not invent answers.
 - Admin API to issue and revoke, behind `config.write`, at
   `/api/stations/{id}/enrolment`
 - Broker principals derived from station identity, one per station, pinned to
-  its own channels (`services/broker_acl.py`)
+  its own channels (`services/broker_acl.py`), with the broker's `default` user
+  closed — `server/docker-compose.yaml` passes `--requirepass` and the stack
+  will not start without it, so per-station principals are a second layer
+  rather than the only one
 - Every issue, claim, renew, revoke and rejection audited
 - `scripts/verify_enrolment.py` exercises the lifecycle against a running stack
 
-**Platform — still owed**
-- ~~Locking down the broker's default user.~~ **Done** —
-  `server/docker-compose.yaml` passes `--requirepass` and the stack will not
-  start without it, so per-station principals are a second layer rather than
-  the only one.
-
 **Station**
-- Keypair or credential generation, and secure local storage
+- Credential storage in a permissions-restricted file, with the pinned CA
+  beside it (`gsu/credentials.py`; the seam for a hardware keystore)
 - Setup page and the claim exchange, resumable
 - Renewal with overlap, and a health alarm when it is failing
-- Time sync, and refusing to enrol with an implausible clock
+  (`gsu/enrolment.py`)
+- Time sync, and refusing to enrol with an implausible clock (`gsu/clock.py`)
 - Config apply, persist, and report version
 - Device discovery, and reporting what is actually attached
-
----
-
-## 11. Where the implementation differs from this document
-
-Each of these is deliberate. Raise them rather than silently matching the code
-if you disagree — that is what the contract process is for.
-
-**A retry re-issues rather than returning the same credential.** §4 says a retry
-from the same station returns the same credential. The platform cannot: secrets
-are stored hashed and are unrecoverable, and making them recoverable would mean
-the operator could impersonate a customer's station. A retry inside the token's
-lifetime therefore issues a *fresh* credential and revokes the previous one.
-This still satisfies what the clause is for — a technician who loses signal
-mid-enrolment can finish without an admin issuing anything new. The cost is that
-an accidental re-claim cuts off a box that had already succeeded, which requires
-someone to physically re-enter the code.
-
-**Tokens are not strictly single-use.** Same reason. A token stays claimable
-until it expires or is revoked; `claim_count` records how often it was used, and
-issuing a new code revokes any outstanding one.
-
-**`ca_pem` is sent, and `ca_mode` says what to do with it.** On a stack serving
-its own certificate, both the broker and the API serve TLS from one private CA
-and the mode is `"pinned"`. Behind a reverse proxy holding a publicly trusted
-certificate the mode is `"system"` and no CA is sent, because the private CA is
-not what the station will be shown.
-
-Either way the plaintext listeners are disabled outright rather than merely
-discouraged - a station misconfigured to `redis://` or `http://` fails instead
-of sending its credential in clear and appearing to work. `"system"` is not a
-weaker mode in that sense: it is full verification against a different, larger
-root set, and there remains no way to ask a station not to verify at all.
-
-**Two fields were added**: `credential.renew_after` and `broker.username`. Both
-are additive and safe to ignore.
-
-**Rate limiting fails open.** If Redis is unavailable, enrolment proceeds. An
-outage in an unrelated component should not strand a technician on site, and the
-actual defence against guessing is the token's ~58 bits of entropy, not the
-limit.

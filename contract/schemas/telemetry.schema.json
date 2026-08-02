@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://percepta/contract/telemetry.schema.json",
   "title": "Ground station telemetry",
-  "description": "One object per message on gsu/{station_id}/telemetry. Discriminated by `kind`. Unknown fields are ignored by the platform, and unknown kinds are dropped rather than erroring - so a new sensor can be added station-side before the platform renders it.\n\nEvery payload may carry `available: false` to declare that the station has no source for that stream - no receiver fitted, or one that has failed. When it does, the stream's own fields are not required, because there is nothing to put in them. This exists because an empty payload and a dead sensor are indistinguishable otherwise, and only the station knows which it is: an empty `aircraft` array means clear airspace, and a station with no ADS-B receiver must not be able to say that.",
+  "description": "One object per message on gsu/{station_id}/telemetry. Discriminated by `kind`. Unknown fields are ignored by the platform, and unknown kinds are dropped rather than erroring - so a new sensor can be added station-side before the platform renders it.\n\nEvery stream shares the availability fields in $defs/availability: a payload may carry `available: false` to declare that the station has no source for that stream, and its usual fields are then not required, because there is nothing to put in them.",
   "type": "object",
   "required": [
     "kind"
@@ -28,19 +28,9 @@
     }
   ],
   "$defs": {
-    "adsb": {
-      "type": "object",
+    "availability": {
+      "description": "Fields every stream carries, defined once. They exist because an empty payload and a dead sensor are otherwise indistinguishable, and only the station knows which it is: an empty `aircraft` array means clear airspace, and a station with no ADS-B receiver must not be able to say that.",
       "properties": {
-        "kind": {
-          "const": "adsb"
-        },
-        "aircraft": {
-          "type": "array",
-          "description": "The complete current picture, not a delta. An empty array means no contacts, which is different from sending nothing - sending nothing is what a failed receiver looks like.",
-          "items": {
-            "$ref": "#/$defs/aircraft"
-          }
-        },
         "available": {
           "type": "boolean",
           "default": true,
@@ -51,10 +41,6 @@
           "maxLength": 200,
           "description": "Short, human-readable, for an operator rather than a parser - 'no ADS-B receiver connected', 'weather station not responding'. Only meaningful when available is false."
         },
-        "simulated": {
-          "type": "boolean",
-          "description": "This stream's source is a demo sensor and its readings are synthetic. Per stream, not per station: a station is routinely part real - a bench box with a live camera and a demo weather head - and a station-wide flag had to be wrong about one half of it. Absent means real. Distinct from the per-contact simulated flag inside an aircraft, which means a test target injected by a genuine receiver."
-        },
         "unavailable_cause": {
           "enum": [
             "not_fitted",
@@ -62,28 +48,51 @@
             "stopped"
           ],
           "description": "The same fact as unavailable_reason, in one word a consumer can branch on. not_fitted is a complete station with nothing selected for this slot and is not a fault; not_detected and stopped both are. Carried on the stream rather than only in health because a console that has just connected or switched station would otherwise wait a full health period - 30 seconds - to tell an empty slot from a broken sensor, and must show something in the meantime. Absent means unknown, which consumers should treat as they did before this field existed."
+        },
+        "simulated": {
+          "type": "boolean",
+          "description": "This stream's source is a demo sensor and its readings are synthetic. Per stream, not per station: a station is routinely part real - a bench box with a live camera and a demo weather head - and a station-wide flag had to be wrong about one half of it. Absent means real. Distinct from the per-contact simulated flag inside an aircraft, which means a test target injected by a genuine receiver."
+        }
+      }
+    },
+    "declared_unavailable": {
+      "description": "The condition each stream's `else: required` hangs off: the station has said this stream has no source, so its usual fields are not demanded.",
+      "properties": {
+        "available": {
+          "const": false
+        }
+      },
+      "required": [
+        "available"
+      ]
+    },
+    "adsb": {
+      "type": "object",
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "const": "adsb"
+        },
+        "aircraft": {
+          "type": "array",
+          "description": "The complete current picture, not a delta. An empty array means no contacts, which is different from sending nothing - sending nothing is what a failed receiver looks like.",
+          "items": {
+            "$ref": "#/$defs/aircraft"
+          }
         }
       },
       "allOf": [
         {
+          "$ref": "#/$defs/availability"
+        },
+        {
           "if": {
-            "properties": {
-              "available": {
-                "const": false
-              }
-            },
-            "required": [
-              "available"
-            ]
-          },
-          "then": {
-            "required": [
-              "kind"
-            ]
+            "$ref": "#/$defs/declared_unavailable"
           },
           "else": {
             "required": [
-              "kind",
               "aircraft"
             ]
           }
@@ -243,6 +252,9 @@
     },
     "weather": {
       "type": "object",
+      "required": [
+        "kind"
+      ],
       "properties": {
         "kind": {
           "const": "weather"
@@ -303,50 +315,18 @@
           "type": "number",
           "minimum": 0,
           "description": "Running total since local midnight, in the station's own timezone."
-        },
-        "available": {
-          "type": "boolean",
-          "default": true,
-          "description": "False when the station has no source for this stream. Absent means true, so nothing that predates this field changes meaning. A consumer that does not know the field sees a payload missing its usual contents and can ignore it, exactly as it ignores an unknown kind."
-        },
-        "unavailable_reason": {
-          "type": "string",
-          "maxLength": 200,
-          "description": "Short, human-readable, for an operator rather than a parser - 'no ADS-B receiver connected', 'weather station not responding'. Only meaningful when available is false."
-        },
-        "simulated": {
-          "type": "boolean",
-          "description": "This stream's source is a demo sensor and its readings are synthetic. Per stream, not per station: a station is routinely part real - a bench box with a live camera and a demo weather head - and a station-wide flag had to be wrong about one half of it. Absent means real. Distinct from the per-contact simulated flag inside an aircraft, which means a test target injected by a genuine receiver."
-        },
-        "unavailable_cause": {
-          "enum": [
-            "not_fitted",
-            "not_detected",
-            "stopped"
-          ],
-          "description": "The same fact as unavailable_reason, in one word a consumer can branch on. not_fitted is a complete station with nothing selected for this slot and is not a fault; not_detected and stopped both are. Carried on the stream rather than only in health because a console that has just connected or switched station would otherwise wait a full health period - 30 seconds - to tell an empty slot from a broken sensor, and must show something in the meantime. Absent means unknown, which consumers should treat as they did before this field existed."
         }
       },
       "allOf": [
         {
+          "$ref": "#/$defs/availability"
+        },
+        {
           "if": {
-            "properties": {
-              "available": {
-                "const": false
-              }
-            },
-            "required": [
-              "available"
-            ]
-          },
-          "then": {
-            "required": [
-              "kind"
-            ]
+            "$ref": "#/$defs/declared_unavailable"
           },
           "else": {
             "required": [
-              "kind",
               "wind_kt",
               "gust_kt",
               "wind_dir_deg",
@@ -358,6 +338,9 @@
     },
     "power": {
       "type": "object",
+      "required": [
+        "kind"
+      ],
       "properties": {
         "kind": {
           "const": "power"
@@ -386,35 +369,13 @@
           ],
           "description": "Hours left at the current draw; null while charging."
         },
-        "available": {
-          "type": "boolean",
-          "default": true,
-          "description": "False when the station has no source for this stream. Absent means true, so nothing that predates this field changes meaning. A consumer that does not know the field sees a payload missing its usual contents and can ignore it, exactly as it ignores an unknown kind."
-        },
-        "unavailable_reason": {
-          "type": "string",
-          "maxLength": 200,
-          "description": "Short, human-readable, for an operator rather than a parser - 'no ADS-B receiver connected', 'weather station not responding'. Only meaningful when available is false."
-        },
-        "simulated": {
-          "type": "boolean",
-          "description": "This stream's source is a demo sensor and its readings are synthetic. Per stream, not per station: a station is routinely part real - a bench box with a live camera and a demo weather head - and a station-wide flag had to be wrong about one half of it. Absent means real. Distinct from the per-contact simulated flag inside an aircraft, which means a test target injected by a genuine receiver."
-        },
-        "unavailable_cause": {
-          "enum": [
-            "not_fitted",
-            "not_detected",
-            "stopped"
-          ],
-          "description": "The same fact as unavailable_reason, in one word a consumer can branch on. not_fitted is a complete station with nothing selected for this slot and is not a fault; not_detected and stopped both are. Carried on the stream rather than only in health because a console that has just connected or switched station would otherwise wait a full health period - 30 seconds - to tell an empty slot from a broken sensor, and must show something in the meantime. Absent means unknown, which consumers should treat as they did before this field existed."
-        },
         "battery_w": {
           "type": "number",
           "description": "Signed battery power in watts: positive charging, negative discharging. Sent rather than left to be derived, because with four possible sources the console cannot work out the battery's direction from the others without knowing about conversion losses and which source is carrying the load. The station measures it; a consumer subtracting pv_w from load_w would be guessing."
         },
         "mains_w": {
           "type": "number",
-          "description": "Watts drawn from the AC mains input. Present only when a mains input is fitted \u2014 a site with no grid connection omits this and mains_present entirely, the same way a weather head with no RH module omits humidity. Absent is 'no such source', which is different from 0 W."
+          "description": "Watts drawn from the AC mains input. Present only when a mains input is fitted — a site with no grid connection omits this and mains_present entirely, the same way a weather head with no RH module omits humidity. Absent is 'no such source', which is different from 0 W."
         },
         "mains_present": {
           "type": "boolean",
@@ -431,24 +392,14 @@
       },
       "allOf": [
         {
+          "$ref": "#/$defs/availability"
+        },
+        {
           "if": {
-            "properties": {
-              "available": {
-                "const": false
-              }
-            },
-            "required": [
-              "available"
-            ]
-          },
-          "then": {
-            "required": [
-              "kind"
-            ]
+            "$ref": "#/$defs/declared_unavailable"
           },
           "else": {
             "required": [
-              "kind",
               "soc_pct"
             ]
           }
@@ -457,6 +408,9 @@
     },
     "radio": {
       "type": "object",
+      "required": [
+        "kind"
+      ],
       "properties": {
         "kind": {
           "const": "radio"
@@ -517,35 +471,13 @@
           "type": "boolean",
           "description": "False on receive-only hardware. The console disables PTT from this."
         },
-        "available": {
-          "type": "boolean",
-          "default": true,
-          "description": "False when the station has no source for this stream. Absent means true, so nothing that predates this field changes meaning. A consumer that does not know the field sees a payload missing its usual contents and can ignore it, exactly as it ignores an unknown kind."
-        },
-        "unavailable_reason": {
-          "type": "string",
-          "maxLength": 200,
-          "description": "Short, human-readable, for an operator rather than a parser - 'no ADS-B receiver connected', 'weather station not responding'. Only meaningful when available is false."
-        },
-        "simulated": {
-          "type": "boolean",
-          "description": "This stream's source is a demo sensor and its readings are synthetic. Per stream, not per station: a station is routinely part real - a bench box with a live camera and a demo weather head - and a station-wide flag had to be wrong about one half of it. Absent means real. Distinct from the per-contact simulated flag inside an aircraft, which means a test target injected by a genuine receiver."
-        },
-        "unavailable_cause": {
-          "enum": [
-            "not_fitted",
-            "not_detected",
-            "stopped"
-          ],
-          "description": "The same fact as unavailable_reason, in one word a consumer can branch on. not_fitted is a complete station with nothing selected for this slot and is not a fault; not_detected and stopped both are. Carried on the stream rather than only in health because a console that has just connected or switched station would otherwise wait a full health period - 30 seconds - to tell an empty slot from a broken sensor, and must show something in the meantime. Absent means unknown, which consumers should treat as they did before this field existed."
-        },
         "spectrum": {
           "type": "array",
           "items": {
             "type": "integer"
           },
           "maxItems": 256,
-          "description": "Per-bin power in dBFS across span_hz, centred on freq_hz, for a spectrum display. Present only while a console has asked for it: the receiver measures 241 bins and sending them continuously is around 150 MB a day on a metered link, for a display that is open for minutes at commissioning. Decimated by peak rather than mean \u2014 an airband channel is a handful of bins wide and averaging buries a real carrier \u2014 and rounded to whole dB, which is all a canvas can render."
+          "description": "Per-bin power in dBFS across span_hz, centred on freq_hz, for a spectrum display. Present only while a console has asked for it (the radio.spectrum command): the receiver measures 241 bins and sending them continuously is around 150 MB a day on a metered link, for a display that is open for minutes at commissioning. Decimated by peak rather than mean — an airband channel is a handful of bins wide and averaging buries a real carrier — and rounded to whole dB, which is all a canvas can render."
         },
         "span_hz": {
           "type": "number",
@@ -554,24 +486,14 @@
       },
       "allOf": [
         {
+          "$ref": "#/$defs/availability"
+        },
+        {
           "if": {
-            "properties": {
-              "available": {
-                "const": false
-              }
-            },
-            "required": [
-              "available"
-            ]
-          },
-          "then": {
-            "required": [
-              "kind"
-            ]
+            "$ref": "#/$defs/declared_unavailable"
           },
           "else": {
             "required": [
-              "kind",
               "freq_hz",
               "rssi_db",
               "noise_floor_db",
@@ -586,6 +508,9 @@
     },
     "light": {
       "type": "object",
+      "required": [
+        "kind"
+      ],
       "properties": {
         "kind": {
           "const": "light"
@@ -593,50 +518,18 @@
         "on": {
           "type": "boolean",
           "description": "What the hardware is actually doing, not what was last commanded. The console renders this and never assumes a command succeeded."
-        },
-        "available": {
-          "type": "boolean",
-          "default": true,
-          "description": "False when the station has no source for this stream. Absent means true, so nothing that predates this field changes meaning. A consumer that does not know the field sees a payload missing its usual contents and can ignore it, exactly as it ignores an unknown kind."
-        },
-        "unavailable_reason": {
-          "type": "string",
-          "maxLength": 200,
-          "description": "Short, human-readable, for an operator rather than a parser - 'no ADS-B receiver connected', 'weather station not responding'. Only meaningful when available is false."
-        },
-        "simulated": {
-          "type": "boolean",
-          "description": "This stream's source is a demo sensor and its readings are synthetic. Per stream, not per station: a station is routinely part real - a bench box with a live camera and a demo weather head - and a station-wide flag had to be wrong about one half of it. Absent means real. Distinct from the per-contact simulated flag inside an aircraft, which means a test target injected by a genuine receiver."
-        },
-        "unavailable_cause": {
-          "enum": [
-            "not_fitted",
-            "not_detected",
-            "stopped"
-          ],
-          "description": "The same fact as unavailable_reason, in one word a consumer can branch on. not_fitted is a complete station with nothing selected for this slot and is not a fault; not_detected and stopped both are. Carried on the stream rather than only in health because a console that has just connected or switched station would otherwise wait a full health period - 30 seconds - to tell an empty slot from a broken sensor, and must show something in the meantime. Absent means unknown, which consumers should treat as they did before this field existed."
         }
       },
       "allOf": [
         {
+          "$ref": "#/$defs/availability"
+        },
+        {
           "if": {
-            "properties": {
-              "available": {
-                "const": false
-              }
-            },
-            "required": [
-              "available"
-            ]
-          },
-          "then": {
-            "required": [
-              "kind"
-            ]
+            "$ref": "#/$defs/declared_unavailable"
           },
           "else": {
             "required": [
-              "kind",
               "on"
             ]
           }
@@ -646,6 +539,9 @@
     "health": {
       "type": "object",
       "description": "How the station itself is doing, as distinct from what it is measuring. Sent on a slow cadence.\n\nThis is where the *structured* form of things the other streams can only say in prose lives. `available: false` on a stream carries a human-readable reason; `devices[].status` says the same thing in a form a console can branch on - a receiver that was never fitted and one that has stopped answering both make a stream unavailable, and an operator does very different things about each.\n\nDeliberately permissive. The station owns the truth about what is attached to it, so unknown fields here are expected rather than tolerated: a station that learns to report something new must not have to wait for the platform.",
+      "required": [
+        "kind"
+      ],
       "properties": {
         "kind": {
           "const": "health"
@@ -690,11 +586,19 @@
         },
         "config_version": {
           "type": "integer",
-          "description": "The configuration generation the station has actually applied. The platform compares it with the version it issued and sends config.set when its own is newer."
+          "description": "The configuration generation the station has actually applied, reported so the platform can record and display what is running. The platform does not currently push configuration - see enrolment.md §7 - so this is a display of fact, not half of a sync."
         },
         "uptime_s": {
           "type": "number",
           "minimum": 0
+        },
+        "cadence": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "description": "Seconds between publishes, per telemetry kind, as this station is actually running them. Consumers deriving a staleness timeout must use this rather than the defaults in transport.md: the weather period is a site setting, and a station legitimately slowed down to save bandwidth would otherwise be marked faulty by a console still assuming the default. Absent on an older agent, which means the defaults."
         },
         "uplink": {
           "type": "object",
@@ -733,6 +637,18 @@
             "$ref": "#/$defs/device"
           }
         },
+        "video": {
+          "type": "object",
+          "description": "The live stream and the sensor behind it: which encoder was probed, who currently holds the camera, and the stream state that `video.start` / `video.stop` report their effect through (`health.video.stream`). Loosely specified on purpose - the station owns the detail, and a console reads what it recognises. This is where a console learns a station's camera state; there is no video telemetry channel (transport.md)."
+        },
+        "security": {
+          "type": "object",
+          "description": "Which link protections are active - TLS to the broker and the API, and what each is verified against. Reported so a misconfigured trust root is visible from a console rather than only from a shell on the box."
+        },
+        "clock": {
+          "type": "object",
+          "description": "What is disciplining this station's clock, and whether the station believes it is plausible. A remote site with a wrong clock cannot authenticate or renew (enrolment.md section 6), so this is the early warning."
+        },
         "unsourced_streams": {
           "type": "array",
           "items": {
@@ -747,18 +663,12 @@
         "storage": {
           "type": "object",
           "description": "Local retention. `events_pending` is what the station is holding for a channel that does not exist yet - see transport.md."
-        },
-        "available": {
-          "type": "boolean",
-          "default": true
-        },
-        "unavailable_reason": {
-          "type": "string",
-          "maxLength": 200
         }
       },
-      "required": [
-        "kind"
+      "allOf": [
+        {
+          "$ref": "#/$defs/availability"
+        }
       ]
     },
     "device": {

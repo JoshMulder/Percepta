@@ -25,6 +25,7 @@ compile, that is the moment to stop and raise it.
 | `enrolment.md` | How a box becomes a station, and everything it is told afterwards |
 | `transport.md` | Channels, identity, direction, delivery expectations |
 | `schemas/telemetry.schema.json` | Every telemetry payload a station may publish |
+| `schemas/audio.schema.json` | The audio frames a station publishes while the squelch is open |
 | `schemas/command.schema.json` | Every command a station must accept |
 | `conformance/check_station.py` | Runs against a live station and reports what it got wrong |
 

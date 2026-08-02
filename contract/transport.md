@@ -78,12 +78,13 @@ publishes nothing at all: it serves the newest frame it has to the local setup
 page, over loopback, so an installer can aim a camera.
 
 A station's camera state — fitted or not, which capture path, who holds the
-sensor — is reported in the health frame, which is where a console should read
-it.
+sensor — is reported in the health frame (`health.video`), which is where a
+console should read it.
+
 ## The live video stream
 
-Separate from the snapshot channel and from the broker entirely. Video is bulk
-data; the broker carries control and telemetry that must not be delayed by it.
+Separate from the broker entirely: video is bulk data, and the broker carries
+control and telemetry that must not be delayed by it.
 
 ```
 station ──(outbound wss, station credential)──► platform ──(per viewer)──► browser
@@ -114,7 +115,8 @@ link drops, the station stops on its own rather than transmitting to nobody,
 which is the whole point of on-demand on a metered link.
 
 `video.start` carries `lease_seconds`. Treat a repeat as a renewal, not as a
-second start.
+second start. Both commands, and the identically shaped `radio.audio` lease for
+audio, are defined in `schemas/command.schema.json`.
 
 ## Streams with no source
 
