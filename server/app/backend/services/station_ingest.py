@@ -130,7 +130,11 @@ GEOCODE_COOLDOWN_S = 3600.0
 LIMITS = {
     "audio": (
         ("rate", float, 8000, 48000),   # ctx.sampleRate / rate scales an allocation
-        ("pcm", str, 0, 262144),        # length, not value
+        # Opus now, not base64 PCM. The console feeds these straight to
+        # `AudioDecoder`, so the count is what bounds the work it is asked to
+        # do in one frame — 200 packets is four seconds of speech, which is
+        # already far more than a live stream should ever deliver at once.
+        ("packets", list, 0, 200),
     ),
     "adsb": (("aircraft", list, 0, 500),),  # a map marker and DOM subtree each
     "health": (

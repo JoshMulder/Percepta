@@ -166,12 +166,49 @@ the credential is what the station keeps.
 
 ---
 
+## 10. Audio is Opus on the wire and PCM on disk
+
+**Decided.** The station encodes Opus for the uplink and keeps writing PCM
+WAVs locally.
+
+They are different problems. The wire is metered and somebody pays for it by
+the gigabyte — measured on the way in, 400 ms of speech is 19 200 bytes of
+PCM16 against 1 087 bytes of Opus, which is 21.7 kbit/s where the contract's
+bandwidth section claims 16–24. Local storage is not metered, and a WAV can be
+opened by anything, which is the entire reason for keeping a recording.
+
+So the receiver holds the raw block as `last_pcm` and the payload builder never
+sees the recording path. Decoding what was just encoded, to get back to the
+samples that produced it, would be an absurd way to write a file.
+
+The encoder is held for the life of the receiver rather than built per
+transmission: Opus carries prediction state between frames, and a fresh encoder
+each time throws that away and costs bitrate for nothing.
+
+A box without `libopus` reports it once and publishes no audio, while going on
+receiving, squelching and recording. Falling back to PCM was rejected — the
+platform's schema would refuse it, and from the field that is indistinguishable
+from a quiet channel, which is the exact failure this contract exists to delete.
+
+---
+
 ## Still owed when this was written
 
 Recorded honestly rather than as a plan, because the brief was to build both
-ends and this is what is not yet built.
+ends and this is what is not yet built. Each is a real gap, not a tidy-up.
 
-- The console needs an Opus decoder. WebCodecs `AudioDecoder` takes the raw
-  packets this contract carries with no container.
+- **The console cannot play audio.** `web/src/useAudio.ts` decodes base64 PCM16
+  into an `AudioWorklet`, and the station now sends Opus packets. The fix is
+  WebCodecs `AudioDecoder`, which takes exactly the raw packets this contract
+  carries with no container — but there is no Node on the build machine, so
+  writing it would mean shipping a rewrite of the audio path that has never
+  been type-checked, let alone run. **Until this lands the console is silent.**
+- **`simulate_station.py` still emits PCM**, and `NOTES.md` designates it the
+  reference implementation. It is now wrong in the one way that file has been
+  wrong before — demonstrating a format the contract does not define. It needs
+  either the same ctypes binding (which means `libopus0` in the server image)
+  or an honest `available: false` for its audio stream.
+- The TypeScript changes in this branch — the ADS-B renames — are reviewed
+  rather than compiled, for the same reason.
 - Nothing yet exercises the renewal-shortens-a-lease rule end to end.
 - `_selfstation.py` remains a test fixture, not a reference implementation.

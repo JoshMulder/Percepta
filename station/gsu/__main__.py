@@ -530,9 +530,17 @@ def _radio(agent, freq_mhz: float | None, seconds: float, out: str | None,
     try:
         while time.monotonic() - started < seconds:
             tick_started = time.monotonic()
-            payload, audio = controller.tick(1.0)
-            if audio is not None:
-                pcm += base64.b64decode(audio["pcm"])
+            payload, _audio = controller.tick(1.0)
+            # From `last_pcm` rather than the payload. This writes a WAV for
+            # somebody to listen to on a bench, and the payload is Opus now —
+            # decoding what was just encoded, to get back to the samples that
+            # produced it, would be a strange way to record a test.
+            #
+            # It also decouples the two: the recording is what the receiver
+            # heard, whether or not the frame reached the four-packet floor the
+            # contract requires before anything goes on the wire.
+            if controller.last_pcm:
+                pcm += controller.last_pcm
                 open_ticks += 1
             print(
                 f"{time.monotonic() - started:5.0f}  "

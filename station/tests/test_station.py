@@ -107,19 +107,18 @@ class PayloadTests(unittest.TestCase):
             errors = sorted(TELEMETRY.iter_errors(payload), key=str)
             self.assertFalse(errors, f"adsb: {[e.message for e in errors]}")
 
-    @unittest.expectedFailure
     def test_audio_matches_the_schema_and_is_gated(self):
-        """KNOWN GAP against contract 1.0: this station still sends PCM.
+        """Opus, raw packets, no container — and both gates above it.
 
-        The contract fixed the audio format as Opus before it was locked
-        (`contract/schemas/audio.schema.json`), on the reasoning that freezing
-        the most expensive payload on a metered link in a shape everybody
-        already knew was wrong would buy a breaking change later. This station
-        has not been built to it yet, so the assertion below is the work
-        remaining rather than a regression.
+        This carried an `expectedFailure` through the whole 2.0 draft while the
+        station still sent base64 PCM. The contract fixed the format before it
+        was locked, on the reasoning that freezing the most expensive payload
+        on a metered link in a shape everybody already knew was wrong would
+        buy a breaking change later.
 
-        **When Opus lands, this starts passing and unittest reports an
-        unexpected success** - which is the signal to delete this decorator.
+        Measured on the way in: 400 ms of speech is 19 200 bytes of PCM16 and
+        1 087 bytes of Opus — 21.7 kbit/s against 384, which is inside the
+        16–24 kbit/s the contract's bandwidth section claims.
         """
         audio = self.by_kind("audio")
         self.assertTrue(audio, "the busy profile should have produced audio")

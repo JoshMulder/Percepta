@@ -39,6 +39,7 @@ from .devices.altitude import BarometricReference
 from .devices.inventory import Inventory
 from .enrolment import EnrolmentClient, Renewer
 from .health import Health
+from .radio.audio import AUDIO_RATE
 from .radio.receiver import RadioController
 from .store import LocalStore
 from .stream import StreamSession
@@ -1179,10 +1180,15 @@ class Agent:
         # Recorded whether or not it can be sent, and whether or not anybody
         # is listening. A transmission during an outage is not simply gone,
         # and neither is one nobody happened to have a console open for.
-        self.store.write_audio(
-            base64.b64decode(audio["pcm"]), audio["rate"],
-            label=f"{self.radio.freq_hz // 1000}kHz",
-        )
+        # From `last_pcm`, not from the payload: the wire carries Opus and a
+        # local recording is PCM. A WAV on disk can be opened by anything,
+        # which is the whole point of keeping one, and decoding the frame we
+        # just encoded to get back to where we started would be absurd.
+        if self.radio.last_pcm:
+            self.store.write_audio(
+                self.radio.last_pcm, AUDIO_RATE,
+                label=f"{self.radio.freq_hz // 1000}kHz",
+            )
         # Published only while somebody is listening. 24 kHz of 16-bit mono is
         # 384 kbit/s, and base64 in a JSON envelope makes it 512 — the largest
         # thing this station sends, and it used to go up on every over whether

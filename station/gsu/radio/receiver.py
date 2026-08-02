@@ -35,7 +35,7 @@ from typing import Protocol, runtime_checkable
 
 from ..sensors import Device
 from . import dsp
-from .audio import AUDIO_RATE, audio_payload, to_pcm16
+from .audio import AUDIO_RATE, Encoder, OpusUnavailable, audio_payload, to_pcm16
 
 log = logging.getLogger("gsu.radio")
 
@@ -175,6 +175,13 @@ class RadioController:
         self.monitor = False
         #: When a held-open gate releases itself. See MONITOR_MAX_S.
         self._monitor_until = 0.0
+        #: The Opus encoder, built on first use and held. See `_encoder`.
+        self._opus: Encoder | None = None
+        self._opus_failed = False
+        #: The last block of PCM, kept for the local recording whatever
+        #: happened to the payload — a transmission is written to disk whether
+        #: or not anybody is listening and whether or not the link is up.
+        self.last_pcm = b""
         #: Last threshold actually applied, so leaving AUTO can freeze at it
         #: rather than jumping.
         self.last_threshold_db = -70.0
@@ -410,10 +417,45 @@ class RadioController:
         )
 
         audio = None
+        self.last_pcm = b""
         if self._open:
             samples = self.front_end.demodulate(int(AUDIO_RATE * dt))
-            audio = audio_payload(to_pcm16(samples), AUDIO_RATE)
+            # PCM is kept whatever happens to the payload: it is what goes to
+            # local storage, and a transmission is recorded whether or not
+            # anybody is listening and whether or not the link is up.
+            self.last_pcm = to_pcm16(samples)
+            encoder = self._encoder()
+            if encoder is not None:
+                # None means this tick produced fewer than the four packets the
+                # contract requires — 80 ms of speech is not worth an envelope
+                # of its own — so the recording still happens and nothing goes
+                # on the wire yet.
+                audio = audio_payload(self.last_pcm, encoder, AUDIO_RATE)
         return telemetry, audio
+
+    def _encoder(self) -> Encoder | None:
+        """The Opus encoder, built once and held.
+
+        Held rather than rebuilt because an encoder carries prediction state
+        between frames: constructing a fresh one per transmission throws that
+        away and costs bitrate for nothing.
+
+        A box without libopus reports it once and then publishes no audio. It
+        goes on receiving, squelching and recording — the local WAV is PCM and
+        needs no codec — because a missing library is not a reason to stop
+        doing the part of the job that still works.
+        """
+        if self._opus is not None:
+            return self._opus
+        if self._opus_failed:
+            return None
+        try:
+            self._opus = Encoder(AUDIO_RATE)
+        except OpusUnavailable as exc:
+            self._opus_failed = True
+            log.error("No airband audio will be published: %s", exc)
+            return None
+        return self._opus
 
     # --- state ----------------------------------------------------------
 
