@@ -1,9 +1,9 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://percepta/contract/v1.0/command.schema.json",
-  "contractVersion": "1.0",
+  "$id": "https://percepta/contract/v2.0/command.schema.json",
+  "contractVersion": "2.0",
   "title": "Platform command to a ground station",
-  "description": "One object per message on cmd/gsu/{station_id}. A command is a request, never a guarantee: the platform confirms nothing itself and waits to see the effect in the station's own telemetry. Every command below therefore has a field in a telemetry payload that reports its result - if you add a command, add that field too. Unknown commands must be ignored, not rejected: an older station and a newer platform have to coexist.\n\nThe leased commands (radio.audio, video.start) share one shape: the platform repeats the command while the demand exists, a repeat is a renewal rather than a second start, and the lease expiring is the stop signal. Silence has to be the off switch because most consumers never say goodbye - a closed laptop, a dropped link, a crashed platform - and every one of those must stop a station transmitting to nobody on a metered link.",
+  "description": "One command - stream `c` on the relay, platform to station (transport.md). A command is a request, never a guarantee: the platform confirms nothing itself and waits to see the effect in the station's own telemetry. Every command below therefore has a field in a telemetry payload that reports its result - if you add a command, add that field too. Unknown commands must be ignored, not rejected: an older station and a newer platform have to coexist.\n\nThe leased commands (radio.audio, video.start) share one shape: the platform repeats the command while the demand exists, a repeat is a renewal rather than a second start, and the lease expiring is the stop signal. Silence has to be the off switch because most consumers never say goodbye - a closed laptop, a dropped link, a crashed platform - and every one of those must stop a station transmitting to nobody on a metered link.",
   "type": "object",
   "required": [
     "kind"
@@ -144,7 +144,7 @@
     },
     {
       "type": "object",
-      "description": "Somebody is listening: let audio flow up the link (squelch permitting) for lease_seconds. Repeated while any console holds the audio subscription; a repeat is a renewal. There is no stop command - the lease expiring is the stop signal - and local recording is never gated by this: a transmission nobody had a console open for is still written to disk. Reported back as audio frames on gsu/{station_id}/audio while the squelch is open.",
+      "description": "Somebody is listening: let audio flow up the link (squelch permitting) for lease_seconds. Repeated while any console holds the audio subscription; a repeat is a renewal. There is no stop command - the lease expiring is the stop signal - and local recording is never gated by this: a transmission nobody had a console open for is still written to disk. Reported back as audio frames on stream `a` while the squelch is open, and as radio.audio_lease_remaining_s.",
       "properties": {
         "kind": {
           "const": "radio.audio"
@@ -221,7 +221,10 @@
         "config": {
           "type": "object",
           "description": "The settings to merge. Keys the station does not know are ignored, not rejected: a newer platform must be able to talk to an older station.",
-          "maxProperties": 128
+          "maxProperties": 128,
+          "propertyNames": {
+            "maxLength": 64
+          }
         }
       },
       "required": [

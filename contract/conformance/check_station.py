@@ -10,6 +10,19 @@ and quietly ignored is the failure this platform is least able to notice.
 
 Neutral about implementation: it talks to the broker, not to anyone's code. The
 simulator passes it, and so must real hardware.
+
+**KNOWN GAP — this harness cannot yet reach a station built to contract 1.0.**
+It subscribes to per-station channel names on a direct pub/sub connection,
+which is how the boundary worked before the relay. A station built to the
+current contract opens one authenticated WebSocket to `/broker` and sends
+`{"stream":"t","payload":{…}}`; it never names a channel and never puts its own
+id on the wire, so nothing here can see it.
+
+Until that is rewritten, this checks payload shapes, cadence, audio gating and
+command effects against a station reachable on the older path. It does not
+check the relay envelope, `refused`, the frame cap, close codes, reconnect
+behaviour, or either video lease — the whole of the newest surface. Read a pass
+as "the payloads are right", not "this station is conformant".
 """
 
 import argparse
@@ -293,19 +306,21 @@ def main() -> int:
             f"{CONTRACT_VERSION}"
         )
 
-    # Acknowledge anything the station published, so this harness does not
-    # leave it stuck. Without it the station re-sends the same batch for ever,
-    # never advances, and a run of the conformance checker becomes a reason its
-    # event backlog stopped draining.
-    acked = max(
-        (e.get("seq") for f in by_kind.get("events", [])
-         for e in (f.get("events") or []) if isinstance(e.get("seq"), int)),
-        default=None,
-    )
-    if acked is not None:
-        r.publish(cmd_channel,
-                  json.dumps({"kind": "events.ack", "through_seq": acked}))
-        notes.append(f"acknowledged events through seq {acked}")
+    # This harness deliberately does NOT acknowledge events.
+    #
+    # An earlier version did, to avoid leaving the station re-sending. That was
+    # the wrong trade and it destroyed data: `events.ack` means "durably
+    # stored, delete your copy", this stores nothing and exits, and the file
+    # runs against commissioned hardware on real sites. Running a conformance
+    # check must never cost a site its undelivered history.
+    #
+    # The consequence is honest and bounded: the station keeps its backlog and
+    # re-sends on its own schedule once a real platform is listening.
+    if by_kind.get("events"):
+        notes.append(
+            "events seen and validated but NOT acknowledged - this harness "
+            "stores nothing, and acking would tell the station to delete them"
+        )
 
     cadence = cadence_from(by_kind)
     if cadence != DEFAULT_CADENCE:

@@ -67,11 +67,26 @@ demonstrated precisely the behaviour that rule forbids, and anyone copying it
 inherited a station that streamed to nobody. When the two disagree, the contract
 is right and the simulator has a bug.
 
-## Build status against contract 1.0
+## Build status against contract 2.0
 
-Both sides were built against the contract as it stood before 1.0 was fixed, so
-each owes some work. This is the list, and it is the only part of this file that
+Both sides were built against a draft that 2.0 supersedes incompatibly, so each
+owes real work. This is the list, and it is the only part of this file that
 should ever be empty.
+
+**Start here: neither side speaks the current transport.** The relay frame is
+`{"stream":"t","payload":{…}}` — one letter, no channel name, no station id.
+Both ends still send and expect `{"topic":"gsu/<uuid>/telemetry","payload":…}`,
+and the platform still issues `broker.username` and four `*_topic` fields that
+no longer exist in the contract. Nothing will interoperate until both are
+changed, and because the old and new frames are structurally similar the
+failure mode is a station that connects, authenticates, publishes, and is
+silently refused.
+
+**Also breaking, and easy to miss:** five ADS-B fields gained unit suffixes
+(`altitude_m`, `speed_kt`, `vertical_speed_ms`, `track_deg`, `bearing_deg`).
+Contact objects have no `additionalProperties: false`, so a publisher that
+misses the rename produces payloads that fail *validation* rather than
+anything louder.
 
 **Station**
 - Audio is still base64 PCM. 1.0 fixes the format as Opus
@@ -114,16 +129,20 @@ Python's `ssl` with *"CA cert does not include key usage extension"*. Testing
 TLS with `redis-cli` alone proves nothing about a Python client, and the failure
 arrives as every station in the fleet failing at once.
 
-**The command channel is slash-separated.** `cmd/gsu/{id}`, not `cmd:gsu:{id}` —
-the colon form is the platform's *internal* fan-out naming. Getting it wrong
-produces a station that is subscribed, receiving and dropping everything, which
-from the outside is indistinguishable from one that ignores its operator.
+**Channel names are now platform-internal, and both traps below are why.** They
+are kept because the platform still has channels behind the relay and can still
+make both mistakes on its own side — but a station can no longer be involved in
+either, which was the point of taking names off the wire in 2.0.
 
-**A topic granted in one place and not another fails silently.** The ACL, the
-relay's permitted set, the enrolment response and the ingest's subscription must
-agree. When they do not, the publish is refused, the station reports it and
-carries on, and what an operator sees is a box that enrolled perfectly and
-publishes nothing. Nothing crashes and nothing logs an error at either end.
+- *Slash, not colon.* `cmd/gsu/{id}`, not `cmd:gsu:{id}` — the colon form is
+  the internal fan-out naming. Getting it wrong produced a station that was
+  subscribed, receiving and dropping everything, indistinguishable from one
+  ignoring its operator.
+- *A topic granted in one place and not another fails silently.* The ACL, the
+  relay's permitted set and the ingest's subscription must agree. When they do
+  not, the publish is refused, and what an operator sees is a box that enrolled
+  perfectly and publishes nothing — nothing crashes and nothing logs an error
+  at either end.
 
 **Two USB-UART adapters swap between boots.** Bind serial devices by their
 `by-id` path, never `/dev/ttyUSB0`, or each driver eventually reads the other's

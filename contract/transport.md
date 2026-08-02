@@ -277,7 +277,25 @@ Schema cannot express nesting depth, so this is a rule rather than a
 constraint: a 30 KB frame of deeply nested objects exhausts a recursive parser
 *before* the malformed-JSON path can drop it, and the malformed-JSON path is
 what this contract otherwise relies on. A few hundred levels is far beyond any
-legitimate payload here.
+legitimate payload here. Note that the resulting error is not always the
+parser's usual one — Python raises `RecursionError`, which is not a
+`ValueError` — so a handler that catches only malformed-JSON exceptions still
+dies.
+
+**A receiver rejects the non-finite tokens `NaN`, `Infinity` and `-Infinity`.**
+They are not JSON (RFC 8259 has no such literals) but several parsers accept
+them by default, and one of them defeats every numeric bound in these schemas:
+**every comparison against NaN is false**, so a NaN satisfies `minimum`,
+`maximum` and `exclusiveMinimum` at once and validates anywhere a number is
+allowed. Infinity is caught by any `maximum`; NaN is caught by nothing.
+
+The consequences are worse than a bad reading. Re-serialising a NaN emits the
+same non-JSON token, so one station's frame breaks `JSON.parse` in every
+console in that organisation. And every threshold comparison against it is
+false, so a NaN `soc_pct` never trips a low-battery alert — it does not read
+as a wrong value, it reads as a value that is never a problem. Reject at the
+parser, alongside the depth limit; there is no schema keyword that will do it
+for you.
 
 Both transports are fire-and-forget from the station's point of view, and the
 contract assumes nothing stronger:
@@ -303,8 +321,8 @@ The events channel is the exception to the first of these, and only to the
 first — see *Store and forward*.
 
 **The schemas describe payloads; they are not an accept/reject gate.** Both
-`telemetry` and `command` discriminate with a closed `oneOf`, so a 1.0 schema
-rejects a kind added in 1.1 — which is correct as a *definition* of 1.0 and
+`telemetry` and `command` discriminate with a closed `oneOf`, so a 2.0 schema
+rejects a kind added in 2.1 — which is correct as a *definition* of 2.0 and
 wrong as a filter, because this contract promises unknown kinds are dropped
 and unknown commands ignored rather than erroring. A receiver validates what it
 recognises and passes over what it does not. Resource limits are enforced at
@@ -343,13 +361,16 @@ to tolerate gaps, so favour dropping data over queueing it.
 | `audio` | while squelch is open, and only while asked | See below |
 
 **What a station costs when nothing is happening.** The four 1 Hz streams plus
-weather and health come to **8.3–10.6 kbit/s, about 2.7–3.4 GB a month**, per
+weather and health come to **6.6–9.0 kbit/s, about 2.1–2.9 GB a month**, per
 station, for ever — measured on the wire, which is what a metered link bills.
-Roughly 44% of that is not payload at all: the relay envelope is 73 bytes and
-WebSocket, TLS and TCP framing add another 74–82, against messages of 99–415
-bytes. An earlier version of this paragraph said 5–6 kbit/s, which is the
-payload-JSON figure for a minimal station and undercounts a real one by about
-half.
+Roughly 45% of that is not payload at all: the relay envelope is 25 bytes and
+WebSocket, TLS and TCP framing add another 70–82, against payloads of 52–369
+bytes. A fully-populated health frame is the largest single message at about
+1.8 kB, and is not in that range.
+
+Dropping the station id from the envelope took 48 bytes off every message —
+**0.53 GB per station per month, between a sixth and a fifth of the whole
+floor.** That is what the one-letter stream code bought.
 
 **And that is the clear-airspace number.** It assumes an empty `aircraft`
 array. A site that can see ten contacts costs about **41 kbit/s, 13 GB a
@@ -417,15 +438,19 @@ and all three are required:
    base64'd in an array — `schemas/audio.schema.json` — which keeps the
    envelope JSON like everything else on this transport.
 
-   Measured on the wire at 24 kbit/s with 8 packets of 20 ms: **45 kbit/s, an
+   Measured on the wire at 24 kbit/s with 8 packets of 20 ms: **43 kbit/s, an
    11–12× saving.** A twentieth is reachable only at 16 kbit/s and the maximum
    batch, which costs two seconds of latency on a push-to-talk channel. **The
    batch size is what decides this**: the per-message overhead is a fixed
-   ~245 bytes against a 60-byte packet, so one packet per message costs
-   132 kbit/s to carry a 24 kbit/s codec and throws most of the saving away.
-   The schema enforces a minimum of four.
+   ~198 bytes against a 60-byte packet, so one packet per message would cost
+   112 kbit/s to carry a 24 kbit/s codec and throw most of the saving away.
 
-   Binary frames would save a further 46% and are a transport change rather
+   The schema enforces a minimum of four packets, but **what matters is
+   duration, not count** — four 10 ms packets is 74 kbit/s, still three times
+   the codec. Send at least 80 ms of audio per message. JSON Schema cannot
+   express packets × `frame_ms`, so that one is a rule.
+
+   Binary frames would save a further third and are a transport change rather
    than a schema one, so they are not in this version.
 
    **This is a change from the format that shipped first**, which was base64
@@ -447,6 +472,7 @@ choose something reasonable and not match.
 | `video.start` lease, when the platform states none | 10 s | station default |
 | `radio.spectrum` lease, when `lease_seconds` is absent | 15 s | station default |
 | Any lease the station will honour | clamped to **5–300 s** | station |
+| …except `video.start`, clamped to | **5–30 s** | station |
 | Renewal, for every lease | at or before **one third** of the lease | platform |
 | `radio.monitor` releases itself after | 300 s | station |
 | Events per message | at most 100, **and at most 128 KiB** | station |
@@ -463,10 +489,25 @@ Four rules go with the table, because the numbers alone do not settle it.
 **Video's lease is the short one because video is the expensive one.** Every
 other stream costs tens of kilobits per second and video costs megabits, so the
 tail after a viewer vanishes is worth an order of magnitude more than anywhere
-else: at 3 Mbit/s a 30-second lease throws away about 11 MB per abandoned
-view, and 10 seconds throws away under 4. The renewals that buys — one every
-3.3 seconds, a few hundred bits — are free by comparison. Size a lease against
-what it gates, not for symmetry.
+else: at 3 Mbit/s a 30-second lease throws away up to 11 MB per abandoned
+view, and 10 seconds up to 4. The renewals that buys — one every 3.3 seconds,
+a few hundred bits — are free by comparison. Size a lease against what it
+gates, not for symmetry. (Those are worst cases; the average tail is five
+sixths of the lease, because renewal happens at a third.)
+
+**Video gets its own clamp ceiling for the same reason.** A default of 10 s
+bounds nothing if the platform may state 300, so the tail argument above only
+holds because a station refuses anything longer than 30. This is the one place
+the shared 5–300 s clamp is wrong: it was sized for the cheap streams.
+
+**The cost of the short lease, stated rather than discovered.** Renewals ride
+the broker socket, not the media one, so a 10-second lease means video stops
+during any broker interruption longer than about 6.7 seconds — where a
+30-second lease survived 20. Recovery is not free either: the encoder restarts,
+which means a new `codec` frame, a new initialisation segment, and a buffer
+reset for every attached viewer. On links this document says drop routinely
+that turns some ordinary blips into visible restarts, and it is the price of
+not paying for abandoned streams.
 
 **A lease the platform states always wins, inside the clamp.** The defaults
 above are what a station uses when told nothing. They are not a ceiling and not
@@ -480,12 +521,14 @@ is where a platform sees that its 3600 became 300.
 
 **Renew at a third, not at the edge.** A platform that renews exactly when the
 lease expires produces a gap on every cycle, because the renewal has to cross a
-link that drops. A third means **one renewal can be lost with ten seconds to
-spare**; a second loss puts the next attempt exactly on the expiry, which is a
-race rather than a margin. If a stream ever needs to survive two consecutive
-losses properly, renew at a quarter — the traffic is negligible either way.
-(This paragraph used to claim a third bought two losses. It does not, and the
-arithmetic is worth checking rather than repeating.)
+link that drops. A third means **one renewal can be lost with a third of the
+lease to spare** — ten seconds on a 30-second lease, 3.3 on video's ten — and a
+second loss puts the next attempt exactly on the expiry, which is a race rather
+than a margin. If a stream ever needs to survive two consecutive losses
+properly, renew at a quarter; the traffic is negligible either way. Check this
+arithmetic against the lease you are actually holding rather than repeating the
+number: it has been wrong here twice, once claiming two losses and once quoting
+a margin that belonged to a different lease.
 
 **Stopping is never only a command.** `video.stop` and `radio.spectrum {on:
 false}` end things sooner as a courtesy, and the lease running out is the
@@ -505,7 +548,7 @@ the one place in this contract where "may be dropped" does not apply.
 
 ### Events, which are the exception to everything above
 
-`gsu/{station_id}/events` carries things that happened —
+Stream `e` carries things that happened —
 `schemas/events.schema.json`. A telemetry frame has a newer version a second
 later; an event does not. A transmission at 03:12, a proximity alert, a
 floodlight drawing no current: lose the message and the fact is gone.

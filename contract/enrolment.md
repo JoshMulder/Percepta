@@ -92,7 +92,8 @@ one inviting a station to send it from the start and the other saying to leave
 it out.
 
 **Operate.** The station authenticates with its credential on every connection.
-The broker ACL pins it to its own channels.
+The relay resolves which station it is from that credential, and confines it to
+the four streams in `transport.md`.
 
 **Renew.** Credentials expire. The station renews using its *current* credential,
 well before expiry — see §6, because this is where remote sites fail.
@@ -108,7 +109,7 @@ grants — with a fresh token. The record outlives the box.
 Two options, and the recommendation is deliberate.
 
 **Now: a per-station bearer credential.** A long random secret, unique per
-station, used as the broker password with the station id as the username. Stored
+station, presented as `Authorization: Bearer` on every connection. Stored
 hashed on the platform, in the OS keystore or a permissions-restricted file on
 the station.
 
@@ -150,7 +151,7 @@ technician on site.
                                      // comparing - see below - so the station
                                      // sends it unaltered and never has to
                                      // guess the form
-  "public_key": null,                // reserved for mTLS (§3); omit in 1.0
+  "public_key": null,                // reserved for mTLS (§3); omit in 2.0
   "hardware": {                      // for the fleet inventory, not for trust
     "model": "…",
     "serial": "…",
@@ -253,7 +254,7 @@ technician on site.
                                      // health.config_version. Two copies of
                                      // one number is the thing §7 forbids for
                                      // position, and it applies here too.
-  "contract_version": "1.0"          // which version of this contract the
+  "contract_version": "2.0"          // which version of this contract the
                                      // platform speaks. Stated so a station
                                      // learns it at the one moment both sides
                                      // are talking, and can say plainly that
@@ -353,7 +354,8 @@ accepts and ignores anything else.
 Returns the same shape as a claim. The old credential remains valid for the
 overlap window (§6).
 
-**Apply `credential` and `broker`. Never apply `station`.**
+**Apply `credential`, `broker`, and `station.timezone`/`station.name`. Never
+apply the position.**
 
 That sentence is load-bearing in both directions and neither is obvious:
 
@@ -363,7 +365,16 @@ That sentence is load-bearing in both directions and neither is obvious:
   treats renewal as credential-only goes dark within the same hour, cannot be
   reached to be told, and the field that would explain it (`security.tls_failed`)
   can only travel over the connection that is refusing. The same path carries
-  a moved broker, a changed `media_url`, and a corrected timezone.
+  a moved broker and a changed `media_url`.
+
+**The one exception inside `station`: `timezone` and `name` are applied;
+position is not.** Splitting the block by field rather than wholesale is
+deliberate. A wrong timezone is a daily data fault — `rain_mm_today` is a total
+since local midnight — and renewal is the only channel that carries a
+correction, so refusing the whole block would leave it uncorrectable from
+anywhere but the setup page at the site. Position is the opposite: the station
+authors it (§7), so applying the platform's echo would revert an installer's
+work on every renewal cycle.
 - **`station` must not be applied**, because position flows the other way
   (§7). The platform echoes back whatever `health.position` last told it, so a
   station that re-applies it on every renewal quietly reverts an installer's
@@ -441,7 +452,8 @@ than trusting on first use.
 ## 6. Clock, expiry and the failure this causes
 
 **A remote station with a wrong clock cannot authenticate**, and if the
-credential has already expired it cannot renew either. That is a site visit.
+credential has expired beyond the grace window in §4 it cannot renew either.
+That is a site visit, and the grace window exists to make it a narrow one.
 
 - The station syncs time before enrolling and refuses to enrol with an
   implausible clock, saying so.
@@ -569,8 +581,12 @@ These need a human, and the station agent should not invent answers.
   that escaped its org scope would be the worst leak in the schema
 - The three endpoints in §4, and an admin path to issue and revoke behind a
   configuration capability
-- A broker principal per station, derived from its identity, granted exactly
-  the channels in `transport.md` and nothing else
+- **Enforcement at whatever terminates the station's socket**: resolve the
+  station from the credential, confine it to the four streams in
+  `transport.md`, and enforce their direction. The station cannot name a
+  channel, so this is the only place confinement happens — if the relay is
+  ever fronted or replaced by something else, that component inherits the
+  whole of it, and the contract has nothing else standing behind it
 - Every issue, claim, renew, revoke and rejection audited
 
 **Station**

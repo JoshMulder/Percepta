@@ -1,9 +1,9 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://percepta/contract/v1.0/events.schema.json",
-  "contractVersion": "1.0",
+  "$id": "https://percepta/contract/v2.0/events.schema.json",
+  "contractVersion": "2.0",
   "title": "Ground station events",
-  "description": "One object per message on gsu/{station_id}/events, carrying a batch of things that happened.\n\n**This is the one channel that is a ledger rather than a stream, and every rule elsewhere in this contract inverts here.** Telemetry is current state and may be dropped, because a newer frame replaces it in a second. An event has no newer version: a transmission recorded at 03:12, a proximity alert, a credential renewal that failed, a floodlight that drew no current. Losing it loses the fact.\n\nThat is why the station buffers events through an outage and telemetry is discarded, and why this channel is acknowledged when nothing else is. A station keeps every unacknowledged event on local storage - across reboots - and re-sends until the platform says it has them.\n\nDelivery is **at-least-once**, never exactly-once: an acknowledgement can be lost after the platform has stored a batch, in which case the station sends it again. Consumers deduplicate on `id`, which is why `id` is required and must be globally unique.",
+  "description": "One batch of events - stream `e` on the relay (transport.md).\n\n**This is the one channel that is a ledger rather than a stream, and every rule elsewhere in this contract inverts here.** Telemetry is current state and may be dropped, because a newer frame replaces it in a second. An event has no newer version: a transmission recorded at 03:12, a proximity alert, a credential renewal that failed, a floodlight that drew no current. Losing it loses the fact.\n\nThat is why the station buffers events through an outage and telemetry is discarded, and why this channel is acknowledged when nothing else is. A station keeps every unacknowledged event on local storage - across reboots - and re-sends until the platform says it has them.\n\nDelivery is **at-least-once**, never exactly-once: an acknowledgement can be lost after the platform has stored a batch, in which case the station sends it again. Consumers deduplicate on `id`, which is why `id` is required and must be globally unique.",
   "type": "object",
   "required": [
     "kind",
@@ -49,7 +49,8 @@
         "at": {
           "type": "string",
           "format": "date-time",
-          "description": "When it happened, by the station's own clock, ISO 8601 with an offset. Not when it was sent - the whole point of this channel is that those differ by the length of an outage."
+          "description": "When it happened, by the station's own clock, ISO 8601 with an offset. Not when it was sent - the whole point of this channel is that those differ by the length of an outage.",
+          "maxLength": 64
         },
         "clock": {
           "enum": [
@@ -61,7 +62,10 @@
         "type": {
           "type": "string",
           "maxLength": 100,
-          "description": "What happened, as a dotted name: `radio.transmission`, `adsb.alert`, `power.low`, `credential.renewal_failed`, `light.no_draw`, `uplink.restored`. The station owns this vocabulary and may add to it - the platform stores and displays unknown types rather than dropping them, exactly as it ignores unknown telemetry kinds, because an event it does not recognise is still something that happened at a site."
+          "description": "What happened, as a dotted name: `radio.transmission`, `adsb.alert`, `power.low`, `credential.renewal_failed`, `light.no_draw`, `uplink.restored`. The station owns this vocabulary and may add to it - the platform stores and displays unknown types rather than dropping them, exactly as it ignores unknown telemetry kinds, because an event it does not recognise is still something that happened at a site.\n\n**`platform.` is reserved and a station may not send it.** The platform writes its own facts - credential issued, revoked, enrolment claimed - into this same operator-visible timeline, and a station that could forge one could forge an alibi.",
+          "not": {
+            "pattern": "^platform\\."
+          }
         },
         "severity": {
           "enum": [
@@ -78,8 +82,11 @@
         },
         "data": {
           "type": "object",
-          "description": "Anything structured the event carries - a frequency, a contact's icao, a recording's local name. Free-form by design and **non-normative**: consumers may display it and must not require any particular key, because the set differs per `type` and the station is the side that learns new ones first.",
-          "maxProperties": 64
+          "description": "Anything structured the event carries - a frequency, a contact's icao, a recording's local name. Free-form by design and **non-normative**: consumers may display it and must not require any particular key, because the set differs per `type` and the station is the side that learns new ones first.\n\n**An event must not exceed 8 KiB serialised**, and `data` is where that is spent. JSON Schema cannot bound a serialised size, so this is a rule rather than a constraint - but it is the rule that makes the batch's 128 KiB cap achievable. Without it a single event can exceed the frame cap on its own, and 'a batch that does not fit is split, never dropped' is unsatisfiable at one event. A station with more to say truncates `data`, keeps the event, and says so in `detail`.",
+          "maxProperties": 64,
+          "propertyNames": {
+            "maxLength": 64
+          }
         }
       }
     }

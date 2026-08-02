@@ -85,9 +85,18 @@ exercised by anything that is *told* the floor rather than measuring it.
 
 ## Version
 
-**This is contract 1.0.** It is stamped in each schema's `$id` and
+**This is contract 2.0.** It is stamped in each schema's `$id` and
 `contractVersion`, the platform states it at enrolment, and a station declares
 what it speaks in `health.contract_version`.
+
+**Why 2.0 before anything shipped.** A draft 1.0 existed for a few days and
+this supersedes it incompatibly: the relay frame carries a stream code instead
+of a channel name, five ADS-B fields gained unit suffixes, `broker.username`
+and the topic fields left the enrolment response, and a hundred-odd bounds
+narrowed what had been accepted. Every one of those is breaking by the rule
+below, and the version exists precisely so nobody has to guess which set a box
+holds. Nothing is deployed, so the bump costs nothing today — and a version
+that lied about this would have cost a visit to every site that was.
 
 **Declared, never negotiated.** The platform records what a station says, logs a
 mismatch, and carries on. Nothing is refused over a version string: these are
@@ -97,11 +106,11 @@ debugging session — *which contract is that box on* — has an answer, which i
 did not before. `config_version` is site policy and `agent_version` is a build
 string; neither is this.
 
-- **Minor** (1.0 → 1.1) — additive. A new optional field, a new telemetry kind,
+- **Minor** (2.0 → 2.1) — additive. A new optional field, a new telemetry kind,
   a new command, a new event type. Both sides already tolerate what they do not
   recognise, so old and new interoperate in both directions and no coordination
   is needed.
-- **Major** (1.x → 2.0) — something changed meaning, changed shape, or went
+- **Major** (2.x → 3.0) — something changed meaning, changed shape, or went
   away. Both sides need looking at, and the two versions are not assumed to
   interoperate.
 

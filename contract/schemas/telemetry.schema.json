@@ -1,9 +1,9 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://percepta/contract/v1.0/telemetry.schema.json",
-  "contractVersion": "1.0",
+  "$id": "https://percepta/contract/v2.0/telemetry.schema.json",
+  "contractVersion": "2.0",
   "title": "Ground station telemetry",
-  "description": "One object per message on gsu/{station_id}/telemetry. Discriminated by `kind`. Unknown fields are ignored by the platform, and unknown kinds are dropped rather than erroring - so a new sensor can be added station-side before the platform renders it.\n\nEvery stream shares the availability fields in $defs/availability: a payload may carry `available: false` to declare that the station has no source for that stream, and its usual fields are then not required, because there is nothing to put in them.",
+  "description": "One object per telemetry frame - stream `t` on the relay (transport.md). Discriminated by `kind`. Unknown fields are ignored by the platform, and unknown kinds are dropped rather than erroring - so a new sensor can be added station-side before the platform renders it.\n\nEvery stream shares the availability fields in $defs/availability: a payload may carry `available: false` to declare that the station has no source for that stream, and its usual fields are then not required, because there is nothing to put in them.",
   "type": "object",
   "required": [
     "kind"
@@ -40,7 +40,8 @@
         "unavailable_reason": {
           "type": "string",
           "maxLength": 200,
-          "description": "Short, human-readable, for an operator rather than a parser - 'no ADS-B receiver connected', 'weather station not responding'. Only meaningful when available is false."
+          "description": "Short, human-readable, for an operator rather than a parser - 'no ADS-B receiver connected', 'weather station not responding'. Only meaningful when available is false.",
+          "minLength": 1
         },
         "unavailable_cause": {
           "description": "The same fact as unavailable_reason, in one word a consumer can branch on. Known values: `not_fitted` - a complete station with nothing selected for this slot, which is not a fault; `not_detected` - it was specified and cannot be found; `stopped` - it was found and has stopped answering; `unsupported` - it is fitted and this build cannot drive it, which is a software gap rather than a hardware fault and needs a different response. The last three are faults.\n\nCarried on the stream rather than only in health because a console that has just connected or switched station would otherwise wait a full health period - 30 seconds - to tell an empty slot from a broken sensor. **Treat an unrecognised value as `not_detected`** rather than rejecting the payload: this vocabulary may gain members in a minor version, and a consumer that refused one would turn an additive change into a break. Absent means unknown.",
@@ -154,8 +155,8 @@
             "null"
           ],
           "minimum": 0,
-          "exclusiveMaximum": 360,
-          "description": "Degrees true. Null if unknown - the console draws a dot rather than pointing it in an invented direction."
+          "description": "Degrees true. Null if unknown - the console draws a dot rather than pointing it in an invented direction. 360 is accepted and means the same as 0: normalising an angle lands there exactly (`(-1e-15) % 360` is 360.0, and rounding 359.97 to one decimal is 360.0), and rejecting it would discard the whole frame over a value that is not wrong.",
+          "maximum": 360
         },
         "speed_kt": {
           "type": [
@@ -175,8 +176,8 @@
         "bearing_deg": {
           "type": "number",
           "minimum": 0,
-          "exclusiveMaximum": 360,
-          "description": "Degrees true, station to aircraft."
+          "description": "Degrees true, station to aircraft. 360 is accepted and means the same as 0: normalising an angle lands there exactly (`(-1e-15) % 360` is 360.0, and rounding 359.97 to one decimal is 360.0), and rejecting it would discard the whole frame over a value that is not wrong.",
+          "maximum": 360
         },
         "alert": {
           "type": "boolean",
@@ -295,8 +296,8 @@
         "wind_dir_deg": {
           "type": "number",
           "minimum": 0,
-          "exclusiveMaximum": 360,
-          "description": "Direction the wind comes FROM - meteorological convention, the opposite of a movement vector. Getting this backwards is the classic wind-rose bug."
+          "description": "Direction the wind comes FROM - meteorological convention, the opposite of a movement vector. Getting this backwards is the classic wind-rose bug. 360 is accepted and means the same as 0: normalising an angle lands there exactly (`(-1e-15) % 360` is 360.0, and rounding 359.97 to one decimal is 360.0), and rejecting it would discard the whole frame over a value that is not wrong.",
+          "maximum": 360
         },
         "temperature_c": {
           "type": "number",
@@ -306,8 +307,8 @@
         "humidity_pct": {
           "type": "number",
           "minimum": 0,
-          "maximum": 100,
-          "description": "Relative humidity, if the station has a sensor for it. Optional: the Airmar 110WX ships with and without the RH module, and requiring it would force a station without one to invent a number. Omit it rather than sending a placeholder."
+          "maximum": 105,
+          "description": "Relative humidity, if the station has a sensor for it. Optional: the Airmar 110WX ships with and without the RH module, and requiring it would force a station without one to invent a number. Omit it rather than sending a placeholder. Bounded at 105 rather than 100 because a condensing sensor legitimately reports 100-103 %RH, and losing the frame in fog is losing it in the weather somebody is watching for."
         },
         "pressure_hpa": {
           "type": [
@@ -359,11 +360,63 @@
             "$ref": "#/$defs/declared_unavailable"
           },
           "else": {
-            "required": [
-              "wind_kt",
-              "gust_kt",
-              "wind_dir_deg",
-              "temperature_c"
+            "description": "Available means reporting at least one measurement - not all of them. A fitted instrument that cannot source a particular value omits it and names it in `health.unsourced_fields`; that is a different fact from having no source for the stream at all. Demanding the full set forced a partly-instrumented site to either invent readings or declare a working stream dead, which is the pretending this mechanism exists to prevent.",
+            "anyOf": [
+              {
+                "required": [
+                  "wind_kt"
+                ]
+              },
+              {
+                "required": [
+                  "gust_kt"
+                ]
+              },
+              {
+                "required": [
+                  "wind_dir_deg"
+                ]
+              },
+              {
+                "required": [
+                  "temperature_c"
+                ]
+              },
+              {
+                "required": [
+                  "humidity_pct"
+                ]
+              },
+              {
+                "required": [
+                  "pressure_hpa"
+                ]
+              },
+              {
+                "required": [
+                  "visibility_km"
+                ]
+              },
+              {
+                "required": [
+                  "sky"
+                ]
+              },
+              {
+                "required": [
+                  "is_day"
+                ]
+              },
+              {
+                "required": [
+                  "rain_rate_mmh"
+                ]
+              },
+              {
+                "required": [
+                  "rain_mm_today"
+                ]
+              }
             ]
           },
           "then": {
@@ -465,8 +518,58 @@
             "$ref": "#/$defs/declared_unavailable"
           },
           "else": {
-            "required": [
-              "soc_pct"
+            "description": "Available means reporting at least one measurement - not all of them. A fitted instrument that cannot source a particular value omits it and names it in `health.unsourced_fields`; that is a different fact from having no source for the stream at all. Demanding the full set forced a partly-instrumented site to either invent readings or declare a working stream dead, which is the pretending this mechanism exists to prevent.",
+            "anyOf": [
+              {
+                "required": [
+                  "soc_pct"
+                ]
+              },
+              {
+                "required": [
+                  "battery_v"
+                ]
+              },
+              {
+                "required": [
+                  "pv_w"
+                ]
+              },
+              {
+                "required": [
+                  "load_w"
+                ]
+              },
+              {
+                "required": [
+                  "runtime_h"
+                ]
+              },
+              {
+                "required": [
+                  "battery_w"
+                ]
+              },
+              {
+                "required": [
+                  "mains_w"
+                ]
+              },
+              {
+                "required": [
+                  "mains_present"
+                ]
+              },
+              {
+                "required": [
+                  "generator_w"
+                ]
+              },
+              {
+                "required": [
+                  "generator_running"
+                ]
+              }
             ]
           },
           "then": {
@@ -583,6 +686,12 @@
           "description": "Total width the spectrum array covers, centred on freq_hz. Present only alongside spectrum.",
           "minimum": 0,
           "maximum": 1000000000
+        },
+        "audio_lease_remaining_s": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 86400,
+          "description": "Seconds before this station stops sending audio unless the platform renews; 0 when no lease is live. **This is `radio.audio`'s reported effect**, and without it that command was the one in this contract with none - a platform could not tell 'no lease' from 'gate shut' from 'station ignored me', which is the exact indistinguishability the report-your-effect rule exists to prevent. It is also where a clamped lease becomes visible: ask for 3600, see 300 here."
         }
       },
       "allOf": [
@@ -778,7 +887,10 @@
             "maximum": 86400
           },
           "description": "Seconds between publishes, per telemetry kind, as this station is actually running them. Consumers deriving a staleness timeout must use this rather than the defaults in transport.md: the weather period is a site setting, and a station legitimately slowed down to save bandwidth would otherwise be marked faulty by a console still assuming the default. Absent on an older agent, which means the defaults.",
-          "maxProperties": 32
+          "maxProperties": 32,
+          "propertyNames": {
+            "maxLength": 64
+          }
         },
         "uplink": {
           "type": "object",
@@ -899,6 +1011,38 @@
                   "minimum": 0,
                   "description": "What the encoder actually achieved, which is not always what was asked for. The gap between this and the requested rate is the difference between a hardware and a software encoder, and it is information rather than a fault.",
                   "maximum": 1000
+                },
+                "requested": {
+                  "type": "object",
+                  "description": "What this station asked its encoder for - width, height, fps, bitrate_kbps. Reported beside the measured values because the comparison is the diagnosis: 8 Mbit/s requested and 8 delivered is a site configured expensively, 8 requested and 2 delivered is an encoder or a link in trouble, and those need different people. The platform cannot set these (transport.md), which is exactly why it needs to see them.",
+                  "properties": {
+                    "width": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 16384
+                    },
+                    "height": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 16384
+                    },
+                    "fps": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1000
+                    },
+                    "bitrate_kbps": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 1000000
+                    }
+                  }
+                },
+                "bytes_sent": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1000000000000000,
+                  "description": "Total bytes pushed up the media socket since this station started, monotonic. The only stream whose running cost cannot otherwise be recovered from telemetry: bitrate_bps is an instantaneous gauge sampled every 30 s, which cannot answer what a site spent last month."
                 }
               }
             },
@@ -1097,7 +1241,10 @@
             "maxItems": 64
           },
           "description": "Per telemetry kind, the field names the fitted instrument cannot measure - `{\"weather\": [\"humidity_pct\"]}` for an Airmar without the RH module. Distinct from an unsourced *stream*: the sensor is present and working and simply does not produce that value, so the console strikes the reading through rather than showing the dashes it shows while waiting.",
-          "maxProperties": 32
+          "maxProperties": 32,
+          "propertyNames": {
+            "maxLength": 64
+          }
         },
         "storage": {
           "type": "object",
@@ -1112,7 +1259,7 @@
             "events_pending": {
               "type": "integer",
               "minimum": 0,
-              "description": "Recorded and not yet acknowledged by the platform - the backlog on `gsu/{station_id}/events`. Falls to zero as the platform acknowledges. Persistently non-zero on a station whose uplink is up is a delivery fault worth chasing.",
+              "description": "Recorded and not yet acknowledged by the platform - the events backlog. Falls to zero as the platform acknowledges. Persistently non-zero on a station whose uplink is up is a delivery fault worth chasing.",
               "maximum": 1000000000
             },
             "recordings": {
@@ -1124,6 +1271,12 @@
               "type": "number",
               "minimum": 0,
               "maximum": 1000000000
+            },
+            "events_dropped": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000000,
+              "description": "Events evicted from local storage before they could be delivered, cumulative and surviving a reboot. **This is what separates a real gap from a delivery fault**: `events_pending` high and rising is a backlog, this rising is history that no longer exists. A station that evicts and cannot say so leaves an operator reading a complete timeline that is not."
             }
           }
         }
