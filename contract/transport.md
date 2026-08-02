@@ -39,7 +39,7 @@ nothing should.
 | Organisation | Resolved from the platform's own registry. A station id that is unknown or deactivated is dropped and nothing reaches any subscriber |
 | Unknown `kind` | Dropped, as this contract promises, so a station may be newer than the platform |
 | Malformed JSON | Dropped |
-| Liveness | Derived from the fact that a station is publishing at all. **A station that stops publishing goes offline on its own** — there is no separate heartbeat to send |
+| Liveness | Derived from the fact that a station is publishing at all. **A station that stops publishing goes offline on its own** — there is no separate *application* heartbeat to send. The socket underneath still needs its own liveness check; see *Reconnect* |
 
 **Authentication.** A station must be enrolled and hold a valid credential
 before anything it publishes reaches a subscriber. Revoking one stops its data
@@ -264,15 +264,51 @@ wss://<platform>/broker            Authorization: Bearer <credential>
   socket stays up. A station silently dropping everything it publishes looks
   exactly like a station with nothing to say, and this is the fault most
   likely to be a misconfiguration.
+- **Match a downward frame on `type` before `stream`.** Both downward frames
+  carry a `stream` key and only the command carries `payload`, so a station
+  dispatching straight on `stream` hits a missing `payload` on the refusal —
+  and the refusal it is most likely to provoke is for publishing on `c`, which
+  arrives as `stream: "c"` and looks exactly like a command. The frame written
+  to explain a misconfiguration would instead crash the station that made it.
+  A frame with a `type` is a control frame; anything else is a command.
 - **Frames are capped at 512 KiB**, both directions, enforced by closing the
   socket (1009). A station that needs to send more than that is wrong about
-  something; telemetry is current state.
+  something; telemetry is current state. The cap is on the reassembled message,
+  not on one fragment.
+- **Both ends reassemble fragments, and neither may assume a message arrives
+  whole.** RFC 6455 permits splitting a message unconditionally and most
+  libraries do it on large ones without being asked, so this is not an exotic
+  case — it is the default behaviour of the thing on the other side. A receiver
+  that drops continuation frames loses whole messages silently and in one
+  direction only, which reads as an intermittent peer rather than a bug. A
+  control frame may arrive *between* fragments and must not disturb the message
+  being assembled.
 - **Close code 4401** means the credential was refused — at connect, or later,
   because it is re-checked on the open socket (see *Authentication*). A station
   attempts a renewal once, then reconnects on the schedule below; it does not
   give up, because 4401 covers both "revoked, and will never work again" and
   "expired while you were offline, and renewal will fix it", and a station that
   stopped on the first would need a site visit after a transient.
+- **At connect, that means completing the handshake and *then* closing 4401 —
+  never rejecting the upgrade with HTTP 401.** There is no socket to carry a
+  close code until the handshake finishes, so a platform that authenticates
+  before upgrading, which is what most libraries and every reverse proxy do by
+  default, leaves the station nothing to react to. The renewal above is the
+  whole recovery path for a box whose credential expired while it was offline;
+  drop the 4401 and that box reconnects on a five-minute backoff for ever and
+  never calls `/renew`. The seven-day grace in `enrolment.md` §4 exists to
+  avoid exactly that site visit, and this is the one frame that reaches it.
+- **A second socket on the same credential supersedes the first, and the
+  platform closes the older one.** This is not a hypothetical: the ping rule
+  below has a station reconnect the moment its link goes quiet, and the
+  platform cannot distinguish the socket that died from one that is merely
+  having a quiet minute — so for a while it holds both. Commands and
+  `events.ack` must go to exactly one of them. Send them to the older and the
+  station on the newer never sees its acknowledgement, re-sends the same batch
+  for ever, and the platform stores it again on every round. Refusing the new
+  socket instead is equally readable from "one authenticated socket" and is
+  worse: it strands a live station behind a zombie connection until something
+  times out.
 
 **Reconnect on exponential backoff with jitter**, from about a second to a
 five-minute ceiling. The jitter is not politeness: without it a platform
@@ -281,6 +317,20 @@ each beginning to drain an event backlog, which is a self-inflicted second
 outage. Stagger the first event batch after a reconnect by a random delay too —
 the data is already hours old and nothing is gained by every station in a
 region delivering at once.
+
+**Both ends send WebSocket pings, and both must answer one.** Ping after about
+twenty seconds with nothing sent or received; treat no pong within ten as a
+dead socket and reconnect on the backoff above. This is not the heartbeat the
+liveness row rules out — that one is about whether a *station* is alive, and it
+is still derived from publishing. This is about whether the *socket* is, and
+nothing else can tell you. A station on CGNAT whose NAT mapping is dropped goes
+on publishing into a hole indefinitely: nothing arrives downward on a healthy
+link either, because commands are unrequested and a quiet hour is normal, so
+without a ping there is no signal a station could possibly use. The platform
+has the same hole in the other direction — it marks the station offline within
+seconds and then keeps writing commands, including `events.ack`, into a socket
+nobody is reading. A platform closes a socket it has stopped hearing from on
+the same rule.
 
 **A receiver imposes a parse depth limit before validating anything.** JSON
 Schema cannot express nesting depth, so this is a rule rather than a
@@ -490,6 +540,8 @@ choose something reasonable and not match.
 | Wait for `events.ack` before re-sending | 30 s | station |
 | Event re-send backoff | 30 s doubling to a 15 min ceiling, jittered | station |
 | Reconnect backoff | ~1 s doubling to a 5 min ceiling, jittered | station |
+| WebSocket ping, after nothing sent or received for | 20 s | both ends |
+| Pong deadline, after which the socket is dead | 10 s | both ends |
 | Credential renewal begins | `credential.renew_after`, as issued | platform states it |
 | Credential overlap after renewal | 24 h | platform |
 | Revocation takes effect within | 30 s | platform |
@@ -522,6 +574,17 @@ not paying for abandoned streams.
 **A lease the platform states always wins, inside the clamp.** The defaults
 above are what a station uses when told nothing. They are not a ceiling and not
 a negotiation: a platform asking for 45 s gets 45 s.
+
+**A renewal replaces the remaining lease; it never extends it.** A repeat
+carrying 5 s leaves five seconds to run even if ninety were left, and this is
+the only way a platform can stop audio early — `radio.audio` has no stop
+command by design, so shortening the lease *is* the off switch when the last
+listener closes their console. A station that takes the maximum of the old and
+the new instead removes that lever entirely: audio keeps flowing to nobody for
+up to the full clamp on a metered link, and the platform sees a
+`lease_remaining_s` it never asked for with no way to tell an extension from a
+clamp. Both readings are defensible from the word "renewal", which is why the
+choice is written down here rather than left to be discovered.
 
 **The clamp is the station's, and it is not silent.** 5–300 s exists so a
 platform that has gone wrong cannot pin an unattended box's uplink open for a
@@ -581,8 +644,9 @@ So this channel alone is **acknowledged**:
    batch for ever. That loop also takes telemetry and commands down with it,
    because they share the socket. A batch that does not fit is split, never
    dropped.
-3. The platform stores the batch durably and replies on the command channel
-   with `events.ack {through_seq}`.
+3. The platform stores the batch durably — refusing any event it is required
+   to, which counts as dealt with rather than as a failure — and replies on the
+   command channel with `events.ack {through_seq}`.
 4. The station deletes up to that seq, and sends the next batch. It does not
    run ahead of the acknowledgement — one batch in flight at a time, so a
    station reconnecting after a week does not arrive as a flood.
@@ -595,6 +659,23 @@ there is exactly one ack a station can be expecting; anything else is a
 duplicate, a straggler from a previous connection, or from before a store
 rebuild. This is the rule that matters, and it needs no new field precisely
 because the one-batch-in-flight discipline already identifies the batch.
+
+**An acknowledgement covers the batch, not only the rows that survived it.**
+The platform acks the highest `seq` in the batch once it has durably stored
+every event in it that it accepted, and an event it refuses — a reserved
+`platform.` type, a payload that fails the schema — counts as dealt with. This
+is the one place where the obvious reading is the dangerous one. Read
+`through_seq` as "the highest I stored" and a batch whose *first* event is
+unstorable has no honest ack: the highest stored seq falls below the batch, the
+rule above tells the station to ignore it, and it re-sends the same batch for
+ever with every later event queued behind it. One malformed event would end
+that site's history permanently. Re-sending cannot help, because nothing about
+a second delivery makes a refused event acceptable — so refusal has to be
+terminal and the cursor has to move past it. **The platform records what it
+refused**, on its own side; the station has been told the batch is done and no
+longer holds it. If a station ever needs to know which rows died, that is an
+optional field on a later `events.ack` and a free minor — but it must never be
+the difference between a channel that drains and one that wedges.
 
 The clamp below is the weaker companion to it and is not sufficient alone:
 
@@ -625,10 +706,18 @@ and nothing else should be able to forge one.
 
 The schema carries a pattern and it is not the defence: it forbids exactly
 `platform.` and a station has a dozen ways past it that render identically to
-an operator — `Platform.`, a leading space, a Cyrillic а, a full-width stop.
-Normalise (NFKC, casefold, strip) and *then* reject the prefix, at the
-platform, on the way in. A schema pattern cannot do this and the party it
-constrains is the wrong one.
+an operator — `Platform.`, a leading space, a Cyrillic а, a full-width stop, a
+zero-width space. **Require `type` to be printable ASCII, reject it outright if
+it is not, and only then normalise (NFKC, casefold, strip) and compare.** The
+ASCII rule is doing the real work and the normalisation alone is not enough:
+NFKC maps a full-width `Ｐ` to `P` but leaves Cyrillic а exactly where it is,
+because the two are different letters and not two spellings of one — and
+`strip()` removes whitespace, which a zero-width space is not. Both of those
+were measured against this paragraph's own examples and both walked straight
+through. An event type is a machine vocabulary; nothing legitimate here needs a
+character outside ASCII, so refusing them costs nothing and closes the whole
+class rather than the instances anyone thought to enumerate. A schema pattern
+cannot do this and the party it constrains is the wrong one.
 
 **Local storage is finite and the contract does not pretend otherwise.** A
 station caps its event store, evicts oldest-first when it is full, counts what

@@ -405,6 +405,14 @@ the only remedy is the site visit the whole section exists to prevent. An
 expired-but-unrevoked credential authenticates for renewal and for nothing
 else — it cannot publish, and a revoked one is refused at any age.
 
+**A station learns it is in that window from close code 4401 on the relay**,
+which is the only signal it gets: a box with no battery-backed clock cannot
+evaluate its own expiry, and nothing else tells it. That is why the relay
+completes the WebSocket handshake before closing 4401 rather than refusing the
+upgrade with HTTP 401 — see `transport.md`, *The relay's wire format*. A
+platform that rejects the upgrade instead leaves this window unreachable and
+the site visit above happens anyway.
+
 ### `GET /api/enrol/status`
 
 Authenticated the same way. Thin by design — it is for a box confirming it is

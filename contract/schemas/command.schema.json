@@ -233,7 +233,7 @@
     },
     {
       "type": "object",
-      "description": "The platform has stored every event up to and including through_seq; the station may delete them. **The only acknowledgement in this contract**, and it exists because the events channel is the only one carrying facts that have no newer version - everything else is current state and may be dropped. Sent after each batch is durably stored, never on receipt: acknowledging what is still in memory is how a crash silently loses a site's history. A lost ack costs a re-send, which is why events carry a stable id to deduplicate on.",
+      "description": "The platform is finished with every event up to and including through_seq - each one either durably stored or refused as permanently unstorable - so the station may delete them and must not re-send. **The only acknowledgement in this contract**, and it exists because the events channel is the only one carrying facts that have no newer version - everything else is current state and may be dropped. Sent after each batch is durably stored, never on receipt: acknowledging what is still in memory is how a crash silently loses a site's history. A lost ack costs a re-send, which is why events carry a stable id to deduplicate on.",
       "properties": {
         "kind": {
           "const": "events.ack"
@@ -241,7 +241,7 @@
         "through_seq": {
           "type": "integer",
           "minimum": 0,
-          "description": "The highest seq durably stored. The station may delete everything up to and including this and must not re-send it.",
+          "description": "The highest seq in the batch being acknowledged. The station may delete everything up to and including this and must not re-send it. Read this as 'the batch is dealt with', not as 'the highest row I stored' - a batch whose first event the platform is required to refuse (a reserved `platform.` type, a payload failing this schema) would otherwise have no expressible ack, and the station would re-send it for ever with every later event stuck behind it. A refused event is terminal: re-sending never makes it acceptable, so the cursor moves past it and the platform records the refusal on its own side. See transport.md, Store and forward.",
           "maximum": 9007199254740991
         }
       },
