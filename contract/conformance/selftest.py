@@ -165,6 +165,12 @@ CASES = [
      "radio. Latching on it skipped every radio command and both audio gates "
      "while still exiting 0; this station also withholds a report, so a "
      "harness that skips the radio certifies it"),
+    ("quiet-band", "INCONCLUSIVE",
+     "a station whose squelch never opens: correct behaviour on a quiet "
+     "channel, and no evidence at all about the squelch gate or the audio "
+     "lease. Found by running the real agent against this harness — three "
+     "runs reported no audio and exited 0, against a station that was "
+     "publishing it perfectly well on a longer window"),
     ("honest-empty", "INCONCLUSIVE",
      "a station with no hardware at all: nothing wrong, nothing tested, and "
      "not a pass"),

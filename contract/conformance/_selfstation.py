@@ -144,7 +144,7 @@ def main():
                          "nan | all-unavailable | bad-stream-type | fragmented "
                          "| fragmented-ping | slow-weather | lying-cadence | "
                          "honest-empty | disconnect | transient-unavailable | "
-                         "fixed-squelch | oversize | no-pong")
+                         "fixed-squelch | oversize | no-pong | quiet-band")
     args = ap.parse_args()
 
     c = Client(args.host, args.port, pong=(args.break_ != "no-pong"))
@@ -193,7 +193,13 @@ def main():
                     st["quit_at"] = time.time() + 2.0
 
         # a transmission every 6s, 2s long
-        st["squelch_open"] = (t % 6.0) < 2.0 or st["monitor"]
+        # `quiet-band` never opens the gate. Not a fault — airband is silent
+        # most of the time and a station with nothing to send is behaving
+        # correctly — which is exactly why the harness must return
+        # INCONCLUSIVE rather than certify a run that proved nothing about
+        # the two most expensive rules in the contract.
+        quiet = args.break_ == "quiet-band"
+        st["squelch_open"] = (not quiet) and ((t % 6.0) < 2.0 or st["monitor"])
         leased = time.time() < st["audio_until"]
 
         radio = {"kind": "radio", "freq_hz": st["freq_hz"], "rssi_db": -60.0,

@@ -136,6 +136,22 @@ skipped_streams: list[str] = []
 #: in the same report that said it had been left mistuned.
 disconnected: list[str] = []
 
+#: Rules this run could not put to the test, as opposed to rules it watched
+#: pass. Today that is the two audio rules, and they are the ones that matter:
+#: the squelch gate and the lease are the most expensive things in the
+#: contract, and the lease is what the reference implementation once shipped
+#: wrong.
+#:
+#: They cannot simply be failed. Airband is silent most of the time and a quiet
+#: channel is the normal case, so a station that sent no audio has done nothing
+#: wrong — which is exactly why this needs its own verdict rather than a pass
+#: or a failure. A run that never heard a transmission proves nothing about
+#: gating, and saying "this station satisfies the contract" on that evidence is
+#: a certificate nobody earned. Found by running the real agent against this
+#: harness: three runs in a row reported no audio and exited 0, against a
+#: station that was publishing it perfectly well on a longer window.
+unexercised: list[str] = []
+
 
 def check(label: str, ok: bool, detail: str = "") -> None:
     print(f"  {'PASS' if ok else 'FAIL'}  {label}{'' if ok else f'  ({detail})'}")
@@ -928,9 +944,11 @@ def main() -> int:
         elif not by_kind.get("radio"):
             check("audio only while squelch is open", False, "no radio telemetry")
         elif not by_kind.get("audio"):
-            check("audio only while squelch is open", True)
-            notes.append("no audio in the window, so gating was not exercised; "
-                         "run again on a busy channel to test it")
+            # Not a pass. Nothing was gated because nothing was sent.
+            unexercised.append("audio gating")
+            skip("audio only while squelch is open",
+                 "no audio in the window; raise --listen-for, or run on a "
+                 "busier channel")
         else:
             def open_at(index: int, step: int) -> bool | None:
                 i = index + step
@@ -975,7 +993,8 @@ def main() -> int:
         if "radio" in unavailable_kinds:
             notes.append("radio unavailable, so the audio lease was not tested")
         elif not by_kind.get("audio"):
-            notes.append("no audio seen at all, so lease expiry was not tested")
+            unexercised.append("the audio lease")
+            skip("audio stops when the lease lapses", "no audio seen at all")
         else:
             relay.send_command({"kind": "radio.audio", "on": True, "lease_seconds": 5})
             collect(relay, 9.0)                      # let it lapse, unrenewed
@@ -1020,6 +1039,17 @@ def main() -> int:
             "those streams were not tested — and the cadence is a number the\n"
             "station itself supplies, so this is not evidence of anything.\n"
             "Re-run with --listen-for long enough to see them."
+        )
+        return 2
+    if unexercised:
+        print(
+            f"INCONCLUSIVE: {', '.join(unexercised)} could not be tested — no\n"
+            "audio arrived in this run. Nothing here is wrong: airband is quiet\n"
+            "most of the time and a station with nothing to send is behaving\n"
+            "correctly. But the squelch gate and the lease are the two most\n"
+            "expensive rules in this contract, and a run that never heard a\n"
+            "transmission has proved nothing about either.\n"
+            "Raise --listen-for, or run against a busier channel."
         )
         return 2
     if disconnected:
