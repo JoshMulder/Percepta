@@ -1,23 +1,66 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://percepta/contract/audio.schema.json",
+  "$id": "https://percepta/contract/v1/audio.schema.json",
+  "contractVersion": "1.0",
   "title": "Ground station audio",
-  "description": "One object per message on gsu/{station_id}/audio. Published ONLY while the squelch is open - a station that streams continuously is the single most expensive thing on a metered link. See contract/transport.md.",
+  "description": "One object per message on gsu/{station_id}/audio.\n\nOpus, because this is the platform's largest single consumer and the link is metered. Uncompressed 24 kHz 16-bit mono is 384 kbit/s, and base64 inside a JSON envelope made it ~512; Opus at 16-24 kbit/s is transparent for voice and reaches the same console for a twentieth of the bandwidth. That saving is the whole reason this stream is shaped the way it is, and it is why the format is fixed here rather than left to a station.\n\nPublished ONLY when both gates are open: the squelch is open, AND the platform has asked within a live `radio.audio` lease. A station nobody has asked sends nothing at all. See contract/transport.md.",
   "type": "object",
+  "required": [
+    "kind",
+    "codec",
+    "rate",
+    "channels",
+    "frame_ms",
+    "packets"
+  ],
   "properties": {
-    "kind": { "const": "audio" },
-    "rate": {
-      "type": "integer",
-      "minimum": 8000,
-      "maximum": 48000,
-      "description": "Sample rate in Hz. 24000 today; the console resamples to whatever the browser grants. Bounded because a consumer resampling by ctx.sampleRate/rate turns a small number into a very large allocation and a zero into a division by zero - the range is wide enough for any real airband receiver and narrow enough that the arithmetic downstream stays finite."
+    "kind": {
+      "const": "audio"
     },
-    "pcm": {
-      "type": "string",
-      "contentEncoding": "base64",
-      "maxLength": 262144,
-      "description": "Mono signed 16-bit little-endian PCM. Wasteful and known to be so - expect this to become binary frames with Opus, so keep the encoding behind one function. Bounded well above the ~8 kB a frame actually carries: audio is a stream of short chunks, not a file."
+    "codec": {
+      "enum": [
+        "opus"
+      ],
+      "description": "Always `opus` in this version. The field exists so a future codec is an additive change rather than a break: a consumer branches on it instead of assuming, and a station that only knows one value still says which."
+    },
+    "rate": {
+      "enum": [
+        8000,
+        12000,
+        16000,
+        24000,
+        48000
+      ],
+      "description": "Sample rate in Hz that the packets decode to. Opus works internally at 48 kHz and resamples, so this is what the decoder should be configured for, not a property of the encoder. 24000 suits airband voice; the console resamples to whatever the browser grants. Enumerated rather than ranged because Opus supports exactly these five."
+    },
+    "channels": {
+      "const": 1,
+      "description": "Mono. Airband is one channel of one receiver, and stereo would double the cost of the stream this schema exists to make cheap."
+    },
+    "frame_ms": {
+      "enum": [
+        10,
+        20,
+        40,
+        60
+      ],
+      "description": "Duration each packet decodes to. Uniform across a message, so a consumer can size its buffer from packet count without inspecting them. 20 is the usual choice for voice: shorter costs proportionally more header, longer costs latency and loses more audio per dropped packet."
+    },
+    "packets": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 100,
+      "items": {
+        "type": "string",
+        "contentEncoding": "base64",
+        "maxLength": 2048
+      },
+      "description": "Whole Opus packets, in order, each base64 of one packet. Raw packets, NOT Ogg- or WebM-encapsulated: a browser decodes these directly with WebCodecs, and a container here would have to be stripped by whoever consumes them.\n\nAn array rather than one concatenated blob because Opus packets are variable length and self-delimiting only inside a container - carrying them as separate strings means no length prefixes to agree on and no framing to get wrong. Base64 costs a third; against a 20x codec saving that is a trade worth making to keep the envelope JSON, and the alternative is binary frames on the relay, which is a transport change rather than a schema one.\n\nBatch enough packets to be worth a message and few enough to stay inside the latency budget - around 8 packets of 20 ms is a reasonable chunk."
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Message counter, increasing by one, wrapping at 2^32. Optional, and the reason to send it: this transport is explicitly droppable, so a console that receives seq 41 after seq 39 knows a chunk was lost and can conceal the gap rather than playing the next audio as though it were continuous. Without it, loss is inaudible to the consumer and sounds like a glitch to the listener. Resets when a station restarts."
     }
-  },
-  "required": ["kind", "rate", "pcm"]
+  }
 }

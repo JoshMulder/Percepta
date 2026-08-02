@@ -10,6 +10,7 @@ talks to a browser (`server/docs/00-topology.md`, rule 8).
 |---|---|---|
 | station → platform | `gsu/{station_id}/telemetry` | one telemetry object, JSON |
 | station → platform | `gsu/{station_id}/audio` | one audio object, JSON |
+| station → platform | `gsu/{station_id}/events` | one batch of events, JSON |
 | platform → station | `cmd/gsu/{station_id}` | one command object, JSON |
 
 `{station_id}` is the UUID the platform issued at enrolment. A station publishes
@@ -300,33 +301,86 @@ Three things follow, none of which needs a schema change:
    the contract should not price two streams and stay quiet about the biggest.
 
 **Audio is the platform's largest single consumer while it is flowing** and the
-one place where being careless is expensive. Uncompressed it is ~384 kbit/s, and base64 inside
-a JSON envelope makes it ~512. Three things keep it manageable, and the third
-is not done:
+one place where being careless is expensive. Three things keep it manageable,
+and all three are required:
 
 1. **Send only while the gate is open.** Airband is silent most of the time, so
-   this alone is most of the saving. Required.
-2. **Send only while somebody is listening.** Required. The platform sends
-   `radio.audio` with a `lease_seconds`, renews it while a console holds the
-   subscription, and **stops saying anything at all** when the last one goes.
-   The lease expires on its own, so audio stops when the platform goes away
-   rather than when it remembers to say so — the same shape as `video.start`,
-   and for the same reason: most listeners never say goodbye. A closed laptop,
-   a dropped link, a revoked session and a shut tab all look identical to
-   somebody still listening, right up until the lease runs out.
+   this alone is most of the saving.
+2. **Send only while somebody is listening.** The platform sends `radio.audio`
+   with a `lease_seconds`, renews it while a console holds the subscription,
+   and **stops saying anything at all** when the last one goes. The lease
+   expires on its own, so audio stops when the platform goes away rather than
+   when it remembers to say so — the same shape as `video.start`, and for the
+   same reason: most listeners never say goodbye. A closed laptop, a dropped
+   link, a revoked session and a shut tab all look identical to somebody still
+   listening, right up until the lease runs out.
 
    A station that has never been asked sends no audio. **Recording is not
    gated by this** — a transmission nobody had a console open for is still
    written to disk, exactly as one during an outage is.
-3. **Compress it.** Opus at 16–24 kbit/s is transparent for voice and would cut
-   the rest by more than an order of magnitude. The current format is
-   base64-encoded PCM inside JSON, which is convenient and wasteful; expect this
-   to change, and keep the encoding behind one function.
+3. **Opus, at 16–24 kbit/s.** Uncompressed 24 kHz 16-bit mono is 384 kbit/s and
+   base64 in a JSON envelope made it ~512; Opus is transparent for voice at a
+   twentieth of that. Whole packets travel base64'd in an array —
+   `schemas/audio.schema.json` — which keeps the envelope JSON like everything
+   else on this transport and still gets the order of magnitude. Binary frames
+   would save the remaining third and are a transport change rather than a
+   schema one, so they are not in this version.
+
+   **This is a change from the format that shipped first**, which was base64
+   PCM. It was replaced before this contract was fixed rather than after,
+   because the alternative was freezing the most expensive payload on the link
+   in the shape everybody already knew was wrong, and paying for a breaking
+   change later to fix it.
 
 ## Store and forward
 
 A station must keep working with no link at all: continue sensing, recording and
-locally alerting, and reconcile when the link returns. What it buffers and for
-how long is the station's business, but note that replaying a backlog of stale
-telemetry into a live console is worse than dropping it — the console shows
-*current* state. Buffer events and recordings; drop stale telemetry.
+locally alerting, and reconcile when the link returns. **Buffer events and
+recordings; drop stale telemetry.** Replaying an hour of old readings into a
+live console is worse than a gap, because the console shows *current* state and
+has no way to tell it is being shown the past.
+
+That split is why there are two upward channels with opposite rules, and it is
+the one place in this contract where "may be dropped" does not apply.
+
+### Events, which are the exception to everything above
+
+`gsu/{station_id}/events` carries things that happened —
+`schemas/events.schema.json`. A telemetry frame has a newer version a second
+later; an event does not. A transmission at 03:12, a proximity alert, a
+floodlight drawing no current: lose the message and the fact is gone.
+
+So this channel alone is **acknowledged**:
+
+1. The station records events to local storage that survives a reboot, each
+   with a stable `id` and a monotonic `seq`.
+2. It publishes them oldest first, **at most 100 per message**.
+3. The platform stores the batch durably and replies on the command channel
+   with `events.ack {through_seq}`.
+4. The station deletes up to that seq, and sends the next batch. It does not
+   run ahead of the acknowledgement — one batch in flight at a time, so a
+   station reconnecting after a week does not arrive as a flood.
+5. Anything unacknowledged is re-sent, with backoff, for ever.
+
+**Delivery is at-least-once and never exactly-once.** An acknowledgement can be
+lost after the platform has stored the batch, and the station will then send it
+again; that is correct behaviour, not a fault. **Consumers deduplicate on `id`**
+— which is why `id` is a UUID rather than a counter, and why it is separate from
+`seq`. A station whose local store is rebuilt starts `seq` again from zero, and
+a platform that had deduplicated on a counter would silently discard real events
+from a station it recognised.
+
+**A timestamp from an unsynchronised clock is marked as one.** Events carry
+`clock: "synced" | "unsynced"`, because a box with no battery-backed clock that
+has not reached a time source produces times that are internally consistent and
+absolutely wrong. An event log that cannot say so is worse than one with gaps:
+somebody will read those times as fact (enrolment.md §6).
+
+**The platform must not raise stale events as live alerts.** A batch arriving
+after an outage is history, and `at` says when it happened. Waking an operator
+at nine in the morning for a proximity alert from three in the morning is how a
+station's backlog becomes a reason to turn alerting off.
+
+`health.storage.events_pending` is the backlog, and is the number to watch: it
+rising during an outage is the system working, and it staying high while the
+uplink is up is a delivery fault.

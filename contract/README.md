@@ -25,7 +25,8 @@ compile, that is the moment to stop and raise it.
 | `enrolment.md` | How a box becomes a station, and everything it is told afterwards |
 | `transport.md` | Channels, identity, direction, delivery expectations |
 | `schemas/telemetry.schema.json` | Every telemetry payload a station may publish |
-| `schemas/audio.schema.json` | The audio frames a station publishes while the squelch is open |
+| `schemas/audio.schema.json` | The Opus audio a station publishes while asked, and gated |
+| `schemas/events.schema.json` | Things that happened, buffered through an outage and acknowledged |
 | `schemas/command.schema.json` | Every command a station must accept |
 | `conformance/check_station.py` | Runs against a live station and reports what it got wrong |
 
@@ -88,13 +89,37 @@ stale-high gets treated as noise, the floor drifts up toward it, and the squelch
 latches shut permanently. That is the regression to test, and the simulator
 cannot exercise it because it is *told* the floor rather than measuring it.
 
+## Version
+
+**This is contract 1.0.** It is stamped in each schema's `$id` and
+`contractVersion`, the platform states it at enrolment, and a station declares
+what it speaks in `health.contract_version`.
+
+**Declared, never negotiated.** The platform records what a station says, logs a
+mismatch, and carries on. Nothing is refused over a version string: these are
+unattended boxes on hillsides, and turning a compatibility note into a refusal
+turns it into a site visit. The field exists so the first question of any remote
+debugging session — *which contract is that box on* — has an answer, which it
+did not before. `config_version` is site policy and `agent_version` is a build
+string; neither is this.
+
+- **Minor** (1.0 → 1.1) — additive. A new optional field, a new telemetry kind,
+  a new command, a new event type. Both sides already tolerate what they do not
+  recognise, so old and new interoperate in both directions and no coordination
+  is needed.
+- **Major** (1.x → 2.0) — something changed meaning, changed shape, or went
+  away. Both sides need looking at, and the two versions are not assumed to
+  interoperate.
+
+Design for minor. A major bump on a fleet that is hard to reach physically is
+the most expensive thing in this document.
+
 ## Changing the contract
 
 1. Raise it with the other side before writing code against the change.
-2. Update the schema and `transport.md` in the same commit.
-3. Additive changes (a new optional field, a new telemetry kind) are cheap —
-   consumers ignore what they do not know. Renames and removals are not; treat
-   them as breaking and stage them.
+2. Update the schema, the prose and the version in the same commit.
+3. Additive changes are cheap — consumers ignore what they do not know. Renames
+   and removals are not; treat them as breaking and stage them.
 4. Run `conformance/check_station.py` on both sides afterwards.
 
 ## Wider context

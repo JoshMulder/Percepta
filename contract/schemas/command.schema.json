@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://percepta/contract/command.schema.json",
+  "$id": "https://percepta/contract/v1/command.schema.json",
+  "contractVersion": "1.0",
   "title": "Platform command to a ground station",
   "description": "One object per message on cmd/gsu/{station_id}. A command is a request, never a guarantee: the platform confirms nothing itself and waits to see the effect in the station's own telemetry. Every command below therefore has a field in a telemetry payload that reports its result - if you add a command, add that field too. Unknown commands must be ignored, not rejected: an older station and a newer platform have to coexist.\n\nThe leased commands (radio.audio, video.start) share one shape: the platform repeats the command while the demand exists, a repeat is a renewal rather than a second start, and the lease expiring is the stop signal. Silence has to be the off switch because most consumers never say goodbye - a closed laptop, a dropped link, a crashed platform - and every one of those must stop a station transmitting to nobody on a metered link.",
   "type": "object",
@@ -99,6 +100,15 @@
         "config": { "type": "object", "description": "The settings to merge. Keys the station does not know are ignored, not rejected: a newer platform must be able to talk to an older station." }
       },
       "required": ["kind"]
+    },
+    {
+      "type": "object",
+      "description": "The platform has stored every event up to and including through_seq; the station may delete them. **The only acknowledgement in this contract**, and it exists because the events channel is the only one carrying facts that have no newer version - everything else is current state and may be dropped. Sent after each batch is durably stored, never on receipt: acknowledging what is still in memory is how a crash silently loses a site's history. A lost ack costs a re-send, which is why events carry a stable id to deduplicate on.",
+      "properties": {
+        "kind": { "const": "events.ack" },
+        "through_seq": { "type": "integer", "minimum": 0, "description": "The highest seq durably stored. The station may delete everything up to and including this and must not re-send it." }
+      },
+      "required": ["kind", "through_seq"]
     },
     {
       "type": "object",

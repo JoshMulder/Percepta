@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://percepta/contract/telemetry.schema.json",
+  "$id": "https://percepta/contract/v1/telemetry.schema.json",
+  "contractVersion": "1.0",
   "title": "Ground station telemetry",
   "description": "One object per message on gsu/{station_id}/telemetry. Discriminated by `kind`. Unknown fields are ignored by the platform, and unknown kinds are dropped rather than erroring - so a new sensor can be added station-side before the platform renders it.\n\nEvery stream shares the availability fields in $defs/availability: a payload may carry `available: false` to declare that the station has no source for that stream, and its usual fields are then not required, because there is nothing to put in them.",
   "type": "object",
@@ -547,6 +548,11 @@
         "kind": {
           "const": "health"
         },
+        "contract_version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+$",
+          "description": "Which version of this contract the station speaks, `major.minor`. **Declared, not negotiated**: the platform records it, logs a mismatch, and carries on - a station is never refused for it, because refusing a box on a hillside over a version string turns a compatibility note into a site visit.\n\nA major bump means something changed meaning or went away, and the two sides need looking at. A minor bump means fields or kinds were added, which both sides already tolerate by design. Absent means a station older than this field, which is the same as 1.0.\n\nIt exists because the first question of every remote debugging session is which contract that box is on, and until this field there was no way to answer it: config_version is site policy and agent_version is a build string."
+        },
         "status": {
           "type": "string",
           "enum": [
@@ -663,23 +669,183 @@
         },
         "video": {
           "type": "object",
-          "description": "The live stream and the sensor behind it: which encoder was probed, who currently holds the camera, and the stream state that `video.start` / `video.stop` report their effect through (`health.video.stream`). Loosely specified on purpose - the station owns the detail, and a console reads what it recognises. This is where a console learns a station's camera state; there is no video telemetry channel (transport.md)."
+          "description": "The camera and the live stream. **This is where a console learns a station's camera state** - there is no video telemetry channel (transport.md) - and it is where `video.start` and `video.stop` report their effect, so unlike the diagnostics below it is specified rather than free-form. A consumer may depend on everything named here.",
+          "required": [
+            "stream"
+          ],
+          "properties": {
+            "stream": {
+              "type": "object",
+              "description": "The live stream, and the reported effect of `video.start` / `video.stop`. A `video.start` that silently did nothing must be visible here: a station with no camera answers `state: \"unavailable\"` with a reason rather than going quiet, because quiet is what a wedged encoder looks like.",
+              "required": [
+                "state"
+              ],
+              "properties": {
+                "state": {
+                  "enum": [
+                    "idle",
+                    "starting",
+                    "streaming",
+                    "unavailable"
+                  ],
+                  "description": "`idle` - a camera is fitted and nobody has asked. `streaming` - sending now. `unavailable` - it cannot stream, and `reason` says why. The distinction that matters is idle against unavailable: one is a working station nobody is watching, the other needs somebody."
+                },
+                "reason": {
+                  "type": "string",
+                  "maxLength": 200,
+                  "description": "Why it is not streaming, when it is not. For an operator."
+                },
+                "viewers": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "How many the platform has told it about, through repeated `video.start`."
+                },
+                "since": {
+                  "type": ["string", "null"],
+                  "description": "When the current stream started, ISO 8601. Null when not streaming."
+                },
+                "lease_remaining_s": {
+                  "type": "number",
+                  "minimum": 0,
+                  "description": "Seconds before this stream stops on its own unless renewed. Zero when not streaming. A console watching this fall and not reset is watching the platform fail to renew."
+                },
+                "codec": {
+                  "type": ["string", "null"],
+                  "description": "The codec string sent on the media socket, derived from the bitstream: `avc1.PPCCLL` or `hvc1.P.C.TLL.CC`. Reported so a console can tell before playing whether this browser can decode it."
+                },
+                "frames": {"type": "integer", "minimum": 0},
+                "dropped": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Fragments discarded because the link could not carry them. Rising is a bandwidth problem, not a camera fault - the station drops rather than queues, per transport.md."
+                },
+                "bitrate_bps": {"type": "integer", "minimum": 0},
+                "fps_measured": {
+                  "type": "number",
+                  "minimum": 0,
+                  "description": "What the encoder actually achieved, which is not always what was asked for. The gap between this and the requested rate is the difference between a hardware and a software encoder, and it is information rather than a fault."
+                }
+              }
+            },
+            "camera": {
+              "type": "object",
+              "description": "The sensor and how it is being read.",
+              "properties": {
+                "fitted": {"type": "boolean"},
+                "backend": {
+                  "type": ["string", "null"],
+                  "description": "Which capture path is in use. Named rather than inferred because a slow path and broken hardware look identical from a console, and the difference is a packaging problem somebody can fix."
+                },
+                "backend_reason": {
+                  "type": ["string", "null"],
+                  "description": "Why that path and not a better one. This is the field that saves an SSH session."
+                },
+                "encoder": {
+                  "type": ["string", "null"],
+                  "description": "Hardware block or software, probed at start-up rather than assumed, so moving between boards is a setting and not a rewrite."
+                }
+              }
+            },
+            "sensor": {
+              "type": "object",
+              "description": "Who holds the camera right now. One sensor, one owner: a camera that is *busy* and a camera that is *broken* looked identical from the platform for the whole life of a bug that survived four fixes, and this is the field that separates them.",
+              "properties": {
+                "holder": {
+                  "type": ["string", "null"],
+                  "description": "The named holder, or null when nobody has it."
+                },
+                "held_for_s": {"type": "number", "minimum": 0},
+                "grants": {"type": "integer", "minimum": 0},
+                "refusals": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "How often somebody asked and was refused. Climbing means two things want one camera."
+                }
+              }
+            },
+            "snapshots": {
+              "const": false,
+              "description": "Always false. The periodic snapshot channel was removed - two readers of one sensor was the camera wedge - and this says so out loud rather than leaving a console to infer it from a bitrate of zero, which is also what a broken camera looks like."
+            }
+          }
         },
         "resources": {
           "type": "array",
           "maxItems": 64,
           "items": {
-            "type": "object"
+            "type": "object",
+            "required": ["id", "kind"],
+            "properties": {
+              "id": {
+                "type": "string",
+                "maxLength": 100,
+                "description": "Stable identity for this piece of hardware. Keyed on serial, never on enumeration order: two identical dongles swap indices between boots, and a slot bound to an index reads the other one's traffic."
+              },
+              "kind": {
+                "type": "string",
+                "maxLength": 40,
+                "description": "What sort of thing it is - `rtlsdr`, `serial`."
+              },
+              "serial": {"type": "string", "maxLength": 100},
+              "model": {"type": "string", "maxLength": 100},
+              "detail": {"type": "string", "maxLength": 200}
+            }
           },
-          "description": "Shared hardware the station's slots draw on - SDR tuners by serial, and which slot holds each. Reported so a console can explain 'two receivers configured, one dongle fitted' as a shortage rather than showing two faults."
+          "description": "Physical hardware the station's device slots draw on, found rather than configured. Reported so a console can say 'two receivers configured, one dongle fitted' as a single shortage instead of showing two unrelated faults - which is what a slot-by-slot view does when several slots want one contended device."
         },
         "security": {
           "type": "object",
-          "description": "Which link protections are active - TLS to the broker and the API, and what each is verified against. Reported so a misconfigured trust root is visible from a console rather than only from a shell on the box."
+          "description": "Which link protections are actually active. Reported because \"is that station's traffic encrypted, and against which root\" should not require a shell on the box or a packet capture, and because the answer being *no* is exactly the case nobody would think to check.\n\n**No secret ever appears here.** `broker_url` is redacted of any credential before it travels.",
+          "properties": {
+            "broker_url": {
+              "type": ["string", "null"],
+              "description": "Where this station publishes, with any credential redacted."
+            },
+            "broker_tls": {
+              "type": ["boolean", "null"],
+              "description": "Whether the broker connection is encrypted. False on a station that should be publishing is a fault worth acting on immediately."
+            },
+            "platform_tls": {"type": ["boolean", "null"]},
+            "publishing": {
+              "type": "boolean",
+              "description": "Whether the uplink is up at all. A station can be sensing, recording and alerting locally while this is false - it is cut off, not broken."
+            },
+            "tls_failed": {
+              "type": "boolean",
+              "description": "The station refused to connect because verification failed. It does not fall back, so this is a station that is deliberately silent rather than one that quietly downgraded."
+            },
+            "trust": {
+              "$ref": "#/$defs/trust",
+              "description": "The broker's root. Always pinned unless the platform said otherwise."
+            },
+            "api_trust": {
+              "$ref": "#/$defs/trust",
+              "description": "The platform API's root, which is a separate question - normally the system store, because the API is expected behind a public certificate."
+            }
+          }
         },
         "clock": {
           "type": "object",
-          "description": "What is disciplining this station's clock, and whether the station believes it is plausible. A remote site with a wrong clock cannot authenticate or renew (enrolment.md section 6), so this is the early warning."
+          "description": "What is keeping this station's clock. A remote site with a wrong clock cannot authenticate and, if its credential has expired, cannot renew either - that is the failure that costs a site visit (enrolment.md section 6), so this is the early warning for it and not a curiosity.",
+          "properties": {
+            "synchronised": {
+              "type": ["boolean", "null"],
+              "description": "Whether the time source considers itself locked. Null means the station could not tell, which is not the same as no - and both are worth showing differently from yes."
+            },
+            "source": {
+              "type": "string",
+              "description": "What is disciplining it: `ntp`, `gps`, `rtc-only`, `none`, `unknown`. `rtc-only` is a box holding time across a reboot with nothing correcting drift; `none` is a box whose clock is whatever it was when it booted."
+            },
+            "detail": {
+              "type": "string",
+              "maxLength": 500,
+              "description": "One line for a person."
+            },
+            "rtc": {
+              "type": "boolean",
+              "description": "Whether a battery-backed clock is fitted. On hardware without one this is the difference between a reboot losing minutes and losing the date entirely."
+            }
+          }
         },
         "unsourced_streams": {
           "type": "array",
@@ -690,11 +856,30 @@
         },
         "unsourced_fields": {
           "type": "object",
-          "description": "Per-kind, the fields the fitted instrument cannot measure - humidity on an Airmar without the RH module. Distinct from an unsourced stream: the sensor is present and simply does not report that value."
+          "additionalProperties": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": 64
+          },
+          "description": "Per telemetry kind, the field names the fitted instrument cannot measure - `{\"weather\": [\"humidity_pct\"]}` for an Airmar without the RH module. Distinct from an unsourced *stream*: the sensor is present and working and simply does not produce that value, so the console strikes the reading through rather than showing the dashes it shows while waiting."
         },
         "storage": {
           "type": "object",
-          "description": "Local retention. `events_pending` is what the station is holding for a channel that does not exist yet - see transport.md."
+          "description": "What the station is holding locally. It keeps recording and recording through an outage, so these numbers rising while `uplink.connected` is false is the system working, not failing.",
+          "properties": {
+            "events": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Events on local storage."
+            },
+            "events_pending": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Recorded and not yet acknowledged by the platform - the backlog on `gsu/{station_id}/events`. Falls to zero as the platform acknowledges. Persistently non-zero on a station whose uplink is up is a delivery fault worth chasing."
+            },
+            "recordings": {"type": "integer", "minimum": 0},
+            "recordings_mb": {"type": "number", "minimum": 0}
+          }
         }
       },
       "allOf": [
@@ -702,6 +887,29 @@
           "$ref": "#/$defs/availability"
         }
       ]
+    },
+    "trust": {
+      "type": "object",
+      "description": "How one connection is verified. There are two of these and they are reported separately, because 'which CA is this box trusting' has two answers and merging them is what produced a station pinning the broker's private CA against an API behind a public certificate.",
+      "properties": {
+        "mode": {
+          "enum": ["pinned", "system"],
+          "description": "`pinned` - this CA and no other issuer, which is stronger than public PKI rather than weaker. `system` - the OS trust store, correct when the far end is behind a publicly trusted certificate."
+        },
+        "source": {
+          "type": "string",
+          "maxLength": 100,
+          "description": "Where the root came from: the enrolment response, a pre-provisioned file, or the system store. A station that cannot say where its trust came from cannot be audited."
+        },
+        "fingerprint": {
+          "type": ["string", "null"],
+          "description": "SHA-256 of the pinned certificate, so a person can compare what the box trusts against what was issued without extracting anything from it. Null when the mode is `system`."
+        },
+        "require_tls": {
+          "type": "boolean",
+          "description": "Whether this station refuses plaintext outright."
+        }
+      }
     },
     "device": {
       "type": "object",

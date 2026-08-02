@@ -48,11 +48,16 @@ MIN_WAIT = 8.0
 #: A station reporting a very slow weather period would otherwise stall the run.
 MAX_WAIT = 45.0
 
-#: Kinds the contract defines but does not require a station to send. Validated
-#: when present - a station that reports health must report it correctly - and
-#: never demanded, because a station is not less conformant for staying quiet
-#: about itself.
-OPTIONAL_KINDS = {"health"}
+#: Kinds the contract defines but does not require a station to send in a short
+#: window. Validated when present - a station that reports these must report
+#: them correctly - and never demanded. `health` because a station is not less
+#: conformant for staying quiet about itself; `events` because a station with
+#: nothing to report has nothing to send, and manufacturing an event to be
+#: observed is not something a harness can ask for.
+OPTIONAL_KINDS = {"health", "events"}
+
+#: What this harness checks against.
+CONTRACT_VERSION = "1.0"
 
 #: How long a command has to be reflected in telemetry.
 COMMAND_TIMEOUT = 8.0
@@ -230,9 +235,14 @@ def main() -> int:
     r = redis.Redis.from_url(args.redis, **kwargs)
     telemetry_schema = load("telemetry.schema.json")
     audio_schema = load("audio.schema.json")
+    events_schema = load("events.schema.json")
 
     sub = r.pubsub()
-    sub.subscribe(f"gsu/{args.station}/telemetry", f"gsu/{args.station}/audio")
+    sub.subscribe(
+        f"gsu/{args.station}/telemetry",
+        f"gsu/{args.station}/audio",
+        f"gsu/{args.station}/events",
+    )
     cmd_channel = f"cmd/gsu/{args.station}"
 
     print(f"\nListening to station {args.station}\n")
@@ -253,6 +263,24 @@ def main() -> int:
     by_kind: dict[str, list[dict]] = {}
     for payload in seen:
         by_kind.setdefault(str(payload.get("kind")), []).append(payload)
+
+    # What the station says it speaks. Reported, never failed on: the contract
+    # is explicit that a version is declared rather than negotiated, and a
+    # harness that refused an older box would be the refusal the contract
+    # deliberately does not make.
+    spoken = next(
+        (f.get("contract_version") for f in by_kind.get("health", [])
+         if f.get("contract_version")), None)
+    if spoken is None:
+        notes.append(
+            f"station declares no contract_version; this harness checks "
+            f"{CONTRACT_VERSION}"
+        )
+    elif spoken != CONTRACT_VERSION:
+        notes.append(
+            f"station speaks contract {spoken}, this harness checks "
+            f"{CONTRACT_VERSION}"
+        )
 
     cadence = cadence_from(by_kind)
     if cadence != DEFAULT_CADENCE:
@@ -291,6 +319,8 @@ def main() -> int:
     for kind, payloads in sorted(by_kind.items()):
         if kind == "audio":
             schema = audio_schema
+        elif kind == "events":
+            schema = events_schema
         elif kind in cadence or kind in OPTIONAL_KINDS:
             schema = telemetry_schema
         else:

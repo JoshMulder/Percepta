@@ -201,6 +201,7 @@ technician on site.
     "username": "gsu:{station_id}",  // the broker principal to authenticate as
     "telemetry_topic": "gsu/{station_id}/telemetry",
     "audio_topic": "gsu/{station_id}/audio",
+    "events_topic": "gsu/{station_id}/events",
     "command_topic": "cmd/gsu/{station_id}",
     "media_url": "wss://platform.example/media/ingest"
                                      // where the live H.264 goes. Not a
@@ -237,7 +238,16 @@ technician on site.
                                      // on site can tell at a glance that the
                                      // coordinates are where they stand.
   },
-  "config_version": 3
+  "config_version": 3,
+  "contract_version": "1.0"          // which version of this contract the
+                                     // platform speaks. Stated so a station
+                                     // learns it at the one moment both sides
+                                     // are talking, and can say plainly that
+                                     // it is older or newer rather than
+                                     // failing in some field it does not
+                                     // recognise. The station declares its own
+                                     // in health.contract_version. Neither
+                                     // side refuses the other over it.
 }
 ```
 
