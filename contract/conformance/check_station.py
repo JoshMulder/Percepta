@@ -105,10 +105,22 @@ failures: list[str] = []
 notes: list[str] = []
 
 
+#: Checks that could not be run, as distinct from checks that failed. Kept
+#: apart because "this station is wrong" and "this run could not tell" are
+#: different answers, and reporting the second as the first is how correct
+#: hardware gets rejected on a hillside.
+skipped: list[str] = []
+
+
 def check(label: str, ok: bool, detail: str = "") -> None:
     print(f"  {'PASS' if ok else 'FAIL'}  {label}{'' if ok else f'  ({detail})'}")
     if not ok:
         failures.append(label)
+
+
+def skip(label: str, why: str) -> None:
+    print(f"  SKIP  {label}  ({why})")
+    skipped.append(f"{label}: {why}")
 
 
 def load(name: str) -> Draft202012Validator:
@@ -479,11 +491,13 @@ def main() -> int:
         stated = ", ".join(f"{k} {v:g}s" for k, v in sorted(cadence.items())
                            if DEFAULT_CADENCE.get(k) != v)
         notes.append(f"station reports its own cadence: {stated}")
+    listened = MIN_WAIT
     missing = [k for k in cadence if not by_kind.get(k)]
     if missing:
         extra = min(MAX_WAIT, max(cadence[k] * PERIODS for k in missing)) - MIN_WAIT
         if extra > 0:
             relay.send_command(audio_request)
+            listened += extra
             for stream, payload in collect(relay, extra):
                 seen.append((stream, payload))
                 key = "audio" if stream == "audio" else (
@@ -493,6 +507,7 @@ def main() -> int:
     for kind in cadence:
         payloads = by_kind.get(kind, [])
         unavailable = [p for p in payloads if p.get("available") is False]
+        needed = cadence[kind] * PERIODS
         if unavailable:
             # A station saying "I have no receiver for this" is conformant.
             # Demanding a payload it cannot honestly fill is what makes a
@@ -501,9 +516,20 @@ def main() -> int:
             reason = unavailable[-1].get("unavailable_reason") or "no reason given"
             check(f"publishes {kind}", True)
             notes.append(f"{kind} declared unavailable: {reason}")
+        elif not payloads and needed > listened + 0.5:
+            # Absent, but this run never waited long enough to expect it. The
+            # contract lets a metered site slow a stream down and says a
+            # station must not be failed for it, so MAX_WAIT capping the
+            # window is the harness's limitation and not the station's fault.
+            # Reporting it as a failure — with a duration the harness never
+            # actually waited — is how correctly-configured hardware gets
+            # rejected on site.
+            skip(f"publishes {kind}",
+                 f"reported cadence needs {needed:g}s and this run listened "
+                 f"for {listened:g}s; re-run with a longer --wait-for")
         else:
             check(f"publishes {kind}", bool(payloads),
-                  f"nothing received in {cadence[kind] * PERIODS:g}s")
+                  f"nothing received in {listened:g}s")
 
     print("\n2. Envelope")
     # The relay format is the newest surface in the contract and the one with

@@ -369,8 +369,8 @@ bytes. A fully-populated health frame is the largest single message at about
 1.8 kB, and is not in that range.
 
 Dropping the station id from the envelope took 48 bytes off every message —
-**0.53 GB per station per month, between a sixth and a fifth of the whole
-floor.** That is what the one-letter stream code bought.
+**0.53 GB per station per month, between a fifth and a quarter of the floor
+above.** That is what the one-letter stream code bought.
 
 **And that is the clear-airspace number.** It assumes an empty `aircraft`
 array. A site that can see ten contacts costs about **41 kbit/s, 13 GB a
