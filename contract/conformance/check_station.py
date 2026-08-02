@@ -143,6 +143,17 @@ class Refused(Exception):
     """The station did not connect in a way this harness can accept."""
 
 
+class NonFinite(ValueError):
+    """A frame carried NaN or Infinity, which are not JSON (RFC 8259)."""
+
+
+def _reject_constant(token: str):
+    raise NonFinite(
+        f"frame carries the non-finite token {token}; NaN and Infinity are "
+        "not JSON, and NaN passes every numeric bound in the schemas"
+    )
+
+
 class Relay:
     """One station's socket, from the platform's side."""
 
@@ -279,7 +290,16 @@ class Relay:
         if raw is None:
             return None
         try:
-            frame = json.loads(raw)
+            # `parse_constant` is what enforces transport.md's rule against
+            # NaN and Infinity. Python's parser accepts both by default, and
+            # NaN defeats every numeric bound in the schemas — it satisfies
+            # `minimum` and `maximum` at once, because comparisons against it
+            # are false. Validating without this would pass the sharpest
+            # violation the contract describes.
+            frame = json.loads(raw, parse_constant=_reject_constant)
+        except NonFinite as exc:
+            self.envelope_faults.append(str(exc))
+            return None
         except ValueError:
             self.envelope_faults.append("frame is not JSON")
             return None
@@ -291,6 +311,14 @@ class Relay:
         if extra:
             self.envelope_faults.append(
                 f"envelope carries {sorted(extra)}; transport.md defines two keys")
+        if not isinstance(stream, str):
+            # Guarded before the membership test below: a non-hashable stream
+            # (an object, a list) would otherwise raise TypeError and take the
+            # whole run down on a 26-byte frame — from the check whose job is
+            # to catch exactly that frame.
+            self.envelope_faults.append(
+                f"stream is {type(stream).__name__}, expected a one-letter code")
+            return None
         if stream == COMMAND_STREAM:
             self.envelope_faults.append(
                 "station published on stream 'c', which is downward only")
@@ -310,31 +338,66 @@ class Relay:
 
 def await_station(port: int, host: str, tls: tuple[str, str] | None,
                   seconds: float) -> Relay:
+    """Wait for a station, ignoring whatever else finds the port first.
+
+    Accepts in a loop rather than once. A port scanner, a browser tab or a
+    monitoring probe would otherwise take the single slot and leave the real
+    station refused — on a bench network that is not a hypothetical, and the
+    failure looks like the station never connected.
+    """
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+        # Windows: SO_REUSEADDR lets another local process bind a live
+        # listening port, which is the opposite of what it means elsewhere.
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    else:
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((host, port))
-    server.listen(1)
+    server.listen(8)
     scheme = "wss" if tls else "ws"
     print(f"Listening on {scheme}://{host}:{port}/broker — start the station.\n")
-    server.settimeout(seconds)
+
+    deadline = time.time() + seconds
     try:
-        sock, _ = server.accept()
-    except socket.timeout:
-        sys.exit(
-            f"No station connected within {seconds:.0f}s.\n"
-            f"Point one at {scheme}://{host}:{port}/broker and run it.\n"
-            "If the station requires TLS it is right to refuse a ws:// URL — "
-            "pass --tls to test that path instead."
-        )
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                sys.exit(
+                    f"No station connected within {seconds:.0f}s.\n"
+                    f"Point one at {scheme}://{host}:{port}/broker and run it.\n"
+                    "If the station is on another machine, this listens on "
+                    f"{host} — pass --host 0.0.0.0 to accept from the network.\n"
+                    "If the station requires TLS it is right to refuse a ws:// "
+                    "URL — pass --tls to test that path instead."
+                )
+            server.settimeout(remaining)
+            try:
+                sock, peer = server.accept()
+            except socket.timeout:
+                continue
+            # Every peer gets a deadline of its own, before anything that can
+            # block. CPython returns an accepted socket in blocking mode even
+            # when the listener had a timeout, so without this a peer that
+            # opens TCP and then says nothing hangs the run for ever — on the
+            # TLS path, inside the handshake.
+            sock.settimeout(10)
+            try:
+                if tls:
+                    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                    context.load_cert_chain(tls[0], tls[1])
+                    sock = context.wrap_socket(sock, server_side=True)
+                relay = Relay(sock)
+                relay.handshake(time.time() + 10)
+                return relay
+            except (Refused, ssl.SSLError, OSError, ConnectionError,
+                    TimeoutError, socket.timeout, UnicodeDecodeError) as exc:
+                print(f"  (ignoring {peer[0]}:{peer[1]} — {exc})")
+                try:
+                    sock.close()
+                except OSError:
+                    pass
     finally:
         server.close()
-    if tls:
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.load_cert_chain(tls[0], tls[1])
-        sock = context.wrap_socket(sock, server_side=True)
-    relay = Relay(sock)
-    relay.handshake(time.time() + 10)
-    return relay
 
 
 # --- checks ----------------------------------------------------------------
@@ -513,9 +576,14 @@ def main() -> int:
             # Demanding a payload it cannot honestly fill is what makes a
             # station invent numbers, which is what this harness exists to
             # prevent.
-            reason = unavailable[-1].get("unavailable_reason") or "no reason given"
-            check(f"publishes {kind}", True)
-            notes.append(f"{kind} declared unavailable: {reason}")
+            #
+            # But the reason has to be a reason. `minLength: 1` is satisfied by
+            # a space, and README promises a station "is failed for pretending"
+            # — a blank reason on every stream is the shape of pretending.
+            reason = (unavailable[-1].get("unavailable_reason") or "").strip()
+            check(f"{kind} unavailable, with a reason", bool(reason),
+                  "unavailable_reason is blank or whitespace")
+            notes.append(f"{kind} declared unavailable: {reason or '(blank)'}")
         elif not payloads and needed > listened + 0.5:
             # Absent, but this run never waited long enough to expect it. The
             # contract lets a metered site slow a stream down and says a
@@ -607,13 +675,16 @@ def main() -> int:
 
     print("\n5. Commands take effect")
     unavailable_kinds = unavailable_now(by_kind)
+    exercised = 0
     for kind, body, report_kind, field, expect in COMMANDS:
         if report_kind in unavailable_kinds:
-            notes.append(f"{kind} not checked — {report_kind} is unavailable")
+            skip(f"{kind} -> {report_kind}.{field}",
+                 f"{report_kind} is declared unavailable")
             continue
         relay.send_command({"kind": kind, **body})
         got, ok = await_report(relay, report_kind, field, expect, COMMAND_TIMEOUT)
         check(f"{kind} -> {report_kind}.{field}", ok, f"reported {got!r}")
+        exercised += 1
 
     print("\n6. Audio stops when the lease lapses")
     # The second gate, and the expensive one. Checking only squelch gating
@@ -653,6 +724,10 @@ def main() -> int:
     relay.send_command({"kind": "radio.spectrum", "on": False})
     relay.close()
 
+    if skipped:
+        print("\nNot tested")
+        for s in skipped:
+            print(f"  - {s}")
     if notes:
         print("\nNotes")
         for n in notes:
@@ -662,7 +737,19 @@ def main() -> int:
     if failures:
         print(f"FAILED: {len(failures)} check(s): {failures}")
         return 1
-    print("All checks passed — this station satisfies the contract.")
+    if exercised == 0:
+        # A station that declares every stream unavailable skips every command
+        # check and reaches this point with nothing tested but its ability to
+        # say "no hardware here". That is a conformant thing to say and it is
+        # not a pass — reporting it as one lets the emptiest possible station
+        # collect a certificate, which is the opposite of what this exists for.
+        print("INCONCLUSIVE: nothing was exercised — every command was skipped\n"
+              "because its stream was declared unavailable. Nothing here is\n"
+              "wrong; nothing here was tested either. Run against a station\n"
+              "with hardware fitted before believing this.")
+        return 2
+    print(f"All checks passed — {exercised} of {len(COMMANDS)} commands "
+          f"exercised, this station satisfies the contract.")
     return 0
 
 

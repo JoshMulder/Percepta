@@ -46,6 +46,16 @@ before anything it publishes reaches a subscriber. Revoking one stops its data
 **within thirty seconds**, whether or not the broker noticed, and that bound
 holds on both transports.
 
+**An expired credential closes the socket, and does not publish.** Enrolment
+grants a credential seven days past expiry for *renewal only* (`enrolment.md`
+§4), so that a station back from a fortnight offline is not stranded. That
+grace does not extend here: the relay refuses an expired credential at connect
+and closes an open socket when one expires under it, exactly as for a revoked
+one. This is stated in both documents because it is one `authenticate()` shared
+between the renewal endpoint and the relay, and a relay built only from this
+page would otherwise inherit the grace by accident and let a seven-day-dead
+credential publish.
+
 **Authenticating once, at connect, is not enough on a link that stays up for
 months.** Where the transport has its own identity layer, revocation removes it
 and drops the station's connections; where it does not — the 443 relay, which
@@ -558,7 +568,13 @@ So this channel alone is **acknowledged**:
 1. The station records events to local storage that survives a reboot, each
    with a stable `id` and a monotonic `seq`.
 2. It publishes them oldest first, **at most 100 per message and at most
-   128 KiB serialised, whichever comes first**. The byte limit is not
+   128 KiB serialised, whichever comes first — and no single event may exceed
+   8 KiB serialised**. The per-event bound is what makes the batch bound
+   reachable: `data` is free-form, JSON Schema cannot bound a serialised size,
+   and without it one event can exceed the frame cap on its own, at which point
+   "split, never dropped" is unsatisfiable and the loop below is unavoidable. A
+   station with more to say truncates `data`, keeps the event, and says so in
+   `detail`. The byte limit is not
    decoration: `data` is free-form, and 100 events each within every field
    bound reaches 786 KiB — over the 512 KiB frame cap, which closes the
    socket, after which the station reconnects and re-sends the identical
@@ -573,14 +589,26 @@ So this channel alone is **acknowledged**:
 5. Anything unacknowledged is re-sent, with backoff, until it is acknowledged
    or evicted (below).
 
-**A station ignores an `events.ack` above the highest `seq` it has actually
-published.** The ack is the one irreversible thing the platform can do to a
-station, it rides a channel this contract declares lossy and unordered, and
-`seq` restarts at zero whenever the local store is rebuilt or drains — which on
-a quiet station is routine, not rare. Without that rule a delayed duplicate ack
-naming a pre-rebuild seq deletes a fresh backlog that was never delivered. Keep
-the counter in durable storage of its own rather than deriving it from the rows
-still present, or an emptied store silently reuses numbers it has already used.
+**A station applies an `events.ack` only to the batch it is currently
+awaiting, and ignores every other.** One batch is in flight at a time, so
+there is exactly one ack a station can be expecting; anything else is a
+duplicate, a straggler from a previous connection, or from before a store
+rebuild. This is the rule that matters, and it needs no new field precisely
+because the one-batch-in-flight discipline already identifies the batch.
+
+The clamp below is the weaker companion to it and is not sufficient alone:
+
+**A station also ignores an `events.ack` above the highest `seq` it has
+actually published.** The ack is the one irreversible thing the platform can do
+to a station, and it can arrive late, twice, or after a reconnect.
+
+**Keep the `seq` counter in durable storage of its own**, rather than deriving
+it from the rows still present. An emptied store otherwise restarts at zero and
+reuses numbers it has already used — and on a quiet station, draining to empty
+is routine rather than rare. That is what makes a stale ack dangerous: a
+pre-rebuild `through_seq` lands *inside* the fresh range and the clamp above
+does not fire, which is exactly why the batch rule and not the clamp is the one
+that protects the data.
 
 **The platform records its own receipt time for every event and never trusts
 `at` for anything but display and ordering.** `at` is set by the station, on a
@@ -589,10 +617,18 @@ into an alerting decision — so a station that is wrong, or lying, must not be
 able to backdate a real event into silence. Receipt time is the platform's, and
 it is what staleness is judged on.
 
-**Event `type` values beginning `platform.` are reserved.** The vocabulary is
-otherwise the station's to extend, but the platform writes its own facts —
-credential issued, revoked, enrolment claimed — into the same operator-visible
-timeline, and nothing else should be able to forge one.
+**Event `type` values beginning `platform.` are reserved**, and **the platform
+enforces that by normalising before it compares.** The vocabulary is otherwise
+the station's to extend, but the platform writes its own facts — credential
+issued, revoked, enrolment claimed — into the same operator-visible timeline,
+and nothing else should be able to forge one.
+
+The schema carries a pattern and it is not the defence: it forbids exactly
+`platform.` and a station has a dozen ways past it that render identically to
+an operator — `Platform.`, a leading space, a Cyrillic а, a full-width stop.
+Normalise (NFKC, casefold, strip) and *then* reject the prefix, at the
+platform, on the way in. A schema pattern cannot do this and the party it
+constrains is the wrong one.
 
 **Local storage is finite and the contract does not pretend otherwise.** A
 station caps its event store, evicts oldest-first when it is full, counts what
