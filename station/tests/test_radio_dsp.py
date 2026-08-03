@@ -88,6 +88,71 @@ class SquelchTests(unittest.TestCase):
             delta=0.11,
         )
 
+    def test_the_hang_outlasts_a_block(self):
+        """The gate must not shut on the first block a signal dips out of.
+
+        This is what "stays open briefly" has to mean on a loop that only looks
+        once a second, and it is the assertion the old hang failed: 0.6 s was
+        spent by a 1.0 s tick inside the very block that set it, so the gate
+        shut immediately and airband speech — which dips between words — came
+        through chopping in and out every few seconds.
+        """
+        from gsu.radio.receiver import Block, HANG_SECONDS, RadioController
+
+        class Switchable:
+            available_gains = [0.0]
+
+            def __init__(self):
+                self.loud = True
+
+            def tune(self, freq_hz): pass
+            def set_gain(self, gain): pass
+            def set_ppm(self, ppm): pass
+            def demodulate(self, samples): return [0.0] * samples
+            def shutdown(self): pass
+
+            def read(self, seconds):
+                spectrum = (with_carrier(-100.0, -30.0) if self.loud
+                            else flat_spectrum(-100.0))
+                return Block(spectrum_db=spectrum, bin_hz=dsp.BIN_HZ,
+                             seconds=seconds)
+
+        front_end = Switchable()
+        controller = RadioController(front_end)
+        try:
+            payload, _ = controller.tick(1.0)
+            self.assertTrue(payload["squelch_open"], "a carrier must open it")
+
+            # The signal goes. The very next block must still be open — that is
+            # the whole point of a hang, and the gap between two words is
+            # shorter than the one second this loop can even see.
+            front_end.loud = False
+            payload, audio = controller.tick(1.0)
+            self.assertTrue(
+                payload["squelch_open"],
+                "the gate shut on the first block without a signal",
+            )
+            self.assertIsNotNone(audio, "audio must ride the hang too")
+
+            # ...and it does close, once the hang is actually spent.
+            shut = False
+            for _ in range(int(HANG_SECONDS) + 2):
+                payload, _ = controller.tick(1.0)
+                shut = shut or not payload["squelch_open"]
+            self.assertTrue(shut, "the hang must expire, not latch open")
+        finally:
+            controller.shutdown()
+
+        # Stated as well as demonstrated, because the way this failed was
+        # silent: the constant still read like a duration and the arithmetic
+        # was still right, and nothing above the gate could tell that the
+        # number never survived long enough to be asked about.
+        self.assertGreater(
+            HANG_SECONDS, 1.0,
+            "a hang shorter than the sensing loop's period holds nothing "
+            "open; the loop runs at 1 Hz",
+        )
+
     def test_turning_auto_off_freezes_the_threshold(self):
         payload, _ = self.controller.tick(1.0)
         frozen = payload["threshold_db"]
