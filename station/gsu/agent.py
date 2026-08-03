@@ -144,6 +144,11 @@ class Agent:
         #: front end is a single device with a single reader, so exactly one of
         #: the two callers may read it in any given interval.
         self._radio_pumped = False
+        #: Monotonic time of the last receiver read, held across sweeps so the
+        #: audio timeline is the wall clock rather than the sum of the
+        #: intervals we intended to sleep for. None until the first pump.
+        #: See `_sleep_pumping_radio` for why the difference is audible.
+        self._audio_clock: float | None = None
         # Who owns the camera, for the life of this process. Built before the
         # devices are, handed to every camera driver through device_context(),
         # and deliberately NOT rebuilt by rediscovery: an arbiter that is
@@ -1243,21 +1248,32 @@ class Agent:
         # matter how deep it is, underruns, and the operator hears speech
         # chopping in and out for ever. Two playback fixes went in ahead of
         # this one and neither could have worked.
-        last = time.monotonic()
+        # The clock is the agent's, not this call's. Resetting it here left the
+        # sweep's own work — every sensor, the telemetry publish, the health
+        # pass — outside the audio timeline, and that is another tenth of every
+        # second the receiver is never asked for: 0.91 seconds of audio per
+        # second, down from 0.82 but still draining the console's buffer.
+        # Carried across sweeps, the gap between them is demodulated like any
+        # other elapsed time.
+        last = self._audio_clock or time.monotonic()
         while not self._stop.is_set():
             now = time.monotonic()
             if now >= until:
+                self._audio_clock = last
                 return
             if self.radio is None:
+                self._audio_clock = last
                 self._stop.wait(until - now)
                 return
             # To the next boundary, not for a whole interval: the work above
             # has already spent part of this one.
             nap = min(last + AUDIO_TICK_S, until) - now
             if nap > 0 and self._stop.wait(nap):
+                self._audio_clock = last
                 return
             now = time.monotonic()
             elapsed, last = now - last, now
+            self._audio_clock = last
             try:
                 # Clamped, so a stalled box asks for a burst it cannot use
                 # rather than an unbounded one. Falling behind after a stall is
