@@ -68,6 +68,51 @@ FULL_QUIETING_SNR_DB = 25.0
 VOICE_GAIN = 1.1
 #: Silence between loops, so a broadcast does not run back-to-back forever.
 GAP_S = 2.0
+
+#: How far a keyed transmitter sits above the channel's noise floor, in dB.
+#:
+#: **A carrier, not the speech.** The RF level here used to be the RMS of the
+#: audio block, so the "signal" rose and fell with the talker: it sat tens of dB
+#: up on a loud syllable and fell to the noise floor in the pause after it. An
+#: AM transmission does not do that. An operator keys up and holds, and full
+#: carrier is present through every pause until they let go — which is why a
+#: signal-strength gate stays open for a whole over instead of chopping it into
+#: words.
+#:
+#: Everything an operator could see was wrong in the same way, and all of it was
+#: read as a fault somewhere else:
+#:
+#:   * the squelch opened and shut once per syllable, so the console's
+#:     channel-open light blinked through a transmission — and because playback
+#:     runs a fraction of a second behind, the blinking never lined up with what
+#:     was being heard, which reads as the light lagging the audio
+#:   * `quiet` below is derived from this, so the hiss came back to full level in
+#:     every gap between words. On the one channel with a recording on it — the
+#:     channel someone tunes to precisely to hear something clean — the pauses
+#:     were the noisiest part of the transmission
+#:   * the spectrum drew its carrier from this, so the trace showed a peak that
+#:     appeared and vanished with the voice rather than a carrier sitting there
+#:     for the length of the over
+#:
+#: At or above FULL_QUIETING_SNR_DB on purpose: the demo channel exists to sound
+#: like a solid local transmission, and a held carrier that still hissed would
+#: only have moved the complaint rather than answered it.
+CARRIER_SNR_DB = 25.0
+
+#: How long the carrier stays up after the modulation stops.
+#:
+#: Held rather than smoothed, because holding is what a transmitter does. Long
+#: enough to carry a sentence break and well short of GAP_S, which still has to
+#: read as the end of the transmission and drop the gate. The station's own demo
+#: receiver solved the same problem the same way — see
+#: `station/gsu/radio/simulated.py`, BROADCAST_CARRIER_HOLD_S — and this is that
+#: fix arriving on the platform's side of the fence.
+CARRIER_HOLD_S = 2.0
+
+#: Modulation peak that counts as the transmitter being keyed. An amplitude
+#: test rather than "any non-zero sample": a recording with dither is never
+#: exactly silent, and the gap between loops has to read as nobody transmitting.
+KEYED_PEAK = 0.02
 #: How far off-channel a transmission is still audible. Beyond this the
 #: receiver's filter has rejected it.
 CAPTURE_HZ = 12_500
@@ -165,6 +210,9 @@ class AirbandDemo:
         # Positions are per receiver, so two stations on the same channel are
         # not in lock-step even though they share the audio behind them.
         self.pos: dict[int, int] = dict.fromkeys(self.broadcasts, 0)
+        #: Seconds of carrier still to run on each broadcast after its audio
+        #: goes quiet. Per receiver, like the positions. See CARRIER_HOLD_S.
+        self.hold: dict[int, float] = dict.fromkeys(self.broadcasts, 0.0)
         self._rng = np.random.default_rng()
 
     def block(self, freq_hz: int, samples: int) -> tuple[np.ndarray, float]:
@@ -177,6 +225,7 @@ class AirbandDemo:
         """
         floor_db = channel_floor_db(freq_hz)
         noise = self._rng.standard_normal(samples).astype(np.float32)
+        seconds = samples / AUDIO_RATE
 
         voice = np.zeros(samples, np.float32)
         best_db = floor_db
@@ -184,6 +233,19 @@ class AirbandDemo:
         for freq, mod in self.broadcasts.items():
             start = self.pos[freq]
             self.pos[freq] = int((start + samples) % len(mod))
+            idx = (start + np.arange(samples)) % len(mod)
+            window = mod[idx]
+
+            # Whether the transmitter is keyed, decided from the recording
+            # itself and before the capture test below: keying is a property of
+            # the transmitter, not of how well this receiver hears it, and a
+            # broadcast advances whether or not anybody is tuned to it. So
+            # tuning across joins an over already in progress with its carrier
+            # already up, exactly as a real channel behaves.
+            if float(np.max(np.abs(window))) > KEYED_PEAK:
+                self.hold[freq] = CARRIER_HOLD_S
+            else:
+                self.hold[freq] = max(0.0, self.hold[freq] - seconds)
 
             delta = abs(freq - freq_hz)
             if delta >= CAPTURE_HZ:
@@ -192,16 +254,18 @@ class AirbandDemo:
             # stepping 25 kHz at a time sounds like tuning past something.
             capture = math.cos((delta / CAPTURE_HZ) * (math.pi / 2)) ** 2
 
-            idx = (start + np.arange(samples)) % len(mod)
-            chunk = mod[idx] * capture
-            voice = voice + chunk
+            voice = voice + window * capture
 
-            # RF level of the transmission - well above the floor while it is
-            # modulating, near it during the gap between loops. This is what the
+            # RF level of the transmission: a carrier that is up for the whole
+            # over, at a level that does not follow the speech. This is what the
             # meter shows and what the squelch gate compares against; it is
-            # deliberately not what sets the audio level.
-            rms = float(np.sqrt(np.mean(np.square(chunk))) + 1e-9)
-            best_db = max(best_db, 20 * math.log10(rms))
+            # deliberately not what sets the audio level. See CARRIER_SNR_DB.
+            if self.hold[freq] > 0.0:
+                # Attenuated off-channel by the same factor as the audio, so a
+                # transmission the receiver can barely hear also reads weak on
+                # the meter instead of full strength.
+                off_channel_db = 20 * math.log10(max(capture, 1e-6))
+                best_db = max(best_db, floor_db + CARRIER_SNR_DB + off_channel_db)
 
         # Quieting follows signal-to-noise, not raw amplitude: what matters is
         # how far above this channel's own floor the transmission sits. A strong
