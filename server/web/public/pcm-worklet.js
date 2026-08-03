@@ -7,15 +7,35 @@
 // Starlink, where a brief stall is normal and audio that drifts a second behind
 // stays a second behind for the rest of the shift.
 //
-// **Both thresholds are sized from the chunks that actually arrive**, and that
+// **Both thresholds are sized from the audio that actually arrives**, and that
 // is the fix for a year of choppy audio. The ported constants — 90 ms of
 // prebuffer, a 300 ms latency cap — were right for Remote-Radio, which sent
-// small chunks many times a second over a LAN. This station demodulates one
-// second of audio per tick and sends it at 1 Hz, so every single chunk
-// overflowed the 300 ms cap the instant it landed and was truncated to the
-// last 90 ms: nine-tenths of every second discarded before it could play.
-// Hardcoding a bigger number would fix this station and break the next one, so
-// the player measures instead.
+// small chunks many times a second over a LAN. A station that demodulates one
+// second of audio per tick and sends it at 1 Hz overflowed the 300 ms cap the
+// instant a chunk landed and was truncated to the last 90 ms: nine-tenths of
+// every second discarded before it could play. Hardcoding a bigger number
+// would fix one station and break the next, so the player measures instead.
+//
+// What it measures has to be the *arrival interval*, not the chunk. Those were
+// the same thing until audio became Opus and the main thread began posting one
+// 20 ms packet at a time; see BURST_LEAD_S below for what that cost.
+// How much to hold before playing, when the chunks cannot say.
+//
+// The sizing below measures the chunk, and that worked while a chunk was what
+// the station sent. Under Opus it is not: the main thread posts one 20 ms
+// packet at a time, because the decoder emits one `AudioData` per packet, while
+// the station sends a burst of six or seven of them eight times a second. So
+// `chunk.length` stopped describing how the audio *arrives*, and 20 ms of it
+// bought a 90 ms prebuffer under a 130 ms cap — less than one burst. Every
+// burst overflowed the cap on landing, the ring was trimmed back to the
+// prebuffer, and the discarded audio was a gap eight times a second, which is
+// speech that cuts in and out constantly rather than an occasional click.
+//
+// 300 ms is about two and a half burst intervals. Same number and same
+// reasoning as `BURST_LEAD_S` in `useAudio.ts`, which is the scheduled
+// player's half of this and was fixed first.
+const BURST_LEAD_S = 0.3;
+
 class PcmPlayer extends AudioWorkletProcessor {
   constructor() {
     super();
@@ -24,9 +44,9 @@ class PcmPlayer extends AudioWorkletProcessor {
     this.r = 0;
     this.w = 0;
     this.playing = false;
-    // Floors, until a chunk says otherwise. Anything smaller than a chunk is
-    // unusable; anything much larger is latency nobody asked for.
-    this.minPrebuffer = Math.floor(sampleRate * 0.09);
+    // Floors, until a chunk says otherwise. Anything smaller than an arrival
+    // interval is unusable; anything much larger is latency nobody asked for.
+    this.minPrebuffer = Math.floor(sampleRate * BURST_LEAD_S);
     this.prebuffer = this.minPrebuffer;
     this.maxBuffer = Math.floor(sampleRate * 0.3);
     this.port.onmessage = (e) => {
@@ -44,7 +64,15 @@ class PcmPlayer extends AudioWorkletProcessor {
         this.prebuffer = Math.max(
           this.minPrebuffer, Math.floor(chunk.length * 1.25),
         );
-        this.maxBuffer = this.prebuffer + chunk.length * 2;
+        // Headroom of a whole lead above the prebuffer, not of two chunks. A
+        // burst has to be able to land on top of a full buffer without pushing
+        // it over the cap, and under Opus a burst is many chunks rather than
+        // one — two of them is 40 ms of slack against 125 ms of arrival, which
+        // is what made the trim fire on every burst. For a station that really
+        // does send one chunk per burst this is still two chunks, so the case
+        // the measurement was written for is unchanged.
+        this.maxBuffer =
+          this.prebuffer + Math.max(chunk.length * 2, this.minPrebuffer);
         // The ring has to hold the cap with room to spare, or the write
         // pointer laps the read pointer and the audio tears instead of gapping.
         const needed = this.maxBuffer * 2;
