@@ -573,6 +573,11 @@ body {
   margin-top: 0;
   letter-spacing: 0.14em;
   font-weight: 600;
+  /* Grows into the room the fixed-size controls above it leave, rather than the
+     panel carrying a band of dead air under its one big control. See `.radio`,
+     which now sits the cluster at the top so this has somewhere to grow into. */
+  flex: 1 1 auto;
+  min-height: 2.25rem;
 }
 
 /* ------------------------------------------------------------- floodlight */
@@ -1009,11 +1014,13 @@ body {
   display: flex;
   flex-direction: column;
   gap: var(--s3);
-  /* Centred rather than stretched. An earlier version gave every control a flex
-     share of the panel height, which made the frequency box and the preset row
-     grow into shapes they were never designed for. A control cluster with spare
-     room should sit in the middle of it, not be pulled apart to fill it. */
-  justify-content: center;
+  /* The fixed-size controls sit at the top at their natural height — an earlier
+     version gave every control a flex share and pulled the frequency box and
+     preset row into shapes they were never designed for. What takes up the
+     slack is the PTT alone (see `.btn.ptt`, flex: 1): the one control a big
+     target helps rather than distorts, filling the room the cluster leaves
+     instead of the panel carrying a band of dead air. */
+  justify-content: flex-start;
   min-height: 0;
 }
 .freq-row {
@@ -2745,7 +2752,15 @@ body {
   padding: 0.05rem 0.22rem;
   text-shadow: 0 0 0.15rem rgba(0, 0, 0, 0.9);
 }
-.map-contact.alert svg { filter: drop-shadow(0 0 0.3rem rgba(255, 122, 69, 0.9)); }
+.map-contact.alert svg { filter: drop-shadow(0 0 0.35rem rgba(255, 45, 45, 0.95)); }
+/* A close contact wears a red badge, not the map's default dark one — the
+   callsign that most needs reading at a glance is the one right on top of you,
+   and a red backdrop finds it in a field of amber traffic. */
+.map-contact.alert span {
+  background: rgba(255, 45, 45, 0.9);
+  color: #fff;
+  text-shadow: 0 0 0.15rem rgba(0, 0, 0, 0.7);
+}
 /* Only the glyph is clickable. The marker as a whole keeps pointer-events off
    so a callsign label — which can be several times the width of the aircraft
    it names — never swallows a click meant for the map behind it. */

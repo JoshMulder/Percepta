@@ -59,7 +59,7 @@ function pathPoints(selector: string): [number, number][] {
 describe("sources that do not exist", () => {
   it("draws no mains at a site with no grid connection", () => {
     render(<PowerFlow power={payload()} />);
-    expect(labels().some((l) => l.startsWith("Mains"))).toBe(false);
+    expect(labels().some((l) => l.startsWith("AC In"))).toBe(false);
   });
 
   it("draws no generator at a site without one", () => {
@@ -81,14 +81,14 @@ describe("sources that exist but are giving nothing", () => {
     // The fault case. Absent would say "this site has no grid", which is the
     // opposite of what a grid failure means.
     render(<PowerFlow power={payload({ mains_present: false, mains_w: 0 })} />);
-    const node = nodeFor("Mains down");
+    const node = nodeFor("AC In down");
     expect(node).toBeTruthy();
     expect(node!.classList.contains("dim")).toBe(true);
   });
 
   it("says so when a fitted mains input has lost power", () => {
     render(<PowerFlow power={payload({ mains_present: false, mains_w: 0 })} />);
-    expect(labels()).toContain("Mains down");
+    expect(labels()).toContain("AC In down");
   });
 
   it("draws a stopped generator dim, and a running one bright", () => {

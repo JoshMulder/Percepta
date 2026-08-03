@@ -60,8 +60,12 @@ function ringCoords(lat: number, lon: number, km: number, points = 128): number[
  *  anyone who has looked at a tracking map already reads as "aircraft", and
  *  this panel is not the place to be original. */
 const CONTACT_COLOUR = "#f5c518";
+// A true red for a proximity alert, deliberately distinct from the amber
+// `--danger` used for faults elsewhere: a fault is "something is wrong with the
+// station", a close contact is "something is in the air right here", and they
+// should not read as the same colour.
 /** Alerting contacts break that convention on purpose. */
-const ALERT_COLOUR = "#ff7a45";
+const ALERT_COLOUR = "#ff2d2d";
 
 /** Applied on top of tar1090's per-shape scale. Their sizes assume a map that
  *  fills a screen; this one is often a third of one. */

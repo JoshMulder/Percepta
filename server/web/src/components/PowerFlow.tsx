@@ -198,7 +198,7 @@ export function PowerFlow({ power }: { power: PowerPayload | null }) {
   if (power.mains_present !== undefined) {
     sources.push({
       key: "mains",
-      label: power.mains_present ? "Mains" : "Mains down",
+      label: power.mains_present ? "AC In" : "AC In down",
       watts: power.mains_w ?? 0,
       idle: (power.mains_w ?? 0) < IDLE_W,
     });
