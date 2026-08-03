@@ -1157,16 +1157,26 @@ class Console:
         note = ""
         if device is not None and device.connection == "network":
             note = self._strip_url_credentials(form, params)
+        camera_changed = slot == "camera" and (
+            previous is None
+            or previous.type_id != type_id
+            or previous_params != params
+        )
         self.agent.inventory.set_device(slot, type_id, params, resource)
-        # This page's own preview is holding the camera it is being used to
-        # change. Opening the camera tab starts the encoder, `build_devices`
-        # refuses to touch the slot while a stream runs, and the save then
-        # reported success while the old driver carried on — see
-        # `StreamSession.stop_local_preview`. Stopped before the rebuild rather
-        # than after, or the rebuild is the one that gets deferred.
+        # A running stream is still showing the OLD camera — its source was
+        # built from the driver that is about to be replaced, and `build_devices`
+        # refuses to touch the slot while a stream runs, so the save reported
+        # success while the demo test card kept going out. Stop it, and stop
+        # *any* of it, not only the local preview: a platform viewer watching
+        # the demo must not go on receiving the test card after the box has been
+        # pointed at a real camera. It re-requests and gets the new source; the
+        # few seconds of black is the honest cost of a swap. Only on an actual
+        # change, so a no-op save does not interrupt a viewer for nothing —
+        # `stop` before the rebuild, or the rebuild is the one that gets
+        # deferred.
         stream = getattr(self.agent, "stream", None)
-        if slot == "camera" and stream is not None:
-            stream.stop_local_preview("a camera change was saved")
+        if camera_changed and stream is not None:
+            stream.stop("a camera change was saved")
         # Rebuild immediately: an installer who changes a port expects to see
         # within seconds whether the box can now talk to the thing.
         self.agent.build_devices()

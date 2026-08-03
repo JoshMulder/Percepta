@@ -1978,6 +1978,39 @@ class DevicePickerTests(unittest.TestCase):
         self.assertIn(
             "<input type=hidden name=type_id value='simulated-weather'>", previewed)
 
+    def _save_camera(self, type_id, **params):
+        form = {"slot": ["camera"], "type_id": [type_id]}
+        for name, value in params.items():
+            form[f"p_{name}"] = [value]
+        return self.console._set_device(form)
+
+    def test_changing_the_camera_stops_the_stream_that_shows_the_old_one(self):
+        # The reported bug: switch the demo card to an RTSP source and the box
+        # goes on displaying and sending the demo. A running stream built its
+        # source from the camera that is being replaced, so it has to be stopped
+        # for the swap to take — and stopped even when the platform, not this
+        # page, is the one watching, which is the case that needed a restart.
+        self._save_camera("simulated-camera")
+        self.agent.stream.state = "streaming"
+        self.agent.stream._local_only = False  # the platform is watching
+
+        self._save_camera("onvif-network-camera", address="192.168.1.9")
+
+        self.assertEqual(self.agent.stream.state, "idle")
+        self.assertEqual(
+            self.agent.inventory.fitted["camera"].type_id, "onvif-network-camera")
+
+    def test_a_camera_save_that_changes_nothing_leaves_the_stream_alone(self):
+        # A no-op save must not yank a viewer's stream: only a real change is
+        # worth the few seconds of black.
+        self._save_camera("onvif-network-camera", address="192.168.1.9")
+        self.agent.stream.state = "streaming"
+        self.agent.stream._local_only = False
+
+        self._save_camera("onvif-network-camera", address="192.168.1.9")
+
+        self.assertEqual(self.agent.stream.state, "streaming")
+
     def test_another_devices_stored_values_are_not_offered_as_defaults(self):
         # A baud that belonged to the Airmar must not appear pre-filled under a
         # device that happens to have a field of the same name.

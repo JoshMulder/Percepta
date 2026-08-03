@@ -2004,34 +2004,25 @@ class StuckStartingTests(AgentFixture):
         self.assertIn("did not finish starting", self.agent.stream.reason)
         self.assertFalse(self.agent._stream_holds_camera())
 
-    def test_the_pages_own_preview_does_not_veto_the_pages_own_save(self):
-        """Opening the camera tab starts the encoder to feed the `<video>`.
-
-        `build_devices` will not touch the camera slot while a stream runs,
-        which is right on its own — a rebuild mid-stream is contention. The two
-        together meant the setup page's preview silently vetoed the change the
-        setup page had just been used to make: save a new camera, be told it
-        was saved, and go on watching the old one.
+    def test_stopping_the_stream_frees_the_camera_whoever_was_watching(self):
+        """A running stream reads as holding the camera, so `build_devices`
+        leaves the slot alone. Saving a camera change stops the stream (see
+        `Console._set_device`) precisely so the rebuild is no longer deferred —
+        and it must free the slot whether the watcher was this page's own
+        preview or the platform. The old code freed it only for a local-only
+        preview, which is how a platform-watched demo went on sending the test
+        card until the box was restarted.
         """
-        stream = self.agent.stream
-        stream.state = "streaming"
-        stream._local_only = True
-        self.assertTrue(self.agent._stream_holds_camera())
+        for local_only in (True, False):
+            with self.subTest(local_only=local_only):
+                stream = self.agent.stream
+                stream.state = "streaming"
+                stream._local_only = local_only
+                self.assertTrue(self.agent._stream_holds_camera())
 
-        self.assertTrue(stream.stop_local_preview("a camera change was saved"))
-        self.assertFalse(self.agent._stream_holds_camera(),
-                         "the rebuild would still be deferred")
-
-    def test_a_stream_the_platform_asked_for_keeps_its_deferral(self):
-        # Somebody else is watching. That one keeps the behaviour it always
-        # had: the change applies when the stream ends, which
-        # `_camera_rebuild_owed` now follows through on.
-        stream = self.agent.stream
-        stream.state = "streaming"
-        stream._local_only = False
-
-        self.assertFalse(stream.stop_local_preview("a camera change was saved"))
-        self.assertEqual(stream.state, "streaming")
+                stream.stop("a camera change was saved")
+                self.assertFalse(self.agent._stream_holds_camera(),
+                                 "the rebuild would still be deferred")
 
     def test_a_start_still_within_its_time_is_left_alone(self):
         # Legitimate starts are not fast: an ffprobe is allowed 15s and the

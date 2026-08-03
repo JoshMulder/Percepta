@@ -432,28 +432,6 @@ class StreamSession:
         else:
             viewer.close()
 
-    def stop_local_preview(self, reason: str) -> bool:
-        """Give the camera up for a device change, if this is only the preview.
-
-        **Opening the camera tab starts the encoder**, so the page's `<video>`
-        has something to read. `Agent.build_devices` will not touch the camera
-        slot while a stream is running, and that is right — a rebuild mid-stream
-        is guaranteed contention. But the two together meant the setup page's
-        own preview silently vetoed the change the setup page had just been used
-        to make: save a new camera, be told it was saved, and go on watching the
-        old one until you navigated away.
-
-        A local-only session is this operator's preview of the very thing they
-        are changing, so it loses. A session the platform asked for is somebody
-        else watching, and keeps the deferral it always had — that one is
-        applied when the stream ends, which `_camera_rebuild_owed` now sees
-        through.
-        """
-        if self.state == "streaming" and self._local_only:
-            self.stop(reason)
-            return True
-        return False
-
     def stop(self, reason: str = "stopped by the platform") -> str:
         """`video.stop`, and every other way this ends. Safe to call at any
         time, including when nothing is running."""
