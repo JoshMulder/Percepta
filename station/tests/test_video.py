@@ -364,6 +364,27 @@ class PreviewCacheTests(AgentFixture):
         # And it says why, which is what the page puts where the picture was.
         self.assertTrue(state.get("reason"))
 
+    def test_the_outgoing_cameras_excuse_goes_with_it(self):
+        """A reason is about a driver, and drivers are replaced.
+
+        "the camera did not deliver a frame within 15s (rtsp://…)" is a true
+        sentence about a camera that no longer exists. Left set across a
+        rebuild it is attributed to whatever was just fitted, so a demo camera
+        starting up perfectly well is introduced by the failure of the RTSP
+        camera it replaced — and now that the page renders the reason where
+        the picture would be, that is the most prominent thing on it.
+        """
+        self.video.last_reason = (
+            "the camera did not deliver a frame within 15s "
+            "(rtsp://192.0.2.10:554/stream1)"
+        )
+        self.video.last_frame = None
+
+        self.agent.build_devices()
+
+        self.assertEqual(self.video.last_reason, "")
+        self.assertNotIn("reason", self.video.preview_state())
+
     def test_an_unenrolled_station_still_captures_for_the_preview(self):
         # The preview exists for the installer standing at an unenrolled box,
         # and it needs no identity because it sends nothing anywhere.
@@ -1982,6 +2003,35 @@ class StuckStartingTests(AgentFixture):
         self.assertEqual(self.agent.stream.state, "unavailable")
         self.assertIn("did not finish starting", self.agent.stream.reason)
         self.assertFalse(self.agent._stream_holds_camera())
+
+    def test_the_pages_own_preview_does_not_veto_the_pages_own_save(self):
+        """Opening the camera tab starts the encoder to feed the `<video>`.
+
+        `build_devices` will not touch the camera slot while a stream runs,
+        which is right on its own — a rebuild mid-stream is contention. The two
+        together meant the setup page's preview silently vetoed the change the
+        setup page had just been used to make: save a new camera, be told it
+        was saved, and go on watching the old one.
+        """
+        stream = self.agent.stream
+        stream.state = "streaming"
+        stream._local_only = True
+        self.assertTrue(self.agent._stream_holds_camera())
+
+        self.assertTrue(stream.stop_local_preview("a camera change was saved"))
+        self.assertFalse(self.agent._stream_holds_camera(),
+                         "the rebuild would still be deferred")
+
+    def test_a_stream_the_platform_asked_for_keeps_its_deferral(self):
+        # Somebody else is watching. That one keeps the behaviour it always
+        # had: the change applies when the stream ends, which
+        # `_camera_rebuild_owed` now follows through on.
+        stream = self.agent.stream
+        stream.state = "streaming"
+        stream._local_only = False
+
+        self.assertFalse(stream.stop_local_preview("a camera change was saved"))
+        self.assertEqual(stream.state, "streaming")
 
     def test_a_start_still_within_its_time_is_left_alone(self):
         # Legitimate starts are not fast: an ffprobe is allowed 15s and the

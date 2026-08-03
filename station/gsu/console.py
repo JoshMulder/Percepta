@@ -1116,6 +1116,15 @@ class Console:
         if device is not None and device.connection == "network":
             note = self._strip_url_credentials(form, params)
         self.agent.inventory.set_device(slot, type_id, params, resource)
+        # This page's own preview is holding the camera it is being used to
+        # change. Opening the camera tab starts the encoder, `build_devices`
+        # refuses to touch the slot while a stream runs, and the save then
+        # reported success while the old driver carried on — see
+        # `StreamSession.stop_local_preview`. Stopped before the rebuild rather
+        # than after, or the rebuild is the one that gets deferred.
+        stream = getattr(self.agent, "stream", None)
+        if slot == "camera" and stream is not None:
+            stream.stop_local_preview("a camera change was saved")
         # Rebuild immediately: an installer who changes a port expects to see
         # within seconds whether the box can now talk to the thing.
         self.agent.build_devices()

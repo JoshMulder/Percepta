@@ -592,6 +592,14 @@ class Agent:
             preview = getattr(self, "video", None)
             if preview is not None:
                 preview.last_frame = None
+                # And the outgoing camera's excuse with it, for the same
+                # reason one line up. "the camera did not deliver a frame
+                # within 15s (rtsp://…)" is a true sentence about a driver
+                # that no longer exists, and leaving it set attributes it to
+                # whatever was just fitted — so a demo camera that is starting
+                # up perfectly well is introduced by the failure of the RTSP
+                # camera it replaced.
+                preview.last_reason = ""
 
         self._log_unconfigured = True
 
