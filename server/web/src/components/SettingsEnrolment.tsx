@@ -253,21 +253,29 @@ export function EnrolmentCode({
             once.</strong> We keep only a hash of it and cannot show it again —
             if it is lost, issue another.
           </p>
-          {/* The combined string, not the bare code. It carries the code, this
-              platform's address and the CA fingerprint — all three had to
-              reach the box anyway, and the one easiest to skip was the
-              fingerprint, which is the one deciding whether the code is typed
-              into the real platform or into whatever answered. Falls back to
-              the bare code on a platform that pins no CA. */}
+          {/* The code, and nothing folded into it.
+
+              This used to offer `CODE@host#fingerprint` — the code with this
+              platform's address and the fingerprint of its CA — as one string
+              to carry to the box. All three retired together: the
+              `bootstrap.sh --enrol` flag it was for no longer exists, the
+              address is asked for by bootstrap itself so the box has it before
+              a code is typed, and the fingerprint pins this platform's own CA,
+              which is meaningless behind a proxy with a public certificate and
+              actively wrong when the box pins it and the proxy answers.
+
+              It also did not fit. A station's token field is capped at 64
+              characters; the combined string is 103 on any real host. Somebody
+              handed a string pastes the string, so every paste of it was
+              refused — as "the box sent something the platform could not
+              read", which named no field and sent people looking elsewhere. */}
           <div className="token-value">
-            <code>{issued.bootstrap || issued.token}</code>
+            <code>{issued.token}</code>
             <button
               type="button"
               className="btn ghost"
               onClick={() => {
-                void navigator.clipboard?.writeText(
-                  issued.bootstrap || issued.token,
-                );
+                void navigator.clipboard?.writeText(issued.token);
                 setCopied(true);
               }}
             >
@@ -275,7 +283,8 @@ export function EnrolmentCode({
             </button>
           </div>
           <p className="settings-note">
-            On the box: <code>sudo station/deploy/bootstrap.sh --enrol …</code>
+            Type it into the box's setup page, or{" "}
+            <code>docker compose run --rm gsu enrol --token …</code>
           </p>
           <p className="settings-note">
             Expires {when(issued.expires_at)}

@@ -10,10 +10,7 @@ onto our platform, and when" is the question this table exists to answer, and it
 is asked after something has already gone wrong.
 """
 
-import hashlib
-import ssl
 import uuid
-from pathlib import Path
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -37,17 +34,28 @@ router = APIRouter(prefix="/api/stations/{station_id}/enrolment", tags=["enrolme
 class IssuedToken(BaseModel):
     """The plaintext appears here once and is never retrievable again.
 
-    `bootstrap` is the same code with the two other facts a station needs
-    folded in: where this platform is, and which CA to pin. All three had to
-    reach the box anyway, by three routes, and the one that was easiest to skip
-    was the fingerprint — which is the one that decides whether the code is
-    typed into the real platform or into whatever answered.
+    **The code, and nothing folded into it.** This used to also offer
+    `CODE@host#sha256` — the code with this platform's address and the
+    fingerprint of its CA — as one string for an installer to carry, for
+    `bootstrap.sh --enrol`.
+
+    Three things retired it. That flag no longer exists: bootstrap takes no
+    arguments and asks for the platform's address itself. The address is
+    therefore already on the box before a code is ever typed. And the
+    fingerprint pins the platform's own CA, which is meaningless once it is
+    behind a proxy with a publicly trusted certificate, and worse than
+    meaningless when the box pins it and the proxy then answers — that is an
+    enrolment refused for a certificate that was correct.
+
+    It also did not fit. A station's `token` field is capped at 64 characters
+    by the contract; the combined string is a hundred and three on any real
+    host. Somebody handed a string pastes the string, so every paste of it was
+    a validation failure that reached the technician as "the box sent
+    something the platform could not read."
     """
 
     token: str
     expires_at: str
-    #: `CODE@host#sha256`, for `bootstrap.sh --enrol`.
-    bootstrap: str
 
 
 class EnrolmentStatus(BaseModel):
@@ -118,43 +126,6 @@ def get_status(
     )
 
 
-#: Where the CA lives inside the app container — the same file `/ca.crt`
-#: serves. Absent in a deployment behind a publicly trusted certificate, and
-#: then there is no fingerprint to carry and nothing to pin.
-CA_PATH = Path("/certs/ca.crt")
-
-
-def _ca_fingerprint() -> str:
-    """The SHA-256 of the pinned CA, lowercase and unpunctuated.
-
-    Read per call rather than cached: a CA rotation is rare but it is exactly
-    the moment a stale value would send a technician to site with a fingerprint
-    that no longer matches, and this is not a hot path.
-    """
-    if not CA_PATH.is_file():
-        return ""
-    der = ssl.PEM_cert_to_DER_cert(CA_PATH.read_text())
-    return hashlib.sha256(der).hexdigest()
-
-
-def _bootstrap_string(plaintext: str, request: Request) -> str:
-    """`CODE@host#fingerprint` — one thing for an installer to carry.
-
-    The host comes from the request, so it is whatever name the operator
-    actually reached this platform by. Deriving it from configuration instead
-    produced a string that was right in the deployment it was written in and
-    wrong behind every proxy.
-    """
-    host = request.headers.get("host", "").split(":")[0]
-    fingerprint = _ca_fingerprint()
-    out = plaintext
-    if host:
-        out += f"@{host}"
-    if fingerprint:
-        out += f"#{fingerprint}"
-    return out
-
-
 @router.post("/token", response_model=IssuedToken, status_code=201)
 def issue_token(
     station_id: uuid.UUID,
@@ -184,11 +155,7 @@ def issue_token(
         ip_address=request.client.host if request.client else None,
         detail={"expires_at": expires_at.isoformat()},
     )
-    return IssuedToken(
-        token=plaintext,
-        expires_at=expires_at.isoformat(),
-        bootstrap=_bootstrap_string(plaintext, request),
-    )
+    return IssuedToken(token=plaintext, expires_at=expires_at.isoformat())
 
 
 @router.delete("/token", status_code=200)

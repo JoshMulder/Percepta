@@ -413,16 +413,14 @@ export interface EnrolmentStatus {
 }
 
 export interface IssuedToken {
-  /** Shown once. The server keeps only a hash and cannot show it again. */
+  /** Shown once. The server keeps only a hash and cannot show it again.
+   *
+   *  Just the code. A `bootstrap` field used to carry it with this platform's
+   *  address and CA fingerprint folded in, for a `bootstrap.sh --enrol` flag
+   *  that no longer exists — and at 103 characters against the contract's
+   *  64-character token field, pasting it was always refused. */
   token: string;
   expires_at: string;
-  /** The same code with this platform's address and CA fingerprint folded in,
-   *  as `CODE@host#sha256`, for `bootstrap.sh --enrol`. All three had to reach
-   *  the box anyway; the fingerprint was the one easiest to skip, and it is
-   *  the one that decides whether the code goes to the real platform.
-   *
-   *  Empty on a platform that pins no CA — then there is nothing to carry. */
-  bootstrap: string;
 }
 
 export interface MemberGrant {
