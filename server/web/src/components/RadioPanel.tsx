@@ -352,10 +352,16 @@ function RadioPanelInner({
         {/* Outside the readout rather than inside it. In the box it read as
             part of the frequency; beside it, it is what it is - the state of
             the channel that frequency is tuned to. */}
+        {/* One colour, whatever opened the gate.
+
+            This used to go amber while monitor held the squelch open, and
+            monitor is held for the whole time the volume slider is being
+            dragged - so setting the level turned the light a different colour
+            and pointed at a distinction nobody was asking about mid-gesture.
+            The light answers one question, "is the channel open", and it is
+            open either way. The tooltip still says which. */}
         <span
-          className={`led${radio?.squelch_open ? " on" : ""}${
-            radio?.monitor ? " monitor" : ""
-          }`}
+          className={`led${radio?.squelch_open ? " on" : ""}`}
           title={
             radio?.monitor
               ? "Monitor — squelch held open"

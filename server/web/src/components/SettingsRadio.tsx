@@ -241,9 +241,16 @@ export function SettingsRadio({
           <span>
             Threshold <b>{threshold.toFixed(0)} dB</b>
           </span>
+          {/* Same one colour as the front panel's. See RadioPanel. */}
           <span
-            className={`led${radio.squelch_open ? " on" : ""}${radio.monitor ? " monitor" : ""}`}
-            title={radio.squelch_open ? "Channel open" : "Squelched"}
+            className={`led${radio.squelch_open ? " on" : ""}`}
+            title={
+              radio.monitor
+                ? "Monitor — squelch held open"
+                : radio.squelch_open
+                  ? "Channel open"
+                  : "Squelched"
+            }
           />
         </div>
 
