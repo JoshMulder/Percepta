@@ -575,9 +575,12 @@ body {
   font-weight: 600;
   /* Grows into the room the fixed-size controls above it leave, rather than the
      panel carrying a band of dead air under its one big control. See `.radio`,
-     which now sits the cluster at the top so this has somewhere to grow into. */
+     which now sits the cluster at the top so this has somewhere to grow into.
+     The floor is what the button is when the panel has no slack to give — a big
+     target in its own right, not a thin strip that only fills out on a tall
+     layout. `flex: 1` still lets it take any extra room on top of that. */
   flex: 1 1 auto;
-  min-height: 2.25rem;
+  min-height: 4rem;
 }
 
 /* ------------------------------------------------------------- floodlight */
@@ -1612,7 +1615,7 @@ body {
 .battery-chart svg {
   display: block;
   width: 100%;
-  height: 3.4rem;
+  height: 8.5rem;
   background: #060a0e;
   border: 1px solid var(--line);
   border-radius: var(--s1);
@@ -1658,7 +1661,7 @@ body {
 .power-series svg {
   display: block;
   width: 100%;
-  height: 3.4rem;
+  height: 8.5rem;
   background: #060a0e;
   border: 1px solid var(--line);
   border-radius: var(--s1);
@@ -3219,7 +3222,7 @@ body {
   place-items: center;
 }
 .power-detail {
-  width: min(46rem, calc(100vw - 3rem));
+  width: min(54rem, calc(100vw - 3rem));
   padding: 1rem 1.1rem 1.2rem;
   border: 1px solid var(--line);
   border-radius: 0.5rem;
