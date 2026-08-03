@@ -143,9 +143,6 @@ class SimulatedFrontEnd:
         self._transmitting = False
         self._remaining = self._rng.uniform(*TRAFFIC[self._traffic][0])
         self._snr_db = 0.0
-        self._phase = 0.0
-        self._syllable = 0.0
-        self._f0 = 140.0
         #: A recorded broadcast for this channel, if one is fitted, and where
         #: playback has reached. When present it *replaces* the random traffic
         #: model: the message loops with a fixed gap and the gate follows it,
@@ -288,7 +285,6 @@ class SimulatedFrontEnd:
             self._remaining = self._rng.uniform(*length)
             # Aircraft at range are weak; the tower down the valley is not.
             self._snr_db = self._rng.choice([9.0, 14.0, 20.0, 28.0]) + self._rng.uniform(-2, 2)
-            self._f0 = self._rng.uniform(95.0, 190.0)
 
     # --- audio ----------------------------------------------------------
 
@@ -315,25 +311,25 @@ class SimulatedFrontEnd:
                 # a perfectly clean floor is the one thing that never happens.
                 out.append(self._broadcast[source] + self._rng.gauss(0.0, 0.02))
             return out
-        out: list[float] = []
-        clarity = 0.0 if not self._transmitting else min(1.0, max(0.0, (self._snr_db - 4) / 24))
+        # No recording on this channel, so there is nothing to play, and the
+        # channel is left sounding like what it is: an open squelch with a
+        # carrier on it and nobody talking.
+        #
+        # This used to synthesise a voice — three harmonics under a syllabic
+        # envelope — so that a demo station had something audible on any
+        # frequency. On a headset it is unmistakably artificial, and a tone
+        # nobody can mistake for traffic is worse than silence for the one job
+        # a demo has. The recording on the demo channel is the honest version
+        # of that idea; everywhere else now carries only the noise.
+        #
+        # Note the hiss falls as the signal rises, which is not an accident of
+        # the old formula but the behaviour worth keeping: on AM a strong
+        # unmodulated carrier holds the noise *down*, so an open squelch on a
+        # solid signal is quieter than an idle channel rather than louder.
+        clarity = 0.0 if not self._transmitting else min(
+            1.0, max(0.0, (self._snr_db - 4) / 24))
         hiss = 0.12 * (1.0 - clarity) + 0.02
-        step = 2 * math.pi * self._f0 / max(1, rate)
-        for index in range(samples):
-            value = 0.0
-            if self._transmitting:
-                self._phase += step
-                # Syllabic envelope: speech is not a steady tone, and a steady
-                # tone is instantly recognisable as a fake on a headset.
-                self._syllable += 1.0 / max(1, rate)
-                envelope = 0.35 + 0.65 * abs(math.sin(self._syllable * 3.1))
-                value = (
-                    math.sin(self._phase) * 0.55
-                    + math.sin(self._phase * 2.1) * 0.25
-                    + math.sin(self._phase * 3.7) * 0.12
-                ) * envelope * clarity
-            out.append(value + self._rng.gauss(0.0, hiss))
-        return out
+        return [self._rng.gauss(0.0, hiss) for _ in range(samples)]
 
     # --- lifecycle ------------------------------------------------------
 
