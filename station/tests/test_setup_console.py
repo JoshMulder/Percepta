@@ -674,8 +674,11 @@ class ServedPageTests(unittest.TestCase):
         self.assertIn("SameSite=Strict", cookie)
 
     def test_the_update_gate_can_still_read_status_json_over_loopback(self):
-        # deploy/gsu-update.sh polls this to decide whether to keep a new
-        # image. Breaking it means every update rolls back.
+        # The one endpoint that answers on loopback with no password, and the
+        # cheapest proof from a shell that the agent is alive at all. An
+        # updater used to gate on it; nothing does now, but a station you
+        # cannot ask "are you working" over a tunnel is worse for the same
+        # reason it was worth gating on.
         response, body = self.request("GET", "/status.json")
         self.assertEqual(response.status, 200)
         self.assertIn("enrolled", json.loads(body))

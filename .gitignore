@@ -15,6 +15,10 @@ __pycache__/
 percepta.txt
 # A site's own settings, written by the bootstrap scripts. Never committed:
 # `git pull` is the update path, and it must not be able to clobber the answers
-# somebody gave when the box was commissioned.
+# somebody gave when the box was commissioned. It also carries the setup page's
+# password hash, which is the one secret either file is allowed to hold.
+station/.env
+# The old location, kept so that moving the file does not make a bench box's
+# existing one suddenly tracked. Nothing writes here any more.
 station/deploy/.env
 server/.env

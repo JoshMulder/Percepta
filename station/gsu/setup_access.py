@@ -188,8 +188,8 @@ def hash_password(password: str, iterations: int = ITERATIONS) -> str:
 def verify_password(spec: str | None, password: str) -> bool:
     """Check a password against a stored hash, or against a plain value.
 
-    A plain value is accepted because `/etc/percepta/gsu.env` is 0640 root:gsu
-    and an operator who sets one has not done anything unreasonable. It is not
+    A plain value is accepted because `.env` is written 0600 by bootstrap and
+    an operator who sets one has not done anything unreasonable. It is not
     the recommendation: a hash costs one command and survives the file being
     read, which a plain one does not.
     """
@@ -356,7 +356,7 @@ class Gate:
         now = time.monotonic()
         with self._lock:
             # Expired entries go on every failure. Unbounded growth is a real
-            # concern in a 384 MB container (deploy/docker-compose.yml sets
+            # concern in a 384 MB container (docker-compose.yml sets
             # `mem_limit`), and the thing that grows it is the same rotation
             # that defeats a per-source lockout — so the two are fixed
             # together rather than one being left as the price of the other.

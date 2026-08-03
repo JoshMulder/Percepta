@@ -21,7 +21,12 @@ from gsu.config import AgentConfig
 from gsu.devices import registry
 from gsu.devices.serialio import SerialPort, list_ports
 
-DEPLOY = Path(__file__).resolve().parent.parent / "deploy"
+#: The station package root, where docker-compose.yml, .env, bootstrap.sh and
+#: the documentation live — everything a person types or reads.
+STATION = Path(__file__).resolve().parent.parent
+#: The things nobody types: the Dockerfile, the udev rule, the reference
+#: inventory, the environment reference.
+DEPLOY = STATION / "deploy"
 
 
 class SerialFailureTests(unittest.TestCase):
@@ -231,7 +236,7 @@ class ContainerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.dockerfile = (DEPLOY / "Dockerfile").read_text()
-        cls.compose = (DEPLOY / "docker-compose.yml").read_text()
+        cls.compose = (STATION / "docker-compose.yml").read_text()
         # Asserted against the text rather than a parsed tree so that these run
         # everywhere without adding PyYAML as a dependency. The file's *schema*
         # was validated separately with `docker compose config`, which is the
@@ -293,7 +298,7 @@ class ContainerTests(unittest.TestCase):
     def test_the_docs_agree_that_the_container_is_the_path(self):
         # Prose is line-wrapped, so match on collapsed whitespace rather than
         # on where the paragraph happened to break.
-        runbook = " ".join((DEPLOY.parent / "DEPLOYMENT.md").read_text().split())
+        runbook = " ".join((STATION / "DEPLOYMENT.md").read_text().split())
         self.assertIn("The station runs as a container", runbook)
         # The trade is stated, not glossed.
         self.assertIn("Isolation was traded away deliberately", runbook)
@@ -302,7 +307,7 @@ class ContainerTests(unittest.TestCase):
         # A runbook is followed rather than read, so a stale one sends somebody
         # to a site and leaves them there. This used to assert the *presence*
         # of the systemd appendix.
-        runbook = " ".join((DEPLOY.parent / "DEPLOYMENT.md").read_text().split())
+        runbook = " ".join((STATION / "DEPLOYMENT.md").read_text().split())
         for gone in ("--path systemd", "the systemd path", "gsu.service",
                      ".venv/bin/python"):
             self.assertNotIn(gone, runbook, f"the runbook still mentions {gone}")
@@ -377,7 +382,7 @@ class ContainerTests(unittest.TestCase):
         self.assertIn("/dev/bus/usb", self.compose)     # documented in comments
 
     def test_the_dockerignore_keeps_one_stations_identity_out_of_the_image(self):
-        ignored = (DEPLOY.parent / ".dockerignore").read_text()
+        ignored = (STATION / ".dockerignore").read_text()
         self.assertIn("var/", ignored)
 
 

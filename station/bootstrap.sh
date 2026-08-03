@@ -2,7 +2,7 @@
 #
 # Stand up a ground station. Writes `.env`, then starts the container.
 #
-#   cd station/deploy && ./bootstrap.sh
+#   cd station && ./bootstrap.sh
 #
 # ---------------------------------------------------------------------------
 # WHAT THIS DELIBERATELY DOES NOT DO
@@ -70,7 +70,7 @@ Percepta ground station
 =======================
 
 Two answers are needed. Everything else has a working default, and every key
-is documented in gsu.env.example.
+is documented in deploy/gsu.env.example.
 
 INTRO
 
@@ -102,6 +102,7 @@ ask GSU_SITE_NAME "A name for this site (shown on the local setup page)" "ground
 # unreachable from anywhere at all.
 #
 # So this is not optional hardening; it is what makes the page exist.
+
 # **Before the first `docker compose` call that loads the project.**
 #
 # docker-compose.yml declares `env_file: - .env`, and compose treats a missing
@@ -148,8 +149,8 @@ GSU_SETUP_PASSWORD_HASH="${GSU_SETUP_PASSWORD_HASH:-}"
 umask 077
 cat > "$ENV_FILE" <<EOF
 # Written by bootstrap.sh. Gitignored on purpose: this holds a site's settings
-# and \`git pull\` must never clobber it. gsu.env.example documents every key
-# this station understands.
+# and \`git pull\` must never clobber it. deploy/gsu.env.example documents
+# every key this station understands.
 GSU_PLATFORM_URL=$GSU_PLATFORM_URL
 GSU_SITE_NAME=$GSU_SITE_NAME
 GSU_SETUP_PASSWORD_HASH=$GSU_SETUP_PASSWORD_HASH

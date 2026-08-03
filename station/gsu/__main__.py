@@ -767,9 +767,9 @@ def _preflight(agent, config: AgentConfig, probe: bool) -> int:
     # expensive to learn standing at an enclosure with a laptop.
     print("\nSetup page")
     if not config.setup_enabled:
-        line("WARN", "disabled", "GSU_SETUP=0. There is no web setup on this box, "
-                                 "and deploy/gsu-update.sh has no health endpoint "
-                                 "to gate updates on.")
+        line("WARN", "disabled", "GSU_SETUP=0. There is no web setup on this "
+                                 "box, so enrolling it and choosing what is "
+                                 "fitted both have to happen from a shell.")
     else:
         from .setup_access import is_loopback_host
 
@@ -874,7 +874,7 @@ def _setup_password(from_stdin: bool = False) -> int:
         print("Use at least 10 characters. Nothing written.")
         return 1
     print(
-        "\nPut this in /etc/percepta/gsu.env, then restart the agent:\n\n"
+        "\nPut this in station/.env, then `docker compose up -d`:\n\n"
         f"GSU_SETUP_PASSWORD_HASH={hash_password(password)}\n\n"
         f"(pbkdf2-sha256, {ITERATIONS} rounds. Remove any GSU_SETUP_PASSWORD "
         "line: the hash wins, and a stale plain line is a second password "

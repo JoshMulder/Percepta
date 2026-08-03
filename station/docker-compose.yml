@@ -1,7 +1,12 @@
 # The ground station agent, as a container. **This is the deployment path.**
 #
-#   cd station/deploy
+#   cd station
 #   ./bootstrap.sh          # writes .env, then brings it up
+#
+# This file and `.env` sit at the top of `station/` rather than in `deploy/`,
+# beside the package they run. Everything a person types lives here; `deploy/`
+# holds the things nobody types — the Dockerfile, the udev rule, the reference
+# inventory.
 #
 # Updating is `git pull` and `docker compose up -d --build`. There is no
 # updater daemon and no image registry: the source of truth is the checkout,
@@ -47,7 +52,10 @@ name: percepta-station
 services:
   gsu:
     build:
-      context: ..
+      # `station/` either way — this file used to sit one level down and reach
+      # up for it. The package, the requirements and .dockerignore are all
+      # here, which is what the image is built from.
+      context: .
       dockerfile: deploy/Dockerfile
 
     # Built from this checkout, never pulled. There is no registry in this
@@ -74,7 +82,11 @@ services:
 
     # Beside this file, and gitignored, so that `git pull` cannot clobber a
     # site's settings and a secret never reaches the repository. `bootstrap.sh`
-    # writes it; `gsu.env.example` documents every key.
+    # writes it; `deploy/gsu.env.example` documents every key.
+    #
+    # Compose treats a missing env file as a hard error rather than an empty
+    # one, so bootstrap creates it before its first `docker compose` call - see
+    # the comment there.
     env_file:
       - .env
     environment:

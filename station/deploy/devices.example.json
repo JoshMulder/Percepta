@@ -1,7 +1,9 @@
 {
   "_comment": [
-    "The device inventory for the Pi 2B station described in HARDWARE.md, as",
-    "shipped by deploy/install.sh when the box has no inventory of its own.",
+    "The device inventory for the Pi 2B station described in HARDWARE.md.",
+    "Nothing installs this: a station starts with no devices.json at all and",
+    "an installer chooses each slot on the setup page. It is here as the",
+    "reference for what that box is, and tests/test_deploy.py holds it to it.",
     "",
     "It is INTENT, not detection. The station keeps the two apart on purpose",
     "(contract/enrolment.md §7): this file says what someone believes is",

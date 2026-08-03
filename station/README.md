@@ -167,8 +167,11 @@ gsu/
                  four controls, and why each one is a default and not a setting
   enrolment.py   claim, renew with backoff, and alarm early
   clock.py       plausibility, and what is disciplining this clock
-deploy/          systemd unit, installer, environment, udev rule, and the
-                 device inventory for the Pi described in HARDWARE.md
+deploy/          the things nobody types: the Dockerfile, the udev rule for the
+                 SDR, the environment reference, and the device inventory for
+                 the Pi described in HARDWARE.md
+bootstrap.sh     stand a box up: three questions, then the container
+docker-compose.yml  how it runs. `.env` beside it holds this site's answers
 ```
 
 ## Running it
@@ -226,19 +229,19 @@ which is the point of them: they are how the first person with a Pi finds out
 whether the camera and the encoder work.
 
 **To put one on a Raspberry Pi, read `DEPLOYMENT.md`.** It goes from a blank SD
-card to an enrolled station, running as a **container** (`deploy/install.sh`,
-`deploy/Dockerfile`, `deploy/docker-compose.yml`). That is the only path. The
-agent also ran as a plain systemd service until the CSI camera stopped being a
+card to an enrolled station, running as a **container** (`bootstrap.sh`,
+`docker-compose.yml`, `deploy/Dockerfile`). That is the only path. The agent
+also ran as a plain systemd service until the CSI camera stopped being a
 requirement — that was the one thing the container could not do, because
 `rpicam-vid` bus-errors inside the image — and carrying two deployment shapes
 for a camera nobody fits was the larger cost.
 
 Containers won on one constraint: these stations are hard to reach physically,
-so an update is the riskiest routine operation there is. `deploy/gsu-update.sh`
-pulls on a jittered timer, **proves the new image enrols and publishes before
-keeping it**, and rolls back to the image already on disk if it does not —
-no download, over a link that may be why you are rolling back. DEPLOYMENT.md §14
-and DECISIONS.md items 35a–c and 39; the reversal history is kept deliberately.
+so an update is the riskiest routine operation there is. The update is
+`git pull && docker compose up -d --build`, and the rollback is `git checkout`
+of a tag already on the disk — which needs no tooling and, on the link that may
+be the reason you are rolling back, no download. DECISIONS.md items 35a–c; the
+reversal history is kept deliberately.
 
 `GSU_BROKER_URL` overrides only the broker *address* — an address and nothing
 else, never credentials — and the username and topics still come from enrolment.
