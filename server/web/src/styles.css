@@ -2775,6 +2775,48 @@ body {
   transform-box: fill-box;
   transform-origin: center;
 }
+/* Holds the glyph and, for a helicopter, the rotor stacked over it. Sized to
+   the glyph, so the rotor can centre on the aircraft rather than on the marker
+   as a whole — the label below would otherwise drag the midpoint down. */
+.glyph-wrap {
+  position: relative;
+  display: block;
+}
+/* Hidden and still on everything that is not a helicopter — the element is
+   always in the DOM so a contact that starts reporting rotorcraft needs no
+   rebuild, only the class. */
+.map-contact .rotor {
+  display: none;
+}
+.map-contact.rotorcraft .rotor {
+  display: block;
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 30px;
+  height: 30px;
+  margin: -15px 0 0 -15px;
+  pointer-events: none;
+  /* Spun fast enough that the two blades read as a disc rather than a slow
+     propeller, which is the look FR24 has. */
+  animation: helo-rotor 0.32s linear infinite;
+}
+.map-contact.rotorcraft .rotor ellipse {
+  fill: rgba(232, 238, 245, 0.5);
+  stroke: none;
+}
+@keyframes helo-rotor {
+  to {
+    transform: rotate(360deg);
+  }
+}
+/* A spinning disc over every helicopter on screen is exactly the motion someone
+   who asked for stillness wants gone; the blades stay, just crossed and still. */
+@media (prefers-reduced-motion: reduce) {
+  .map-contact.rotorcraft .rotor {
+    animation: none;
+  }
+}
 .map-contact span {
   font: 0.6rem var(--mono);
   white-space: nowrap;

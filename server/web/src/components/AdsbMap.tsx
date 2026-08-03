@@ -1,6 +1,6 @@
 import maplibregl from "maplibre-gl";
 import { memo, useEffect, useRef, useState } from "react";
-import { iconFor } from "../adsbIcons";
+import { iconFor, isRotorcraft } from "../adsbIcons";
 import type { Aircraft, MapConfig } from "../types";
 import { ContactDetail } from "./ContactDetail";
 
@@ -338,7 +338,19 @@ function AdsbMapInner({
       if (!marker) {
         const el = document.createElement("div");
         el.className = "map-contact";
-        el.innerHTML = "<svg></svg><span></span>";
+        // The glyph and, for a rotorcraft, a rotor disc that spins over it, in a
+        // wrapper so the disc can be centred on the glyph rather than the whole
+        // marker (the label sits below and would pull the centre down). The
+        // rotor is inert markup until the `rotorcraft` class turns it on, so
+        // every other contact carries a hidden, un-animated element and nothing
+        // else. `querySelector("svg")` below still finds the glyph — it is the
+        // first svg in document order. The rotor's own blades are two crossed
+        // ellipses; spinning the svg blurs them into a disc, like FR24.
+        el.innerHTML =
+          "<div class='glyph-wrap'><svg></svg>" +
+          "<svg class='rotor' viewBox='-16 -16 32 32' aria-hidden='true'>" +
+          "<ellipse rx='15' ry='2.1'></ellipse>" +
+          "<ellipse rx='2.1' ry='15'></ellipse></svg></div><span></span>";
         // Pointer events are off for the marker as a whole (see STYLE) so the
         // label never eats a click meant for the map behind it; the glyph opts
         // back in — but only where there is a panel to open. In the mini
@@ -379,6 +391,10 @@ function AdsbMapInner({
       const el = marker.getElement();
       el.classList.toggle("alert", Boolean(contact.alert));
       el.classList.toggle("selected", contact.icao === selected);
+      // A helicopter gets a spinning rotor; everything else keeps the hidden,
+      // un-animated rotor element it was built with. Toggled every update
+      // because a transponder can begin reporting a category it was not before.
+      el.classList.toggle("rotorcraft", isRotorcraft(contact.emitter_type));
       // Ground vehicles and obstacles are not rotated at all, and a contact
       // that sent no track is left pointing north rather than being asserted
       // to be heading north — `track ?? 0` would have invented a heading.
