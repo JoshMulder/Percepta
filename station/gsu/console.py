@@ -1043,33 +1043,65 @@ class Console:
         )
 
     def _set_location(self, form: dict) -> None:
-        """The one thing about this box's position that is still set here.
+        """Where this box is, set by the person standing at it.
 
-        Coordinates and elevation are settled at commissioning and frozen with
-        the enrolment: a station that needs different ones has physically
-        moved, and a box that has moved is recommissioned rather than edited.
+        **This was read-only, and it should not have been.** The reasoning was
+        that a box which has moved is recommissioned rather than edited, so the
+        position was settled at enrolment and frozen. But that left an enrolled
+        box with no way to be given a position at all except by revoking its
+        credential and re-enrolling — and the position the platform then reissues
+        is the one it already had, so even that did not work. The person at the
+        mast is the one who knows the coordinates; this is where they belong.
 
-        What remains is whether to *use* the elevation — the ADS-B barometric
-        correction, which is computed on this box from this box's barometer.
-        That is a local behaviour switch rather than a fact about the site, and
-        it is the one thing here somebody at the mast might reasonably change
-        after the fact.
+        Written to the station's own `SiteConfig`, which `effective_position`
+        already prefers over anything the platform issued (agent.py). Nothing
+        else changes: the platform still carries its own idea of where the box
+        is, and the box still reports its position up.
+
+        Latitude and longitude are both-or-neither: a lone coordinate is a
+        half-entered pair, not a position, and storing it would put the box
+        somewhere on the equator or the prime meridian.
         """
+        from .config import parse_elevation_m, parse_latitude, parse_longitude
+
+        def read(name: str, parser):
+            raw = (form.get(name) or [""])[0].strip()
+            return parser(raw) if raw else None
+
+        latitude = read("latitude", parse_latitude)
+        longitude = read("longitude", parse_longitude)
+        elevation = read("elevation_m", parse_elevation_m)
+
+        if (latitude is None) != (longitude is None):
+            raise ValueError(
+                "Give both a latitude and a longitude, or clear both. One on "
+                "its own is not a position."
+            )
+
         # An unchecked checkbox sends nothing at all, so its absence from a
         # submission of *this* form is a real "off". That only holds because
         # the input is inside this form and always rendered.
         correction = bool(form.get("adsb_baro_correction"))
-        if correction and self.agent.effective_elevation_m() is None:
-            # Refused rather than accepted-and-idle. A checkbox that stays
-            # ticked while nothing happens is how somebody comes to trust a
-            # number that was never computed — and the fix is not here, it is
-            # on the platform, so the message has to say so.
+        # What the elevation will be after this save: the value just entered, or
+        # whatever the enrolment carried if the field was left empty. Checked
+        # against that rather than the field alone, so leaving the field blank
+        # on a station the platform gave an elevation still lets the correction
+        # run. Refused rather than accepted-and-idle: a switch ticked while
+        # nothing is computed is how somebody comes to trust a number that was
+        # never produced.
+        enrolment = getattr(self.agent, "enrolment", None)
+        enrolled_elevation = getattr(getattr(enrolment, "site", None),
+                                     "elevation_m", None)
+        if correction and elevation is None and enrolled_elevation is None:
             raise ValueError(
-                "This station has no elevation, so altitudes cannot be "
-                "corrected. Set one on the platform and re-enrol."
+                "Correcting altitudes needs an elevation. Enter one above, or "
+                "leave the correction off."
             )
-        self.agent.site.adsb_baro_correction = correction
-        self.agent.site.save(self.agent.config.site_config_path)
+
+        # Through the agent's own setter, which parses nothing (already done
+        # here) but stores and acts on all four together — see set_location.
+        self.agent.set_location(
+            latitude, longitude, elevation, baro_correction=correction)
         self.message = ("good", "Saved.")
 
     def _reset(self, form: dict) -> None:
@@ -1724,31 +1756,44 @@ class Console:
             "</form></div>"
         )
 
-    def _section_enrol(self, state: dict, csrf: str) -> str:
-        """The code field, and why an enrolled station still gets one.
+    def _has_usable_credential(self, state: dict) -> bool:
+        """Whether this box holds a credential the platform still honours.
 
-        **A box that holds a credential is not necessarily a box the platform
-        accepts.** `enrolled` here means only that there is a credential file
-        on the disk. An admin who revokes it changes nothing this box can see
-        until a renewal fails, and possibly not then — so the page went on
-        reporting "Enrolled as …" with no way to type the replacement code an
-        admin had just issued. The only exit was a factory reset, which throws
-        away the device inventory, the events and the recordings to solve a
-        problem with one file.
+        `state["enrolled"]` only means a credential *file* exists. The platform
+        can revoke it, and — this is the honest limit — the box does not learn
+        that at the moment it happens. It finds out when a renewal is next
+        refused, which raises `credential.revoked`, or when the credential
+        expires. Until one of those, a box that has been cut off still believes
+        it is enrolled, and no amount of code on this side can know otherwise.
 
-        The platform has always allowed this. `services/enrolment.claim`
-        accepts a token *issued after* the station enrolled precisely so a box
-        can be replaced or re-enrolled in service, and refuses only a stale one
-        that predates it — somebody's old code found written down. So the guard
-        that matters is already at the other end, where it can tell those two
-        apart; this end was refusing to ask the question at all.
-
-        Both states are the same shape — a line saying where this box stands,
-        then the card with the field in it. A code entered on a working station
-        is refused by the platform if it predates enrolment, so nothing here
-        needs a confirmation step to protect against a mistyped one.
+        So "enrolled" for the purpose of the code field means *has a working
+        credential*: a revoked or expired one drops the box back to needing a
+        code, which is the same state as a box that never had one. There is no
+        third "re-enrol" state, because from the box's side there is no third
+        thing to be.
         """
-        if state["enrolled"]:
+        if not state["enrolled"]:
+            return False
+        credential = getattr(
+            getattr(self.agent, "enrolment", None), "credential", None)
+        if credential is None or credential.expired():
+            return False
+        return not any(
+            condition.get("id") == "credential.revoked"
+            for condition in state.get("health", [])
+        )
+
+    def _section_enrol(self, state: dict, csrf: str) -> str:
+        """Either a line saying where the box is enrolled, or a field for a code.
+
+        A station is enrolled or it is not, and the field shows only when it is
+        not — where "not" includes a credential the box has found the platform
+        no longer honours (see `_has_usable_credential`). There is no separate
+        re-enrol: a revoked box is simply a box that needs setting up again, and
+        the platform tells the two apart, accepting a code issued after
+        enrolment and refusing a stale one that predates it.
+        """
+        if self._has_usable_credential(state):
             # The organisation is echoed back by the platform and shown here
             # because a code carries no visible clue whose it is. The mistake
             # this catches is a contractor commissioning a box into the
@@ -1759,84 +1804,85 @@ class Console:
             return (
                 f"<p class=sub>Enrolled as {html.escape(state['station'] or '')}"
                 f"{where}.</p>"
-                + self._code_form(
-                    csrf, autofocus=False,
-                    label="Enter a new code",
-                    button="Re-enrol this station",
-                )
             )
-        return (
+        note = (
+            "<p class=sub>This station's credential is no longer valid. Enter a "
+            "new code to set it up again.</p>"
+            if state["enrolled"] else
             "<p class=sub>Not set up yet.</p>"
-            + self._code_form(
-                csrf, autofocus=True,
-                label="Enter the code you were given",
-                button="Set this station up",
-            )
+        )
+        return note + self._code_form(
+            csrf, autofocus=True,
+            label="Enter the code you were given",
+            button="Set this station up",
         )
 
     def _section_location(self, state: dict, csrf: str, banner: str = "") -> str:
-        """Where this box is, and the one local thing about it worth setting.
+        """Where this box is, set by whoever is standing at it.
 
-        **Position is read-only.** It is settled when the station enrols and
-        frozen afterwards: a station that needs a different one has physically
-        moved, and a box that has moved is recommissioned rather than edited.
-        The rows state what it was issued, with the platform's own words for
-        those coordinates beside them so somebody at the site can check the
-        position matches the site they are standing at.
+        **Editable, where it used to be read-only.** The old rule froze the
+        position at enrolment on the reasoning that a box which has moved is
+        recommissioned — but that left an enrolled box with no way to be given a
+        position at all, and the revoke-and-re-enrol workaround reissued the
+        same coordinates it already had. The person at the mast knows where the
+        box is; this is the field they put it in. It writes to the station's own
+        config, which `effective_position` already prefers over anything the
+        platform issued.
 
-        **Elevation is not, and that is not an inconsistency.** It is measured
-        at the mast rather than issued, and it exists for the ADS-B barometric
-        correction, which is computed on this box from this box's barometer.
-        The switch for that correction sits directly under it because they are
-        one decision — the correction refuses to run without the elevation.
+        The three coordinates and the altitude-correction switch are one form:
+        the correction is computed from the elevation and refuses without it, so
+        editing them apart would let somebody tick a correction whose input is
+        on another screen.
 
-        **No dialog.** There was one, and it was right while this held three
-        coordinates and duplicated the rows above it. With the position frozen
-        it holds a number and a checkbox, and putting two controls behind an
-        overlay, a fragment target and a focus dance is more machinery than the
-        thing it hides. Inline, they are simply the rest of the card.
+        The platform's own words for the coordinates it issued are shown beside
+        the fields, unedited, so an installer can check the box against the site
+        they are standing at rather than against a bare pair of decimals.
         """
         position = state.get("position") or {}
         station = position.get("station") or {}
-        elevation = position.get("elevation_m")
-        rows = [
-            ("Position", *self._position_wording(position)),
-        ]
-        out = ["<h2>Where this box is</h2><div class=card>"]
-        for label, value, css in rows:
-            out.append(
-                f"<div class=row><span class=k>{html.escape(label)}</span>"
-                f"<span class='{css}'>{html.escape(str(value))}</span></div>"
+
+        def field(name: str, label: str, value, placeholder: str,
+                  step: str, lo: str, hi: str) -> str:
+            shown = "" if value is None else html.escape(str(value))
+            return (
+                f"<div class=field><label for={name}>{label}</label>"
+                f"<input id={name} name={name} type=number inputmode=decimal "
+                f"step={step} min={lo} max={hi} value='{shown}' "
+                f"placeholder='{placeholder}'></div>"
             )
+
+        out = ["<h2>Where this box is</h2><div class=card>"]
         out.append(banner)
-        # Elevation is a row, not a field. It is part of the position — the
-        # correction below is computed from it, and a correction referenced to
-        # the wrong height is out by that height on every aircraft — so it is
-        # set at commissioning with the coordinates and frozen with them.
-        out.append(
-            "<div class=row><span class=k>Elevation</span>"
-            + (f"<span class=ok>{html.escape(_degrees(elevation))} m</span>"
-               if elevation is not None
-               else "<span class=warn>not set</span>")
-            + "</div>"
-        )
-        # No banner here. It existed to put a refusal *inside* the dialog;
-        # with the dialog gone the page's own banner is the only one, and
-        # emitting it twice is how a single refusal read as two.
         out.append(f"<form method=post action='/location'>{self._csrf_field(csrf)}")
+        # Prefilled with what the box is actually using, whichever source that
+        # came from, so an installer edits from the current position rather than
+        # a blank field — and saving what is shown simply confirms it locally.
+        out.append(field("latitude", "Latitude", position.get("latitude"),
+                         "-43.48972", "any", "-90", "90"))
+        out.append(field("longitude", "Longitude", position.get("longitude"),
+                         "172.53194", "any", "-180", "180"))
+        out.append(field("elevation_m", "Elevation (m)", position.get("elevation_m"),
+                         "metres above sea level", "any", "-500", "100000"))
         checked = " checked" if station.get("adsb_baro_correction") else ""
         out.append(
             "<div class=field><label for='adsb_baro_correction'>"
             "Correct altitudes</label>"
             "<input type=checkbox id='adsb_baro_correction' "
             f"name='adsb_baro_correction' value='1'{checked}>"
-            "<span class=muted>Uses this station's barometer. "
-            "Needs an elevation.</span></div>"
+            "<span class=muted>Uses this station's barometer and the elevation "
+            "above.</span></div>"
         )
+        out.append("<div class=field><button type=submit>Save</button></div></form>")
+
+        # What the platform issued, for comparison only. Named as the platform's
+        # so it is never mistaken for what the box is using — a station running
+        # a local position and one still on the platform's look identical
+        # otherwise, and only the local one was put there by somebody who was
+        # at the site.
+        where, _ = self._position_wording(position)
         out.append(
-            "<div class=field><button type=submit>Save</button></div></form>"
-            "<div class=muted>Position is set when this box is enrolled. "
-            "Re-enrol to move it.</div></div>"
+            "<div class=muted>Platform's position: "
+            f"{html.escape(where)}</div></div>"
         )
         return "".join(out)
 

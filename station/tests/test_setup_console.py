@@ -699,22 +699,7 @@ class ServedPageTests(unittest.TestCase):
         _, summary = self.request("GET", "/")
         self.assertIn("/connection", summary)
 
-    def test_an_enrolled_station_can_still_be_given_a_new_code(self):
-        """A box holding a credential is not necessarily a box the platform
-        accepts.
-
-        `enrolled` means only that a credential file exists here. An admin who
-        revokes it changes nothing this box can see until a renewal fails — so
-        the page reported "Enrolled as …" with no way to type the replacement
-        code that admin had just issued, and the only exit was a factory reset:
-        throwing away the device inventory, the events and the recordings to
-        solve a problem with one file.
-
-        The platform has always permitted this. `services/enrolment.claim`
-        accepts a token issued *after* the station enrolled, exactly so a box
-        can be re-enrolled or replaced in service, and refuses only a stale one
-        that predates it. This end was refusing to ask.
-        """
+    def _enrol(self, name="Station1", hours=48):
         from datetime import UTC, datetime, timedelta
 
         from gsu.credentials import Enrolment
@@ -724,31 +709,48 @@ class ServedPageTests(unittest.TestCase):
             "station_id": "11111111-2222-3333-4444-555555555555",
             "credential": {
                 "type": "bearer", "secret": "s",
-                "expires_at": (now + timedelta(hours=48)).isoformat(),
-                "renew_after": (now + timedelta(hours=24)).isoformat(),
+                "expires_at": (now + timedelta(hours=hours)).isoformat(),
+                "renew_after": (now + timedelta(hours=hours / 2)).isoformat(),
             },
             "broker": {
                 "url": "redis://broker:6379/0", "username": "gsu:x",
                 "telemetry_topic": "gsu/x/telemetry", "audio_topic": "gsu/x/audio",
                 "command_topic": "cmd/gsu/x",
             },
-            "station": {"name": "Station1", "timezone": "Pacific/Auckland"},
+            "station": {"name": name, "timezone": "Pacific/Auckland"},
             "config_version": 3,
         })
 
+    def test_a_working_enrolled_station_shows_no_code_field(self):
+        # A station is enrolled or it is not. With a credential the platform
+        # still honours, there is nothing to type — just where it is enrolled.
+        self._enrol()
         _, body = self.request("GET", "/connection")
         self.assertIn("Enrolled as Station1", body)
-        self.assertIn("XXXX-XXXX-XXXX", body, "no way to enter a replacement code")
-        self.assertIn("action='/enrol'", body)
-        # Offered directly, in the same shape as the unenrolled state: a line
-        # saying where the box stands, then the card with the field in it. No
-        # reveal to open first, and nothing styled unlike the rest of the page.
-        self.assertNotIn("#recode", body)
+        self.assertNotIn("XXXX-XXXX-XXXX", body,
+                         "an enrolled station offered a code field")
 
-    def test_the_field_is_focused_only_when_it_is_the_first_thing_to_do(self):
-        # Unenrolled, the code is the whole job and the cursor belongs in it.
-        # On an enrolled station the page is being read rather than filled in,
-        # and stealing focus into a re-enrolment field would be wrong.
+    def test_a_revoked_credential_brings_the_code_field_back(self):
+        # The box cannot know the platform revoked it at the moment it happens;
+        # it learns when a renewal is refused, which raises this condition. Once
+        # it knows, it is effectively not enrolled, and the code field returns —
+        # without a factory reset, and without a separate "re-enrol" concept.
+        self._enrol()
+        self.agent.health.raise_condition(
+            "credential.revoked", "critical", "The platform rejected this box.")
+        _, body = self.request("GET", "/connection")
+        self.assertIn("no longer valid", body.lower())
+        self.assertIn("XXXX-XXXX-XXXX", body,
+                      "a revoked station had no way to enter a new code")
+
+    def test_an_expired_credential_brings_the_code_field_back(self):
+        self._enrol(hours=-1)  # already past its expiry
+        _, body = self.request("GET", "/connection")
+        self.assertIn("XXXX-XXXX-XXXX", body)
+
+    def test_the_field_is_focused_when_the_station_needs_setting_up(self):
+        # Not enrolled (or credential dead): the code is the whole job and the
+        # cursor belongs in it.
         _, body = self.request("GET", "/connection")
         self.assertIn("autofocus", body)
 
@@ -1094,33 +1096,30 @@ class ServedPageTests(unittest.TestCase):
         self.request("POST", "/location", f"{body}&csrf={csrf}", {"Cookie": cookie})
         return self.request("GET", "/connection", None, {"Cookie": cookie})[1]
 
-    def test_the_connection_page_states_the_position_and_does_not_ask_for_it(self):
-        # Position is settled at enrolment and frozen. The page reports what
-        # this box was issued; it offers no way to type a different one.
+    def test_the_connection_page_offers_the_position_fields(self):
+        # Position is set by whoever is standing at the box — the read-only
+        # freeze left an enrolled station with no way to be given one at all.
         _, _, body = self.page("/connection")
-        self.assertIn("Position", body)
-        self.assertNotIn("name='latitude'", body)
-        self.assertNotIn("name='longitude'", body)
+        self.assertIn("name=latitude", body)
+        self.assertIn("name=longitude", body)
 
-    def test_the_elevation_is_stated_and_not_editable(self):
-        # It is part of the position: the barometric correction is computed
-        # from it, and a correction referenced to the wrong height is out by
-        # that height on every aircraft. So it is set at commissioning with the
-        # coordinates and frozen with them.
+    def test_the_elevation_is_a_field(self):
+        # It is part of the position, and it drives the barometric correction,
+        # so it is set here with the coordinates rather than issued and frozen.
         _, _, body = self.page("/connection")
         self.assertIn("Elevation", body)
-        self.assertNotIn("name='elevation_m'", body)
+        self.assertIn("name=elevation_m", body)
 
     def test_the_correction_cannot_be_switched_on_without_one(self):
-        # Refused rather than accepted-and-idle, and the message names where
-        # the fix is — which is no longer this page.
+        # Refused rather than accepted-and-idle. The elevation it needs is now a
+        # field on this same form, so the message points there.
         token, csrf, _ = self.page("/connection")
         self.request("POST", "/location",
                      f"adsb_baro_correction=1&csrf={csrf}", {"Cookie": token})
         self.assertFalse(self.agent.site.adsb_baro_correction)
         _, body = self.request("GET", "/connection", None, {"Cookie": token})
         self.assertIn("msg bad", body)
-        self.assertIn("re-enrol", body.lower())
+        self.assertIn("elevation", body.lower())
 
     def test_the_location_post_lands_back_on_connection(self):
         token, csrf, _ = self.page("/connection")
@@ -1148,26 +1147,23 @@ class ServedPageTests(unittest.TestCase):
     # reopen a URL-driven dialog after a refused save and can do nothing at all
     # to a hidden checkbox. Everything below is that path with no script in it.
 
-    def test_the_position_is_stated_and_not_editable(self):
-        # Settled at enrolment and frozen. The card reports it; nothing on the
-        # page offers a way to type a different one.
+    def test_the_position_is_editable_at_the_box(self):
+        # The person at the mast knows where the box is; the card gives them the
+        # fields to say so, and the station's own position is preferred over
+        # whatever the platform issued.
         _, _, body = self.page("/connection")
         card = body.split("<h2>Where this box is</h2>", 1)[1]
-        self.assertIn("Position", card)
-        self.assertNotIn("name='latitude'", body)
-        self.assertNotIn("name='longitude'", body)
+        self.assertIn("name=latitude", card)
+        self.assertIn("name=longitude", card)
 
     def test_the_local_settings_are_inline_and_need_no_dialog(self):
-        # There was a :target dialog here, and it was right while this card
-        # held three coordinates that duplicated the rows above it. With the
-        # position frozen it would hold a number and a checkbox, which is less
-        # than the machinery of an overlay costs.
+        # No :target dialog and no script: an installer's phone with scripts
+        # blocked has to be able to set a position, and the whole card is
+        # ordinary fields.
         _, _, body = self.page("/connection")
         self.assertNotIn("class=modal", body)
         card = body.split("<h2>Where this box is</h2>", 1)[1]
-        # Elevation is stated, not typed — it comes with the enrolment. What
-        # remains editable is whether to *use* it.
-        self.assertNotIn("name='elevation_m'", card)
+        self.assertIn("name=elevation_m", card)
         self.assertIn("name='adsb_baro_correction'", card)
 
     def test_the_connection_page_carries_no_script_at_all(self):
@@ -1199,15 +1195,15 @@ class ServedPageTests(unittest.TestCase):
                      f"adsb_baro_correction=1&csrf={csrf}", {"Cookie": token})
         _, body = self.request("GET", "/connection", None, {"Cookie": token})
         self.assertEqual(body.count("msg bad"), 1, "said twice is said wrong")
-        self.assertIn("no elevation", body)
+        self.assertIn("elevation", body.lower())
 
     def test_the_local_settings_use_the_shared_field_grid(self):
         _, _, body = self.page("/connection")
         # Bounded to this card: the sections below it have fields of their own.
         card = body.split("<h2>Where this box is</h2>", 1)[1].split("<h2>", 1)[0]
-        # The correction checkbox and the save row. Position and elevation are
-        # rows now, not fields — they arrive with the enrolment.
-        self.assertEqual(card.count("<div class=field>"), 2)
+        # Latitude, longitude, elevation, the correction checkbox, and the save
+        # row — all in the shared .field grid.
+        self.assertEqual(card.count("<div class=field>"), 5)
         self.assertNotIn("grid-template-columns", card)
         self.assertIn("--label-w:9.5rem", body)
 
@@ -1792,12 +1788,11 @@ class BarometricCorrectionSettingTests(unittest.TestCase):
 
     def test_ticking_it_without_an_elevation_is_refused_not_accepted_idle(self):
         # A checkbox that stays ticked while nothing happens is how somebody
-        # comes to trust a number that was never computed. The message names
-        # where the fix is, which is no longer this page.
+        # comes to trust a number that was never computed. The elevation it
+        # needs is now a field on this same form, so the message points there.
         with self.assertRaises(ValueError) as caught:
             self.submit(adsb_baro_correction="1")
         self.assertIn("elevation", str(caught.exception).lower())
-        self.assertIn("re-enrol", str(caught.exception).lower())
         self.assertFalse(self.agent.site.adsb_baro_correction)
 
     def test_an_unticked_box_turns_it_off(self):

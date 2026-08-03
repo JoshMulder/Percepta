@@ -344,35 +344,36 @@ class Agent:
     def effective_elevation_m(self) -> float | None:
         """The height the barometric correction is computed against.
 
-        Enrolment first, for the same reason the coordinates come from there:
-        it is part of the position, settled at commissioning and frozen with
-        it. A locally configured value is still honoured underneath, because a
-        box enrolled before the platform carried an elevation has nothing else
-        — but nothing sets it any more.
+        Local first, to match `effective_position` — the two were inconsistent,
+        position preferring the value set at the box and elevation preferring
+        the one from enrolment, which meant setting a position locally moved the
+        coordinates but not the height they were referenced against. The person
+        at the mast is the authority on both, so both take the local value when
+        there is one and fall back to what the platform issued when there is
+        not.
         """
+        if self.site.elevation_m is not None:
+            return self.site.elevation_m
         site = self.enrolment.site if self.enrolment else None
-        if site is not None and site.elevation_m is not None:
-            return site.elevation_m
-        return self.site.elevation_m
+        return site.elevation_m if site is not None else None
 
     def effective_position(self) -> tuple[float | None, float | None, str]:
         """Where this station is, and on whose word.
 
-        **The enrolment answers this now.** Position is settled when the code is
-        redeemed and frozen afterwards, because a station that needs a different
-        position has physically moved — and a box that has moved needs
-        commissioning at its new site anyway: new coordinates, new basemap
-        cache, quite possibly a new owner. Two editable copies of one fact was
-        the earlier problem; one editable copy that outlives the site it
-        describes is a worse one, because every bearing the station ever
-        reported becomes unattributable.
+        **The station's own configuration wins, then the enrolment.** The
+        position set on this box, by somebody standing at it, is preferred over
+        whatever the platform issued — because the person at the mast is the one
+        who knows, and because the setup page now lets them set it. The
+        enrolment value is the fallback for a box that has never been told
+        locally, which is the normal state right after a code is redeemed.
 
-        A locally configured position is still preferred if one is present, and
-        that is not a leftover. It is what a station enrolled before the
-        platform carried a position has, and dropping it would take range and
-        bearing away from boxes already in the field. Nothing sets it any more
-        — the setup page shows position read-only — so on a station enrolled
-        from here on it is never populated and the enrolment value is used.
+        This used to be the other way round in spirit — the position was frozen
+        at enrolment and the setup page showed it read-only — on the reasoning
+        that a box which has moved is recommissioned. That left an enrolled box
+        with no way to be given a position at all, so the read-only rule is
+        gone. Two editable copies of one fact is still a hazard, which is why
+        the platform's copy is a fallback and reference rather than a second
+        master.
 
         Returns `(None, None, "")` when nobody has said. Unset is a state, and
         it is reported as absent rather than as a plausible-looking default.
