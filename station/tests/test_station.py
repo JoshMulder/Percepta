@@ -1269,11 +1269,108 @@ class LocalStreamViewerTests(unittest.TestCase):
         self.assertEqual(primary.log, [], "nothing should have gone out yet")
 
         primary.available = True
-        self.assertTrue(tee.open_primary())
-        # Handed the init segment it missed, so it can decode what follows.
-        self.assertEqual(primary.log, [b"INIT"])
+        # `open_primary` asks; it does not connect. It runs in the `video.start`
+        # handler, which is the relay's socket reader, and a connect that waits
+        # out its timeouts there stops the station answering pings for long
+        # enough to lose the relay — a disconnect caused by the code meant to
+        # recover one. So it reports the uplink as still down and leaves the
+        # work to the encoder thread.
+        self.assertFalse(tee.open_primary())
+        self.assertEqual(primary.log, [], "open_primary must not connect")
+
+        # ...which happens on the next fragment, and hands over the init
+        # segment it missed so the platform can decode what follows.
         tee.send(b"later", keyframe=True)
         self.assertEqual(primary.log, [b"INIT", b"later"])
+        self.assertTrue(tee.open_primary(), "up now, so this is a no-op")
+
+    def test_a_closed_platform_socket_reopens_on_the_encoder_thread(self):
+        """What every platform restart does, and what used to end video.
+
+        The socket goes from the far end and nothing local hears about it.
+        `open_primary` has to notice — it used to trust a flag and answer
+        "already streaming" for ever — without being the one that reconnects.
+        """
+        from gsu.transport.stream import StreamUplink, TeeUplink
+
+        class Closable(StreamUplink):
+            name = "closable"
+
+            def __init__(self):
+                super().__init__()
+                self.live = True
+                self.opens = 0
+                self.log = []
+
+            @property
+            def connected(self): return self.live
+
+            def open(self):
+                self.opens += 1
+                self.live = True
+                return True
+
+            def begin(self, codec, init): self.log.append(init); return True
+            def send(self, fragment, keyframe): self.log.append(fragment); return True
+            def close(self): pass
+
+        primary = Closable()
+        tee = TeeUplink(primary)
+        self.assertTrue(tee.open())
+        tee.begin("h264", b"INIT")
+        tee.send(b"a", keyframe=True)
+        self.assertEqual(primary.log, [b"INIT", b"a"])
+        self.assertEqual(primary.opens, 1)
+
+        # The platform restarts. The socket is gone; the flag still says open.
+        primary.live = False
+        self.assertFalse(tee.open_primary(), "the socket is gone")
+        self.assertEqual(primary.opens, 1, "open_primary must not reconnect")
+
+        # The encoder offers its next fragment, and the reconnect happens
+        # there — with the init segment re-sent, because whatever the platform
+        # was holding went with the socket.
+        tee.send(b"b", keyframe=True)
+        self.assertEqual(primary.opens, 2)
+        self.assertEqual(primary.log, [b"INIT", b"a", b"INIT", b"b"])
+
+    def test_a_platform_that_will_not_come_back_is_retried_slowly(self):
+        """Thirty fragments a second must not mean thirty connects a second.
+
+        Each failed connect costs the connect and handshake timeouts, so an
+        unrated retry would spend the entire stream inside `socket.connect`
+        — which is the cost this moved off the command thread to avoid.
+        """
+        from gsu.transport.stream import StreamUplink, TeeUplink
+
+        class Dead(StreamUplink):
+            name = "dead"
+
+            def __init__(self):
+                super().__init__()
+                self.opens = 0
+
+            @property
+            def connected(self): return False
+
+            def open(self):
+                self.opens += 1
+                return False
+
+            def begin(self, codec, init): return True
+            def send(self, fragment, keyframe): return True
+            def close(self): pass
+
+        primary = Dead()
+        tee = TeeUplink(primary, require_primary=False)
+        tee.open()
+        self.assertFalse(tee.open_primary())
+        for _ in range(50):
+            tee.send(b"x", keyframe=False)
+        self.assertEqual(
+            primary.opens, 2,
+            "one connect from open() and one retry, not one per fragment",
+        )
 
     def test_the_uplink_says_who_is_watching(self):
         from gsu.transport.stream import LocalViewer

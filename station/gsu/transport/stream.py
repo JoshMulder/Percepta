@@ -39,6 +39,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from abc import ABC, abstractmethod
 from collections import deque
 
@@ -53,6 +54,12 @@ FILE_CAP_BYTES = 64 * 1024 * 1024
 #: The path the platform serves. Kept beside the URL derivation rather than
 #: buried in it, because it is the platform's to change.
 INGEST_PATH = "/media/ingest"
+
+#: How often the encoder thread may retry a platform uplink that went away.
+#: It is offered a fragment about thirty times a second and a failed connect
+#: costs the connect and handshake timeouts, so retrying on each one would
+#: spend the whole stream inside `socket.connect`.
+REOPEN_INTERVAL_S = 5.0
 
 
 class StreamUplink(ABC):
@@ -478,6 +485,17 @@ class TeeUplink(StreamUplink):
         self._lock = threading.Lock()
         self._codec = ""
         self._init: bytes | None = None
+        #: Set by `open_primary` on whichever thread handled the command, acted
+        #: on by `_reopen_if_wanted` on the encoder's. A plain bool rather than
+        #: an Event: it is set in one place and cleared in one place, and the
+        #: worst a lost edge can cost is one fragment, because the next one is
+        #: thirty milliseconds behind it.
+        self._reopen_wanted = False
+        #: Minus infinity rather than zero so the first attempt is never the
+        #: one the rate limit swallows: `time.monotonic()` has no defined
+        #: epoch, and on a platform where it starts near zero a plain 0.0 would
+        #: hold off the first reconnect for the interval.
+        self._last_reopen_at = float("-inf")
 
     # --- local viewers --------------------------------------------------
 
@@ -508,38 +526,86 @@ class TeeUplink(StreamUplink):
         return not self.require_primary
 
     def open_primary(self) -> bool:
-        """Try the platform's uplink again, mid-session.
+        """Ask for the platform's uplink. Never waits for it.
 
-        A local session may already be running when the platform asks to watch
-        — the setup page was open first. The encoder is right there; only the
-        connection is missing, and the init segment is held, so the platform
-        can be brought in without restarting anything.
+        Two situations arrive here and from the outside they look the same. A
+        local session may already be running when the platform asks to watch —
+        the setup page was open first. Or a session that *was* reaching the
+        platform has had its socket closed from the far end, which is what
+        every platform restart does. Either way the encoder is already running
+        and the init segment is held, so nothing needs restarting; only a
+        connection needs making.
 
-        That same path is what recovers a socket the platform closed, so the
-        guard below has to ask the socket rather than a flag.
+        **Making it is not this thread's job.** This runs in the `video.start`
+        handler, which is the relay's socket reader. A connect that sits out
+        its timeouts here stops the station reading commands, and stops it
+        answering pings for long enough that the platform's own liveness rule
+        drops the relay — turning a reconnect into a disconnect, on the one
+        path whose purpose is to recover. `_reopen_if_wanted` does the work on
+        the encoder thread, which is offered a fragment thirty times a second
+        and can afford to block.
+
+        So the answer is about now, not about what has been arranged: False
+        means the platform is not receiving this stream *yet*.
         """
-        # `primary_open` alone is not enough, and trusting it stopped video
-        # dead. It records that the socket was once opened, never that it is
-        # still there — so after the platform restarted and closed the uplink
-        # from its end, this returned True to every `video.start` for as long
-        # as the station stayed up. The station answered "already streaming;
-        # lease extended" once every ten seconds, sent nothing, and never
-        # reconnected. `begin` and `send` both ask the socket itself; this was
-        # the one place that did not, and it is the only one whose job is to
-        # notice.
+        # Asking the socket rather than the flag is the whole point.
+        # `primary_open` records that the socket was once opened, never that it
+        # is still there — trusting it meant that after a platform restart this
+        # returned True to every `video.start` for as long as the station
+        # stayed up, answering "already streaming" once every ten seconds while
+        # sending nothing and never reconnecting.
         if self.primary_open and self.primary.connected:
             return True
-        self.primary_open = self.primary.open()
-        if not self.primary_open:
-            return False
+        self._reopen_wanted = True
+        # The socket's own account of why it went, when it has one — "the
+        # platform closed the media uplink" says more to whoever is reading the
+        # command's answer than anything this method could invent.
+        self.reason = (self.primary.reason
+                       or "the platform's uplink is down; reconnecting")
+        return False
+
+    def _reopen_if_wanted(self, *, resend_init: bool) -> None:
+        """Connect the platform's uplink, on the encoder's thread.
+
+        Called from `begin` and `send` because they are the only two things the
+        encoder does with this class, and therefore the only places where a
+        connect is allowed to take its time. Rate limited: an unreachable
+        platform must not leave the whole stream sitting in `socket.connect`,
+        and fragments arrive far faster than a connect can fail.
+        """
+        if not self._reopen_wanted:
+            return
+        if self.primary_open and self.primary.connected:
+            self._reopen_wanted = False
+            return
+        now = time.monotonic()
+        if now - self._last_reopen_at < REOPEN_INTERVAL_S:
+            return
+        self._last_reopen_at = now
+        if not self.primary.open():
+            # `primary_open` is deliberately left as it was. It says the
+            # platform is meant to be receiving this stream, and it still is —
+            # clearing it here would make `send` treat every dropped fragment
+            # as "nobody off-box is watching" and quietly stop counting them.
+            self.reason = self.primary.reason or "the media uplink would not open"
+            return
+        self._reopen_wanted = False
+        self.primary_open = True
         self.require_primary = True
+        self.reason = ""
+        if not resend_init:
+            return
+        # Whatever the platform was holding went with the socket, and a
+        # fragment without its init segment decodes as nothing.
         with self._lock:
             codec, init = self._codec, self._init
         if init is not None:
             self.primary.begin(codec, init)
-        return True
 
     def begin(self, codec: str, init_segment: bytes) -> bool:
+        # A new encoder session is about to hand over a segment of its own, so
+        # re-sending the held one on the way in would only be a duplicate.
+        self._reopen_if_wanted(resend_init=False)
         with self._lock:
             self._codec, self._init = codec, init_segment
             viewers = list(self._viewers)
@@ -550,6 +616,7 @@ class TeeUplink(StreamUplink):
         return self.primary.begin(codec, init_segment)
 
     def send(self, fragment: bytes, keyframe: bool) -> bool:
+        self._reopen_if_wanted(resend_init=True)
         with self._lock:
             viewers = list(self._viewers)
         for viewer in viewers:
@@ -564,6 +631,10 @@ class TeeUplink(StreamUplink):
         return self.primary.send(fragment, keyframe)
 
     def close(self) -> None:
+        # Before anything else: a session being torn down must not have a
+        # reconnect arranged behind it. A late fragment from an encoder still
+        # winding down would otherwise reopen the socket that was just closed.
+        self._reopen_wanted = False
         with self._lock:
             viewers, self._viewers = list(self._viewers), set()
             self._init = None
