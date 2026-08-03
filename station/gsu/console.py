@@ -2394,7 +2394,13 @@ class Console:
             "<noscript>The live preview needs JavaScript. "
             "<a href='/frame.jpg'>Latest still</a></noscript></label>"
         )
-        if has_frame:
+        # Same rule as the poll: why there is no live picture beats how old the
+        # still is. Rendered on the first paint too, so the answer is on screen
+        # before the first poll rather than 2.5 seconds into looking at it.
+        why = str(stream.get("reason") or "") if not live else ""
+        if why:
+            out.append(f"<div class=muted id=preview-age>{html.escape(why)}</div>")
+        elif has_frame:
             age = video.get("frame_age_s") or 0
             out.append(
                 f"<div class=muted id=preview-age>still frame {age:.0f} s old"
@@ -2675,8 +2681,19 @@ class Console:
               empty.textContent = s.video.reason
                 || "No picture from this camera yet.";
             }
+            // **Why there is no live picture beats how old the still is.**
+            //
+            // `startLive` writes the stream's refusal here when /stream.mp4
+            // will not open, and this line then overwrote it 2.5 seconds
+            // later with "frame 3 s old" — so the one explanation available
+            // survived exactly one poll and nobody ever saw it. The station
+            // reports the same thing in `video.stream.reason`, which does not
+            // evaporate, so it is read from there and it wins whenever there
+            // is no live picture to describe.
             if (age) {
-              if (mode === "empty") age.textContent = "";
+              var why = (mode !== "live" && stream.reason) ? stream.reason : "";
+              if (why) age.textContent = why;
+              else if (mode === "empty") age.textContent = "";
               else if (typeof s.video.frame_age_s === "number") {
                 age.textContent = (mode === "live" ? "still " : "frame ")
                   + Math.round(s.video.frame_age_s) + " s old";
