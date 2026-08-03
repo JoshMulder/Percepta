@@ -45,6 +45,42 @@ describe("before the station has said anything", () => {
   });
 });
 
+describe("a station the platform already knows is offline", () => {
+  /**
+   * The grace period is for a station that is talking and whose first frame is
+   * merely late. It is not for one nobody has heard from: `online` is computed
+   * from `last_seen_at` and arrives with the station list, before any
+   * telemetry, so waiting it out meant a console opened on a station that went
+   * offline hours ago spent twelve seconds running skeleton loaders — implying
+   * a connection was being established when there was nothing to wait for.
+   */
+  it("faults at once instead of running the loaders", () => {
+    expect(panelStatus(null, NOW, STALE, true, false)).toBe("fault");
+  });
+
+  it("does so even before the station has described its slots", () => {
+    expect(panelStatus(null, NOW, STALE, undefined, false)).toBe("fault");
+  });
+
+  it("still says not-fitted for a slot that is genuinely empty", () => {
+    // Offline does not make an unfitted slot a fault. Nothing is wrong with a
+    // station that has no floodlight, whether or not it is talking.
+    expect(panelStatus(null, NOW, STALE, false, false)).toBe("not-fitted");
+  });
+
+  it("goes live the moment a frame actually arrives", () => {
+    // `online` is refreshed on a timer and telemetry is not. A frame in hand
+    // outranks a minute-old summary saying there would not be one.
+    expect(panelStatus(NOW, NOW, STALE, true, false)).toBe("live");
+  });
+
+  it("keeps loading while the station list has not arrived", () => {
+    // `undefined` is not knowing, and must not read as offline — otherwise
+    // every panel flashes red on connect and then corrects itself.
+    expect(panelStatus(null, NOW, STALE, true, undefined)).toBe("loading");
+  });
+});
+
 describe("a fitted sensor", () => {
   it("loads, then goes live", () => {
     expect(panelStatus(null, NOW, STALE, true)).toBe("loading");

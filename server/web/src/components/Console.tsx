@@ -613,10 +613,18 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
     // is a fault: something was specified and is not delivering.
     if (unavailable[kind] && !isDemo(kind)) return "fault" as const;
 
+    // What the platform says about the station, which it knew before any
+    // telemetry arrived. `undefined` until the station list lands — that is
+    // not knowing, and must not read as "offline".
+    const stationOnline = stationId
+      ? stations.find((s) => s.id === stationId)?.online
+      : undefined;
+
     return panelStatus(
       lastSeen[kind] ?? null, streamsSince,
       staleAfterMs(kind, health?.cadence ?? {}),
       fittedFor(kind),
+      stationOnline,
     );
   };
 

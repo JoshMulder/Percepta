@@ -50,6 +50,9 @@ const FIRST_DATA_GRACE_MS = 12_000;
  *                      because weather reports far less often than power does.
  * @param fitted    what the station says about the slot, or undefined until its
  *                  first health frame arrives.
+ * @param stationOnline  what the *platform* says about the station: whether it
+ *                  has been heard from recently. `undefined` before the station
+ *                  list has loaded, which is genuinely not knowing.
  *
  * There is deliberately no `demo` parameter. It was here to suppress faults for
  * synthetic streams, and removing it rather than ignoring it is what stops that
@@ -61,6 +64,7 @@ export function panelStatus(
   since: number | null,
   staleAfterMs: number,
   fitted?: boolean,
+  stationOnline?: boolean,
 ): PanelStatus {
   // Checked before anything time-based: an empty slot is a fact the station
   // states, not something to be inferred from silence. Only `false` counts —
@@ -73,6 +77,18 @@ export function panelStatus(
   if (fitted === false && lastSeen === null) return "not-fitted";
   if (lastSeen === null) {
     if (since === null) return "loading";
+    // **Nothing to wait for.** The grace period is for a station that is
+    // talking and whose first frame is merely late — a degraded backhaul, a
+    // sensor slow to start. It is not for one the platform has not heard from
+    // at all: `online` is computed from `last_seen_at` and arrives with the
+    // station list, before any telemetry, so waiting the full twelve seconds
+    // showed skeletons to discover something already known on load. On a
+    // console opened to a station that went offline hours ago, that is twelve
+    // seconds of implying a connection is being established.
+    //
+    // Strictly `=== false`: undefined means the station list has not arrived
+    // and nothing is known yet, which is the one case that really is loading.
+    if (stationOnline === false) return "fault";
     return Date.now() - since > FIRST_DATA_GRACE_MS ? "fault" : "loading";
   }
   return Date.now() - lastSeen > staleAfterMs ? "fault" : "live";
