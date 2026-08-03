@@ -165,11 +165,26 @@ class RtlSdrFrontEnd:
 
     @property
     def status(self) -> str:
-        """`absent`, `failed`, `streaming` or `silent`, for the slot report."""
+        """`absent`, `failed`, `streaming` or `silent`, for the slot report.
+
+        **`silent` means a device that is open and hearing nothing; `absent`
+        means no device at all.** They read the same in dead air and are
+        completely different faults, and conflating them is how a disconnected
+        dongle reported itself present: with no device open this returned
+        `silent` — the quiet-channel state — so the slot showed as fitted and
+        the station published a dead noise floor as if it were a live reading.
+        A receiver on a quiet channel is silent; an unplugged one is absent.
+        """
         if not self._numpy:
             return "absent"
         if self._failures >= FAILURES_BEFORE_FAILED:
+            # Tried repeatedly and given up — distinct from not-yet-tried, and
+            # the slot report reads them the same ("configured_absent"), but a
+            # human wants to know which. Checked before the device below because
+            # a failed open leaves the device None too.
             return "failed"
+        if self._device is None or not self._device.is_open:
+            return "absent"
         return "streaming" if self._blocks else "silent"
 
     @property

@@ -312,6 +312,20 @@ class FrontEndTests(unittest.TestCase):
         self.assertFalse(payload["squelch_open"])
         self.assertIsNone(audio)
 
+    def test_a_receiver_that_never_opened_is_absent_not_silent(self):
+        # `silent` is a device that is open and hearing nothing — a quiet
+        # channel. With no device open at all the status used to return `silent`
+        # too, so a disconnected dongle read as present and the station
+        # published a dead noise floor as a live reading. `absent` is the honest
+        # answer, and it is what makes the slot report the radio unavailable.
+        self.open_error = rtl2832.RtlError("no RTL-SDR device found")
+        front_end = self.make()
+        front_end._next_attempt = 0.0
+        open_now(front_end)                     # one attempt, below the fail count
+        self.assertLess(front_end._failures, rtlsdr.FAILURES_BEFORE_FAILED)
+        self.assertEqual(front_end.status, "absent")
+        self.assertFalse(front_end.describe().present)
+
     def test_repeated_failures_report_the_slot_as_failed(self):
         self.open_error = rtl2832.RtlError("no RTL-SDR device found")
         front_end = self.make()

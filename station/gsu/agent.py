@@ -1198,7 +1198,20 @@ class Agent:
             reading.to_payload() if reading is not None
             else self.unavailable_payload("power", reports)
         )
-        if radio_payload is not None:
+        # **Gated on the device being present, like every other slot.** A
+        # `RadioController` exists whenever a radio is configured, and its
+        # `tick` always returns a payload — so `radio_payload is not None` says
+        # nothing about whether a dongle is plugged in. A disconnected receiver
+        # went on publishing a dead noise floor as an available reading, and the
+        # console, having no reason to doubt it, drew the panel green while the
+        # station's own setup page showed the radio absent. The other streams
+        # read `available: false` from their sensor returning nothing; the radio
+        # never returns nothing, so its absence is read here from the slot
+        # report instead — the same report that drives the health inventory, so
+        # the two now agree.
+        radio_report = reports.get("radio")
+        radio_present = radio_report is not None and radio_report.status == "present"
+        if radio_payload is not None and radio_present:
             self._publish_radio(radio_payload)
         else:
             # The console has been told the stream is unavailable, so whatever
