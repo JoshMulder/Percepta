@@ -2598,6 +2598,19 @@ class Console:
             var lines = s.raw_samples[raw.getAttribute("data-slot")] || [];
             raw.textContent = lines.join("\\n");
           }
+          // No frame any more: the slot was set to not fitted, or the camera
+          // has stopped answering. This block used to run only when there WAS
+          // one, so the last picture stayed on screen for ever — a station
+          // with no camera still showing the test card, which reads as the
+          // change not having taken rather than as a stale image.
+          if (wrap && s.video && !s.video.has_frame) {
+            var stale = document.getElementById("preview");
+            if (stale && stale.tagName !== "VIDEO") stale.remove();
+            var oldAge = document.getElementById("preview-age");
+            if (oldAge) {
+              oldAge.textContent = (s.video && s.video.reason) ? s.video.reason : "";
+            }
+          }
           if (wrap && s.video && s.video.has_frame) {
             var shown = document.getElementById("preview");
             // The live element owns this id now, and this poll used to assign

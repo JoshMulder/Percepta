@@ -173,6 +173,16 @@ class CameraPreview:
             self.last_reason = (
                 self.agent.inventory.reasons.get("camera") or "no camera fitted"
             )
+            # **The last picture goes with the camera.**
+            #
+            # Keeping a frame while a camera is merely struggling is deliberate
+            # — a picture with a stated age beats a blank box. That reasoning
+            # stops when there is no camera at all: the frame is then a
+            # photograph of a site being served as this station's current view,
+            # by a station that has no view. Somebody who sets the slot to "not
+            # fitted" and goes on being shown the test card reasonably concludes
+            # the change did not take.
+            self.last_frame = None
             return False
         if not self.agent.site.video_enabled:
             self.last_reason = (

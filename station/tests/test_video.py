@@ -339,6 +339,31 @@ class PreviewCacheTests(AgentFixture):
         self.assertGreaterEqual(state["frame_age_s"], 0.0)
         self.assertGreaterEqual(self.video.frame_age_s(), 0.0)
 
+    def test_the_last_picture_goes_when_the_camera_does(self):
+        """A station with no camera must not go on serving its last frame.
+
+        Keeping a frame while a camera is merely struggling is deliberate — a
+        picture with a stated age beats a blank box. That stops when there is
+        no camera at all: the frame is then a photograph of a site being served
+        as this station's current view, by a station that has no view.
+
+        How it presented: set the camera slot to "not fitted", and the setup
+        page went on showing the demo test card, which reads as the change not
+        having taken.
+        """
+        self.video.cycle()
+        self.assertIsNotNone(self.video.last_frame)
+
+        self.agent.camera = None
+        self.video.request()
+        self.video.cycle()
+
+        self.assertIsNone(self.video.last_frame)
+        state = self.video.preview_state()
+        self.assertFalse(state["has_frame"])
+        # And it says why, which is what the page puts where the picture was.
+        self.assertTrue(state.get("reason"))
+
     def test_an_unenrolled_station_still_captures_for_the_preview(self):
         # The preview exists for the installer standing at an unenrolled box,
         # and it needs no identity because it sends nothing anywhere.
