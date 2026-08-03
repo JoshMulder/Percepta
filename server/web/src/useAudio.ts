@@ -52,6 +52,13 @@ export function useAudio(enabled: boolean) {
   const gainRef = useRef<GainNode | null>(null);
   // Scheduled-player cursor: when the next chunk should start.
   const nextTimeRef = useRef(0);
+  // Resampler state for the worklet path, carried across chunks: the
+  // fractional read position still owing, and the previous chunk's last
+  // sample so the pair either side of a boundary can be interpolated. Null
+  // tail means "nothing before this", which is true once per stream and after
+  // every flush.
+  const phaseRef = useRef(0);
+  const tailRef = useRef<number | null>(null);
   // The Opus decoder, its running presentation timestamp, and the rate it was
   // configured for. Declared with the other refs rather than beside the
   // decode logic so the teardown below can close it.
@@ -100,6 +107,15 @@ export function useAudio(enabled: boolean) {
       } else {
         setEngine("scheduled");
       }
+
+      // Logged once, because the difference between 48000 and 44100 here is
+      // the difference between clean audio and audio that chops fifty times a
+      // second, and it is not otherwise visible from outside the browser —
+      // the same build sounded fine in one and broken in the other.
+      console.info(
+        "[audio] context %d Hz, engine %s",
+        ctx.sampleRate, nodeRef.current ? "worklet" : "scheduled",
+      );
 
       // The context is the authority on its own state, so track it rather than
       // inferring it once. This also covers the browser suspending us later,
@@ -180,19 +196,44 @@ export function useAudio(enabled: boolean) {
     if (node) {
       // Worklet path: resample to the context rate, since browsers rarely grant
       // a 24 kHz context, then hand the buffer over.
-      let out = samples;
-      if (Math.abs(ctx.sampleRate - rate) > 1) {
-        const ratio = ctx.sampleRate / rate;
-        const resampled = new Float32Array(Math.round(samples.length * ratio));
-        for (let i = 0; i < resampled.length; i += 1) {
-          const src = i / ratio;
-          const j = Math.floor(src);
-          const a = samples[j] ?? 0;
-          const b = samples[j + 1] ?? a;
-          resampled[i] = a + (b - a) * (src - j);
-        }
-        out = resampled;
+      //
+      // **The phase carries across chunks, and that is the whole point.** This
+      // read `src = i / ratio` and so restarted the interpolation at zero for
+      // every chunk — and a chunk here is one 20 ms Opus packet. When the
+      // context runs at 48 kHz the ratio is exactly 2, every boundary lands on
+      // a whole sample, and nothing is audible. When it runs at 44.1 kHz the
+      // ratio is 1.8375, every boundary lands mid-sample, and the waveform
+      // jumps fifty times a second. Same build, same station: clean in a
+      // browser that gave us 48 kHz and chopping in one that gave us 44.1.
+      //
+      // So the read position is kept in stream coordinates rather than chunk
+      // coordinates, and the previous chunk's last sample is carried so the
+      // pair either side of a boundary can still be interpolated between.
+      let source = samples;
+      let start = 0;
+      const tail = tailRef.current;
+      if (tail !== null) {
+        source = new Float32Array(samples.length + 1);
+        source[0] = tail;
+        source.set(samples, 1);
+        start = phaseRef.current;
       }
+      let out = source;
+      if (Math.abs(ctx.sampleRate - rate) > 1) {
+        const step = rate / ctx.sampleRate;
+        const produced: number[] = [];
+        let pos = start;
+        while (pos + 1 < source.length) {
+          const j = Math.floor(pos);
+          produced.push(source[j] + (source[j + 1] - source[j]) * (pos - j));
+          pos += step;
+        }
+        // Whatever is left of the step lands in the next chunk, measured from
+        // the sample that will be prepended to it.
+        phaseRef.current = pos - (source.length - 1);
+        out = new Float32Array(produced);
+      }
+      tailRef.current = source[source.length - 1] ?? null;
       node.port.postMessage(out, [out.buffer]);
       return;
     }
@@ -259,6 +300,10 @@ export function useAudio(enabled: boolean) {
     decoderRef.current?.close();
     timestampRef.current = 0;
     rateRef.current = frame.rate;
+    // A new rate makes the carried phase meaningless: it is a position in a
+    // stream that no longer exists.
+    phaseRef.current = 0;
+    tailRef.current = null;
 
     const decoder = new AudioDecoder({
       output: (data) => {
@@ -332,6 +377,11 @@ export function useAudio(enabled: boolean) {
     decoderRef.current = null;
     rateRef.current = 0;
     timestampRef.current = 0;
+    // The resampler's carry goes with it: interpolating from the last sample
+    // of the channel just left into the first of the new one would smear the
+    // two together, which is exactly what flushing exists to prevent.
+    phaseRef.current = 0;
+    tailRef.current = null;
     nodeRef.current?.port.postMessage({ cmd: "flush" });
     // Scheduled path: nothing already queued can be unscheduled cheaply, so the
     // cursor is reset and the next chunk starts fresh.
