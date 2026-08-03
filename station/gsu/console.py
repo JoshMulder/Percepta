@@ -1176,18 +1176,17 @@ class Console:
         # deferred.
         stream = getattr(self.agent, "stream", None)
         if camera_changed and stream is not None:
+            # Stop the stream still showing the old camera so it restarts on the
+            # new one — and stop *any* of it, platform viewer included (see the
+            # note where `camera_changed` is set).
             stream.stop("a camera change was saved")
         # Rebuild immediately: an installer who changes a port expects to see
-        # within seconds whether the box can now talk to the thing.
-        self.agent.build_devices()
-        if slot == "camera" and getattr(self.agent, "_stream_holds_camera",
-                                        lambda: False)():
-            # The rebuild deliberately leaves the camera alone while the live
-            # stream holds the sensor (agent.build_devices); say so rather
-            # than reporting the old driver's state as this save's outcome.
-            self.message = ("good", f"{slot}: saved. Applies when the live "
-                                    f"stream stops.{note}")
-            return slot
+        # within seconds whether the box can now talk to the thing. `force_camera`
+        # on an actual change so the new driver is in place at once and cannot be
+        # deferred — a platform viewer reconnecting a second later would restart
+        # the stream, and a deferred rebuild waits on a stream that never ends,
+        # which is how the swap "did not take effect" until a restart.
+        self.agent.build_devices(force_camera=camera_changed)
         # **Give the new driver one sensing tick before judging it.**
         #
         # A receiver's presence is not knowable at construction. `describe()`

@@ -160,6 +160,23 @@ class MidStreamTests(unittest.TestCase):
         self.agent.build_devices()
         self.assertIsNot(self.agent.camera, held)
 
+    def test_a_forced_rebuild_replaces_the_camera_even_mid_stream(self):
+        # The deliberate camera change from the setup page. Deferring it is what
+        # rediscovery must do and a save must not: the deferral discharges when
+        # the stream ends, and a platform viewer that keeps reconnecting keeps
+        # the stream up for ever, so the new camera would never arrive without a
+        # restart. `force_camera` overrides the deferral for that one caller.
+        for state in ("streaming", "starting"):
+            with self.subTest(state=state):
+                self.agent.stream.state = state
+                held = self.agent.camera
+                self.agent.build_devices(force_camera=True)
+                self.assertIsNot(self.agent.camera, held,
+                                 "the forced change was deferred under the stream")
+                self.assertFalse(self.agent._camera_rebuild_owed,
+                                 "a forced rebuild left a debt to discharge later")
+        self.agent.stream.state = "idle"
+
     def test_a_streaming_camera_is_not_retired(self):
         log: list = []
         self.agent.inventory.drivers["camera"] = RecordingDriver(log, "camera")

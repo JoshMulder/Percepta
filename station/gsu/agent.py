@@ -530,10 +530,21 @@ class Agent:
             "traffic": self.config.airband_traffic,
         }
 
-    def build_devices(self) -> None:
+    def build_devices(self, force_camera: bool = False) -> None:
         """Construct whatever the inventory says is fitted, and record why
         anything else is missing. Never substitutes a simulation for hardware
         that did not answer.
+
+        `force_camera` rebuilds the camera slot even while the live stream holds
+        it, for the one caller that has decided the slot must change *now*: an
+        operator saving a new camera on the setup page. Rediscovery never sets
+        it — an automatic pass must not tear a working stream down — but a
+        deliberate change must not be deferrable, because the thing that would
+        discharge a deferral is the stream ending, and a platform viewer that
+        keeps watching (its player reconnects within a second of any drop) keeps
+        the stream up for ever. That is precisely the "watches the demo until
+        somebody restarts the box" this used to warn about, arriving by way of
+        the viewer rather than the deferral never being asked.
 
         Two rules here, both bought with a wedged station:
 
@@ -562,7 +573,7 @@ class Agent:
         """
         context = self.device_context()
         self._last_discovery = time.monotonic()
-        keep_camera = self._stream_holds_camera()
+        keep_camera = self._stream_holds_camera() and not force_camera
         # Set when this pass leaves the camera alone, cleared when it builds
         # one. Assigned rather than or-ed: a rebuild that did the camera has
         # discharged the debt however it was incurred.
