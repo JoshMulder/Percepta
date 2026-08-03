@@ -160,6 +160,28 @@ class SnapshotTests(unittest.TestCase):
         self.assertIn("-frames:v", command)
         self.assertIn("-rtsp_transport", command)
 
+    def test_only_keyframes_are_decoded_or_the_still_is_black(self):
+        """An RTSP connection joins a stream in progress.
+
+        The first pictures to arrive predict from an IDR this decoder never
+        saw, so decoding them against an all-zero reference produces a valid,
+        correctly-sized, black JPEG — a preview that resizes to the camera's
+        real resolution and shows nothing, which reads as a dark room rather
+        than as a decode with no reference behind it.
+
+        `-skip_frame nokey` has to sit before `-i`: it is a decoder option, and
+        after the input it would apply to the output instead and do nothing.
+        """
+        camera = fitted_camera()
+        with mock.patch("gsu.camera.rtsp.subprocess.run",
+                        return_value=self.run_result(stdout=a_real_jpeg())) as run:
+            camera.capture()
+        command = run.call_args[0][0]
+        self.assertIn("-skip_frame", command)
+        self.assertEqual(command[command.index("-skip_frame") + 1], "nokey")
+        self.assertLess(command.index("-skip_frame"), command.index("-i"),
+                        "a decoder option after -i applies to the output")
+
     def test_an_incomplete_frame_is_dropped_with_a_reason(self):
         camera = fitted_camera()
         with mock.patch("gsu.camera.rtsp.subprocess.run",

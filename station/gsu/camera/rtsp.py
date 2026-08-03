@@ -252,6 +252,26 @@ class RtspCamera:
         command = [
             self._ffmpeg, "-nostdin", "-loglevel", "error",
             "-rtsp_transport", self.transport,
+            # **Only keyframes are decoded, and that is the whole of this fix.**
+            #
+            # An RTSP connection joins a stream already in progress, so the
+            # first pictures to arrive are inter frames predicting from an IDR
+            # this decoder never saw. ffmpeg decodes them anyway, against a
+            # reference frame that is all zeroes, and `-frames:v 1` then takes
+            # that first output: a valid JPEG, correctly sized because the
+            # dimensions come from the sequence parameter set, and black.
+            #
+            # Which is precisely how it presents — a preview that resizes to
+            # the camera's real resolution and shows nothing. It reads as a
+            # camera pointed at a dark room, not as a decode that never had a
+            # reference, so it sends people to check the lens.
+            #
+            # `nokey` drops everything that is not a keyframe before the
+            # decoder, so the frame that comes out is a whole intra picture.
+            # The cost is waiting for the next one - a second or two at the
+            # keyframe intervals cameras actually use, well inside
+            # CAPTURE_TIMEOUT_S.
+            "-skip_frame", "nokey",
             "-i", self._url,
             "-an", "-dn",
             "-frames:v", "1",
