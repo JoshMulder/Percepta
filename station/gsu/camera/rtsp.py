@@ -370,7 +370,31 @@ class RtspCamera:
             # failure this probe exists to prevent.
             return self._codec or None
         lines = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
-        self._codec = lines[0] if lines else ""
+        # **A probe that ran and answered nothing is not an answer.**
+        #
+        # The exception path above is careful to keep what it knew, for exactly
+        # the reason stated there — and then this threw it away anyway on the
+        # far more common failure. ffprobe does not raise when it cannot reach a
+        # camera: it exits non-zero with an empty stdout, which landed here as
+        # `self._codec = ""`, which `stream_source` reads back as "unknown" and
+        # turns into the h264 default. An HEVC camera then gets an H.264 muxer
+        # and H.264 NAL rules, and the result is the silent-black failure this
+        # whole probe exists to prevent: ffmpeg exits zero, bytes flow, and the
+        # far end decodes none of them.
+        #
+        # One unreachable moment — a reboot, a lease renewal, a switch port
+        # flapping — was enough, and the codec stayed wrong until the process
+        # restarted.
+        if result.returncode != 0 or not lines:
+            log.warning(
+                "ffprobe could not read %s (exit %d): %s. Keeping the last "
+                "known codec %r rather than assuming.",
+                redact(self._url), result.returncode,
+                (result.stderr or "").strip()[:120] or "no output",
+                self._codec or "unknown",
+            )
+            return self._codec or None
+        self._codec = lines[0]
         # ffprobe reports the rate as a rational, "25/1". Taken from the stream
         # rather than asked of an operator: the camera decides its own rate, the
         # station only copies what arrives, and a hand-typed figure that
