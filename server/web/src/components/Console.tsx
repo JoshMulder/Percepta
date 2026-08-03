@@ -615,7 +615,7 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
 
     return panelStatus(
       lastSeen[kind] ?? null, streamsSince,
-      staleAfterMs(kind, health?.cadence ?? {}), isDemo(kind),
+      staleAfterMs(kind, health?.cadence ?? {}),
       fittedFor(kind),
     );
   };

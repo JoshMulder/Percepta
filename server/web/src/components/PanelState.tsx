@@ -24,8 +24,17 @@ import type { ReactNode } from "react";
  * configured in every health frame, so this is knowable on the first frame and
  * needs no timer.
  *
- * Fault is suppressed in demo mode: the simulator is the sensor there, so a red
- * X would only ever mean the simulator stopped.
+ * **Demo streams go stale like any other, and that is a correction.** Fault
+ * used to be suppressed for them, reasoning that the simulator is the sensor so
+ * a red X could only ever mean the simulator stopped. That was true when demo
+ * meant the platform's own in-process simulator, which cannot fail on its own.
+ *
+ * It is not true now. `simulated` is a per-stream flag a *real station* stamps
+ * on its own telemetry, so a demo sensor is a synthetic reading travelling from
+ * a real box, over a real link, through a real broker — every one of which can
+ * stop. Suppressing the fault meant a station whose credential had been revoked
+ * went on showing green panels full of readings from before it was cut off,
+ * which is the one thing this file exists to prevent.
  */
 export type PanelStatus = "loading" | "live" | "fault" | "not-fitted";
 
@@ -39,12 +48,18 @@ const FIRST_DATA_GRACE_MS = 12_000;
  * @param since     epoch ms the stream became available, or null when it is not
  * @param staleAfterMs  how long without a frame counts as failed. Per panel,
  *                      because weather reports far less often than power does.
+ * @param fitted    what the station says about the slot, or undefined until its
+ *                  first health frame arrives.
+ *
+ * There is deliberately no `demo` parameter. It was here to suppress faults for
+ * synthetic streams, and removing it rather than ignoring it is what stops that
+ * being rewired: whether a reading is synthetic says nothing about whether it
+ * is still arriving.
  */
 export function panelStatus(
   lastSeen: number | null,
   since: number | null,
   staleAfterMs: number,
-  demo: boolean,
   fitted?: boolean,
 ): PanelStatus {
   // Checked before anything time-based: an empty slot is a fact the station
@@ -57,10 +72,9 @@ export function panelStatus(
   // station is actually sending is the safer half of it.
   if (fitted === false && lastSeen === null) return "not-fitted";
   if (lastSeen === null) {
-    if (demo || since === null) return "loading";
+    if (since === null) return "loading";
     return Date.now() - since > FIRST_DATA_GRACE_MS ? "fault" : "loading";
   }
-  if (demo) return "live";
   return Date.now() - lastSeen > staleAfterMs ? "fault" : "live";
 }
 

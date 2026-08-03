@@ -18,17 +18,17 @@ describe("an empty slot", () => {
   it("is obvious immediately, with no grace period", () => {
     // The station states this in every health frame; there is nothing to wait
     // for and no timer involved.
-    expect(panelStatus(null, NOW, STALE, false, false)).toBe("not-fitted");
+    expect(panelStatus(null, NOW, STALE, false)).toBe("not-fitted");
   });
 
   it("stays not-fitted however long the link has been up", () => {
     // The old path would have called this a fault after twelve seconds.
     const longAgo = NOW - 10 * 60 * 1000;
-    expect(panelStatus(null, longAgo, STALE, false, false)).toBe("not-fitted");
+    expect(panelStatus(null, longAgo, STALE, false)).toBe("not-fitted");
   });
 
   it("is not a fault", () => {
-    expect(panelStatus(null, NOW - 60_000, STALE, false, false)).not.toBe("fault");
+    expect(panelStatus(null, NOW - 60_000, STALE, false)).not.toBe("fault");
   });
 });
 
@@ -36,23 +36,23 @@ describe("before the station has said anything", () => {
   it("keeps loading rather than guessing at not-fitted", () => {
     // `undefined` means no health frame yet. Guessing here would flash "Not
     // fitted" across every panel on connect and then correct itself.
-    expect(panelStatus(null, NOW, STALE, false, undefined)).toBe("loading");
+    expect(panelStatus(null, NOW, STALE, undefined)).toBe("loading");
   });
 
   it("still becomes a fault once the grace period expires", () => {
     const longAgo = NOW - 10 * 60 * 1000;
-    expect(panelStatus(null, longAgo, STALE, false, undefined)).toBe("fault");
+    expect(panelStatus(null, longAgo, STALE, undefined)).toBe("fault");
   });
 });
 
 describe("a fitted sensor", () => {
   it("loads, then goes live", () => {
-    expect(panelStatus(null, NOW, STALE, false, true)).toBe("loading");
-    expect(panelStatus(NOW, NOW, STALE, false, true)).toBe("live");
+    expect(panelStatus(null, NOW, STALE, true)).toBe("loading");
+    expect(panelStatus(NOW, NOW, STALE, true)).toBe("live");
   });
 
   it("faults when it stops reporting", () => {
-    expect(panelStatus(NOW - 60_000, NOW, STALE, false, true)).toBe("fault");
+    expect(panelStatus(NOW - 60_000, NOW, STALE, true)).toBe("fault");
   });
 });
 
@@ -60,14 +60,38 @@ describe("data outranks the slot report", () => {
   it("shows readings that are actually arriving", () => {
     // A slot reported empty while its stream is live is a contradiction, and
     // showing what the station is really sending is the safer half of it.
-    expect(panelStatus(NOW, NOW, STALE, false, false)).toBe("live");
+    expect(panelStatus(NOW, NOW, STALE, false)).toBe("live");
   });
 });
 
-describe("demo stations", () => {
-  it("never show a fault, because the simulator is the sensor", () => {
-    expect(panelStatus(null, NOW - 10 * 60 * 1000, STALE, true, undefined))
-      .toBe("loading");
-    expect(panelStatus(NOW - 60_000, NOW, STALE, true, true)).toBe("live");
+describe("synthetic streams", () => {
+  /**
+   * These used to be exempt from staleness, reasoning that the simulator is
+   * the sensor so a red X could only mean the simulator stopped. That held
+   * when demo meant the platform's own in-process simulator. It does not now:
+   * `simulated` is a per-stream flag a real station stamps on its telemetry,
+   * so the reading is synthetic but the box, the link and the broker carrying
+   * it are not.
+   *
+   * The exemption was found by revoking a station's credential. It stopped
+   * publishing, and the console went on showing green panels full of readings
+   * from before it was cut off — which is the single failure this file exists
+   * to prevent, arriving through the one door left open for it.
+   *
+   * There is no `demo` argument to pass any more. That is the fix: whether a
+   * reading is synthetic says nothing about whether it is still arriving.
+   */
+  it("go stale like any other, because the link carrying them is real", () => {
+    expect(panelStatus(NOW - 60_000, NOW, STALE, true)).toBe("fault");
+  });
+
+  it("are live while they are actually arriving", () => {
+    expect(panelStatus(NOW, NOW, STALE, true)).toBe("live");
+  });
+
+  it("still get the grace period before the first frame", () => {
+    // A synthetic sensor is no quicker to start than a real one, and crying
+    // wolf during start-up trains operators to ignore the X.
+    expect(panelStatus(null, NOW, STALE, true)).toBe("loading");
   });
 });
