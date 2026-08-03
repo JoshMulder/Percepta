@@ -624,6 +624,52 @@ class _InstantSource:
         pass
 
 
+def _slice_bits(nal: bytes):
+    """The RBSP of a slice NAL, with emulation prevention taken back out."""
+    out = bytearray()
+    zeros = 0
+    for byte in nal[1:]:
+        if zeros >= 2 and byte == 0x03:
+            zeros = 0
+            continue
+        out.append(byte)
+        zeros = zeros + 1 if byte == 0 else 0
+    bits = []
+    for byte in out[:8]:
+        bits += [(byte >> shift) & 1 for shift in range(7, -1, -1)]
+    return bits
+
+
+def _read_ue(bits: list[int], at: int) -> tuple[int, int]:
+    zeros = 0
+    while bits[at + zeros] == 0:
+        zeros += 1
+    at += zeros + 1
+    value = 1
+    for _ in range(zeros):
+        value = (value << 1) | bits[at]
+        at += 1
+    return value - 1, at
+
+
+def _first_mb_in_slice(nal: bytes) -> int:
+    return _read_ue(_slice_bits(nal), 0)[0]
+
+
+def _frame_num(nal: bytes) -> int:
+    """The four-bit frame_num, past first_mb_in_slice, slice_type and the PPS
+    id — this stream's SPS sets `log2_max_frame_num_minus4` to zero."""
+    bits = _slice_bits(nal)
+    at = 0
+    for _ in range(3):
+        _, at = _read_ue(bits, at)
+    value = 0
+    for _ in range(4):
+        value = (value << 1) | bits[at]
+        at += 1
+    return value
+
+
 class H264BitstreamTests(unittest.TestCase):
     """The synthetic H.264 source produces real H.264, or it is worthless.
 
@@ -651,17 +697,122 @@ class H264BitstreamTests(unittest.TestCase):
         first = self.units[0]
         self.assertTrue(first.keyframe)
         kinds = [nal_type(nal) for nal in split_annexb(first.data)]
-        self.assertEqual(kinds, [NAL_SPS, NAL_PPS, NAL_IDR])
+        # The parameter sets, then the picture — which is several slices, not
+        # one. A keyframe here is the whole picture in raw samples, and one NAL
+        # holding all of it is what browsers would not decode.
+        self.assertEqual(kinds[:2], [NAL_SPS, NAL_PPS])
+        self.assertTrue(kinds[2:], "a keyframe with no picture in it")
+        self.assertEqual(set(kinds[2:]), {NAL_IDR})
+
+    def test_no_slice_is_bigger_than_a_decoder_will_take(self):
+        """The fault this file exists to have caught.
+
+        A picture used to be one slice. At 1080p that is 3.1 MB of I_PCM in a
+        single NAL, and Chromium on the station's own setup page decoded none
+        of it — the console showed the few macroblocks the P frames carry
+        moving on black, which reads as a broken camera and is a slice size.
+        """
+        from gsu.camera.h264 import split_annexb
+        from gsu.camera.h264_synthetic import SLICE_BYTES
+
+        # Generous: the budget is on the samples, and a slice also carries a
+        # header and whatever emulation prevention its bytes happen to need.
+        ceiling = SLICE_BYTES * 2
+        for unit in self.units:
+            for nal in split_annexb(unit.data):
+                self.assertLess(len(nal), ceiling)
+
+    def test_the_slices_of_a_picture_tile_it_exactly(self):
+        """Every macroblock coded once, by slices that meet without a gap.
+
+        Splitting a picture is only correct if the pieces cover it: a gap is
+        macroblocks the decoder is never given, and an overlap is a second
+        slice claiming ground the first one already coded.
+        """
+        from gsu.camera.h264 import nal_type, split_annexb
+
+        columns = (320 + 15) // 16
+        total = columns * ((240 + 15) // 16)
+        for unit in self.units:
+            starts = []
+            for nal in split_annexb(unit.data):
+                if nal_type(nal) not in (1, 5):
+                    continue
+                starts.append(_first_mb_in_slice(nal))
+            self.assertTrue(starts)
+            # In raster order, beginning at zero, no repeats. Together with
+            # each slice running to the next one's start, that is a tiling.
+            self.assertEqual(starts, sorted(starts))
+            self.assertEqual(starts[0], 0)
+            self.assertEqual(len(starts), len(set(starts)))
+            self.assertLess(starts[-1], total)
+
+    def test_frame_num_restarts_at_every_keyframe(self):
+        """`frame_num` counts reference frames since the IDR, not since boot.
+
+        With `gaps_in_frame_num_value_allowed_flag` clear in the SPS, a
+        frame_num that skips is a stream a decoder may refuse. Using the
+        absolute frame counter made the first group of pictures right by
+        accident and every one after it wrong, and a browser answered by
+        decoding one keyframe every two seconds and dropping everything
+        between them.
+        """
+        from gsu.camera.h264 import nal_type, split_annexb
+
+        expected = 0
+        for unit in self.units:
+            for nal in split_annexb(unit.data):
+                kind = nal_type(nal)
+                if kind not in (1, 5):
+                    continue
+                if kind == 5:
+                    expected = 0
+                self.assertEqual(_frame_num(nal), expected % 16)
+            expected += 1
 
     def test_the_frames_between_keyframes_are_predicted(self):
         from gsu.camera.h264 import NAL_NON_IDR, nal_type, split_annexb
 
         for unit in self.units[1:5]:
             self.assertFalse(unit.keyframe)
-            self.assertEqual([nal_type(n) for n in split_annexb(unit.data)], [NAL_NON_IDR])
+            self.assertEqual(
+                set(nal_type(n) for n in split_annexb(unit.data)), {NAL_NON_IDR})
             # A P frame of skips and a few raw macroblocks is a fraction of an
             # IDR. If this ever inverts, something is encoding every macroblock.
             self.assertLess(unit.bytes, self.units[0].bytes // 4)
+
+    def test_a_picture_too_big_for_raw_samples_is_shrunk_not_sent(self):
+        """1080p asked for, something decodable sent — and said out loud.
+
+        I_PCM cannot compress, so an HD keyframe is megabytes and nothing
+        renders it. The shape is kept, because a stretched test card would be
+        read as the console stretching it.
+        """
+        from gsu.camera.h264 import StreamSettings
+        from gsu.camera.h264_synthetic import (
+            MAX_KEYFRAME_BYTES, SyntheticH264Source,
+        )
+
+        source = SyntheticH264Source(
+            StreamSettings(width=1920, height=1080, fps=30, intra_period=60))
+        self.assertTrue(source.clamped)
+        self.assertLess(source.width, 1920)
+        self.assertAlmostEqual(source.width / source.height, 16 / 9, places=2)
+        keyframe = source.frame()
+        self.assertTrue(keyframe.keyframe)
+        self.assertLess(len(keyframe.data), MAX_KEYFRAME_BYTES * 1.1)
+        # And it says so, rather than reporting the size it was asked for.
+        self.assertIn("1920x1080", source.stats()["reason"])
+        self.assertEqual(source.stats()["width"], source.width)
+
+    def test_a_picture_that_already_fits_is_left_alone(self):
+        from gsu.camera.h264 import StreamSettings
+        from gsu.camera.h264_synthetic import SyntheticH264Source
+
+        source = SyntheticH264Source(
+            StreamSettings(width=640, height=480, fps=30, intra_period=60))
+        self.assertFalse(source.clamped)
+        self.assertEqual((source.width, source.height), (640, 480))
 
     def test_emulation_prevention_matches_a_reference_implementation(self):
         # The one piece of this that a decoder cannot forgive: a missed 0x03

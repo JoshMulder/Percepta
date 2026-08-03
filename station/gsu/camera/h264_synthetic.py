@@ -17,6 +17,15 @@ An IDR of I_PCM macroblocks followed by P frames that skip everything except the
 few macroblocks the clock is drawn in is a legal, decodable, moving H.264
 stream, and it costs almost nothing to produce on a slow CPU.
 
+**Two limits keep the keyframe decodable, and both are about size.** Every
+picture is cut into slices of about 64 kB (`MBS_PER_SLICE`), and the picture
+itself is shrunk until half a megabyte of raw samples covers it
+(`MAX_KEYFRAME_BYTES`) — so a station configured for 1080p is sent a 768x432
+test card, at the same shape, and told so. Neither is a nod to packet size:
+uncompressed macroblocks make a 1080p keyframe 3.1 MB, nothing decodes that,
+and the failure is silent and looks exactly like a broken camera. The comments
+on those two names have the measurements.
+
 **Its bitrate means nothing.** I_PCM is uncompressed, so a synthetic frame is
 tens of times larger than what the Pi's hardware encoder produces for the same
 picture. Use it to prove the pipe works; use HARDWARE.md §9 for what the link
@@ -42,6 +51,72 @@ log = logging.getLogger("gsu.h264")
 MB = 16
 #: Bytes of a 4:2:0 I_PCM macroblock: 256 luma, 64 Cb, 64 Cr.
 PCM_BYTES = 384
+
+#: How much of one picture goes into a slice. I_PCM is 384 uncompressed bytes a
+#: macroblock and nothing else in this stream has any size worth counting, so
+#: this is a byte budget with a macroblock count derived from it.
+#:
+#: A picture used to be one slice, which at 1080p is an IDR of 8160 macroblocks
+#: — 3.1 MB in a single NAL. **Browsers would not decode it.** Chromium on the
+#: setup page dropped every keyframe and decoded only the P frames, so the
+#: console showed the handful of macroblocks the clock and the sweep are drawn
+#: in, moving on a black field, and nothing else: no colour bars, no mosaic, no
+#: station name. Which looks like a camera fault and is a slice size. The same
+#: picture at 320x240 — a 115 kB IDR — decoded perfectly, which is what made it
+#: look like a resolution problem rather than the one number below.
+#:
+#: 64 kB is comfortably inside what a decoder will hold for one slice, and the
+#: split costs one ~5-byte slice header per 64 kB.
+#:
+#: **This is the first of two limits, not the whole fix.** Measured in Chromium
+#: at 1080p: with one slice per picture no part of a keyframe decodes at all;
+#: with 64 kB slices the tail of one does and the rest of the picture stays
+#: blank. What makes a keyframe whole is `MAX_KEYFRAME_BYTES` below, which
+#: bounds the picture rather than the slice.
+SLICE_BYTES = 64 * 1024
+MBS_PER_SLICE = max(1, SLICE_BYTES // PCM_BYTES)
+
+#: The largest picture this source will encode, as a keyframe byte budget.
+#:
+#: I_PCM is uncompressed — 384 bytes a macroblock, twelve bits a pixel — so a
+#: keyframe here is the whole picture in raw samples. At 1080p that is 3.1 MB,
+#: and **no browser decodes it.** Measured in Chromium against this station's
+#: own setup page: 1080p comes back with the top two thirds of the picture
+#: missing and one frame decoded every two seconds, 1280x720 (1.4 MB) fails
+#: the same way, while 960x540 (780 kB) and 640x480 (450 kB) are perfect at
+#: full rate. The cliff is about a megabyte a keyframe, and slicing does not
+#: move it — the limit is on the picture, not the slice.
+#:
+#: Half a megabyte leaves room under that for decoders less willing than the
+#: one it was measured on. **A real encoder has no such limit**, because a real
+#: encoder compresses and this one cannot; nothing here is a statement about
+#: what the camera or the link can do. HARDWARE.md §9 has those numbers.
+MAX_KEYFRAME_BYTES = 512 * 1024
+MAX_MACROBLOCKS = MAX_KEYFRAME_BYTES // PCM_BYTES
+
+
+def encodable(width: int, height: int) -> tuple[int, int]:
+    """The requested picture, shrunk until its keyframe will decode.
+
+    The shape is kept, so a 16:9 site gets a 16:9 test card, and both sides come
+    back whole macroblocks — this is a limit on how much raw sample data one
+    picture can be, so it is answered in macroblocks rather than in pixels.
+    """
+    mb_width = max(1, (width + MB - 1) // MB)
+    mb_height = max(1, (height + MB - 1) // MB)
+    if mb_width * mb_height <= MAX_MACROBLOCKS:
+        return width, height
+    # Fit the height first and derive the width from it, rather than scaling
+    # both and rounding each: rounding two sides independently is what turns
+    # 16:9 into 1.81, and the test card is the one picture on the station whose
+    # shape being wrong would be read as the console stretching it.
+    scale = (MAX_MACROBLOCKS / (mb_width * mb_height)) ** 0.5
+    rows = max(1, int(mb_height * scale))
+    while True:
+        columns = max(1, round(rows * width / height))
+        if columns * rows <= MAX_MACROBLOCKS or rows == 1:
+            return columns * MB, rows * MB
+        rows -= 1
 
 
 class BitWriter:
@@ -289,22 +364,47 @@ def _pcm(tiles) -> bytes:
     return block
 
 
-def idr_slice(picture: Picture, frame_num: int = 0) -> bytes:
-    """An IDR made entirely of I_PCM macroblocks."""
-    writer = BitWriter()
-    writer.ue(0)                        # first_mb_in_slice
-    writer.ue(7)                        # slice_type: I, all slices
+def slice_header(writer: BitWriter, first_mb: int, frame_num: int, *,
+                 idr: bool) -> None:
+    """The header both slice types share, written once.
+
+    `first_mb_in_slice` is what makes several slices a picture rather than
+    several pictures: each one states where in the macroblock raster it begins,
+    and between them they have to tile the frame exactly.
+    """
+    writer.ue(first_mb)
+    writer.ue(7 if idr else 5)          # slice_type: I or P, all slices
     writer.ue(0)                        # pic_parameter_set_id
-    writer.u(frame_num, 4)
-    writer.ue(0)                        # idr_pic_id
-    writer.u(0, 1)                      # no_output_of_prior_pics_flag
-    writer.u(0, 1)                      # long_term_reference_flag
+    writer.u(frame_num & 0xF, 4)
+    if idr:
+        writer.ue(0)                    # idr_pic_id
+        writer.u(0, 1)                  # no_output_of_prior_pics_flag
+        writer.u(0, 1)                  # long_term_reference_flag
+    else:
+        writer.u(0, 1)                  # num_ref_idx_active_override_flag
+        writer.u(0, 1)                  # ref_pic_list_modification_flag_l0
+        writer.u(0, 1)                  # adaptive_ref_pic_marking_mode_flag
     writer.se(0)                        # slice_qp_delta
-    for block in picture.macroblocks:
-        writer.ue(25)                   # mb_type I_PCM, in an I slice
-        writer.byte_align_zero()
-        writer.bytes_(block)
-    return nal(5, 3, writer.trailing())
+
+
+def idr_slice(picture: Picture, frame_num: int = 0) -> bytes:
+    """An IDR made entirely of I_PCM macroblocks, in slices of `MBS_PER_SLICE`.
+
+    One NAL per slice, concatenated: the access unit is the whole picture and
+    every consumer downstream already handles a frame that is several NALs,
+    because a real encoder's keyframe is one too.
+    """
+    out = b""
+    total = len(picture.macroblocks)
+    for start in range(0, total, MBS_PER_SLICE):
+        writer = BitWriter()
+        slice_header(writer, start, frame_num, idr=True)
+        for block in picture.macroblocks[start:start + MBS_PER_SLICE]:
+            writer.ue(25)               # mb_type I_PCM, in an I slice
+            writer.byte_align_zero()
+            writer.bytes_(block)
+        out += nal(5, 3, writer.trailing())
+    return out
 
 
 def p_slice(picture: Picture, changed: list[int], frame_num: int) -> bytes:
@@ -312,30 +412,39 @@ def p_slice(picture: Picture, changed: list[int], frame_num: int) -> bytes:
 
     Every macroblock that did not change is `P_Skip` — a few bits that mean
     "copy the previous frame" — and every one that did is I_PCM. On a test card
-    where only a clock is moving that is a handful of macroblocks a frame.
-    """
-    writer = BitWriter()
-    writer.ue(0)                        # first_mb_in_slice
-    writer.ue(5)                        # slice_type: P, all slices
-    writer.ue(0)                        # pic_parameter_set_id
-    writer.u(frame_num & 0xF, 4)
-    writer.u(0, 1)                      # num_ref_idx_active_override_flag
-    writer.u(0, 1)                      # ref_pic_list_modification_flag_l0
-    writer.u(0, 1)                      # adaptive_ref_pic_marking_mode_flag
-    writer.se(0)                        # slice_qp_delta
+    where only a clock is moving that is a handful of macroblocks a frame, so
+    this is normally one small slice.
 
-    previous = -1
-    for index in changed:
-        writer.ue(index - previous - 1)  # mb_skip_run up to this macroblock
-        writer.ue(30)                    # mb_type I_PCM, in a P slice (25 + 5)
-        writer.byte_align_zero()
-        writer.bytes_(picture.macroblocks[index])
-        previous = index
+    It is split on the same budget as the IDR all the same. A P frame is only
+    small because little moved, which is a property of the picture rather than
+    of the format — change the card enough and a frame of mostly-coded
+    macroblocks is the same 3 MB slice that stopped keyframes decoding.
+    """
     total = picture.mb_width * picture.mb_height
-    trailing = total - previous - 1
-    if trailing > 0:
-        writer.ue(trailing)
-    return nal(1, 2, writer.trailing())
+    out = b""
+    start = 0                           # first macroblock of this slice
+    written = 0                         # coded macroblocks dealt with so far
+    while start < total:
+        batch = changed[written:written + MBS_PER_SLICE]
+        written += len(batch)
+        # To the end of the picture, unless coded macroblocks are left over —
+        # then this slice stops where the next one has to begin.
+        end = total if written >= len(changed) else changed[written]
+        writer = BitWriter()
+        slice_header(writer, start, frame_num, idr=False)
+        previous = start - 1
+        for index in batch:
+            writer.ue(index - previous - 1)  # mb_skip_run to this macroblock
+            writer.ue(30)                    # mb_type I_PCM in a P slice (25+5)
+            writer.byte_align_zero()
+            writer.bytes_(picture.macroblocks[index])
+            previous = index
+        trailing = end - previous - 1
+        if trailing > 0:
+            writer.ue(trailing)
+        out += nal(1, 2, writer.trailing())
+        start = end
+    return out
 
 
 class SyntheticH264Source:
@@ -352,7 +461,30 @@ class SyntheticH264Source:
         self.settings = settings or StreamSettings()
         self.tool = "synthetic"
         self.reason = ""
-        self._picture = Picture(self.settings.width, self.settings.height, station_name)
+        #: What is actually encoded, which is not always what was asked for.
+        #: Read by `gsu/stream.py` so that the log, the stored event and the
+        #: telemetry all name the picture being sent rather than the policy it
+        #: was derived from.
+        self.width, self.height = encodable(
+            self.settings.width, self.settings.height)
+        self.clamped = (
+            (self.width, self.height)
+            != (self.settings.width, self.settings.height)
+        )
+        if self.clamped:
+            log.info(
+                "The synthetic camera is encoding %dx%d, not the %dx%d this "
+                "station is configured for: its macroblocks are uncompressed, "
+                "so a keyframe at the configured size is %.1f MB and decoders "
+                "drop it. This is the fake encoder's limit and says nothing "
+                "about the camera or the link.",
+                self.width, self.height,
+                self.settings.width, self.settings.height,
+                (((self.settings.width + MB - 1) // MB)
+                 * ((self.settings.height + MB - 1) // MB)
+                 * PCM_BYTES / (1024 * 1024)),
+            )
+        self._picture = Picture(self.width, self.height, station_name)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._on_unit = None
@@ -397,21 +529,27 @@ class SyntheticH264Source:
     def frame(self) -> AccessUnit:
         """One access unit. Public so a test can pull frames without a thread."""
         at = clock.now()
-        keyframe = self.frames % max(1, self.settings.intra_period) == 0
+        # Counted from the last IDR, not from the start of the stream. That is
+        # what `frame_num` means: an IDR resets it to zero and every reference
+        # frame after it adds one, and with
+        # `gaps_in_frame_num_value_allowed_flag` clear in the SPS a decoder is
+        # entitled to reject a picture whose frame_num skipped. Using the
+        # absolute frame counter here made the first group of pictures correct
+        # by accident and every one after it wrong — the frame after the second
+        # IDR jumped from 0 to 13 — so a browser decoded one keyframe per two
+        # seconds and dropped the fifty-nine P frames between them.
+        since_idr = self.frames % max(1, self.settings.intra_period)
+        keyframe = since_idr == 0
         changed = self._picture.draw(at, self.frames)
         if keyframe:
-            data = (
-                sps(self.settings.width, self.settings.height)
-                + pps()
-                + idr_slice(self._picture)
-            )
+            data = sps(self.width, self.height) + pps() + idr_slice(self._picture)
         else:
-            data = p_slice(self._picture, changed, self.frames)
+            data = p_slice(self._picture, changed, since_idr)
         self.frames += 1
         self.bytes_out += len(data)
         return AccessUnit(
             data=data, captured_at=at, keyframe=keyframe,
-            parameter_sets=sps(self.settings.width, self.settings.height) + pps(),
+            parameter_sets=sps(self.width, self.height) + pps(),
         )
 
     def stats(self) -> dict:
@@ -423,6 +561,16 @@ class SyntheticH264Source:
             "bytes": self.bytes_out,
             "fps_measured": round(self.frames / elapsed, 1),
             "bitrate_bps": round(self.bytes_out * 8 / elapsed),
-            "reason": "synthetic H.264 — uncompressed macroblocks, so its "
-                      "bitrate is not a camera's",
+            "width": self.width,
+            "height": self.height,
+            "reason": (
+                f"synthetic H.264 — uncompressed macroblocks, so its bitrate "
+                f"is not a camera's. Encoding {self.width}x{self.height} "
+                f"rather than the configured {self.settings.width}x"
+                f"{self.settings.height}: a keyframe of raw samples at that "
+                f"size is too large to decode."
+                if self.clamped else
+                "synthetic H.264 — uncompressed macroblocks, so its bitrate "
+                "is not a camera's"
+            ),
         }
