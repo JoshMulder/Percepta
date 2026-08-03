@@ -90,6 +90,18 @@ class StreamUplink(ABC):
     @abstractmethod
     def close(self) -> None: ...
 
+    @property
+    def connected(self) -> bool:
+        """Whether this uplink still has somewhere to send.
+
+        True by default, and that is the honest answer for most of them: an
+        uplink writing to a file or to nowhere cannot lose a connection it
+        never had, and is usable from `open()` until `close()`. `MediaUplink`
+        is the one that can go away underneath us — the platform closes its
+        socket on every restart — and it is the one that overrides this.
+        """
+        return True
+
     def describe(self) -> str:
         return self.name
 
@@ -502,8 +514,20 @@ class TeeUplink(StreamUplink):
         — the setup page was open first. The encoder is right there; only the
         connection is missing, and the init segment is held, so the platform
         can be brought in without restarting anything.
+
+        That same path is what recovers a socket the platform closed, so the
+        guard below has to ask the socket rather than a flag.
         """
-        if self.primary_open:
+        # `primary_open` alone is not enough, and trusting it stopped video
+        # dead. It records that the socket was once opened, never that it is
+        # still there — so after the platform restarted and closed the uplink
+        # from its end, this returned True to every `video.start` for as long
+        # as the station stayed up. The station answered "already streaming;
+        # lease extended" once every ten seconds, sent nothing, and never
+        # reconnected. `begin` and `send` both ask the socket itself; this was
+        # the one place that did not, and it is the only one whose job is to
+        # notice.
+        if self.primary_open and self.primary.connected:
             return True
         self.primary_open = self.primary.open()
         if not self.primary_open:
