@@ -417,6 +417,20 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
       .catch(() => setStations([]));
   }, []);
 
+  // A station save can change what the map is built from — the min and max zoom,
+  // the position — and those used to wait for a page reload because the config
+  // is fetched only when the station changes. Refetch it here instead, so a
+  // zoom change takes on save. Narrow on purpose: the map config and the detail,
+  // not the full station-switch reset, so the telemetry panels do not blink.
+  // The list reload keeps the switcher's names current.
+  const handleStationsChanged = useCallback(() => {
+    loadStations();
+    if (stationId) {
+      api.mapConfig(stationId).then(setMapConfig).catch(() => {});
+      api.station(stationId).then(setDetail).catch(() => {});
+    }
+  }, [loadStations, stationId]);
+
   useEffect(() => {
     loadStations();
   }, [loadStations]);
@@ -979,7 +993,7 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
           capabilities={caps}
           onClose={() => setSettingsOpen(false)}
           onProfileChanged={setDisplayName}
-          onStationsChanged={loadStations}
+          onStationsChanged={handleStationsChanged}
           onSignOut={signOut}
         />
       )}
@@ -1093,7 +1107,7 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
           capabilities={caps}
           onClose={() => setSettingsOpen(false)}
           onProfileChanged={setDisplayName}
-          onStationsChanged={loadStations}
+          onStationsChanged={handleStationsChanged}
           onSignOut={signOut}
         />
       )}
