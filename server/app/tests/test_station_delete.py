@@ -22,10 +22,25 @@ from backend.database.models.device import Device
 from backend.database.models.ground_station import GroundStation
 
 
+def station_row(db, station_id) -> GroundStation | None:
+    """Ask the database, not the session's identity map.
+
+    `Session.get` answers from the map when it can, and these tests arrange
+    through the same session they check with — so after the endpoint deleted
+    the row it cheerfully returned the instance it had loaded beforehand, and
+    reported a successful delete as a failure. A SELECT that comes back empty
+    is empty whatever the map is holding.
+    """
+    db.expire_all()
+    return db.execute(
+        select(GroundStation).where(GroundStation.id == station_id)
+    ).scalar_one_or_none()
+
+
 def test_a_record_with_no_credential_is_deleted(client, station, db):
     response = client.delete(f"/api/stations/{station.id}/config")
     assert response.status_code == 204, response.text
-    assert db.get(GroundStation, station.id) is None
+    assert station_row(db, station.id) is None
 
 
 def test_a_station_with_devices_is_still_deletable(client, station, db, org):
@@ -50,7 +65,7 @@ def test_a_station_with_devices_is_still_deletable(client, station, db, org):
     response = client.delete(f"/api/stations/{station.id}/config")
     assert response.status_code == 204, response.text
 
-    assert db.get(GroundStation, station.id) is None
+    assert station_row(db, station.id) is None
     remaining = db.execute(
         select(Device).where(Device.ground_station_id == station.id)
     ).scalars().all()
@@ -94,7 +109,7 @@ def test_a_station_that_can_still_authenticate_is_refused(client, station, db, o
     response = client.delete(f"/api/stations/{station.id}/config")
     assert response.status_code == 409
     assert "revoke" in response.json()["detail"].lower()
-    assert db.get(GroundStation, station.id) is not None
+    assert station_row(db, station.id) is not None
 
 
 def test_deleting_something_that_is_not_there_is_a_404(client):

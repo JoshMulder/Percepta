@@ -231,6 +231,23 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  # The app's background workers connect to Redis at import time and retry for
+  # ever when it is absent, so without this every test carried three tracebacks
+  # in its captured log — the realtime hub, the station ingest and the power
+  # recorder, all failing at localhost:6379. None of it affected a result, and
+  # all of it buried the assertion that did.
+  redis-test:
+    image: redis:7-alpine
+    profiles: ["tests"]
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    security_opt:
+      - no-new-privileges:true
+
   tests:
     profiles: ["tests"]
     build:
@@ -253,10 +270,17 @@ services:
       # schema owner, which bypasses row-level security — these tests are about
       # endpoint behaviour, and tenant isolation has its own verifier in
       # backend/scripts/verify_rls.py.
+      REDIS_URL: redis://redis-test:6379/0
       SECRET_KEY: testing-only-not-a-real-key
       PYTHONDONTWRITEBYTECODE: "1"
+      # No cache directory. /app belongs to root in the image and the tests run
+      # as uid 10001, so pytest's cache writes fail — three warnings a run about
+      # something nothing here wants anyway.
+      PYTEST_ADDOPTS: "-p no:cacheprovider"
     depends_on:
       postgres-test:
+        condition: service_healthy
+      redis-test:
         condition: service_healthy
     security_opt:
       - no-new-privileges:true
