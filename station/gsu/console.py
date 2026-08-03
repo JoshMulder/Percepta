@@ -67,6 +67,7 @@ import html
 import ipaddress
 import json
 import logging
+import queue
 import secrets
 import threading
 import time
@@ -78,6 +79,7 @@ from urllib.parse import parse_qs, urlsplit
 from .camera.rtsp import split_credentials
 from .config import parse_elevation_m
 from .devices import registry
+from .radio.audio import AUDIO_RATE
 from .radio.receiver import FREQ_MAX_HZ, FREQ_MIN_HZ
 from .setup_access import COOKIE_NAME, Gate, is_loopback_host
 
@@ -108,6 +110,28 @@ WATCH_SECONDS = 5.0
 #: response (`_headers`) — a stored-XSS payload cannot know it, and no other
 #: script source is ever valid. `connect-src 'self'` is what lets the Devices
 #: script poll status.json; it permits nothing off-box.
+def _wav_header(rate: int, channels: int = 1, bits: int = 16) -> bytes:
+    """A RIFF header for a stream whose length nobody knows yet.
+
+    The two size fields are 0xFFFFFFFF rather than a real count. A live capture
+    has no end until the client stops reading, and every player treats an
+    over-long size as "keep going" — which is exactly the behaviour wanted and
+    is how every other endless-WAV endpoint does it.
+    """
+    block = channels * bits // 8
+    return b"".join((
+        b"RIFF", b"\xff\xff\xff\xff", b"WAVE",
+        b"fmt ", (16).to_bytes(4, "little"),
+        (1).to_bytes(2, "little"),              # PCM, uncompressed
+        channels.to_bytes(2, "little"),
+        rate.to_bytes(4, "little"),
+        (rate * block).to_bytes(4, "little"),   # byte rate
+        block.to_bytes(2, "little"),
+        bits.to_bytes(2, "little"),
+        b"data", b"\xff\xff\xff\xff",
+    ))
+
+
 def _chunk(handler, data: bytes) -> None:
     """One HTTP chunk. `http.server` does not frame these for us."""
     handler.wfile.write(f"{len(data):X}\r\n".encode("ascii"))
@@ -840,6 +864,8 @@ class Console:
                 return self._send_json(handler, self._registry_json(), cookie)
             if path.startswith("/stream.mp4"):
                 return self._send_stream(handler, cookie)
+            if path.startswith("/audio.wav"):
+                return self._send_audio(handler, cookie)
             if path.startswith("/frame.jpg"):
                 return self._send_frame(handler, cookie)
             if path in ("/index.html", "/login"):
@@ -1321,6 +1347,54 @@ class Console:
             pass
         finally:
             stream.detach_local(viewer)
+
+    def _send_audio(self, handler, cookie: str | None) -> None:
+        """The receiver's own PCM, live, straight off the box.
+
+        **This exists to cut the transport out of an argument.** Airband audio
+        that chops in the console has four suspects between the demodulator and
+        the speaker — the Opus encoder, the broker relay, the platform's
+        fan-out, and the browser's player — and no way to tell which. This is
+        the demodulator's output, before any of them: if it chops here the
+        fault is on the box, and if it is clean here it is not.
+
+        Uncompressed on purpose. Opus is the first thing downstream and so the
+        first thing that has to be ruled out, and PCM16 at 24 kHz is 384 kbit/s
+        on a LAN cable to a laptop that is already on this network.
+
+        Play it with anything:
+
+            ffplay -autoexit http://<station>:8088/audio.wav
+            vlc http://<station>:8088/audio.wav
+            curl -s http://<station>:8088/audio.wav | aplay
+
+        The length in the header is a lie, and deliberately so: this body ends
+        when the client goes away, and every player treats an over-long RIFF
+        size as "stream until it stops".
+        """
+        radio = getattr(self.agent, "radio", None)
+        if radio is None:
+            return self._deny(handler, 503, "No receiver on this station.")
+
+        listener = radio.attach_listener()
+        try:
+            self._headers(handler, 200, "audio/wav", None, cookie,
+                          extra={"Cache-Control": "no-store"})
+            _chunk(handler, _wav_header(AUDIO_RATE))
+            while True:
+                try:
+                    pcm = listener.get(timeout=1.0)
+                except queue.Empty:
+                    # The sensing loop feeds silence while the squelch is shut,
+                    # so nothing arriving at all means the loop itself has
+                    # stopped — worth discovering by the stream ending.
+                    continue
+                _chunk(handler, pcm)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            # The player was closed, which is the ordinary way this ends.
+            pass
+        finally:
+            radio.detach_listener(listener)
 
     def _send_json(self, handler, payload: dict, cookie: str | None = None) -> None:
         body = json.dumps(payload, indent=2, default=str).encode()

@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -185,6 +187,13 @@ class RadioController:
         #: Last threshold actually applied, so leaving AUTO can freeze at it
         #: rather than jumping.
         self.last_threshold_db = -70.0
+
+        #: Local PCM listeners, for `/audio.wav` on the setup page. Each is a
+        #: bounded queue of the same blocks the recorder gets — never a second
+        #: demodulation, for the same reason the setup page shares the camera's
+        #: encoder rather than starting its own.
+        self._listeners: set[queue.Queue] = set()
+        self._listeners_lock = threading.Lock()
 
         self._hang = 0.0
         self._rssi_db = -100.0
@@ -431,7 +440,57 @@ class RadioController:
                 # of its own — so the recording still happens and nothing goes
                 # on the wire yet.
                 audio = audio_payload(self.last_pcm, encoder, AUDIO_RATE)
+        self._feed_listeners(self.last_pcm, dt)
         return telemetry, audio
+
+    # --- listening on the box itself --------------------------------------
+
+    def attach_listener(self) -> "queue.Queue[bytes]":
+        """A queue of PCM blocks, for `/audio.wav` on the setup page.
+
+        The same blocks the recorder and the Opus encoder are handed, never a
+        second demodulation — the front end is one device with one reader, and
+        the setup page shares the camera's encoder for exactly this reason.
+
+        Bounded and dropping-oldest: somebody who stops reading must not grow
+        this without bound or stall the sensing loop, and for a diagnostic the
+        newest audio is the audio worth having.
+        """
+        listener: "queue.Queue[bytes]" = queue.Queue(maxsize=64)
+        with self._listeners_lock:
+            self._listeners.add(listener)
+        return listener
+
+    def detach_listener(self, listener: "queue.Queue[bytes]") -> None:
+        with self._listeners_lock:
+            self._listeners.discard(listener)
+
+    def _feed_listeners(self, pcm: bytes, dt: float) -> None:
+        """Every block, open gate or shut.
+
+        Silence is sent while the squelch is closed rather than nothing at all.
+        A listener that simply stalls between transmissions cannot be told
+        apart from one that is dropping audio, which is the entire question
+        this exists to answer — so the timeline stays real and a gap arrives as
+        a gap rather than as a pause in the download.
+        """
+        with self._listeners_lock:
+            listeners = list(self._listeners)
+        if not listeners:
+            return
+        if not pcm:
+            pcm = b"\x00\x00" * max(0, int(AUDIO_RATE * dt))
+        if not pcm:
+            return
+        for listener in listeners:
+            try:
+                listener.put_nowait(pcm)
+            except queue.Full:
+                try:
+                    listener.get_nowait()
+                    listener.put_nowait(pcm)
+                except (queue.Empty, queue.Full):
+                    pass
 
     def _encoder(self) -> Encoder | None:
         """The Opus encoder, built once and held.
