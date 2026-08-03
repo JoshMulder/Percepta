@@ -152,10 +152,18 @@ class PayloadTests(unittest.TestCase):
                             or agent.store.stats().get("audio_files", 0) > 0,
                             f"nothing was recorded either: {agent.store.stats()}")
 
-            # Now ask, and it arrives.
+            # Now ask, and it arrives — but on the traffic's schedule, not on
+            # ours. The busy profile leaves 6 to 25 seconds between overs
+            # (`radio.simulated.TRAFFIC`) from an unseeded generator, so a flat
+            # twenty ticks was really asserting "an over began within twenty
+            # seconds", which is not what this test is about and failed about
+            # one run in eight. Step until it arrives instead, with a ceiling
+            # clear of the longest gap plus the longest over.
             agent.radio.want_audio(True, 60)
-            for _ in range(20):
+            for _ in range(60):
                 agent.step(1.0)
+                if [p for p in sent if p.get("kind") == "audio"]:
+                    break
             self.assertTrue([p for p in sent if p.get("kind") == "audio"],
                             "audio did not resume when it was asked for")
 
@@ -573,7 +581,15 @@ class AltitudeCorrectionWiringTests(unittest.TestCase):
         # optional refinement is unavailable. `Health.SUMMARY` maps info to ok,
         # so a setting cannot degrade a station.
         self.assertEqual(condition["severity"], "info")
-        self.assertEqual(payload["status"], "ok")
+        # Asked of the mapping rather than of `payload["status"]`, which is
+        # every condition at once. On a developer machine that includes
+        # `clock.unsynchronised`, raised from whatever is or is not
+        # disciplining the host clock and cached process-wide for a minute by
+        # `clock.discipline` — so a single probe decided the whole suite and
+        # this test failed about one run in eight over a clock it says nothing
+        # about. What it means is that *this* condition cannot degrade a
+        # station, and that is what it now asserts.
+        self.assertEqual(Health.SUMMARY[condition["severity"]], "ok")
 
         contacts = self.agent.adsb.poll(1.0)
         self.assertTrue(contacts)
