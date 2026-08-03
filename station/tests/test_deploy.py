@@ -351,16 +351,34 @@ class ContainerTests(unittest.TestCase):
         self.assertIn("stop_grace_period: 45s", self.directives)
         self.assertIn("restart: unless-stopped", self.directives)
 
-    def test_the_console_is_published_to_loopback_only(self):
-        # It has no authentication. On 0.0.0.0 this would be an unauthenticated
-        # setup page on the public internet.
-        # The binding is configurable now, so what matters is the *default*:
-        # an unauthenticated page on a routable interface is the failure this
-        # guards, and a site that opens it to the LAN has set a password to do
-        # so (the agent refuses to serve the page without one).
-        self.assertIn('"${GSU_SETUP_BIND:-127.0.0.1}:8088:8088"', self.directives)
-        self.assertNotIn('- "0.0.0.0:8088', self.directives)
-        self.assertNotIn('- "8088:8088"', self.directives)
+    def test_the_setup_page_is_published_to_the_lan_on_port_80(self):
+        """Reachable by default, because the password is what protects it.
+
+        This used to assert loopback, on the grounds that the page had no
+        authentication. It has: the agent refuses to serve it at all without
+        `GSU_SETUP_PASSWORD_HASH` and demotes itself to the container's own
+        loopback, which no port mapping can reach — `test_setup_console.py`'s
+        `test_a_routable_host_with_no_password_is_demoted_to_loopback` is the
+        guard on that, and it is the one that matters. Once a password is
+        guaranteed — bootstrap.sh will not finish without collecting one —
+        loopback-only stopped being protection and became an installer at an
+        enclosure unable to open the page the enclosure exists to be set up
+        from.
+
+        Both halves are overridable, and the defaults are what this pins.
+        """
+        self.assertIn(
+            '"${GSU_SETUP_BIND:-0.0.0.0}:${GSU_SETUP_HOST_PORT:-80}:8088"',
+            self.directives,
+        )
+
+    def test_the_container_still_listens_high_and_unprivileged(self):
+        # The published port is 80 on the *host*, which the Docker daemon binds.
+        # The agent inside is unprivileged with every capability dropped, so it
+        # must still be asked for a port it can actually have — a container-side
+        # 80 would fail to bind and the page would never come up at all.
+        self.assertRegex(self.directives, r":8088\"")
+        self.assertIn("cap_drop:", self.directives)
 
     def test_the_state_is_a_named_volume_that_survives_a_rebuild(self):
         """The credential lives here, and `up -d --build` must not lose it.

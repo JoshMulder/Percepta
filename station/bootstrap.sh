@@ -208,8 +208,8 @@ Running.
 
   Enrol it        docker compose run --rm gsu enrol --token XXXX-XXXX-XXXX
   Check hardware  docker compose run --rm gsu preflight --probe
-  Setup page      http://127.0.0.1:8088   (this host's loopback only; from
-                  elsewhere: ssh -L 8088:127.0.0.1:8088 <this host>)
+  Setup page      http://<this box>/      (port 80, on the site LAN. The
+                  password you just set is what protects it)
   Logs            docker compose logs -f
   Update          git pull && docker compose up -d --build
 

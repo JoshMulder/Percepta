@@ -184,23 +184,38 @@ services:
       - 'c 189:* rmw'
       - 'c 249:* rmw'
 
-    # The console is published to loopback only. It has no authentication —
-    # physical presence, or an SSH tunnel, is the control — and publishing it on
-    # 0.0.0.0 would put an unauthenticated setup page on the public internet.
+    # The setup page, on the site LAN, on port 80.
+    #
+    # **The password is the control, not the interface.** The agent refuses to
+    # serve this page at all without GSU_SETUP_PASSWORD_HASH — it demotes itself
+    # to the container's own loopback, which this mapping cannot reach — and
+    # `bootstrap.sh` will not finish without collecting one. So "reachable only
+    # from a shell on the box" was not buying protection on top of that; it was
+    # costing an installer standing at the enclosure the ability to open the
+    # page at all, which is the job the page exists for.
+    #
+    # Port 80 rather than 443: the console speaks plain HTTP
+    # (`http.server.ThreadingHTTPServer`, no TLS anywhere in gsu/console.py).
+    # Publishing it on 443 would answer HTTP on the port every browser tries
+    # HTTPS on first, so `https://<box>` would fail outright and an installer
+    # would have to know to type `http://<box>:443`. Worse in every way than 80
+    # until somebody gives the console a certificate.
+    #
+    # **What this means on the wire:** the password and the enrolment code cross
+    # the site LAN in clear text. That is the trade, and it is why the other
+    # three controls in gsu/setup_access.py matter — the window that closes, the
+    # source-address check, and CSRF on every form.
+    #
+    # Set GSU_SETUP_BIND=127.0.0.1 in .env to put it back on loopback (reach it
+    # with `ssh -L 80:127.0.0.1:80`), or GSU_SETUP_HOST_PORT to move it off 80
+    # if something else on the box wants that port. Prefer binding to the setup
+    # interface's own address over 0.0.0.0 where the address is known.
+    #
+    # Binding a port below 1024 needs no privilege here: the container process
+    # is unprivileged and still listens on 8088: it is the Docker daemon that
+    # publishes 80 on the host.
     ports:
-      # Loopback by default, and a site can open it to the LAN.
-      #
-      # The default is the safe one: an unauthenticated setup page on a routable
-      # interface is the failure this whole path guards against. But the agent
-      # now refuses to serve the page at all without a password hash — that is
-      # what `bootstrap.sh` collects — so once one is set, "reachable only from
-      # a shell on the box itself" stops being a security property and becomes
-      # an obstacle. An installer standing at the site with a laptop cannot
-      # reach a page published to the Pi's own loopback.
-      #
-      # Set GSU_SETUP_BIND=0.0.0.0 in .env to open it. The password is what
-      # protects it then, and the agent enforces that itself.
-      - "${GSU_SETUP_BIND:-127.0.0.1}:8088:8088"
+      - "${GSU_SETUP_BIND:-0.0.0.0}:${GSU_SETUP_HOST_PORT:-80}:8088"
 
     # Numeric because the container's /etc/group is the image's and the host's
     # is the host's, and only the numbers are shared. Check with

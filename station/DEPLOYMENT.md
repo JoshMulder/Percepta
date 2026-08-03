@@ -148,19 +148,32 @@ reaches the repository.
 `deploy/gsu.env.example` documents every other key the agent understands. It is
 a **reference, not a template** — do not copy it over `.env`.
 
-### Reaching the setup page from a laptop
+### Reaching the setup page
 
-The page is published to the host's loopback by default, which means an SSH
-tunnel:
+It is on the site LAN, on port 80, from the moment the container starts. Open
+`http://<box>/` and enter the setup password.
+
+**The password is the control, not the interface.** The agent refuses to serve
+the page at all without `GSU_SETUP_PASSWORD_HASH` — it demotes itself to the
+container's own loopback, which no port mapping reaches — so forgetting the
+password gives an unreachable page rather than an open one. `bootstrap.sh` will
+not finish without collecting one.
+
+Port 80 and not 443 because the console speaks plain HTTP and has no
+certificate. On 443, every browser would try HTTPS first and fail. **So the
+password and the enrolment code cross the LAN in clear text**, which is the
+trade for a page an installer can actually open, and the reason the window
+below matters.
+
+To put it back on loopback for a box whose LAN you do not trust, set
+`GSU_SETUP_BIND=127.0.0.1` in `.env`, `docker compose up -d`, and tunnel:
 
 ```bash
-ssh -L 8088:127.0.0.1:8088 <user>@<box>
+ssh -L 8080:127.0.0.1:80 <user>@<box>
 ```
 
-For an installer standing at the enclosure, put `GSU_SETUP_BIND=0.0.0.0` in
-`.env` and `docker compose up -d`. The password is what protects it then, not
-the interface — and the agent refuses to serve the page at all without one, so
-forgetting the password gives an unreachable page rather than an open one.
+`GSU_SETUP_HOST_PORT` moves it off 80 if something else on the box wants that
+port. Both are host-side; the container always listens on 8088.
 
 ---
 
@@ -229,7 +242,7 @@ There is no third option and deliberately no flag for one.
 
 ### From a laptop or a phone, with no terminal
 
-Join the setup network, open `http://<box>:8088`, enter the setup password, and
+Join the setup network, open `http://<box>/`, enter the setup password, and
 the page does the rest — enrolment code first, then a card per slot for what is
 fitted. The platform's address is shown but not editable.
 
@@ -485,8 +498,8 @@ reporting `disciplined by gps` on its own, because chrony's reference id becomes
 
 | Port | Bound to | What |
 |---|---|---|
-| 8088 | `127.0.0.1` | the setup page, over an SSH tunnel |
-| 8088 | `$GSU_SETUP_BIND` | the setup page on the site LAN — **only** with a password set, and **only** while the window is open |
+| 80 | `$GSU_SETUP_BIND`, `0.0.0.0` by default | the setup page on the site LAN — **only** with a password set, and **only** while the window is open. Plain HTTP, so the password and the enrolment code cross the LAN in clear |
+| 80 | `127.0.0.1`, if you set `GSU_SETUP_BIND` back | the setup page over an SSH tunnel instead |
 | 22 | everything | SSH. Key-only, please: this box is on the public internet |
 
 The station makes **outbound** connections only: to the platform API, to the
@@ -501,11 +514,19 @@ broad device permissions so that a missing sensor cannot stop the station
 starting and a replugged one is picked up without anybody touching it. See
 DECISIONS.md item 35c. `privileged: true` is still not used.
 
-**One caveat, and it is a real one: the setup page's source-address check does
-not work under Docker.** Every request arrives from the bridge gateway, which is
-inside 172.16/12, so that control passes for everyone. On this path the password
-and the window are the only two controls left. Publish the port to a specific
-LAN address rather than `0.0.0.0` if you use it.
+**One caveat, and it matters more now the page is on the LAN by default: do not
+count on the source-address check under Docker.** It refuses anything outside
+10/8, 172.16/12, 192.168/16 and link-local, but what the container sees as the
+client address depends on how the daemon publishes the port — iptables DNAT
+preserves it, the userland proxy replaces it with the bridge gateway, which is
+itself inside 172.16/12 and so passes for everyone. **This has not been measured
+on the box.** Assume the password and the window are the only two controls that
+are certainly working.
+
+Two things follow. Set `GSU_SETUP_BIND` to the setup interface's own address
+rather than leaving it at `0.0.0.0` wherever you know that address. And if the
+box has a public IP rather than sitting behind CGNAT, treat port 80 as reachable
+from the internet and put it back on loopback.
 
 ---
 
