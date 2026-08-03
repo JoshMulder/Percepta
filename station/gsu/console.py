@@ -392,6 +392,16 @@ STYLE = """
  .btn.danger, button.danger { border-color: var(--danger); color: var(--danger);
    background: rgba(255,122,69,.08); }
  .btn.danger:hover, button.danger:hover { background: rgba(255,122,69,.18); }
+ /* A form that has been submitted and is waiting for the page to come back.
+    Saving a device slot tears the driver down, builds a new one and then gives
+    it a sensing tick to say whether it is there — seconds on a network camera,
+    with nothing on the page changing meanwhile. A button that appears to have
+    done nothing gets pressed again, and the second press is a second POST.
+    `pointer-events` rather than `disabled`, because the state is set from the
+    submit handler and a control disabled there stops being announced halfway
+    through the action. */
+ form[data-busy] { cursor: progress; }
+ form[data-busy] button[type=submit] { pointer-events: none; opacity: .65; }
  /* Name, device, status — three columns, so the pills line up down the card
     instead of following each device name's length. */
  /* The columns are defined once, on the card, and each row borrows them with
@@ -2618,6 +2628,31 @@ class Console:
     };
     setInterval(poll, 2500);
   }
+
+  // Say that a save is happening.
+  //
+  // Saving a slot tears the old driver down, builds a new one, and then gives
+  // it a sensing tick to report whether it is actually there. On a network
+  // camera that is seconds, and until the page came back nothing on screen
+  // acknowledged the click at all — so the button read as broken, and the
+  // reasonable response to a button that did nothing is to press it again.
+  //
+  // Deliberately not `disabled`: these buttons carry no name or value, so the
+  // label is free to change, but a control disabled from inside its own submit
+  // handler stops being announced halfway through the action it is describing.
+  // The CSS takes the clicks instead.
+  document.addEventListener("submit", function (event) {
+    var form = event.target;
+    if (!form || form.nodeName !== "FORM" || form.getAttribute("data-busy")) return;
+    var button = (event.submitter && event.submitter.nodeName === "BUTTON")
+      ? event.submitter
+      : form.querySelector("button[type=submit]");
+    form.setAttribute("data-busy", "1");
+    if (button) {
+      button.setAttribute("aria-busy", "true");
+      button.textContent = "Working\\u2026";
+    }
+  }, true);
 })();
 """
         return f"<script nonce='{nonce}'>{script}</script>"
