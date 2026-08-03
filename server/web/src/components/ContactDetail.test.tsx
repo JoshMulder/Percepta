@@ -85,23 +85,13 @@ describe("altitude, which is what the panel is for", () => {
     expect(text()).toContain("11483 ft");
   });
 
-  it("says which datum a pressure altitude is", () => {
-    // 1013.25 hPa is not the local datum, so this is not height above the sea
-    // today — and the number looks equally exact either way.
+  it("no longer captions the altitude with its datum", () => {
+    // The "pressure altitude, 1013.25 hPa datum" caption was on every contact
+    // and read as noise; the number stands on its own, and the Corrected row
+    // carries the local-datum comparison where the correction is switched on.
     show({ altitude_type: "pressure" });
-    expect(text()).toContain("1013.25 hPa");
-  });
-
-  it("distinguishes a geometric altitude from a pressure one", () => {
-    show({ altitude_type: "geometric" });
-    expect(text()).toContain("GNSS");
     expect(text()).not.toContain("1013.25");
-  });
-
-  it("claims no datum when the receiver did not say", () => {
-    show({ altitude_type: null });
-    expect(text()).not.toContain("1013.25");
-    expect(text()).not.toContain("GNSS");
+    expect(text()).not.toContain("datum");
   });
 
   it("says so rather than showing nothing when there is no altitude", () => {
@@ -219,14 +209,11 @@ describe("flags that change how the rest should be read", () => {
     expect(text()).toContain("47");
   });
 
-  it("does not also print a Last heard row once it has said that", () => {
-    show({ seconds_since_contact: 47 });
-    expect(rowLabels()).not.toContain("Last heard");
-  });
-
-  it("prints Last heard while the contact is current", () => {
+  it("no longer prints a Last heard row", () => {
+    // The stale banner says when a position is a memory; a "3 s ago" row on
+    // every current contact on top of that was noise, and is gone.
     show({ seconds_since_contact: 3 });
-    expect(rowLabels()).toContain("Last heard");
+    expect(rowLabels()).not.toContain("Last heard");
     expect(text()).not.toMatch(/memory/i);
   });
 
@@ -271,6 +258,20 @@ describe("rows that only exist when there is something to say", () => {
   it("distinguishes airborne from unknown", () => {
     show({ on_ground: false });
     expect(text()).toMatch(/airborne/i);
+  });
+
+  it("names the emitter category as the type", () => {
+    show({ emitter_type: 7 }); // A7 — rotorcraft
+    expect(rowLabels()).toContain("Type");
+    expect(text()).toContain("Helicopter");
+  });
+
+  it("reports the type as absent when the transponder sent no category", () => {
+    // 0 is 'no category sent', which is different from one we do not recognise;
+    // both read as not reported rather than as a made-up type.
+    show({ emitter_type: 0 });
+    expect(rowLabels()).toContain("Type");
+    expect(text()).not.toContain("aircraft");
   });
 });
 

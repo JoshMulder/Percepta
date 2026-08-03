@@ -1,3 +1,4 @@
+import { emitterName } from "../adsbIcons";
 import type { Aircraft } from "../types";
 
 /**
@@ -63,7 +64,6 @@ export function ContactDetail({
     icao,
     callsign,
     altitude_m: altitude,
-    altitude_type,
     altitude_corrected_m,
     vertical_speed_ms: vertical_speed,
     speed_kt: speed,
@@ -74,20 +74,14 @@ export function ContactDetail({
     seconds_since_contact,
     on_ground,
     simulated,
-    source,
+    emitter_type,
     alert,
   } = contact;
 
-  // A pressure altitude is referenced to 1013.25 hPa, not to the local datum,
-  // so it is not the aircraft's height above the sea today. Saying which datum
-  // it is turns a number that looks exact into one that can be trusted
-  // correctly, and it is the whole reason the correction below exists.
-  const datum =
-    altitude_type === "pressure"
-      ? "pressure altitude, 1013.25 hPa datum"
-      : altitude_type === "geometric"
-        ? "geometric (GNSS)"
-        : null;
+  // The emitter category in words — "Helicopter", "Large aircraft". This is the
+  // type the transponder actually broadcasts; a specific model or a tail number
+  // is not in ADS-B and would need a lookup keyed by the ICAO address.
+  const type = emitterName(emitter_type);
 
   const stale = seconds_since_contact !== null
     && seconds_since_contact !== undefined
@@ -135,10 +129,7 @@ export function ContactDetail({
         {altitude === null || altitude === undefined ? (
           <span className="contact-absent">Altitude not reported</span>
         ) : (
-          <>
-            <strong>{altitudeText(altitude)}</strong>
-            {datum && <span className="contact-datum">{datum}</span>}
-          </>
+          <strong>{altitudeText(altitude)}</strong>
         )}
       </div>
 
@@ -193,24 +184,14 @@ export function ContactDetail({
             : squawk.toString().padStart(4, "0")}
         </Row>
 
-        {/* No Type row. The panel is opened by clicking the aircraft's own
-            glyph, and that glyph *is* the type — a row naming it again is the
-            same fact twice, one of them redundant the moment you know how the
-            icons read. The mapping is still in emitters.ts and still worth
-            keeping honest; it simply does not need a line here. */}
+        {/* The ADS-B emitter category, in words. Not the model — the transponder
+            does not broadcast one — but "Helicopter" or "Large aircraft" is more
+            than the glyph alone says at a glance. Absent reads as not reported,
+            like every other unsent field. */}
+        <Row label="Type">{type ?? <Absent />}</Row>
 
         {on_ground !== null && on_ground !== undefined && (
           <Row label="State">{on_ground ? "on the ground" : "airborne"}</Row>
-        )}
-
-        {source && (
-          <Row label="Band">{source === "uat" ? "UAT, 978 MHz" : "1090ES"}</Row>
-        )}
-
-        {!stale
-          && seconds_since_contact !== null
-          && seconds_since_contact !== undefined && (
-          <Row label="Last heard">{`${Math.round(seconds_since_contact)} s ago`}</Row>
         )}
       </div>
     </div>

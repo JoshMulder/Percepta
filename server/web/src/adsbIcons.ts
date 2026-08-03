@@ -169,3 +169,42 @@ export function iconFor(emitterType: number | null | undefined): IconShape {
   const [name, scale] = SHAPE_FOR[cat ?? "unknown"] ?? SHAPE_FOR.unknown;
   return { ...SHAPES[name], scale };
 }
+
+/** Whether a contact is a helicopter, from its emitter category (A7). The map
+ *  spins the rotor on these; nothing else here rotates. */
+export function isRotorcraft(emitterType: number | null | undefined): boolean {
+  return emitterType != null && CATEGORY[emitterType] === "A7";
+}
+
+/** The emitter category in words, for the contact card's Type row. This is the
+ *  ADS-B *category*, not the model: the transponder broadcasts "large jet", not
+ *  "737". A specific type or a tail number would need a lookup keyed by the
+ *  ICAO address (which is what FlightRadar-style sites do), and the station
+ *  receives neither. `null` when the transponder did not send a category — a
+ *  different statement from one it sent that we do not recognise, both of which
+ *  the caller renders as "not reported". */
+const CATEGORY_NAME: Record<string, string> = {
+  A1: "Light aircraft",
+  A2: "Small aircraft",
+  A3: "Large aircraft",
+  A4: "Large aircraft (high wake)",
+  A5: "Heavy aircraft",
+  A6: "High-performance",
+  A7: "Helicopter",
+  B1: "Glider / sailplane",
+  B2: "Balloon / airship",
+  B3: "Skydiver",
+  B4: "Ultralight / paraglider",
+  B6: "Drone (UAV)",
+  C1: "Emergency vehicle",
+  C2: "Service vehicle",
+  C3: "Obstacle",
+};
+
+export function emitterName(
+  emitterType: number | null | undefined,
+): string | null {
+  if (emitterType == null) return null;
+  const cat = CATEGORY[emitterType];
+  return cat ? CATEGORY_NAME[cat] ?? null : null;
+}
