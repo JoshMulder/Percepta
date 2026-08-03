@@ -88,20 +88,7 @@ FREQ_MAX_HZ = 137_000_000
 
 #: The gate stays open briefly after a signal drops, so a transmission with a
 #: gap in it does not arrive as two clipped fragments. Every receiver does this.
-#:
-#: **It has to outlast a tick or it does nothing at all.** `tick` runs on the
-#: sensing loop at 1 Hz and spends this by the elapsed time, so the 0.6 s this
-#: used to be was always gone inside the very block that set it and the gate
-#: shut on the first one that dipped. Speech dips constantly — between words,
-#: on a quiet talker, in the trough of the modulation — and the result was
-#: audio that chopped in and out every few seconds: measured on the bench at
-#: fourteen gate transitions in fifty seconds, most of them single-block
-#: dropouts in the middle of an over.
-#:
-#: Two seconds is two blocks of hang at the current rate. The cost is two extra
-#: seconds of audio at the end of each transmission, which is about five
-#: kilobytes — the price of a squelch tail, and what every receiver pays.
-HANG_SECONDS = 2.0
+HANG_SECONDS = 0.6
 
 
 def _decimate_db(bins: list[float], target: int) -> list[int]:
@@ -389,17 +376,9 @@ class RadioController:
         above = self._rssi_db > threshold
         if above:
             self._hang = HANG_SECONDS
-            self._open = True
-        else:
-            # Asked before it is spent, not after. Spending first meant a hang
-            # shorter than one tick was tested at zero on the same block that
-            # set it, so it bought nothing — the failure is silent, because the
-            # constant still reads like a duration and the arithmetic is still
-            # right. This way the shortest possible hang is one block, which is
-            # what "stays open briefly" has to mean on a loop that only looks
-            # once a second.
-            self._open = bool(self._hang > 0 or self.monitor)
+        elif self._hang > 0:
             self._hang = max(0.0, self._hang - dt)
+        self._open = bool(above or self._hang > 0 or self.monitor)
 
         telemetry = {
             "kind": "radio",
