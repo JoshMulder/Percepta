@@ -500,13 +500,18 @@ STYLE = """
  .preview > span { display: block; padding: .55rem .7rem; min-height: 1.3rem;
    background: var(--panel-2); border: 1px solid var(--line-soft);
    border-radius: .375rem; font-size: .8rem; }
- /* Nothing to show. The elements that would be blank are hidden rather than
-    left stacked behind the message: an empty <video> is a black rectangle,
-    and a black rectangle where a camera should be reads as a camera working
-    in an unlit room. */
- #preview-empty { display: none; color: var(--muted); }
+ /* One of three at a time, chosen by a class rather than by rebuilding the
+    box. All three elements stay in the page: the <video> is what the live
+    stream attaches to, and removing it to show a still stops the stream.
+    An empty <video> is also a black rectangle, and a black rectangle where a
+    camera should be reads as a camera working in an unlit room — so when
+    there is nothing to show, none of them is displayed except the message. */
+ #preview-empty { color: var(--muted); }
+ .preview > video, .preview > #preview-still, .preview > #preview-empty {
+   display: none; }
+ .preview.live > video { display: block; }
+ .preview.still > #preview-still { display: block; }
  .preview.empty > #preview-empty { display: block; }
- .preview.empty > video, .preview.empty > img { display: none; }
  .zoom-toggle:checked ~ .preview { position: fixed; inset: 0; z-index: 10;
    margin: 0; display: grid; place-items: center; padding: 1.5rem;
    background: rgba(7,11,15,.94); cursor: zoom-out; }
@@ -2365,12 +2370,26 @@ class Console:
         # exactly the wrong guess to send somebody off with. The span says
         # which, in the station's own words, and the class hides the empty
         # elements rather than leaving them stacked behind it.
+        #
+        # **The three elements all exist, always, and a class picks one.**
+        #
+        # The live element is what the stream attaches to, so it must never be
+        # torn down to show something else. Rebuilding the box to swap a still
+        # in removed it 2.5 seconds after every page load — before it had
+        # decoded its first frame, which is the moment it looks most like it is
+        # not working — and took the stream that was about to start with it.
+        # What was left was a still refreshing every 2.5 s, which reads as a
+        # picture that freezes every few seconds, on an idle CPU because the
+        # encoder had been stopped.
         has_frame = bool(video.get("has_frame"))
+        stream = video.get("stream") or {}
+        live = stream.get("state") in ("streaming", "starting")
+        mode = "live" if live else ("still" if has_frame else "empty")
         message = str(video.get("reason") or "") or "No picture from this camera yet."
         out.append(
-            f"<label for=zoom class=\"preview{'' if has_frame else ' empty'}\" "
-            "id=preview-wrap>"
+            f"<label for=zoom class=\"preview {mode}\" id=preview-wrap>"
             "<video id=preview autoplay muted playsinline></video>"
+            "<img id=preview-still alt='latest camera frame'>"
             f"<span id=preview-empty>{html.escape(message)}</span>"
             "<noscript>The live preview needs JavaScript. "
             "<a href='/frame.jpg'>Latest still</a></noscript></label>"
@@ -2626,53 +2645,40 @@ class Console:
             var lines = s.raw_samples[raw.getAttribute("data-slot")] || [];
             raw.textContent = lines.join("\\n");
           }
-          // Three states, and exactly one of them at a time: a live picture, a
-          // still, or nothing with a reason. They were two overlapping ifs,
-          // and the gap between them was the bug — when a frame stopped
-          // existing, neither ran, and whatever was on screen stayed there.
+          // Three states, one at a time, and **the station decides which**.
+          //
+          // This used to work it out from the element — a <video> with no
+          // error counted as playing, then a <video> with no decoded frame
+          // counted as not playing. Both were guesses about a thing the
+          // station already knows and reports, and the second one tore the
+          // element down 2.5 s after every page load, before the stream it
+          // was waiting for had produced a frame, which stopped the stream.
+          //
+          // Nothing is created or removed here now. All three elements are in
+          // the page and a class picks one, so a stream that is still starting
+          // is left alone to finish starting.
           if (wrap && s.video) {
-            var shown = document.getElementById("preview");
-            var age = document.getElementById("preview-age");
+            var stream = s.video.stream || {};
+            var live = stream.state === "streaming" || stream.state === "starting";
+            var still = document.getElementById("preview-still");
             var empty = document.getElementById("preview-empty");
-            // `videoWidth`, not `!error`. An untouched <video> — no source
-            // ever attached, because /stream.mp4 was refused — has no error on
-            // it, so it counted as playing and suppressed both the still and
-            // any message. What was left was the element's own black
-            // rectangle, for ever, which is where "the preview stays black"
-            // came from. A decoded frame is the only thing that gives it a
-            // width.
-            var playing = !!(shown && shown.tagName === "VIDEO"
-                             && !shown.error && shown.videoWidth > 0);
+            var age = document.getElementById("preview-age");
 
-            if (!playing && s.video.has_frame) {
-              // The still. The live element owns this id, so the <video> is
-              // removed rather than having a JPEG assigned to it — that was a
-              // MEDIA_ERR_SRC_NOT_SUPPORTED every 2.5 seconds.
-              if (!shown || shown.tagName === "VIDEO") {
-                if (shown) shown.remove();
-                shown = document.createElement("img");
-                shown.id = "preview";
-                shown.alt = "latest camera frame";
-                // Before the placeholder, so this does not wipe it out - which
-                // is what clearing the whole wrap used to do.
-                wrap.insertBefore(shown, empty || null);
-              }
-              shown.src = "/frame.jpg?t=" + Date.now();
-            } else if (!playing) {
-              // Nothing, and nothing on the way. Say which, in the station's
-              // own words, rather than showing an empty box.
-              if (shown && shown.tagName !== "VIDEO") shown.remove();
-              if (empty) {
-                empty.textContent = s.video.reason
-                  || "No picture from this camera yet.";
-              }
+            var mode = live ? "live" : (s.video.has_frame ? "still" : "empty");
+            wrap.classList.toggle("live", mode === "live");
+            wrap.classList.toggle("still", mode === "still");
+            wrap.classList.toggle("empty", mode === "empty");
+
+            if (mode === "still" && still) {
+              still.src = "/frame.jpg?t=" + Date.now();
+            } else if (mode === "empty" && empty) {
+              empty.textContent = s.video.reason
+                || "No picture from this camera yet.";
             }
-            wrap.classList.toggle("empty", !playing && !s.video.has_frame);
-
             if (age) {
-              if (!playing && !s.video.has_frame) age.textContent = "";
+              if (mode === "empty") age.textContent = "";
               else if (typeof s.video.frame_age_s === "number") {
-                age.textContent = (playing ? "still " : "frame ")
+                age.textContent = (mode === "live" ? "still " : "frame ")
                   + Math.round(s.video.frame_age_s) + " s old";
               }
             }

@@ -549,6 +549,50 @@ class ServedPageTests(unittest.TestCase):
         self.assertNotIn("<video id=preview src=", body)
         self.assertIn("startLive", body)
 
+    def test_the_live_element_is_never_torn_down_to_show_something_else(self):
+        """It is what the stream attaches to.
+
+        Rebuilding the box to swap a still in removed it 2.5 s after every page
+        load — before it had decoded its first frame, which is exactly when it
+        looks most like it is not working — and took the stream that was about
+        to start with it. What was left was a still refreshing every 2.5 s,
+        which reads as a picture that freezes every few seconds, on an idle CPU
+        because the encoder had been stopped.
+
+        So all three elements are always present and a class picks one.
+        """
+        from gsu.console import Console
+
+        for video in (
+            {"stream": {"state": "streaming"}, "has_frame": True},
+            {"stream": {"state": "starting"}},
+            {"stream": {"state": "idle"}, "has_frame": True},
+            {"stream": {"state": "idle"}, "reason": "no camera fitted"},
+        ):
+            markup = Console._preview(video)
+            self.assertIn("<video id=preview", markup, video)
+            self.assertIn("id=preview-still", markup, video)
+            self.assertIn("id=preview-empty", markup, video)
+
+    def test_the_station_decides_which_of_the_three_is_shown(self):
+        # Not the element's own readyState or error, both of which were guesses
+        # about something `status.json` already reports.
+        from gsu.console import Console
+
+        def mode(video):
+            import re
+            return re.search(r'class="preview ([a-z]+)"',
+                             Console._preview(video)).group(1)
+
+        self.assertEqual(mode({"stream": {"state": "streaming"}, "has_frame": True}),
+                         "live")
+        # Starting counts as live: it is the window in which tearing the
+        # element down was fatal.
+        self.assertEqual(mode({"stream": {"state": "starting"}}), "live")
+        self.assertEqual(mode({"stream": {"state": "idle"}, "has_frame": True}),
+                         "still")
+        self.assertEqual(mode({"stream": {"state": "unavailable"}}), "empty")
+
     def test_nothing_to_show_says_so_instead_of_showing_a_black_box(self):
         """A `<video>` with nothing attached renders as a black rectangle.
 
