@@ -52,22 +52,26 @@ def test_a_station_with_devices_is_still_deletable(client, station, db, org):
     A device row is meaningless without its station. It is inventory, not
     history.
     """
+    # Held before the delete: `station_row` calls `db.expire_all()`, so once the
+    # row is gone any later `station.id` would try to reload a deleted row and
+    # raise. The id is what the rest of the test needs, not the live instance.
+    station_id = station.id
     db.add(Device(
         id=uuid.uuid4(),
         organization_id=org.id,
-        ground_station_id=station.id,
+        ground_station_id=station_id,
         kind="camera",
         slug="cam-north",
         name="North camera",
     ))
     db.commit()
 
-    response = client.delete(f"/api/stations/{station.id}/config")
+    response = client.delete(f"/api/stations/{station_id}/config")
     assert response.status_code == 204, response.text
 
-    assert station_row(db, station.id) is None
+    assert station_row(db, station_id) is None
     remaining = db.execute(
-        select(Device).where(Device.ground_station_id == station.id)
+        select(Device).where(Device.ground_station_id == station_id)
     ).scalars().all()
     assert remaining == [], "the device outlived its station"
 
