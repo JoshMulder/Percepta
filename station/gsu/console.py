@@ -500,6 +500,13 @@ STYLE = """
  .preview > span { display: block; padding: .55rem .7rem; min-height: 1.3rem;
    background: var(--panel-2); border: 1px solid var(--line-soft);
    border-radius: .375rem; font-size: .8rem; }
+ /* Nothing to show. The elements that would be blank are hidden rather than
+    left stacked behind the message: an empty <video> is a black rectangle,
+    and a black rectangle where a camera should be reads as a camera working
+    in an unlit room. */
+ #preview-empty { display: none; color: var(--muted); }
+ .preview.empty > #preview-empty { display: block; }
+ .preview.empty > video, .preview.empty > img { display: none; }
  .zoom-toggle:checked ~ .preview { position: fixed; inset: 0; z-index: 10;
    margin: 0; display: grid; place-items: center; padding: 1.5rem;
    background: rgba(7,11,15,.94); cursor: zoom-out; }
@@ -2341,13 +2348,25 @@ class Console:
         # do not. Leaving a src here meant Chromium began a progressive load it
         # cannot finish — which spawns an encoder on this box and abandons it
         # seconds later — before the script replaced it. One request, always.
+        #
+        # The empty state is markup, not an absence. A `<video>` with nothing
+        # attached renders as a black rectangle, and a black rectangle where a
+        # camera should be is the least useful thing this page can show: it is
+        # indistinguishable from a camera working in an unlit room, which is
+        # exactly the wrong guess to send somebody off with. The span says
+        # which, in the station's own words, and the class hides the empty
+        # elements rather than leaving them stacked behind it.
+        has_frame = bool(video.get("has_frame"))
+        message = str(video.get("reason") or "") or "No picture from this camera yet."
         out.append(
-            "<label for=zoom class=preview id=preview-wrap>"
+            f"<label for=zoom class=\"preview{'' if has_frame else ' empty'}\" "
+            "id=preview-wrap>"
             "<video id=preview autoplay muted playsinline></video>"
+            f"<span id=preview-empty>{html.escape(message)}</span>"
             "<noscript>The live preview needs JavaScript. "
             "<a href='/frame.jpg'>Latest still</a></noscript></label>"
         )
-        if video.get("has_frame"):
+        if has_frame:
             age = video.get("frame_age_s") or 0
             out.append(
                 f"<div class=muted id=preview-age>still frame {age:.0f} s old"
@@ -2598,42 +2617,55 @@ class Console:
             var lines = s.raw_samples[raw.getAttribute("data-slot")] || [];
             raw.textContent = lines.join("\\n");
           }
-          // No frame any more: the slot was set to not fitted, or the camera
-          // has stopped answering. This block used to run only when there WAS
-          // one, so the last picture stayed on screen for ever — a station
-          // with no camera still showing the test card, which reads as the
-          // change not having taken rather than as a stale image.
-          if (wrap && s.video && !s.video.has_frame) {
-            var stale = document.getElementById("preview");
-            if (stale && stale.tagName !== "VIDEO") stale.remove();
-            var oldAge = document.getElementById("preview-age");
-            if (oldAge) {
-              oldAge.textContent = (s.video && s.video.reason) ? s.video.reason : "";
-            }
-          }
-          if (wrap && s.video && s.video.has_frame) {
+          // Three states, and exactly one of them at a time: a live picture, a
+          // still, or nothing with a reason. They were two overlapping ifs,
+          // and the gap between them was the bug — when a frame stopped
+          // existing, neither ran, and whatever was on screen stayed there.
+          if (wrap && s.video) {
             var shown = document.getElementById("preview");
-            // The live element owns this id now, and this poll used to assign
-            // /frame.jpg to whatever it found — a JPEG as a video source, over
-            // the top of the stream, every 2.5 seconds. The element reported
-            // MEDIA_ERR_SRC_NOT_SUPPORTED and nothing ever played.
-            var playing = shown && shown.tagName === "VIDEO" && !shown.error;
-            if (!playing) {
-              // No live picture: fall back to the still, which is what this
-              // did before and is better than an empty box.
+            var age = document.getElementById("preview-age");
+            var empty = document.getElementById("preview-empty");
+            // `videoWidth`, not `!error`. An untouched <video> — no source
+            // ever attached, because /stream.mp4 was refused — has no error on
+            // it, so it counted as playing and suppressed both the still and
+            // any message. What was left was the element's own black
+            // rectangle, for ever, which is where "the preview stays black"
+            // came from. A decoded frame is the only thing that gives it a
+            // width.
+            var playing = !!(shown && shown.tagName === "VIDEO"
+                             && !shown.error && shown.videoWidth > 0);
+
+            if (!playing && s.video.has_frame) {
+              // The still. The live element owns this id, so the <video> is
+              // removed rather than having a JPEG assigned to it — that was a
+              // MEDIA_ERR_SRC_NOT_SUPPORTED every 2.5 seconds.
               if (!shown || shown.tagName === "VIDEO") {
-                wrap.textContent = "";
+                if (shown) shown.remove();
                 shown = document.createElement("img");
                 shown.id = "preview";
                 shown.alt = "latest camera frame";
-                wrap.appendChild(shown);
+                // Before the placeholder, so this does not wipe it out - which
+                // is what clearing the whole wrap used to do.
+                wrap.insertBefore(shown, empty || null);
               }
               shown.src = "/frame.jpg?t=" + Date.now();
+            } else if (!playing) {
+              // Nothing, and nothing on the way. Say which, in the station's
+              // own words, rather than showing an empty box.
+              if (shown && shown.tagName !== "VIDEO") shown.remove();
+              if (empty) {
+                empty.textContent = s.video.reason
+                  || "No picture from this camera yet.";
+              }
             }
-            var age = document.getElementById("preview-age");
-            if (age && typeof s.video.frame_age_s === "number") {
-              age.textContent = (playing ? "still " : "frame ")
-                + Math.round(s.video.frame_age_s) + " s old";
+            wrap.classList.toggle("empty", !playing && !s.video.has_frame);
+
+            if (age) {
+              if (!playing && !s.video.has_frame) age.textContent = "";
+              else if (typeof s.video.frame_age_s === "number") {
+                age.textContent = (playing ? "still " : "frame ")
+                  + Math.round(s.video.frame_age_s) + " s old";
+              }
             }
           }
         })

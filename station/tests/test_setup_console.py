@@ -549,6 +549,37 @@ class ServedPageTests(unittest.TestCase):
         self.assertNotIn("<video id=preview src=", body)
         self.assertIn("startLive", body)
 
+    def test_nothing_to_show_says_so_instead_of_showing_a_black_box(self):
+        """A `<video>` with nothing attached renders as a black rectangle.
+
+        Which is the least useful thing this page can put where a camera
+        should be: it is indistinguishable from a working camera in an unlit
+        room, and that is the wrong guess to send an installer off with. The
+        empty state is markup rather than an absence, and it carries the
+        station's own reason.
+        """
+        from gsu.console import Console
+
+        markup = Console._preview({"reason": "no camera fitted"})
+        self.assertIn("class=\"preview empty\"", markup)
+        self.assertIn("id=preview-empty", markup)
+        self.assertIn("no camera fitted", markup)
+
+        # And it is gone the moment there is something to look at, or the
+        # message would sit under every working picture.
+        markup = Console._preview({"has_frame": True, "frame_age_s": 1.0})
+        self.assertNotIn("preview empty", markup)
+
+    def test_the_empty_state_never_renders_a_reason_unescaped(self):
+        # The reason is the station's own text, but it carries a camera
+        # address and ffmpeg's own words, and neither is this page's to trust
+        # into markup.
+        from gsu.console import Console
+
+        markup = Console._preview({"reason": "<script>alert(1)</script>"})
+        self.assertNotIn("<script>alert(1)</script>", markup)
+        self.assertIn("&lt;script&gt;", markup)
+
     def test_the_still_frame_age_appears_once_there_is_one(self):
         # The cached still has not gone away — /frame.jpg still serves it and
         # its age is still stated. It is now a second opinion beside the live
