@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type { Capability, RadioPayload } from "../types";
 import { Spectrum } from "./Spectrum";
@@ -37,6 +37,12 @@ const STEP_HZ = 25_000;
  *  component unmounts — a page nobody has open costs nothing. */
 const SPECTRUM_REFRESH_MS = 6_000;
 
+/** How long an optimistic squelch control waits for the station to confirm
+ *  before giving up and showing telemetry again. Longer than the radio
+ *  stream's cadence by enough to survive a dropped frame; short enough that a
+ *  command which never landed does not sit on screen looking like it did. */
+const SETTLE_MS = 5_000;
+
 function has(caps: Capability[], c: Capability): boolean {
   return caps.includes(c);
 }
@@ -54,22 +60,120 @@ export function SettingsRadio({
 }) {
   const [error, setError] = useState<string | null>(null);
 
-  // No optimistic update. The console's radio panel needs one because an
-  // operator is watching the control they just moved; here the station's own
-  // telemetry lands within a second and is the honest answer. Nothing on this
-  // pane pretends a command succeeded.
+  /**
+   * Optimistic state for the two squelch controls, and why they need it when
+   * nothing else on this pane does.
+   *
+   * "No optimistic update" was right for gain and tune — you set them, the
+   * station reports back within a second, and nothing was moving in between.
+   * It was wrong for these two, and both of the ways it was wrong read as
+   * "auto squelch is broken":
+   *
+   *   The AUTO button had up to a second of dead time after a click, because
+   *   its label came only from telemetry. An operator clicks, sees nothing
+   *   happen, clicks again — and the second click undoes the first, so AUTO
+   *   ends up back where it started and the button looks like it does nothing.
+   *
+   *   The threshold slider was driven straight from `threshold_db`, which is
+   *   exactly the value AUTO moves: it rides the noise floor, so it changes by
+   *   a decibel or so on every frame. Grabbing the handle meant fighting a
+   *   control that was being yanked out from under the pointer once a second.
+   *
+   * This is the pattern the front panel already used before these controls
+   * moved here; it did not come with them. The station stays authoritative —
+   * the pending value is dropped the moment telemetry agrees, or after
+   * SETTLE_MS if a command never lands, so a failed command corrects itself on
+   * screen rather than leaving a wrong state showing.
+   */
+  const [pendingAuto, setPendingAuto] = useState<boolean | null>(null);
+  const [pendingSquelch, setPendingSquelch] = useState<number | null>(null);
+  const autoSettle = useRef<number | null>(null);
+  const squelchSettle = useRef<number | null>(null);
+  //: The threshold last actually sent, so the several gestures that end a drag
+  //: produce one command between them. See `commitSquelch`.
+  const sentSquelch = useRef<number | null>(null);
+
   const send = (what: string, run: () => Promise<unknown>) => {
     if (!stationId) return;
     setError(null);
     run().catch(() => setError(`${what} failed — the station did not accept it.`));
   };
-  const onSquelch = (db: number) =>
-    send("Squelch", () => api.squelch(stationId!, db));
-  const onAutoSquelch = (on: boolean) =>
-    send("Auto squelch", () => api.autoSquelch(stationId!, on));
   const onGain = (g: string | number) =>
     send("Gain", () => api.setGain(stationId!, g));
   const canControl = has(caps, "radio.control");
+
+  const onAutoSquelch = (on: boolean) => {
+    setPendingAuto(on);
+    if (autoSettle.current) window.clearTimeout(autoSettle.current);
+    autoSettle.current = window.setTimeout(() => setPendingAuto(null), SETTLE_MS);
+    send("Auto squelch", () => api.autoSquelch(stationId!, on));
+  };
+
+  /**
+   * Sent when the drag ends, not on every pointer move.
+   *
+   * `onChange` fires per pixel, and each one was an audited command dispatched
+   * over the link — dozens of them for one drag of a control that is set at
+   * commissioning and then left. One command, on commit.
+   *
+   * Idempotent, because four different gestures end a drag and more than one
+   * can fire for the same one: a pointer release is followed by a blur, and
+   * re-sending the value already sent would put a second command on the link
+   * and a second row in the audit log for one adjustment.
+   */
+  const commitSquelch = () => {
+    if (pendingSquelch === null || pendingSquelch === sentSquelch.current) return;
+    sentSquelch.current = pendingSquelch;
+    // The station drops out of AUTO when a threshold is set by hand, which is
+    // deliberate — moving the slider is how you leave AUTO. Shown here at the
+    // same moment so the button does not claim AUTO is still on for the second
+    // before telemetry says otherwise.
+    setPendingAuto(false);
+    if (autoSettle.current) window.clearTimeout(autoSettle.current);
+    autoSettle.current = window.setTimeout(() => setPendingAuto(null), SETTLE_MS);
+    if (squelchSettle.current) window.clearTimeout(squelchSettle.current);
+    squelchSettle.current = window.setTimeout(() => setPendingSquelch(null), SETTLE_MS);
+    send("Squelch", () => api.squelch(stationId!, pendingSquelch));
+  };
+
+  useEffect(() => {
+    if (pendingAuto !== null && radio && radio.auto_squelch === pendingAuto) {
+      setPendingAuto(null);
+    }
+  }, [radio, pendingAuto]);
+
+  /**
+   * Hand the slider back to telemetry once the station reports what was sent.
+   *
+   * Measured against the value **sent**, never against the value on screen.
+   * Comparing the displayed value with telemetry looks equivalent and is not:
+   * dragging to where the station already is — which is the obvious gesture for
+   * pinning AUTO's current threshold as a manual one — would match on the first
+   * frame, clear the pending value mid-drag, and the commit would then find
+   * nothing to send. The command would never leave the console and AUTO would
+   * stay on, with the slider sitting innocently at the value the operator
+   * chose.
+   *
+   * So nothing is cleared unless a command is outstanding, and the displayed
+   * value is only surrendered if it is still the one that was sent — an
+   * operator who has started a fresh drag keeps their handle.
+   */
+  useEffect(() => {
+    const sent = sentSquelch.current;
+    if (sent === null || !radio) return;
+    // Not equality: the station rounds the threshold to a tenth of a dB.
+    if (Math.abs(radio.threshold_db - sent) >= 0.6) return;
+    sentSquelch.current = null;
+    setPendingSquelch((current) => (current === sent ? null : current));
+  }, [radio]);
+
+  useEffect(
+    () => () => {
+      if (autoSettle.current) window.clearTimeout(autoSettle.current);
+      if (squelchSettle.current) window.clearTimeout(squelchSettle.current);
+    },
+    [],
+  );
 
   /* Ask for the spectrum while this page is open, and only while it is.
      Re-asked rather than held open by a connection: the station's window
@@ -93,8 +197,8 @@ export function SettingsRadio({
     };
   }, [stationId]);
   const canConfigure = has(caps, "config.write");
-  const auto = radio?.auto_squelch ?? true;
-  const threshold = radio?.threshold_db ?? -70;
+  const auto = pendingAuto ?? radio?.auto_squelch ?? true;
+  const threshold = pendingSquelch ?? radio?.threshold_db ?? -70;
   const gains = radio?.gains ?? [];
   const gain = radio?.gain ?? "auto";
 
@@ -160,7 +264,16 @@ export function SettingsRadio({
             // A slider that needs a separate button unlocked first is a slider
             // people fight.
             disabled={!canControl}
-            onChange={(e) => onSquelch(Number(e.target.value))}
+            // The handle moves locally; the station hears about it on commit.
+            // Held here for the whole drag, so AUTO riding the noise floor
+            // cannot pull the value out from under the pointer.
+            onChange={(e) => setPendingSquelch(Number(e.target.value))}
+            onPointerUp={commitSquelch}
+            onPointerCancel={commitSquelch}
+            // Keyboard sets it one arrow-press at a time; each keyup is a
+            // finished gesture in the same way a pointer release is.
+            onKeyUp={commitSquelch}
+            onBlur={commitSquelch}
             title="Drag to set the squelch threshold (leaves AUTO)"
             aria-label="Squelch threshold"
           />
