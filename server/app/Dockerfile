@@ -13,7 +13,7 @@ COPY web/ ./
 RUN npm run build
 
 # --- runtime -----------------------------------------------------------------
-FROM python:3.12-slim
+FROM python:3.12-slim AS runtime
 
 WORKDIR /app
 
@@ -67,3 +67,20 @@ EXPOSE 8000
 # looked authoritative and did nothing. They live in that script, next to the
 # frame cap, which is the only place they take effect.
 CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+# --- tests -------------------------------------------------------------------
+#
+# A separate stage, so nothing here reaches the image a server runs: the
+# default target is the runtime above, and `docker compose build` only
+# builds this one because the tests service names it.
+#
+# Installed at build time rather than by the container's command, because
+# the runtime user is uid 10001 and cannot write to site-packages - a
+# `pip install` in the entrypoint would fail on every run.
+FROM runtime AS tests
+USER 0
+COPY app/requirements-dev.txt .
+RUN pip install --no-cache-dir -r requirements-dev.txt
+COPY app/tests tests
+USER 10001
+CMD ["python", "-m", "pytest", "-q"]

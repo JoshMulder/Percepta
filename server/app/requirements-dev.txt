@@ -1,0 +1,9 @@
+# Test-only dependencies. Not installed into the runtime image — the app stage
+# of app/Dockerfile installs requirements.txt alone, so nothing here can end up
+# on a station-facing server.
+#
+# httpx is deliberately absent: it is already a runtime dependency (the media
+# uplink and the geocoder use it), and FastAPI's TestClient is built on it.
+-r requirements.txt
+
+pytest==8.3.4

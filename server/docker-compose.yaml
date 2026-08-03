@@ -200,6 +200,67 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  # --- tests, and a database to throw away -------------------------------
+  #
+  # Both under the `tests` profile, so `docker compose up` never starts them
+  # and a deployment never carries a second Postgres it did not ask for. Run
+  # them with:
+  #
+  #     docker compose --profile tests run --rm tests
+  #
+  # The database has no volume behind it on purpose. A suite that shares a
+  # database with a running stack either corrupts it or is too careful to
+  # write, and both are worse than starting from nothing every time. It is also
+  # why the tests may TRUNCATE freely between cases.
+  postgres-test:
+    image: postgres:17
+    profiles: ["tests"]
+    environment:
+      POSTGRES_USER: percepta
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: percepta_test
+    # tmpfs rather than a volume: nothing here outlives the run, and not
+    # touching the disk makes the suite noticeably faster.
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U percepta -d percepta_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    security_opt:
+      - no-new-privileges:true
+
+  tests:
+    profiles: ["tests"]
+    build:
+      context: .
+      dockerfile: app/Dockerfile
+      # The test stage, which is the runtime image plus pytest. Naming it here
+      # is what keeps it out of the image a server runs.
+      target: tests
+    # The source from the host, so a run reflects what is checked out rather
+    # than what was last built into an image.
+    volumes:
+      - ./app/backend:/app/backend
+      - ./app/tests:/app/tests
+    environment:
+      POSTGRES_HOST: postgres-test
+      POSTGRES_DB: percepta_test
+      POSTGRES_USER: percepta
+      POSTGRES_PASSWORD: test
+      # Deliberately no APP_DB_PASSWORD. Without one the app engine is the
+      # schema owner, which bypasses row-level security — these tests are about
+      # endpoint behaviour, and tenant isolation has its own verifier in
+      # backend/scripts/verify_rls.py.
+      SECRET_KEY: testing-only-not-a-real-key
+      PYTHONDONTWRITEBYTECODE: "1"
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+
 volumes:
   postgres_data:
   tile_cache:

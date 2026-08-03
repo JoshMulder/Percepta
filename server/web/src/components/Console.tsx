@@ -401,7 +401,18 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
       .stations()
       .then((list) => {
         setStations(list);
-        setStationId((current) => current ?? list[0]?.id ?? null);
+        // Keep the current selection only while it still exists. `current ??`
+        // kept it unconditionally, so after a station was deleted the console
+        // went on pointing at an id the platform no longer knew: the switcher
+        // showed nothing selected, every panel sat empty, and the socket was
+        // subscribed to a station that could never send anything. Falling back
+        // to the first one is what an operator expects from a list that just
+        // lost an entry; null when the list is empty is the honest end of it.
+        setStationId((current) =>
+          current && list.some((s) => s.id === current)
+            ? current
+            : list[0]?.id ?? null,
+        );
       })
       .catch(() => setStations([]));
   }, []);

@@ -34,7 +34,17 @@ export function SettingsStation({
     try {
       const list = await api.stations();
       setStations(list);
-      setSelected((current) => prefer ?? current ?? list[0]?.id ?? null);
+      // The current selection survives only while the station does. `prefer ??
+      // current ??` kept a deleted station's id, which is not in the new list,
+      // so `stations.find` came back empty and the pane announced "No stations
+      // yet" beside a picker holding several. Deleting one now moves to the
+      // next; deleting the last leaves null, and the picker says so.
+      setSelected((current) =>
+        prefer ??
+        (current && list.some((s) => s.id === current)
+          ? current
+          : list[0]?.id ?? null),
+      );
       setListError(null);
     } catch (err) {
       setListError(err instanceof ApiError ? err.message : "Could not load stations.");
