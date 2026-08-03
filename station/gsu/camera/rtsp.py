@@ -66,6 +66,12 @@ log = logging.getLogger("gsu.rtsp")
 #: never returns.
 CAPTURE_TIMEOUT_S = 15.0
 
+#: How much of that the keyframe-only attempt may spend before the plain decode
+#: gets the rest. Long enough for any keyframe interval a camera actually uses,
+#: short enough that a camera which never flags one still leaves time for a
+#: picture. See `capture`.
+KEYFRAME_WAIT_S = 8.0
+
 #: How long to leave a failing camera alone before trying again, and how many
 #: failures in a row before the slot is reported failed rather than silent.
 #: Same discipline as the CSI driver, for the same reasons.
@@ -170,6 +176,18 @@ def redact(url: str) -> str:
     return f"{scheme}{separator}{rest}"
 
 
+def _last_line(stderr: bytes | None) -> str:
+    """ffmpeg's final complaint, or "".
+
+    The last line is the diagnosis: everything before it is what it tried.
+    Bytes because this comes off a subprocess, and from a killed one it may be
+    cut mid-character — hence `replace` rather than a decode that can raise on
+    the path whose whole job is explaining a failure.
+    """
+    text = (stderr or b"").decode("utf-8", "replace").strip()
+    return text.splitlines()[-1].strip() if text else ""
+
+
 class RtspCamera:
     """One RTSP camera: snapshots by decoding one frame, live by remuxing."""
 
@@ -242,36 +260,17 @@ class RtspCamera:
     def unavailable_reason(self) -> str:
         return self._reason
 
-    def capture(self) -> Frame | None:
-        if self._ffmpeg is None:
-            return None
-        if time.monotonic() < self._next_attempt:
-            # Backing off; the last failure's reason is still the truth.
-            return None
-        started = time.monotonic()
+    def _one_capture(self, extra: list[str], budget: float):
+        """One ffmpeg run. Returns (completed_run | None, reason, timed_out).
+
+        `timed_out` is the caller's signal that the failure had no answer
+        attached — an ffmpeg that exited said something, and something is worth
+        reporting rather than retrying.
+        """
         command = [
             self._ffmpeg, "-nostdin", "-loglevel", "error",
             "-rtsp_transport", self.transport,
-            # **Only keyframes are decoded, and that is the whole of this fix.**
-            #
-            # An RTSP connection joins a stream already in progress, so the
-            # first pictures to arrive are inter frames predicting from an IDR
-            # this decoder never saw. ffmpeg decodes them anyway, against a
-            # reference frame that is all zeroes, and `-frames:v 1` then takes
-            # that first output: a valid JPEG, correctly sized because the
-            # dimensions come from the sequence parameter set, and black.
-            #
-            # Which is precisely how it presents — a preview that resizes to
-            # the camera's real resolution and shows nothing. It reads as a
-            # camera pointed at a dark room, not as a decode that never had a
-            # reference, so it sends people to check the lens.
-            #
-            # `nokey` drops everything that is not a keyframe before the
-            # decoder, so the frame that comes out is a whole intra picture.
-            # The cost is waiting for the next one - a second or two at the
-            # keyframe intervals cameras actually use, well inside
-            # CAPTURE_TIMEOUT_S.
-            "-skip_frame", "nokey",
+            *extra,
             "-i", self._url,
             "-an", "-dn",
             "-frames:v", "1",
@@ -279,27 +278,81 @@ class RtspCamera:
             "pipe:1",
         ]
         try:
-            done = subprocess.run(
-                command, capture_output=True, timeout=CAPTURE_TIMEOUT_S,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            return self._failed(
-                f"the camera did not deliver a frame within "
-                f"{CAPTURE_TIMEOUT_S:.0f}s ({redact(self._url)})"
-            )
+            done = subprocess.run(command, capture_output=True,
+                                  timeout=max(1.0, budget), check=False)
+        except subprocess.TimeoutExpired as exc:
+            # **ffmpeg's own words, from the timeout too.**
+            #
+            # `subprocess.run` puts whatever the child wrote before it was
+            # killed on the exception. This path threw both away and reported
+            # only that the time had passed, which is the least informative
+            # true thing available — "401 Unauthorized", "Connection timed
+            # out", "method DESCRIBE failed" were all sitting in `exc.stderr`
+            # unread, on the one path where there is nothing else to go on.
+            return None, _last_line(exc.stderr), True
+        if done.returncode == 0 and complete_jpeg(done.stdout):
+            return done, "", False
+        # ffmpeg's own last line is the diagnosis — "Connection refused",
+        # "401 Unauthorized", "no such codec" — minus anything that could echo
+        # the URL's credentials.
+        return None, _last_line(done.stderr), False
+
+    def capture(self) -> Frame | None:
+        if self._ffmpeg is None:
+            return None
+        if time.monotonic() < self._next_attempt:
+            # Backing off; the last failure's reason is still the truth.
+            return None
+        started = time.monotonic()
+
+        # **Keyframes preferred, not required.**
+        #
+        # An RTSP connection joins a stream already in progress, so the first
+        # pictures to arrive are inter frames predicting from an IDR this
+        # decoder never saw. ffmpeg decodes them anyway, against a reference
+        # that is all zeroes, and `-frames:v 1` takes that: a valid JPEG,
+        # correctly sized because the dimensions come from the sequence
+        # parameter set, and black. It reads as a camera in an unlit room, so
+        # it sends people to check the lens.
+        #
+        # `-skip_frame nokey` drops everything that is not a keyframe before
+        # the decoder, so what comes out is a whole intra picture. But it
+        # depends on the demuxer having flagged the keyframes, and **when that
+        # flag never comes the wait never ends** — the capture times out and
+        # the preview goes from a black picture to no picture at all, which is
+        # worse. That is not hypothetical; it is what shipping it did.
+        #
+        # So it is the first attempt, on a short budget, and a plain decode is
+        # the second. A camera that flags its keyframes answers the first with
+        # a clean picture; one that does not still gets a preview. The two
+        # budgets together are the timeout this always had.
+        try:
+            done, last_error, timed_out = self._one_capture(
+                ["-skip_frame", "nokey"], KEYFRAME_WAIT_S)
+            if done is None and timed_out:
+                # **A timeout, and only a timeout, earns the second attempt.**
+                #
+                # It is the shape a keyframe flag that never arrives makes. An
+                # ffmpeg that exited and said something — 401, connection
+                # refused, no route — will say the same thing again without
+                # `-skip_frame`, so retrying it just doubles the subprocesses
+                # aimed at a camera that has already answered clearly.
+                done, last_error, timed_out = self._one_capture(
+                    [], CAPTURE_TIMEOUT_S - KEYFRAME_WAIT_S)
         except OSError as exc:
             return self._failed(f"ffmpeg could not be run: {exc}")
+
         at = clock.now()
-        if done.returncode != 0 or not complete_jpeg(done.stdout):
-            # ffmpeg's own last line is the diagnosis — "Connection refused",
-            # "401 Unauthorized", "no such codec" — minus anything that could
-            # echo the URL's credentials.
-            detail = (done.stderr or b"").decode("utf-8", "replace").strip()
-            last = detail.splitlines()[-1] if detail else ""
+        if done is None:
+            if timed_out:
+                return self._failed(
+                    f"the camera did not deliver a frame within "
+                    f"{CAPTURE_TIMEOUT_S:.0f}s ({redact(self._url)})"
+                    + (f": {redact(last_error)}" if last_error else "")
+                )
             return self._failed(
-                f"ffmpeg returned no complete frame"
-                + (f": {redact(last)}" if last else "")
+                "ffmpeg returned no complete frame"
+                + (f": {redact(last_error)}" if last_error else "")
             )
         dims = jpeg_dimensions(done.stdout) or self._last_dims
         if dims is None:

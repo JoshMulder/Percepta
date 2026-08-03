@@ -160,6 +160,65 @@ class SnapshotTests(unittest.TestCase):
         self.assertIn("-frames:v", command)
         self.assertIn("-rtsp_transport", command)
 
+    def test_ffmpegs_words_survive_a_timeout(self):
+        """The one path where the diagnosis was thrown away.
+
+        `subprocess.run` puts whatever the child wrote before it was killed on
+        the exception. This reported only that the time had passed — the least
+        informative true thing available — while "401 Unauthorized" sat unread
+        in `exc.stderr`.
+        """
+        expired = subprocess.TimeoutExpired(cmd="ffmpeg", timeout=8)
+        expired.stderr = (b"[rtsp @ 0x1] method DESCRIBE failed: 401\n"
+                          b"rtsp://192.0.2.10: Server returned 401 Unauthorized\n")
+        camera = fitted_camera()
+        with mock.patch("gsu.camera.rtsp.subprocess.run", side_effect=expired):
+            self.assertIsNone(camera.capture())
+        self.assertIn("401 Unauthorized", camera.unavailable_reason)
+
+    def test_a_camera_that_never_flags_a_keyframe_still_gets_a_picture(self):
+        """Keyframes preferred, not required.
+
+        `-skip_frame nokey` needs the demuxer to have flagged them, and when
+        that flag never comes the wait never ends: the capture times out and
+        the preview goes from a black picture to no picture at all, which is
+        worse. So the keyframe attempt is first and on a short budget, and a
+        plain decode is the fallback.
+        """
+        jpeg = a_real_jpeg()
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            if "-skip_frame" in command:
+                raise subprocess.TimeoutExpired(cmd="ffmpeg", timeout=8)
+            return self.run_result(stdout=jpeg)
+
+        camera = fitted_camera()
+        with mock.patch("gsu.camera.rtsp.subprocess.run", side_effect=fake_run):
+            frame = camera.capture()
+
+        self.assertIsNotNone(frame, camera.unavailable_reason)
+        self.assertEqual(len(calls), 2, "the fallback did not run")
+        self.assertNotIn("-skip_frame", calls[1])
+
+    def test_the_two_attempts_together_do_not_exceed_the_old_timeout(self):
+        # Or the preview loop's own pacing is broken by a camera that is merely
+        # slow, which is the failure this was traded against.
+        from gsu.camera.rtsp import CAPTURE_TIMEOUT_S, KEYFRAME_WAIT_S
+
+        budgets = []
+
+        def fake_run(command, **kwargs):
+            budgets.append(kwargs["timeout"])
+            raise subprocess.TimeoutExpired(cmd="ffmpeg", timeout=kwargs["timeout"])
+
+        camera = fitted_camera()
+        with mock.patch("gsu.camera.rtsp.subprocess.run", side_effect=fake_run):
+            camera.capture()
+        self.assertLessEqual(sum(budgets), CAPTURE_TIMEOUT_S)
+        self.assertEqual(budgets[0], KEYFRAME_WAIT_S)
+
     def test_only_keyframes_are_decoded_or_the_still_is_black(self):
         """An RTSP connection joins a stream in progress.
 
