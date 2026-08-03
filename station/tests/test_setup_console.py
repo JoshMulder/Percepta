@@ -2119,6 +2119,21 @@ class FactoryResetTests(unittest.TestCase):
         body = self.console.render(None, "/connection")
         self.assertGreater(body.index("<h2>Reset</h2>"), body.index("<h2>Security</h2>"))
 
+    def test_only_one_red_button_shows_at_a_time(self):
+        # The two danger buttons — the trigger and the commit — must never be on
+        # screen together, or it is unclear which arms and which fires. The CSS
+        # hides the trigger when the confirm is open, and `~` reaches forward
+        # only, so the trigger has to come AFTER the confirm in the markup for
+        # that rule to bite. Assert the order, and the rule that depends on it.
+        section = self.console._section_reset(self.agent.snapshot(), "tok")
+        self.assertLess(
+            section.index("id=reset class=confirm"),
+            section.index("id=reset-trigger"),
+            "the trigger must follow the confirm or the CSS cannot hide it",
+        )
+        css = (Path(__file__).resolve().parents[1] / "gsu" / "console.py").read_text()
+        self.assertIn("#reset:target ~ #reset-trigger", css)
+
 class DemoProvisioningTests(unittest.TestCase):
     """Demo is decided when the box is provisioned, not slot by slot afterwards.
 

@@ -389,6 +389,11 @@ STYLE = """
     acts, and neither of them should depend on JavaScript being allowed. */
  .confirm { display: none; }
  .confirm:target { display: block; }
+ /* Opening the confirm hides the control that opened it, so the two red
+    buttons are never on screen together: while closed there is only "Reset
+    station", and while open only "Erase everything". The trigger has to follow
+    the confirm in the markup for this — `~` reaches forward only. */
+ #reset:target ~ #reset-trigger { display: none; }
  .btn.danger, button.danger { border-color: var(--danger); color: var(--danger);
    background: rgba(255,122,69,.08); }
  .btn.danger:hover, button.danger:hover { background: rgba(255,122,69,.18); }
@@ -1883,17 +1888,26 @@ class Console:
                 "<div class=row><span class=k>After this</span>"
                 "<span class=warn>this box needs a new enrolment code</span></div>"
             )
-        out.append(
-            "<div class=field><a class='btn danger' href='#reset'>Reset "
-            "station</a></div>"
-        )
+        # The confirm block is emitted BEFORE the trigger, and the CSS hides the
+        # trigger once the block is open (`#reset:target ~ #reset-trigger`). The
+        # two are only siblings the one way round: `~` reaches forward, so the
+        # thing to hide has to follow the thing that opens. Without this the
+        # first "Reset station" button stayed on screen beside the confirm's own
+        # "Erase everything" button — two red controls at once, and no way to
+        # tell the arming click from the committing one.
         out.append(
             "<div id=reset class=confirm>"
             f"<form method=post action='/reset'>{self._csrf_field(csrf)}"
             "<input type=hidden name=confirm value='yes'>"
+            "<p class=sub>This cannot be undone. The box will need a new "
+            "enrolment code before it can publish again.</p>"
             "<div class=field><button type=submit class=danger>"
             "Erase everything on this box</button>"
             "<a class='btn quiet' href='#'>Cancel</a></div></form></div>"
+        )
+        out.append(
+            "<div class=field id=reset-trigger>"
+            "<a class='btn danger' href='#reset'>Reset station</a></div>"
         )
         out.append("</div>")
         return "".join(out)
