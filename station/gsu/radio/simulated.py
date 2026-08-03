@@ -48,6 +48,20 @@ TRAFFIC = {
 #: Silence between loops of a demo broadcast, in seconds.
 BROADCAST_GAP_S = 5.0
 
+#: How long the demo's carrier stays up after the recording goes quiet.
+#:
+#: **A carrier is not the modulation.** An operator keys up and holds: an AM
+#: transmission carries full carrier through every pause between words, and the
+#: squelch — a signal-strength gate — stays open for the whole over. Deciding
+#: this from the amplitude of one 125 ms block made the carrier follow the
+#: speech envelope, so the gate closed in the gaps between words and the demo
+#: sounded chopped by its own squelch.
+#:
+#: Held rather than smoothed, because holding is what the transmitter does.
+#: Long enough to carry a sentence break, and far short of BROADCAST_GAP_S,
+#: which still has to read as the end of the transmission.
+BROADCAST_CARRIER_HOLD_S = 2.0
+
 #: Where `<freq_hz>.wav` files live. Same convention as the platform's own
 #: demo (`server/app/backend/services/airband_demo.py`): drop a 16-bit WAV
 #: named for the frequency in hertz and it goes on air there.
@@ -140,6 +154,9 @@ class SimulatedFrontEnd:
         self._broadcast = _load_broadcast(self._freq_hz)
         self._cursor = 0
         self._block = (0, 0)
+        #: Seconds of carrier still to run after the last audio in the
+        #: recording. See BROADCAST_CARRIER_HOLD_S.
+        self._carrier_hold = 0.0
 
     # --- tuner ----------------------------------------------------------
 
@@ -241,8 +258,17 @@ class SimulatedFrontEnd:
             self._cursor = (self._cursor + block) % len(self._broadcast)
             # An amplitude test, not `any()`: a recording with dither is never
             # exactly zero, and the five-second gap has to read as silence.
+            #
+            # What it decides is when the transmitter is *keyed*, not whether
+            # anybody is speaking into it. The carrier is then held through the
+            # pauses, so the squelch above sees one continuous signal for the
+            # whole over rather than one per word.
             peak = max((abs(v) for v in window), default=0.0)
-            self._transmitting = peak > 0.02
+            if peak > 0.02:
+                self._carrier_hold = BROADCAST_CARRIER_HOLD_S
+            else:
+                self._carrier_hold = max(0.0, self._carrier_hold - seconds)
+            self._transmitting = self._carrier_hold > 0.0
             if self._transmitting:
                 self._snr_db = 22.0
             return
