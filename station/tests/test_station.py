@@ -1162,6 +1162,60 @@ class LocalStreamViewerTests(unittest.TestCase):
             tee.send(f"f{i}".encode(), keyframe=False)
         self.assertEqual(tee.primary.dropped, 0)
 
+    def test_the_depth_is_seconds_of_video_not_a_count_that_reads_like_it(self):
+        """The queue holds access units, and one is a frame, not a GOP.
+
+        It was 8, with a comment reasoning "at a keyframe interval of one
+        second this is a couple of seconds of slack" — the arithmetic for a
+        fragment per keyframe. At 30 fps it was 0.27 s, so a brief stall in one
+        browser overflowed it, and overflowing costs a whole intra period of
+        picture because the viewer then waits for the next keyframe. Two
+        seconds of frozen test card for a hiccup of a few frames, per viewer,
+        which is why two browsers side by side froze at different moments.
+        """
+        from gsu.transport.stream import LocalViewer
+
+        self.assertGreaterEqual(
+            LocalViewer.DEPTH / 30.0, 1.5,
+            "less than 1.5 s of slack at 30 fps: a stall costs a keyframe "
+            "interval of picture, so the slack must outlast a stall",
+        )
+
+    def test_the_queue_is_bounded_in_bytes_as_well(self):
+        # A count of fragments promises nothing about memory: these run from
+        # under a kilobyte for a P frame to half a megabyte for a synthetic
+        # keyframe. The byte ceiling is the "dropped rather than queued" rule
+        # in the unit the rule is about.
+        from gsu.transport.stream import LocalViewer
+
+        tee = self.tee()
+        viewer = LocalViewer()
+        tee.add(viewer)
+        tee.begin("h264", b"INIT")
+        tee.send(b"key", keyframe=True)
+        big = b"x" * (LocalViewer.MAX_BYTES // 4)
+        for _ in range(12):
+            tee.send(big, keyframe=False)
+        self.assertLessEqual(viewer._queued_bytes, LocalViewer.MAX_BYTES)
+        self.assertGreater(viewer.dropped, 0, "the byte ceiling never fired")
+
+    def test_a_viewer_resync_is_reported_where_somebody_will_see_it(self):
+        # It was invisible: the session's `dropped` counts what the uplink
+        # refused, and a browser stalling is a different thing. A stream
+        # showing 30 fps with nothing dropped, while the picture froze every
+        # couple of seconds, is the shape that hid this.
+        from gsu.transport.stream import LocalViewer
+
+        tee = self.tee()
+        viewer = LocalViewer()
+        tee.add(viewer)
+        tee.begin("h264", b"INIT")
+        tee.send(b"key", keyframe=True)
+        for i in range(LocalViewer.DEPTH * 3):
+            tee.send(f"f{i}".encode(), keyframe=False)
+        self.assertGreater(tee.local_resyncs, 0)
+        self.assertEqual(tee.stats()["local_resyncs"], tee.local_resyncs)
+
     def test_removing_a_viewer_closes_it(self):
         from gsu.transport.stream import LocalViewer
         tee = self.tee()

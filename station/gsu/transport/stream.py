@@ -390,13 +390,38 @@ class LocalViewer:
     as a broken camera.
     """
 
-    #: Fragments, not bytes. At a keyframe interval of one second this is a
-    #: couple of seconds of slack for a browser that stalls briefly, and a hard
-    #: stop for one that has gone away without closing the socket.
-    DEPTH = 8
+    #: How far behind a viewer may fall before it is resynchronised.
+    #:
+    #: **One fragment here is one access unit, not one group of pictures.** The
+    #: figure this replaces was 8, with a comment reasoning "at a keyframe
+    #: interval of one second this is a couple of seconds of slack" — which is
+    #: the arithmetic for a fragment per keyframe. A fragment is a frame, so at
+    #: 30 fps it was 0.27 seconds of slack, and any brief stall in one browser
+    #: overflowed it.
+    #:
+    #: Overflowing is expensive out of proportion to the stall that caused it:
+    #: the queue is cleared and the viewer then waits for the next keyframe,
+    #: which is a whole intra period — two seconds on the synthetic source. So
+    #: a hiccup of a few frames costs two seconds of picture, the drawn clock
+    #: jumps by that much when it returns, and because the queue is per viewer,
+    #: two browsers side by side do it at different moments. That is exactly
+    #: how it was found.
+    #:
+    #: Two seconds at 30 fps. The bound that actually protects memory is
+    #: MAX_BYTES below, which is what the original comment was reaching for
+    #: when it worried about "a buffered second of 1080p".
+    DEPTH = 60
+
+    #: And a ceiling in bytes, because a count of fragments promises nothing
+    #: about memory: these run from 0.8 kB for a P frame to half a megabyte for
+    #: a synthetic keyframe, and a real 1080p camera's are larger again. This
+    #: is the "video is dropped rather than queued" rule expressed in the unit
+    #: the rule is actually about.
+    MAX_BYTES = 4 * 1024 * 1024
 
     def __init__(self) -> None:
         self._queue: deque[bytes] = deque()
+        self._queued_bytes = 0
         self._wake = threading.Event()
         self._lock = threading.Lock()
         self.closed = False
@@ -410,6 +435,7 @@ class LocalViewer:
         with self._lock:
             self._queue.clear()
             self._queue.append(init_segment)
+            self._queued_bytes = len(init_segment)
             self._opened = True
             self._waiting_for_keyframe = True
             self._wake.set()
@@ -422,14 +448,23 @@ class LocalViewer:
                 if not keyframe:
                     return
                 self._waiting_for_keyframe = False
-            if len(self._queue) >= self.DEPTH:
+            if (len(self._queue) >= self.DEPTH
+                    or self._queued_bytes + len(fragment) > self.MAX_BYTES):
                 # Behind, so throw away what is stale and resynchronise on the
                 # next keyframe rather than delivering a growing delay.
+                #
+                # This costs a whole intra period of picture, not one fragment,
+                # because of the line above that then holds everything back
+                # until the next keyframe. It is the right trade against a
+                # growing delay, and the wrong one to trigger on a hiccup —
+                # which is why the depth is what it is.
                 self._queue.clear()
+                self._queued_bytes = 0
                 self._waiting_for_keyframe = True
                 self.dropped += 1
                 return
             self._queue.append(fragment)
+            self._queued_bytes += len(fragment)
             self._wake.set()
 
     def read(self, timeout: float = 1.0) -> bytes | None:
@@ -442,7 +477,9 @@ class LocalViewer:
         with self._lock:
             self._wake.clear()
             if self._queue:
-                return self._queue.popleft()
+                fragment = self._queue.popleft()
+                self._queued_bytes = max(0, self._queued_bytes - len(fragment))
+                return fragment
         return None
 
     def close(self) -> None:
@@ -515,6 +552,20 @@ class TeeUplink(StreamUplink):
     def local_viewers(self) -> int:
         with self._lock:
             return len(self._viewers)
+
+    @property
+    def local_resyncs(self) -> int:
+        """Times a setup-page viewer fell behind and was resynchronised.
+
+        Reported because it was invisible: the session's own `dropped` counts
+        what the *uplink* refused, and a browser that stalls is a different
+        thing entirely — one viewer of several, on its own queue. A stream
+        showing 30 fps with nothing dropped while a picture froze every couple
+        of seconds is the exact shape that hid this, and there was no number
+        anywhere that disagreed with it.
+        """
+        with self._lock:
+            return sum(viewer.dropped for viewer in self._viewers)
 
     # --- the uplink itself ----------------------------------------------
 
@@ -653,6 +704,7 @@ class TeeUplink(StreamUplink):
         stats = self.primary.stats()
         stats["uplink"] = self.describe()
         stats["local_viewers"] = self.local_viewers
+        stats["local_resyncs"] = self.local_resyncs
         # Said plainly, because "streaming" with no uplink open is a state
         # somebody will otherwise read as the platform receiving video.
         stats["primary_open"] = self.primary_open
