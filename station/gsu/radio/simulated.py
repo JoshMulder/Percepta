@@ -162,10 +162,22 @@ class SimulatedFrontEnd:
             self._freq_hz = int(freq_hz)
             self._broadcast = _load_broadcast(self._freq_hz)
             self._cursor = 0
+            # The transmit state belongs to the channel just left. Carried
+            # across the retune, the old channel's carrier hold (up to
+            # BROADCAST_CARRIER_HOLD_S) went on reporting a signal on the new
+            # one, so the squelch stayed open — the channel-open light lit on a
+            # channel that was quiet — until the tail decayed a second or two
+            # later. The new channel re-keys from its own traffic on the next
+            # `read`; a real receiver hears the new channel immediately, and so
+            # should this. Not "join a transmission in progress": that would
+            # mean sampling the new channel's real state, which for a broadcast
+            # is `_cursor` (reset above to the start of its recording) and for a
+            # random channel is a fresh gap, not the level the old one was at.
+            self._transmitting = False
+            self._carrier_hold = 0.0
+            self._snr_db = 0.0
+            self._remaining = self._rng.uniform(*TRAFFIC[self._traffic][0])
         self._block = (0, 0)
-            # A retune does not reset the traffic on the channel: broadcasts
-            # advance whether or not anyone is listening, so tuning in joins a
-            # transmission already in progress.
 
     def set_gain(self, gain: float | str) -> None:
         self._gain = gain

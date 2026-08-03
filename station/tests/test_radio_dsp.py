@@ -177,6 +177,34 @@ class SquelchTests(unittest.TestCase):
         self.controller.tune(1_000)
         self.assertEqual(self.controller.freq_hz, 108_000_000)
 
+    def test_a_retune_closes_a_gate_the_old_channel_held_open(self):
+        """Changing channel must not carry the old channel's carrier.
+
+        The simulated front end held its transmit state across a retune, so the
+        tail of the channel just left — up to BROADCAST_CARRIER_HOLD_S of it —
+        went on reporting a signal on the new one, and the squelch stayed open:
+        the channel-open light lit on a channel that was silent. And the
+        controller's own hang time bridged the change as if it were a gap in one
+        transmission. A real receiver hears the new channel at its first
+        measurement, and so must this.
+        """
+        front_end = SimulatedFrontEnd(traffic="off", seed=3)
+        controller = RadioController(front_end)
+        # Force a transmission on the current (quiet, no-broadcast) channel and
+        # confirm the gate is open.
+        front_end.set_traffic("off", transmitting=True)
+        payload, _ = controller.tick(1.0)
+        self.assertTrue(payload["squelch_open"],
+                        "the forced transmission did not open the gate")
+
+        # Move to a different quiet channel. The gate must be shut on the very
+        # next measurement, not a second or two later.
+        controller.tune(120_000_000)
+        payload, _ = controller.tick(1.0)
+        self.assertFalse(payload["squelch_open"],
+                         "the gate carried the old channel's signal across the retune")
+        controller.shutdown()
+
     def test_no_transmit_capability_is_ever_reported(self):
         payload, _ = self.controller.tick(1.0)
         self.assertFalse(payload["tx_capable"])

@@ -96,6 +96,16 @@ REDISCOVER_SECONDS = 30.0
 #: latency it saves, and 8 Hz is already inside what anybody hears as instant.
 AUDIO_TICK_S = 0.125
 
+#: How often the spectrum goes out *while somebody is watching it*. The levels
+#: on the radio frame stay on the one-second sweep — a signal reading does not
+#: need to move faster — but the spectrum is a live picture the operator is
+#: watching change, and once a second it steps rather than moves. The front end
+#: is already measured every AUDIO_TICK_S, so this only decides how often that
+#: measurement is *published*; it is bounded by the demand window, so a station
+#: nobody is watching still sends the spectrum only on the sweep, or not at all.
+#: 200 ms (~5 Hz) reads as live without being the 8 Hz the audio needs.
+SPECTRUM_TICK_S = 0.2
+
 #: How long after the floodlight's commanded state changes before the measured
 #: current is allowed to contradict it. A contactor takes a moment to move and
 #: some lamps draw oddly while striking; judging inside that window turns
@@ -155,6 +165,10 @@ class Agent:
         #: against on every sub-tick so an edge does not wait for the sweep —
         #: see `_pump_radio`.
         self._radio_gate: tuple[bool, bool] | None = None
+        #: Monotonic time the spectrum last went out on a sub-tick, so a watched
+        #: spectrum streams at SPECTRUM_TICK_S rather than on every 125 ms audio
+        #: sub-tick. Zero until the first one. See `_sleep_pumping_radio`.
+        self._spectrum_pub_at = 0.0
         #: Monotonic time of the last receiver read, held across sweeps so the
         #: audio timeline is the wall clock rather than the sum of the
         #: intervals we intended to sleep for. None until the first pump.
@@ -1243,7 +1257,8 @@ class Agent:
 
         self._update_link_state()
 
-    def _pump_radio(self, dt: float, publish_gate_change: bool = False) -> dict | None:
+    def _pump_radio(self, dt: float, publish_gate_change: bool = False,
+                    publish_spectrum: bool = False) -> dict | None:
         """Read the receiver once, publish any audio, keep the telemetry.
 
         The single reader of the front end. Audio goes out the moment it
@@ -1252,8 +1267,11 @@ class Agent:
         than anybody needs.
 
         `publish_gate_change` is for the callers with no sweep behind them —
-        see the gate note below. The sweep passes nothing, because it is about
-        to publish this very payload a few lines later.
+        see the gate note below. `publish_spectrum` is the same idea for the one
+        reading that *is* watched moving: while a console has the spectrum open,
+        the frame carrying it goes out on the sub-tick rather than waiting for
+        the sweep. The sweep passes neither, because it is about to publish this
+        very payload a few lines later.
         """
         if self.radio is None:
             return None
@@ -1282,11 +1300,17 @@ class Agent:
         # often that can be: a signal sitting on the threshold cannot close more
         # than once per HANG_SECONDS, so this is a few hundred bytes on an over,
         # not a new cadence.
-        if publish_gate_change:
-            gate = (bool(telemetry.get("squelch_open")),
-                    bool(telemetry.get("monitor")))
-            if gate != self._radio_gate:
-                self._publish_radio(telemetry)
+        gate_moved = publish_gate_change and (
+            bool(telemetry.get("squelch_open")),
+            bool(telemetry.get("monitor")),
+        ) != self._radio_gate
+        # `spectrum` is only on the frame inside the demand window, so this
+        # publishes nothing extra when nobody is watching. One publish covers
+        # both reasons — a gate edge that also happens to carry the spectrum
+        # must not go out twice.
+        spectrum_due = publish_spectrum and "spectrum" in telemetry
+        if gate_moved or spectrum_due:
+            self._publish_radio(telemetry)
 
         if audio is None:
             return None
@@ -1363,6 +1387,16 @@ class Agent:
             now = time.monotonic()
             elapsed, last = now - last, now
             self._audio_clock = last
+            # While a console is watching the spectrum, push it out between
+            # sweeps too — throttled to SPECTRUM_TICK_S so it rides roughly
+            # every other audio sub-tick rather than all eight a second. Bounded
+            # by the receiver's own demand window, so a station nobody is
+            # watching sends nothing here.
+            spectrum_due = (
+                self.radio is not None
+                and self.radio.spectrum_wanted
+                and now - self._spectrum_pub_at >= SPECTRUM_TICK_S
+            )
             try:
                 # Clamped, so a stalled box asks for a burst it cannot use
                 # rather than an unbounded one. Falling behind after a stall is
@@ -1371,9 +1405,13 @@ class Agent:
                 # up to a second away and the console's channel-open light must
                 # not trail the audio it is announcing.
                 self._pump_radio(min(elapsed, AUDIO_TICK_S * 4),
-                                 publish_gate_change=True)
+                                 publish_gate_change=True,
+                                 publish_spectrum=spectrum_due)
             except Exception:  # noqa: BLE001 - a dead loop is a dead site
                 log.exception("Radio sub-tick failed; continuing.")
+            else:
+                if spectrum_due:
+                    self._spectrum_pub_at = now
 
     def video_state(self) -> dict:
         """What the camera is doing, in one place.

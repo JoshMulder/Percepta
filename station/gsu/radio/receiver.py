@@ -264,6 +264,12 @@ class RadioController:
         # that must not become a retune here.
         self.freq_hz = max(FREQ_MIN_HZ, min(FREQ_MAX_HZ, int(freq_hz)))
         self.front_end.tune(self.freq_hz)
+        # The hang bridges a gap *within one channel's transmission*; there is no
+        # transmission on the new channel to bridge. Left running, it held the
+        # gate open for up to HANG_SECONDS after a retune, so the channel-open
+        # light stayed lit on a channel that was silent. The new channel decides
+        # the gate from its own first measurement.
+        self._hang = 0.0
         self._save()
 
     def set_squelch(self, db: float) -> None:
@@ -344,6 +350,17 @@ class RadioController:
         this existed.
         """
         return time.monotonic() < self._audio_until
+
+    @property
+    def spectrum_wanted(self) -> bool:
+        """Whether somebody is watching the spectrum right now.
+
+        The same demand window `tick` consults to decide whether to put the
+        spectrum on the frame; exposed so the sub-tick loop can stream it faster
+        than the once-a-second sweep while a console has the page open, and not a
+        byte faster than that once the page closes.
+        """
+        return time.monotonic() < self._spectrum_until
 
     def set_ppm(self, ppm: int) -> None:
         self.ppm = int(ppm)

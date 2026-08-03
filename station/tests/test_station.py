@@ -1598,6 +1598,60 @@ class RadioAudioLatencyTests(unittest.TestCase):
             self.assertEqual(len(radio_frames()), before + 1,
                              "the sub-tick duplicated the frame the sweep sent")
 
+    def test_a_watched_spectrum_streams_between_sweeps(self):
+        """The spectrum is a live picture, and once a second it steps.
+
+        While a console has it open, the receiver puts the spectrum on the frame
+        (`RadioController.tick` does this only inside its demand window), and the
+        sub-tick pushes that frame out rather than waiting up to a second for the
+        sweep. When nobody is watching there is no spectrum on the frame and the
+        sub-tick sends nothing extra — the levels still ride the sweep.
+        """
+        class Radio:
+            freq_hz = 121_500_000
+            spectrum = None
+
+            def tick(self, dt):
+                payload = {"kind": "radio", "freq_hz": self.freq_hz,
+                           "squelch_open": False, "monitor": False}
+                if self.spectrum is not None:
+                    payload["spectrum"] = self.spectrum
+                return payload, None
+
+        with tempfile.TemporaryDirectory() as directory:
+            sent: list[dict] = []
+            agent = agent_in(directory)
+            agent._publish = lambda topic, payload: sent.append(payload) or True
+            agent.radio = Radio()
+            agent._radio_telemetry = None
+            agent._radio_pumped = False
+
+            def radio_frames():
+                return [p for p in sent if p.get("kind") == "radio"]
+
+            # Nobody watching: the first frame is the gate's own opening news,
+            # and after that a quiet, unwatched channel sends nothing between
+            # sweeps even with the flag set.
+            for _ in range(8):
+                agent._pump_radio(0.125, publish_gate_change=True,
+                                  publish_spectrum=True)
+            self.assertEqual(len(radio_frames()), 1,
+                             "an unwatched channel published between sweeps")
+
+            # Now the console is watching, so the receiver puts the spectrum on
+            # the frame — and every asked-for sub-tick streams it.
+            agent.radio.spectrum = [1, 2, 3]
+            agent._pump_radio(0.125, publish_gate_change=True, publish_spectrum=True)
+            agent._pump_radio(0.125, publish_gate_change=True, publish_spectrum=True)
+            self.assertEqual(len(radio_frames()), 3,
+                             "a watched spectrum did not stream between sweeps")
+
+            # But only when it is asked for: the same frame with the flag off
+            # waits for the sweep like every other reading.
+            agent._pump_radio(0.125, publish_gate_change=True, publish_spectrum=False)
+            self.assertEqual(len(radio_frames()), 3,
+                             "the spectrum went out without being asked for")
+
 
 class StreamReportingHonestyTests(unittest.TestCase):
     """A remux applies none of the settings this station computed.
