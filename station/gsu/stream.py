@@ -289,8 +289,15 @@ class StreamSession:
         # stored event and the sentence the command log shows, so that all
         # three say the same thing — they did not, and the one an operator
         # sees first was the one still quoting site policy.
+        # A source that states its own picture size is believed over the
+        # settings it was handed. The synthetic encoder is the case: its
+        # macroblocks are uncompressed, so it shrinks the picture until a
+        # keyframe is one a decoder will take, and quoting the configured size
+        # here would name a resolution nothing is sending.
+        width = getattr(source, "width", None) or settings.width
+        height = getattr(source, "height", None) or settings.height
         if getattr(source, "enforces_settings", True):
-            shape = f"{settings.width}x{settings.height} at {settings.fps} fps"
+            shape = f"{width}x{height} at {settings.fps} fps"
         else:
             codec = getattr(source, "codec", "").upper() or "video"
             shape = f"the camera's own {codec} at {self.paced_fps:.3g} fps"
@@ -303,7 +310,7 @@ class StreamSession:
             log.info(
                 "Streaming %dx%d at %d fps, %d kbit/s target, to %s. "
                 "Lease %.0fs.",
-                settings.width, settings.height, settings.fps,
+                width, height, settings.fps,
                 settings.bitrate_kbps, uplink_name, lease,
             )
         else:
