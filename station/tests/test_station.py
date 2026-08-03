@@ -1467,6 +1467,83 @@ class RadioAudioLatencyTests(unittest.TestCase):
             # stale reading as though it were new.
             self.assertIsNone(agent._radio_telemetry)
 
+    def test_the_gate_opening_does_not_wait_for_the_sweep(self):
+        """The channel-open light must not trail the audio it announces.
+
+        Audio leaves on the sub-tick that produced it. The frame carrying
+        `squelch_open` left on the next sweep, up to a second later, so the
+        console lit the LED most of a second after it had started playing —
+        which reads as a second event rather than the same one.
+        """
+        class Gated:
+            freq_hz = 121_500_000
+
+            def __init__(self):
+                self.open = False
+
+            def tick(self, dt):
+                return ({"kind": "radio", "freq_hz": self.freq_hz,
+                         "squelch_open": self.open, "monitor": False}, None)
+
+        with tempfile.TemporaryDirectory() as directory:
+            sent: list[dict] = []
+            agent = agent_in(directory)
+            agent._publish = lambda topic, payload: sent.append(payload) or True
+            agent.radio = Gated()
+            agent._radio_telemetry = None
+            agent._radio_pumped = False
+
+            def radio_frames():
+                return [p for p in sent if p.get("kind") == "radio"]
+
+            # Nothing has been told anything yet, so the first read is itself
+            # news and goes out rather than waiting for the sweep.
+            agent._pump_radio(0.125, publish_gate_change=True)
+            self.assertEqual([p["squelch_open"] for p in radio_frames()], [False])
+
+            # After that a quiet channel costs nothing: the levels ride the
+            # sweep, and a gate that has not moved sends nothing between them.
+            for _ in range(8):
+                agent._pump_radio(0.125, publish_gate_change=True)
+            self.assertEqual(len(radio_frames()), 1, "a quiet gate published anyway")
+
+            agent.radio.open = True
+            agent._pump_radio(0.125, publish_gate_change=True)
+            self.assertEqual(
+                [p["squelch_open"] for p in radio_frames()], [False, True],
+                "the gate opened and nothing was published until the sweep",
+            )
+            # And not once per sub-tick for as long as it stays open.
+            for _ in range(8):
+                agent._pump_radio(0.125, publish_gate_change=True)
+            self.assertEqual(len(radio_frames()), 2,
+                             "a held-open gate republished on every sub-tick")
+
+            # The sweep still reports on its own cadence whether or not
+            # anything moved — this adds a frame, it does not replace one.
+            agent.step(1.0, weather_due=False, health_due=False)
+            self.assertEqual(len(radio_frames()), 3)
+
+            # Closing is the same edge in the other direction: the light going
+            # out late is the same fault as it coming on late.
+            agent.radio.open = False
+            agent._pump_radio(0.125, publish_gate_change=True)
+            self.assertEqual([p["squelch_open"] for p in radio_frames()],
+                             [False, True, True, False])
+
+            # `step` standing on its own: with nothing having pumped it reads
+            # the receiver itself, and the frame it publishes a few lines later
+            # is already the change. One frame, not two.
+            agent.radio.open = True
+            agent._radio_pumped = False
+            before = len(radio_frames())
+            agent.step(1.0, weather_due=False, health_due=False)
+            self.assertEqual(len(radio_frames()), before + 1,
+                             "the sweep published its own gate change twice")
+            agent._pump_radio(0.125, publish_gate_change=True)
+            self.assertEqual(len(radio_frames()), before + 1,
+                             "the sub-tick duplicated the frame the sweep sent")
+
 
 class StreamReportingHonestyTests(unittest.TestCase):
     """A remux applies none of the settings this station computed.

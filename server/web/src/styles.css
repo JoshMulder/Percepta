@@ -1995,11 +1995,10 @@ body {
 
 /* Monitor is amber, not green: the channel is open because someone is holding
    it open, which is a different fact from a signal being present. */
-.led.monitor {
-  background: var(--warn);
-  border-color: var(--warn);
-  box-shadow: 0 0 0.5rem var(--warn);
-}
+/* No `.led.monitor` rule. The channel-open light is one colour whatever opened
+   the gate - monitor is held for the length of a volume drag, and recolouring
+   the light mid-gesture drew attention to a distinction the tooltip already
+   covers. */
 
 /* --------------------------------------------------- shared slider style */
 

@@ -70,6 +70,48 @@ TECHNICIAN_MESSAGE = {
     422: "The box sent something the platform could not read. This is a bug.",
 }
 
+#: Statuses whose message is worth the platform's own explanation appended.
+#:
+#: Only where the explanation names something a person can act on. "This code is
+#: not valid" is complete as it stands and the contract deliberately refuses to
+#: say which kind of invalid; a 422 is the opposite case — it says a field was
+#: wrong and then does not say which, which leaves "this is a bug" as the whole
+#: of a technician's information and nothing to pass on but the sentence itself.
+EXPLAIN_STATUS = frozenset({422, 400})
+
+
+def _explain(body: str) -> str:
+    """The readable part of a FastAPI error body, or "".
+
+    Field and message only. **Never `input`**, which is the value that failed
+    validation — on this endpoint that is the enrolment code itself, and a
+    diagnostic that prints the credential into a setup page and the station log
+    is a worse bug than the one it is explaining.
+    """
+    try:
+        parsed = json.loads(body)
+    except (TypeError, ValueError):
+        return ""
+    detail = parsed.get("detail") if isinstance(parsed, dict) else None
+    if isinstance(detail, str):
+        return detail
+    if not isinstance(detail, list):
+        return ""
+    parts = []
+    for item in detail:
+        if not isinstance(item, dict):
+            continue
+        # ["body", "hardware", "agent_version"] reads as "hardware.agent_version".
+        where = ".".join(
+            str(piece) for piece in item.get("loc", []) if str(piece) != "body"
+        )
+        message = str(item.get("msg", "")).strip()
+        if where and message:
+            parts.append(f"{where}: {message}")
+        elif message:
+            parts.append(message)
+    return "; ".join(parts)
+
 
 @dataclass(frozen=True)
 class Standing:
@@ -154,13 +196,27 @@ class EnrolmentClient:
             ) as response:
                 return json.loads(response.read().decode() or "{}")
         except urllib.error.HTTPError as exc:
-            detail = ""
+            body = ""
             try:
-                detail = exc.read().decode()[:200]
+                body = exc.read().decode()[:2000]
             except Exception:  # noqa: BLE001 - diagnostics only
                 pass
+            message = TECHNICIAN_MESSAGE.get(
+                exc.code, f"The platform refused: {exc.code}.")
+            # **Say what the platform said.** This was read into a local and
+            # then dropped on the floor, so a 422 reached the technician as
+            # "the box sent something the platform could not read. This is a
+            # bug." and nothing else — the one message in this file that names
+            # a fault without naming the field, which is the only part anybody
+            # could have acted on. The platform states which field and why in
+            # the body of the very response being discarded.
+            explanation = _explain(body) if exc.code in EXPLAIN_STATUS else ""
+            if explanation:
+                message = f"{message} The platform said: {explanation}"
+            log.warning("Enrolment call to %s failed: HTTP %d %s",
+                        path, exc.code, explanation or body[:200])
             raise EnrolmentError(
-                TECHNICIAN_MESSAGE.get(exc.code, f"The platform refused: {exc.code}."),
+                message,
                 status=exc.code,
                 # A 4xx will not become a 2xx by trying again with the same
                 # inputs; a 5xx or a dropped link will.
