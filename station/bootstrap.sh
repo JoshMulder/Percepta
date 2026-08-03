@@ -45,11 +45,27 @@ Install docker-compose-plugin and run this again."
 
 # Existing values become the defaults, so re-running is safe and changing one
 # answer does not mean retyping the rest.
-if [ -f "$ENV_FILE" ]; then
-  set -a
-  # shellcheck disable=SC1090
-  . "./$ENV_FILE"
-  set +a
+#
+# `-s`, not `-f`: an empty one exists after a run that got as far as creating it
+# and no further, and announcing that answers were read from a file with none in
+# it is a small lie that costs somebody a puzzled minute.
+# **Read, never sourced.**
+#
+# `.` runs the file as shell, and a pbkdf2 hash is full of dollars:
+# `pbkdf2_sha256$120000$salt$hash` expands `$120000` to positional parameter 1,
+# which under `set -u` is an error that ends the script. So re-running bootstrap
+# — offered at the top of this file as the way to change your mind — died on
+# every box that had a password set, and only on those. A value in here is data
+# and must never be evaluated.
+#
+# The last variable takes the rest of the line, so a value containing `=` or `$`
+# survives intact, and the GSU_ guard stops a stray line setting anything else.
+if [ -s "$ENV_FILE" ]; then
+  while IFS='=' read -r key value; do
+    case "$key" in
+      GSU_*) printf -v "$key" '%s' "$value" ;;
+    esac
+  done < "$ENV_FILE"
   printf 'Reading your existing answers from %s.\n\n' "$ENV_FILE"
 fi
 
@@ -124,25 +140,51 @@ if [ -z "${GSU_SETUP_PASSWORD_HASH:-}" ]; then
   echo
   echo "The setup page needs a password. It is published to this host's"
   echo "loopback only, so reaching it remotely still needs an SSH tunnel."
-  read -r -s -p "Setup page password: " SETUP_PW || true
-  echo
-  if [ -n "${SETUP_PW:-}" ]; then
-    # stderr is deliberately not swallowed. The first run builds the image,
+  echo "At least 10 characters. Ctrl-C to give up."
+
+  # **Asked again rather than aborted.**
+  #
+  # The agent is the authority on what it will accept — it is the thing that
+  # checks this password later — so the rule is not restated here, where it
+  # would drift. What was wrong was the consequence: a password one character
+  # short ended the whole run, after three answers and a five-minute image
+  # build, with a message that blamed docker compose for what was actually the
+  # agent saying "too short". For somebody standing at an enclosure that is a
+  # long way to go to retype one word.
+  #
+  # Bounded, so a docker fault that is nothing to do with the password cannot
+  # turn into an endless prompt.
+  attempts=0
+  while [ -z "${GSU_SETUP_PASSWORD_HASH:-}" ]; do
+    attempts=$((attempts + 1))
+    if [ "$attempts" -gt 3 ]; then
+      die "Three attempts, no hash. If the message above is not about the
+password then the fault is not here: run
+
+    docker compose run --rm gsu setup-password
+
+by hand, and put the GSU_SETUP_PASSWORD_HASH line it prints into .env."
+    fi
+    read -r -s -p "Setup page password: " SETUP_PW || die "Nothing read."
+    echo
+    if [ -z "$SETUP_PW" ]; then
+      # An empty one is not "no password wanted". Without a hash the agent
+      # demotes the page to the container's own loopback, which the published
+      # port cannot reach, so the page ends up unreachable from anywhere.
+      echo "  Nothing typed. The page cannot be served without one."
+      continue
+    fi
+    # stderr is deliberately not swallowed: the first run builds the image,
     # which is minutes on a Pi, and hiding it left somebody watching a terminal
-    # that looked hung. The hash is the whole of stdout — `--stdin` prints no
-    # banner — so build progress on stderr cannot contaminate it.
+    # that looked hung. It also carries the agent's own reason for refusing a
+    # password, which is the sentence the operator needs. The hash is the whole
+    # of stdout — `--stdin` prints no banner — so neither can contaminate it.
     echo "Hashing it. The first run builds the image, which takes a few minutes."
     GSU_SETUP_PASSWORD_HASH=$(printf '%s' "$SETUP_PW" \
-      | docker compose run --rm -T gsu setup-password --stdin | tail -1) \
-      || die "Could not hash the setup password; the error above is docker
-compose's. Nothing was written."
+      | docker compose run --rm -T gsu setup-password --stdin | tail -1) || true
     unset SETUP_PW
-    [ -n "$GSU_SETUP_PASSWORD_HASH" ] || die "The hasher produced nothing.
-Without a hash the agent demotes the setup page to the container's own
-loopback, which the published port cannot reach — so the page would be
-unreachable from anywhere at all. Stopping rather than writing a file that
-looks complete."
-  fi
+    [ -n "${GSU_SETUP_PASSWORD_HASH:-}" ] || echo "  Not accepted — see above."
+  done
 fi
 GSU_SETUP_PASSWORD_HASH="${GSU_SETUP_PASSWORD_HASH:-}"
 
