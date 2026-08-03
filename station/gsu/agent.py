@@ -1227,18 +1227,42 @@ class Agent:
         out, and only when the squelch is open, which is the same gate as
         before and the reason this costs nothing on a quiet channel.
         """
+        # Paced against a deadline, and demodulating the time that actually
+        # passed — not the interval we meant to sleep for.
+        #
+        # This slept a whole AUDIO_TICK_S and then asked the receiver for one
+        # AUDIO_TICK_S of audio, which ignores everything the tick itself
+        # costs: a pure-Python demodulate over three thousand samples, an Opus
+        # encode, a base64, a publish, and a WAV appended to the SD card. On a
+        # Pi that is about 25 ms, so every cycle took 150 ms of wall clock and
+        # produced 125 ms of audio.
+        #
+        # **A station that generates audio slower than real time cannot be
+        # rescued downstream.** Measured on the bench at 0.82 seconds of audio
+        # per second of wall clock: the console's buffer drains at 18% no
+        # matter how deep it is, underruns, and the operator hears speech
+        # chopping in and out for ever. Two playback fixes went in ahead of
+        # this one and neither could have worked.
+        last = time.monotonic()
         while not self._stop.is_set():
-            remaining = until - time.monotonic()
-            if remaining <= 0:
+            now = time.monotonic()
+            if now >= until:
                 return
             if self.radio is None:
-                self._stop.wait(remaining)
+                self._stop.wait(until - now)
                 return
-            slice_s = min(AUDIO_TICK_S, remaining)
-            if self._stop.wait(slice_s):
+            # To the next boundary, not for a whole interval: the work above
+            # has already spent part of this one.
+            nap = min(last + AUDIO_TICK_S, until) - now
+            if nap > 0 and self._stop.wait(nap):
                 return
+            now = time.monotonic()
+            elapsed, last = now - last, now
             try:
-                self._pump_radio(slice_s)
+                # Clamped, so a stalled box asks for a burst it cannot use
+                # rather than an unbounded one. Falling behind after a stall is
+                # right — stale airband audio is worth less than the gap.
+                self._pump_radio(min(elapsed, AUDIO_TICK_S * 4))
             except Exception:  # noqa: BLE001 - a dead loop is a dead site
                 log.exception("Radio sub-tick failed; continuing.")
 
