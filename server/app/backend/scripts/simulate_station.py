@@ -58,6 +58,23 @@ AGENT_VERSION = "1.0"
 SPECTRUM_BINS = 128
 SPECTRUM_SPAN_HZ = 120_000
 
+#: How far below the in-channel noise floor one bin of the spectrum sits.
+#:
+#: `noise_floor_db` and `threshold_db` are *in-channel* power — the sum over the
+#: ~30 bins of a 25 kHz channel — because that is what the squelch compares
+#: against. The `spectrum` array is *per-bin* power, which the contract is
+#: explicit about, and one bin holds far less than the whole channel: about
+#: 10·log10(channel bins) less. A real receiver measured here shows a noise
+#: trace ~14 dB under its own floor, which is what leaves room between the
+#: trace and the dashed squelch line for a carrier to rise into.
+#:
+#: The simulator was drawing the bins at the in-channel level instead, so the
+#: trace sat right under the threshold and a quiet channel looked like a wall
+#: of noise about to open the gate. Measured against a real station's decimated
+#: spectrum, the gap is ~14 dB; the exact figure is not load-bearing on a demo,
+#: only that the floor sits clearly below the line and a carrier crosses it.
+SPECTRUM_BIN_CORRECTION_DB = 14.0
+
 # How far above the measured noise floor AUTO holds the gate. Remote-Radio's
 # guidance is a few dB above the floor; 8 is comfortably clear of it without
 # missing weak transmissions.
@@ -416,12 +433,19 @@ class StationSim:
         # for minutes at commissioning, which is why it is leased like audio.
         if self.t < self.spectrum_until:
             centre = SPECTRUM_BINS // 2
+            # Per-bin, not in-channel — see SPECTRUM_BIN_CORRECTION_DB. The
+            # noise trace sits ~14 dB below the floor the meter reports, which
+            # is where a real one sits and what makes the squelch line readable.
+            per_bin_floor = noise - SPECTRUM_BIN_CORRECTION_DB
+            # The carrier, when there is one, is drawn at the in-channel level
+            # so its peak crosses the dashed threshold line exactly when the
+            # squelch opens — the one thing this display exists to show. No peak
+            # on a quiet channel, so the trace is flat noise between overs.
+            peak = rssi if rssi > threshold else per_bin_floor
             radio["spectrum"] = [
                 round(
-                    noise + random.uniform(-2.0, 2.0)
-                    # The carrier sits in the middle few bins, so the display
-                    # shows a peak where the receiver says the signal is.
-                    + (rssi - noise if abs(i - centre) < 3 else 0.0)
+                    (peak if abs(i - centre) < 3 else per_bin_floor)
+                    + random.uniform(-2.0, 2.0)
                 )
                 for i in range(SPECTRUM_BINS)
             ]
