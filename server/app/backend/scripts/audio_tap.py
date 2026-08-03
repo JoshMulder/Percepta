@@ -46,10 +46,12 @@ import ctypes.util
 import json
 import sys
 import time
+import uuid
 
 import redis
 
 from backend.core.config import settings
+from backend.services import audio_demand
 
 #: The station states its own rate in every frame; this is only the fallback
 #: for a capture that starts before the first frame arrives.
@@ -131,14 +133,63 @@ def main() -> None:
                         help="stop after this long; 0 runs until interrupted")
     parser.add_argument("--quiet", action="store_true",
                         help="no running commentary on stderr")
+    parser.add_argument("--no-demand", action="store_true",
+                        help="do not ask the station for audio; only listen")
     args = parser.parse_args()
 
     client = redis.Redis.from_url(settings.redis_url)
     pubsub = client.pubsub()
     pubsub.psubscribe(f"gsu/{args.station}/audio")
 
+    # **Ask, or hear nothing at all.**
+    #
+    # Airband audio is demand-driven: the station publishes only while somebody
+    # has asked and keeps asking, because 512 kbit/s from an unattended site
+    # nobody is listening to is the most expensive mistake available here. A
+    # console subscribing is what normally asks, so a tap run on its own with
+    # no console open produces an empty stream and looks broken — which is
+    # exactly how this first failed for somebody.
+    #
+    # So it asks for itself, on the same lease and the same renewal interval a
+    # console uses. Idempotent at the station: a console listening at the same
+    # time extends the lease rather than starting a second anything.
+    stations: set[str] = set()
+
+    def ask(station_id: str) -> None:
+        if args.no_demand:
+            return
+        try:
+            audio_demand.request(uuid.UUID(station_id))
+        except Exception as exc:  # noqa: BLE001 - a tap must not die on this
+            print(f"could not ask {station_id} for audio: {exc}",
+                  file=sys.stderr)
+
+    if args.station != "*":
+        stations.add(args.station)
+        ask(args.station)
+    else:
+        # Otherwise there is nothing to ask: a wildcard subscription cannot
+        # name a station until one publishes, and none will publish until it
+        # is asked. Broken out of the deadlock by looking them up.
+        try:
+            from backend.database.models.ground_station import GroundStation
+            from backend.database.session import PrivilegedSessionLocal
+
+            with PrivilegedSessionLocal() as db:
+                for (found,) in db.query(GroundStation.id).all():
+                    stations.add(str(found))
+        except Exception as exc:  # noqa: BLE001 - listening still works
+            print(f"could not list stations ({exc}); open the console's audio "
+                  "or pass --station <id>", file=sys.stderr)
+        for known in stations:
+            ask(known)
+        if not args.quiet and stations:
+            print(f"asking {len(stations)} station(s) for audio",
+                  file=sys.stderr)
+
     out = sys.stdout.buffer
     decoder: _Decoder | None = None
+    last_ask = time.monotonic()
     started = time.monotonic()
     deadline = started + args.seconds if args.seconds else None
     # Wall-clock position of the audio already written, so a gap between
@@ -148,9 +199,22 @@ def main() -> None:
 
     try:
         while deadline is None or time.monotonic() < deadline:
+            now = time.monotonic()
+            if now - last_ask >= audio_demand.RENEW_SECONDS:
+                last_ask = now
+                for known in list(stations):
+                    ask(known)
+
             message = pubsub.get_message(timeout=1.0)
             if not message or message.get("type") != "pmessage":
                 continue
+            channel = message["channel"]
+            if isinstance(channel, bytes):
+                channel = channel.decode()
+            found = channel.split("/")[1]
+            if found not in stations:
+                stations.add(found)
+                ask(found)
             try:
                 payload = json.loads(message["data"])
             except (TypeError, ValueError):
@@ -163,8 +227,7 @@ def main() -> None:
                 out.write(wav_header(rate, channels))
                 out.flush()
                 if not args.quiet:
-                    print(f"tapping {message['channel'].decode()} at {rate} Hz",
-                          file=sys.stderr)
+                    print(f"tapping {channel} at {rate} Hz", file=sys.stderr)
 
             # Silence for the time nothing was published, so what comes out is
             # as long as the wall clock says it should be. Without this a tap
