@@ -1738,11 +1738,10 @@ class Console:
         that matters is already at the other end, where it can tell those two
         apart; this end was refusing to ask the question at all.
 
-        Behind a `:target` reveal rather than offered outright: the common case
-        is a working station, and a code box under the words "Enrolled as" is
-        an invitation to re-point hardware that nobody asked to re-point. One
-        deliberate click, no script — the same idiom as the reset confirmation
-        below it.
+        Both states are the same shape — a line saying where this box stands,
+        then the card with the field in it. A code entered on a working station
+        is refused by the platform if it predates enrolment, so nothing here
+        needs a confirmation step to protect against a mistyped one.
         """
         if state["enrolled"]:
             # The organisation is echoed back by the platform and shown here
@@ -1755,18 +1754,11 @@ class Console:
             return (
                 f"<p class=sub>Enrolled as {html.escape(state['station'] or '')}"
                 f"{where}.</p>"
-                "<div class=field><a class='btn quiet' href='#recode'>"
-                "Enter a new code</a></div>"
-                "<div id=recode class=confirm>"
-                "<p class=sub>For a station whose credential has been revoked, "
-                "or one being moved to another platform. The code must have "
-                "been issued after this box enrolled; an older one is refused.</p>"
                 + self._code_form(
                     csrf, autofocus=False,
-                    label="Enter the new code",
+                    label="Enter a new code",
                     button="Re-enrol this station",
                 )
-                + "</div>"
             )
         return (
             "<p class=sub>Not set up yet.</p>"

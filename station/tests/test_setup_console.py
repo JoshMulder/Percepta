@@ -739,17 +739,17 @@ class ServedPageTests(unittest.TestCase):
         _, body = self.request("GET", "/connection")
         self.assertIn("Enrolled as Station1", body)
         self.assertIn("XXXX-XXXX-XXXX", body, "no way to enter a replacement code")
-        self.assertIn('action=\'/enrol\'', body)
+        self.assertIn("action='/enrol'", body)
+        # Offered directly, in the same shape as the unenrolled state: a line
+        # saying where the box stands, then the card with the field in it. No
+        # reveal to open first, and nothing styled unlike the rest of the page.
+        self.assertNotIn("#recode", body)
 
-    def test_the_new_code_field_takes_a_deliberate_click_to_reach(self):
-        # The common case is a working station, and a code box sitting under
-        # the words "Enrolled as" is an invitation to re-point hardware nobody
-        # asked to re-point. Revealed by :target, like the reset confirmation —
-        # one deliberate act, and no script.
+    def test_the_field_is_focused_only_when_it_is_the_first_thing_to_do(self):
+        # Unenrolled, the code is the whole job and the cursor belongs in it.
+        # On an enrolled station the page is being read rather than filled in,
+        # and stealing focus into a re-enrolment field would be wrong.
         _, body = self.request("GET", "/connection")
-        self.assertIn("XXXX-XXXX-XXXX", body)
-        # Unenrolled: offered outright, focused, and not hidden behind a reveal.
-        self.assertNotIn("id=recode", body)
         self.assertIn("autofocus", body)
 
     def test_the_platform_address_is_shown_and_is_not_editable(self):
