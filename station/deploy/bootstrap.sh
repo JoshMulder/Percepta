@@ -102,6 +102,23 @@ ask GSU_SITE_NAME "A name for this site (shown on the local setup page)" "ground
 # unreachable from anywhere at all.
 #
 # So this is not optional hardening; it is what makes the page exist.
+# **Before the first `docker compose` call that loads the project.**
+#
+# docker-compose.yml declares `env_file: - .env`, and compose treats a missing
+# env file as a hard error rather than an empty one. The password hashing below
+# is a `docker compose run`, so on a fresh clone — where this file does not
+# exist yet — compose refused before the container started, `set -e` ended
+# bootstrap on the spot, and the redirect that was there to hide build noise hid
+# the reason as well. What that looked like: answer three questions, type a
+# password, and get back a prompt with no .env, no container and nothing said.
+#
+# It survived because a *re-run* has a .env by then and skips the block
+# entirely, which is the path anybody debugging this would take.
+#
+# Created empty rather than written early: the answers this script is still
+# collecting are what belong in it, and it is rewritten in full below.
+[ -f "$ENV_FILE" ] || : > "$ENV_FILE"
+
 if [ -z "${GSU_SETUP_PASSWORD_HASH:-}" ]; then
   echo
   echo "The setup page needs a password. It is published to this host's"
@@ -109,9 +126,21 @@ if [ -z "${GSU_SETUP_PASSWORD_HASH:-}" ]; then
   read -r -s -p "Setup page password: " SETUP_PW || true
   echo
   if [ -n "${SETUP_PW:-}" ]; then
+    # stderr is deliberately not swallowed. The first run builds the image,
+    # which is minutes on a Pi, and hiding it left somebody watching a terminal
+    # that looked hung. The hash is the whole of stdout — `--stdin` prints no
+    # banner — so build progress on stderr cannot contaminate it.
+    echo "Hashing it. The first run builds the image, which takes a few minutes."
     GSU_SETUP_PASSWORD_HASH=$(printf '%s' "$SETUP_PW" \
-      | docker compose run --rm -T gsu setup-password --stdin 2>/dev/null | tail -1)
+      | docker compose run --rm -T gsu setup-password --stdin | tail -1) \
+      || die "Could not hash the setup password; the error above is docker
+compose's. Nothing was written."
     unset SETUP_PW
+    [ -n "$GSU_SETUP_PASSWORD_HASH" ] || die "The hasher produced nothing.
+Without a hash the agent demotes the setup page to the container's own
+loopback, which the published port cannot reach — so the page would be
+unreachable from anywhere at all. Stopping rather than writing a file that
+looks complete."
   fi
 fi
 GSU_SETUP_PASSWORD_HASH="${GSU_SETUP_PASSWORD_HASH:-}"
