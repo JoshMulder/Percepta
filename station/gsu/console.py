@@ -1701,7 +1701,49 @@ class Console:
         out.append("</div>")
         return "".join(out)
 
+    def _code_form(self, csrf: str, *, autofocus: bool, label: str,
+                   button: str) -> str:
+        # In a .field like every other row on the page, rather than the
+        # label-<br>-input it was: this is the one form an installer sees
+        # first, and it was the one that lined up with nothing.
+        focus = " autofocus" if autofocus else ""
+        return (
+            "<div class=card><form method=post action='/enrol'>"
+            + self._csrf_field(csrf) +
+            "<div class=field>"
+            f"<label for=token>{label}</label>"
+            "<input id=token class=code name=token type=text autocomplete=off "
+            f"placeholder='XXXX-XXXX-XXXX'{focus}>"
+            "</div>"
+            f"<div class=field><button type=submit>{button}</button></div>"
+            "</form></div>"
+        )
+
     def _section_enrol(self, state: dict, csrf: str) -> str:
+        """The code field, and why an enrolled station still gets one.
+
+        **A box that holds a credential is not necessarily a box the platform
+        accepts.** `enrolled` here means only that there is a credential file
+        on the disk. An admin who revokes it changes nothing this box can see
+        until a renewal fails, and possibly not then — so the page went on
+        reporting "Enrolled as …" with no way to type the replacement code an
+        admin had just issued. The only exit was a factory reset, which throws
+        away the device inventory, the events and the recordings to solve a
+        problem with one file.
+
+        The platform has always allowed this. `services/enrolment.claim`
+        accepts a token *issued after* the station enrolled precisely so a box
+        can be replaced or re-enrolled in service, and refuses only a stale one
+        that predates it — somebody's old code found written down. So the guard
+        that matters is already at the other end, where it can tell those two
+        apart; this end was refusing to ask the question at all.
+
+        Behind a `:target` reveal rather than offered outright: the common case
+        is a working station, and a code box under the words "Enrolled as" is
+        an invitation to re-point hardware that nobody asked to re-point. One
+        deliberate click, no script — the same idiom as the reset confirmation
+        below it.
+        """
         if state["enrolled"]:
             # The organisation is echoed back by the platform and shown here
             # because a code carries no visible clue whose it is. The mistake
@@ -1713,21 +1755,26 @@ class Console:
             return (
                 f"<p class=sub>Enrolled as {html.escape(state['station'] or '')}"
                 f"{where}.</p>"
+                "<div class=field><a class='btn quiet' href='#recode'>"
+                "Enter a new code</a></div>"
+                "<div id=recode class=confirm>"
+                "<p class=sub>For a station whose credential has been revoked, "
+                "or one being moved to another platform. The code must have "
+                "been issued after this box enrolled; an older one is refused.</p>"
+                + self._code_form(
+                    csrf, autofocus=False,
+                    label="Enter the new code",
+                    button="Re-enrol this station",
+                )
+                + "</div>"
             )
         return (
             "<p class=sub>Not set up yet.</p>"
-            "<div class=card><form method=post action='/enrol'>"
-            + self._csrf_field(csrf) +
-            # In a .field like every other row on the page, rather than the
-            # label-<br>-input it was: this is the one form an installer sees
-            # first, and it was the one that lined up with nothing.
-            "<div class=field>"
-            "<label for=token>Enter the code you were given</label>"
-            "<input id=token class=code name=token type=text autocomplete=off "
-            "placeholder='XXXX-XXXX-XXXX' autofocus>"
-            "</div>"
-            "<div class=field><button type=submit>Set this station up</button></div>"
-            "</form></div>"
+            + self._code_form(
+                csrf, autofocus=True,
+                label="Enter the code you were given",
+                button="Set this station up",
+            )
         )
 
     def _section_location(self, state: dict, csrf: str, banner: str = "") -> str:

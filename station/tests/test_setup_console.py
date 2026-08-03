@@ -699,6 +699,59 @@ class ServedPageTests(unittest.TestCase):
         _, summary = self.request("GET", "/")
         self.assertIn("/connection", summary)
 
+    def test_an_enrolled_station_can_still_be_given_a_new_code(self):
+        """A box holding a credential is not necessarily a box the platform
+        accepts.
+
+        `enrolled` means only that a credential file exists here. An admin who
+        revokes it changes nothing this box can see until a renewal fails — so
+        the page reported "Enrolled as …" with no way to type the replacement
+        code that admin had just issued, and the only exit was a factory reset:
+        throwing away the device inventory, the events and the recordings to
+        solve a problem with one file.
+
+        The platform has always permitted this. `services/enrolment.claim`
+        accepts a token issued *after* the station enrolled, exactly so a box
+        can be re-enrolled or replaced in service, and refuses only a stale one
+        that predates it. This end was refusing to ask.
+        """
+        from datetime import UTC, datetime, timedelta
+
+        from gsu.credentials import Enrolment
+
+        now = datetime.now(UTC)
+        self.agent.enrolment = Enrolment.from_response({
+            "station_id": "11111111-2222-3333-4444-555555555555",
+            "credential": {
+                "type": "bearer", "secret": "s",
+                "expires_at": (now + timedelta(hours=48)).isoformat(),
+                "renew_after": (now + timedelta(hours=24)).isoformat(),
+            },
+            "broker": {
+                "url": "redis://broker:6379/0", "username": "gsu:x",
+                "telemetry_topic": "gsu/x/telemetry", "audio_topic": "gsu/x/audio",
+                "command_topic": "cmd/gsu/x",
+            },
+            "station": {"name": "Station1", "timezone": "Pacific/Auckland"},
+            "config_version": 3,
+        })
+
+        _, body = self.request("GET", "/connection")
+        self.assertIn("Enrolled as Station1", body)
+        self.assertIn("XXXX-XXXX-XXXX", body, "no way to enter a replacement code")
+        self.assertIn('action=\'/enrol\'', body)
+
+    def test_the_new_code_field_takes_a_deliberate_click_to_reach(self):
+        # The common case is a working station, and a code box sitting under
+        # the words "Enrolled as" is an invitation to re-point hardware nobody
+        # asked to re-point. Revealed by :target, like the reset confirmation —
+        # one deliberate act, and no script.
+        _, body = self.request("GET", "/connection")
+        self.assertIn("XXXX-XXXX-XXXX", body)
+        # Unenrolled: offered outright, focused, and not hidden behind a reveal.
+        self.assertNotIn("id=recode", body)
+        self.assertIn("autofocus", body)
+
     def test_the_platform_address_is_shown_and_is_not_editable(self):
         """There is one platform. An installer confirms it; nobody retypes it."""
         pages = self.every_page()
