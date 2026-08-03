@@ -98,6 +98,28 @@ export function useAudio(enabled: boolean) {
           await ctx.audioWorklet.addModule("/pcm-worklet.js");
           if (cancelled) return;
           const node = new AudioWorkletNode(ctx, "pcm-player");
+          // The ring buffer's own account of itself, once a second. Every
+          // stage before the browser has been measured and is clean, so this
+          // is the one place left without numbers — and "Chrome chops, Edge
+          // does not" is not a diagnosis.
+          //
+          // underruns  the ring ran dry; each one costs a full re-buffer, so
+          //            even one a second is audible as chopping
+          // trims      a burst overflowed the cap and audio was discarded
+          // fed/consumed  milliseconds in against milliseconds out; these have
+          //            to match or no buffer depth can save it
+          // min/maxDepth  how close the ring came to empty
+          node.port.onmessage = (event) => {
+            const stat = event.data?.stat;
+            if (!stat) return;
+            console.info(
+              "[audio] underruns %d trims %d | fed %dms consumed %dms | " +
+              "depth %d-%dms (prebuffer %dms cap %dms) chunks %d",
+              stat.underruns, stat.trims, stat.fedMs, stat.consumedMs,
+              stat.minDepthMs, stat.maxDepthMs, stat.prebufferMs, stat.capMs,
+              stat.chunks,
+            );
+          };
           node.connect(gain);
           nodeRef.current = node;
           setEngine("worklet");

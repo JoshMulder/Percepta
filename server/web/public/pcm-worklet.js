@@ -19,6 +19,7 @@
 // What it measures has to be the *arrival interval*, not the chunk. Those were
 // the same thing until audio became Opus and the main thread began posting one
 // 20 ms packet at a time; see BURST_LEAD_S below for what that cost.
+
 // How much to hold before playing, when the chunks cannot say.
 //
 // The sizing below measures the chunk, and that worked while a chunk was what
@@ -48,6 +49,15 @@ class PcmPlayer extends AudioWorkletProcessor {
     // interval is unusable; anything much larger is latency nobody asked for.
     this.minPrebuffer = Math.floor(sampleRate * BURST_LEAD_S);
     this.prebuffer = this.minPrebuffer;
+    // Instrumentation. Chrome chops and Edge does not on identical bytes, and
+    // every stage before the browser has been measured clean — so this is the
+    // one place left with no numbers. Reported once a second rather than per
+    // quantum: `process` runs about four hundred times a second and a message
+    // per call would itself be the fault being looked for.
+    this.stat = {
+      underruns: 0, trims: 0, chunks: 0, fed: 0, consumed: 0,
+      minDepth: Infinity, maxDepth: 0,
+    };
     this.maxBuffer = Math.floor(sampleRate * 0.3);
     this.port.onmessage = (e) => {
       if (e.data && e.data.cmd === "flush") {
@@ -89,13 +99,47 @@ class PcmPlayer extends AudioWorkletProcessor {
         this.buf[this.w % this.size] = chunk[i];
         this.w += 1;
       }
-      if (this.w - this.r > this.maxBuffer) this.r = this.w - this.prebuffer;
+      this.stat.chunks += 1;
+      this.stat.fed += chunk.length;
+      if (this.w - this.r > this.maxBuffer) {
+        this.stat.trims += 1;
+        this.r = this.w - this.prebuffer;
+      }
     };
   }
 
   process(inputs, outputs) {
     const out = outputs[0][0];
-    if (!this.playing && this.w - this.r < this.prebuffer) {
+    const depth = this.w - this.r;
+    if (depth < this.stat.minDepth) this.stat.minDepth = depth;
+    if (depth > this.stat.maxDepth) this.stat.maxDepth = depth;
+    this.stat.consumed += out.length;
+    if (this.stat.consumed >= sampleRate) {
+      const ms = (n) => Math.round((n / sampleRate) * 1000);
+      this.port.postMessage({
+        stat: {
+          underruns: this.stat.underruns,
+          trims: this.stat.trims,
+          chunks: this.stat.chunks,
+          fedMs: ms(this.stat.fed),
+          consumedMs: ms(this.stat.consumed),
+          minDepthMs: ms(this.stat.minDepth === Infinity ? 0 : this.stat.minDepth),
+          maxDepthMs: ms(this.stat.maxDepth),
+          prebufferMs: ms(this.prebuffer),
+          capMs: ms(this.maxBuffer),
+          playing: this.playing,
+        },
+      });
+      this.stat.underruns = 0;
+      this.stat.trims = 0;
+      this.stat.chunks = 0;
+      this.stat.fed = 0;
+      this.stat.consumed = 0;
+      this.stat.minDepth = Infinity;
+      this.stat.maxDepth = 0;
+    }
+
+    if (!this.playing && depth < this.prebuffer) {
       out.fill(0);
       return true;
     }
@@ -106,6 +150,7 @@ class PcmPlayer extends AudioWorkletProcessor {
         this.r += 1;
       } else {
         out[i] = 0;
+        if (this.playing) this.stat.underruns += 1;
         this.playing = false; // underrun: re-buffer before resuming
       }
     }
