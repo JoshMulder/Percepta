@@ -450,11 +450,29 @@ class RtlSdrFrontEnd:
         not a recoverable fault. `rtl2832.RtlDevice.close` stops the reader and
         joins it before releasing the device; all this has to do is not race an
         open that is still in flight.
+
+        **The wait is short on purpose, and this is load-bearing.** `shutdown`
+        is called from `Agent.build_devices`, which runs on the sensing loop —
+        the same loop that reads the power sensor and the floodlight. When a
+        dongle is unplugged its open thread is stuck inside librtlsdr probing a
+        device that is not there, and rediscovery calls `shutdown` every thirty
+        seconds. A five-second join there froze the whole loop for five seconds,
+        so power and floodlight — publishing on that loop and working perfectly
+        — went stale on the console and flashed a fault every half minute. The
+        failing radio was crossing wires into panels that had nothing to do
+        with it.
+
+        The join does not need to be long. `_open` acquires the lock and checks
+        `_closing` before it installs anything (see there), so an open still in
+        flight cannot resurrect a torn-down device however late it finishes —
+        the daemon thread simply closes the dongle it opened and returns. The
+        wait is a brief settle, not the safety mechanism; the `_closing` check
+        is.
         """
         self._closing = True
         opening = self._opening
         if opening is not None and opening.is_alive():
-            opening.join(timeout=5.0)
+            opening.join(timeout=0.5)
         self._teardown()
 
     # --- plumbing ---------------------------------------------------------

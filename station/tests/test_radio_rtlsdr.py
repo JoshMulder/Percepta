@@ -335,6 +335,46 @@ class FrontEndTests(unittest.TestCase):
         self.assertEqual(front_end.status, "failed")
         self.assertFalse(front_end.describe().present)
 
+    def test_shutdown_does_not_wait_out_a_stuck_open(self):
+        # `shutdown` is called from `Agent.build_devices`, on the sensing loop
+        # that also publishes power and the floodlight. An unplugged dongle sits
+        # inside librtlsdr's open for seconds, and rediscovery calls shutdown
+        # every thirty seconds — a long join there froze that loop and flashed a
+        # fault across the working panels each time. It must return promptly and
+        # let the daemon open thread finish on its own.
+        import threading
+        import time
+
+        blocking = threading.Event()
+        self.addCleanup(blocking.set)
+
+        def stuck_factory(sample_rate=SAMPLE_RATE, offset_hz=OFFSET_HZ):
+            dongle = FakeDongle(sample_rate, offset_hz)
+
+            def stuck_open(*_args, **_kwargs):
+                blocking.wait(10.0)          # librtlsdr, probing nothing
+                raise rtl2832.RtlError("no device")
+
+            dongle.open = stuck_open
+            self.dongles.append(dongle)
+            return dongle
+
+        rtl2832.RtlDevice = stuck_factory
+        front_end = RtlSdrFrontEnd()
+        front_end._next_attempt = 0.0
+        front_end._ensure_open()
+        for _ in range(50):                  # wait until the open is in flight
+            if front_end._opening and front_end._opening.is_alive():
+                break
+            time.sleep(0.01)
+
+        start = time.monotonic()
+        front_end.shutdown()
+        self.assertLess(
+            time.monotonic() - start, 2.0,
+            "shutdown blocked the sensing loop waiting on a stuck open",
+        )
+
     def test_a_failed_open_backs_off(self):
         """An unattended box must not hammer a USB device once a second."""
         self.open_error = rtl2832.RtlError("no RTL-SDR device found")
