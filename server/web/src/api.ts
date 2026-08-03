@@ -173,7 +173,16 @@ export const api = {
   stationConfig: (id: string) =>
     request<StationConfig>(`/api/stations/${id}/config`),
 
-  saveStationConfig: (id: string, body: Omit<StationConfig, "id" | "config_version">) =>
+  /** `is_simulated` and `enrolled` are read-only: the first is written from
+   *  the station's own health frame, the second is a fact about the record.
+   *  Sending either would be a value the server ignores. */
+  saveStationConfig: (
+    id: string,
+    body: Omit<
+      StationConfig,
+      "id" | "config_version" | "is_simulated" | "enrolled"
+    >,
+  ) =>
     request<StationConfig>(`/api/stations/${id}/config`, {
       method: "PUT",
       body: JSON.stringify(body),

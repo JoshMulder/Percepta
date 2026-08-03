@@ -55,7 +55,12 @@ class StationConfigUpdate(BaseModel):
     map_min_zoom: int = Field(ge=MIN_ZOOM_FLOOR, le=MAX_ZOOM_CEILING)
     map_max_zoom: int = Field(ge=MIN_ZOOM_FLOOR, le=MAX_ZOOM_CEILING)
     map_radius_km: float = Field(gt=0, le=MAX_RADIUS_KM)
-    is_simulated: bool = False
+    # No `is_simulated`. The station reports per device whether its data is
+    # synthetic, and `_reconcile_simulated` writes this row from the health
+    # frame whenever it changes — so a value typed here was overwritten by the
+    # box within half a minute. A control that silently does nothing is worse
+    # than no control, and it is the same "two places to set one fact" that
+    # the position below refuses, arriving from the other direction.
 
 
 class StationConfigOut(BaseModel):
@@ -69,10 +74,15 @@ class StationConfigOut(BaseModel):
     map_max_zoom: int
     map_radius_km: float
     is_simulated: bool
+    #: Whether the position and name are still editable. Sent because the
+    #: form has to know: they are settled at enrolment and refused after
+    #: it, and a field that looks editable and then 409s is a worse way to
+    #: learn that than one that never offered.
+    enrolled: bool
     config_version: int
 
 
-def _out(station: GroundStation) -> StationConfigOut:
+def _out(station: GroundStation, *, enrolled: bool) -> StationConfigOut:
     return StationConfigOut(
         id=str(station.id),
         name=station.name,
@@ -84,6 +94,7 @@ def _out(station: GroundStation) -> StationConfigOut:
         map_max_zoom=station.map_max_zoom,
         map_radius_km=station.map_radius_km,
         is_simulated=station.is_simulated,
+        enrolled=enrolled,
         config_version=station.config_version,
     )
 
@@ -97,7 +108,7 @@ def get_config(
     station = db.get(GroundStation, station_id)
     if station is None:
         raise HTTPException(status_code=404, detail="Station not available")
-    return _out(station)
+    return _out(station, enrolled=_has_enrolled(db, station_id))
 
 
 @router.put("", response_model=StationConfigOut)
@@ -170,7 +181,6 @@ def update_config(
         "map_min_zoom": station.map_min_zoom,
         "map_max_zoom": station.map_max_zoom,
         "map_radius_km": station.map_radius_km,
-        "is_simulated": station.is_simulated,
     }
 
     station.name = body.name.strip()
@@ -181,7 +191,6 @@ def update_config(
     station.map_min_zoom = body.map_min_zoom
     station.map_max_zoom = body.map_max_zoom
     station.map_radius_km = body.map_radius_km
-    station.is_simulated = body.is_simulated
 
     # Words for the new coordinates, in the same transaction, so the row never
     # carries one position's numbers beside another's town. Only on an actual
@@ -204,7 +213,6 @@ def update_config(
         "map_min_zoom": station.map_min_zoom,
         "map_max_zoom": station.map_max_zoom,
         "map_radius_km": station.map_radius_km,
-        "is_simulated": station.is_simulated,
     }
     changed = {k: [before[k], after[k]] for k in before if before[k] != after[k]}
 
@@ -213,7 +221,7 @@ def update_config(
     # read runs with no org set, RLS fails closed as designed, and refreshing
     # the instance raises ObjectDeletedError rather than returning the row we
     # just wrote. Read while the transaction that wrote it is still open.
-    result = _out(station)
+    result = _out(station, enrolled=_has_enrolled(db, station_id))
     db.commit()
 
     if changed:

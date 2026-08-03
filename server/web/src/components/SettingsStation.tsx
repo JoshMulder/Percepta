@@ -296,7 +296,6 @@ function StationConfigForm({
         map_min_zoom: config.map_min_zoom,
         map_max_zoom: config.map_max_zoom,
         map_radius_km: config.map_radius_km,
-        is_simulated: config.is_simulated,
       });
       setConfig(saved);
       setMessage("Saved.");
@@ -335,45 +334,83 @@ function StationConfigForm({
             required
           />
         </label>
-        {/* Read-only. Position is owned by the station: it is set on the box
-            by whoever is standing at the site, reported up in the health
-            frame, and written here. Two places to set one fact is two places
-            for it to be wrong, and the one with a person at it wins. */}
-        {/* Elevation sits with the position because it is part of it: the
-            station's ADS-B barometric correction is computed from it, and a
+        {/* Set here, before enrolment, and frozen by it.
+
+            These were read-only with a note saying to set them on the
+            station's own setup page. That page does not offer them: it says
+            coordinates are "settled at commissioning and frozen with the
+            enrolment" and has no field for either. So each side pointed at
+            the other and there was nowhere at all to say where a station is —
+            which left the ADS-B altitude correction permanently off and every
+            bearing computed from nothing.
+
+            This is that place. The API has always accepted these before
+            enrolment and refused them after (409), for the owner's reason: a
+            box that has moved is recommissioned rather than edited, or its
+            history silently describes two sites. The form follows that rule
+            rather than discovering it from an error.
+
+            Elevation sits with the coordinates because it is part of the same
+            fact: the barometric correction is computed from it, and a
             correction referenced to the wrong height is out by that height on
-            every aircraft. Read-only here for the same reason the coordinates
-            are — settled at commissioning, frozen after enrolment. */}
-        <div className="field">
-          <span>Elevation</span>
-          <div className="reported-value">
-            {config.elevation_m === null ? (
-              <em>Not set. The altitude correction will not run.</em>
-            ) : (
-              <code>{config.elevation_m} m</code>
-            )}
-          </div>
-        </div>
-        <div className="field">
-          <span>Position</span>
-          <div className="reported-value">
-            {config.latitude === null || config.longitude === null ? (
-              <em>Not set. Set it on the station's own setup page.</em>
-            ) : (
-              <code>
-                {config.latitude.toFixed(5)}, {config.longitude.toFixed(5)}
-              </code>
-            )}
-          </div>
-        </div>
-        <label className="field checkbox-field">
+            every aircraft. */}
+        <label className="field">
+          <span>Latitude</span>
           <input
-            type="checkbox"
-            checked={config.is_simulated}
-            onChange={(e) => set("is_simulated", e.target.checked)}
+            type="number"
+            step="0.00001"
+            min={-90}
+            max={90}
+            value={config.latitude ?? ""}
+            disabled={config.enrolled}
+            onChange={(e) =>
+              set("latitude", e.target.value === "" ? null : Number(e.target.value))
+            }
+            placeholder="-43.48972"
           />
-          <span>This station's data is synthetic</span>
         </label>
+        <label className="field">
+          <span>Longitude</span>
+          <input
+            type="number"
+            step="0.00001"
+            min={-180}
+            max={180}
+            value={config.longitude ?? ""}
+            disabled={config.enrolled}
+            onChange={(e) =>
+              set("longitude", e.target.value === "" ? null : Number(e.target.value))
+            }
+            placeholder="172.53194"
+          />
+        </label>
+        <label className="field">
+          <span>Elevation</span>
+          <input
+            type="number"
+            step="1"
+            min={-500}
+            max={100000}
+            value={config.elevation_m ?? ""}
+            disabled={config.enrolled}
+            onChange={(e) =>
+              set("elevation_m", e.target.value === "" ? null : Number(e.target.value))
+            }
+            placeholder="metres above sea level"
+          />
+          <span className="settings-note">
+            {config.enrolled
+              ? "Settled at enrolment. Re-enrol the station to move it."
+              : config.elevation_m === null
+                ? "Without it the ADS-B altitude correction will not run."
+                : "Carried to the box in its enrolment response."}
+          </span>
+        </label>
+        {/* No "this station's data is synthetic" checkbox. The station reports
+            per device whether its data is synthetic, and the ingest writes the
+            row from the health frame whenever it changes — so anything typed
+            here was overwritten by the box within half a minute. It was a
+            control that silently did nothing. */}
       </section>
 
       <section className="settings-section">

@@ -388,7 +388,14 @@ export interface StationConfig {
   elevation_m: number | null;
   map_max_zoom: number;
   map_radius_km: number;
+  /** Read-only here. The station reports per device whether its data is
+   *  synthetic and the ingest writes this from the health frame, so it is
+   *  something to display rather than something to set. */
   is_simulated: boolean;
+  /** Whether the name and position are still editable. They are settled at
+   *  enrolment and refused with a 409 after it, so the form asks rather than
+   *  offering a field that will be rejected. */
+  enrolled: boolean;
   config_version: number;
 }
 
