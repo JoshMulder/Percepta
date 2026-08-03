@@ -95,7 +95,19 @@ export function useAudio(enabled: boolean) {
       // context, which is the common case on a site LAN.
       if (window.isSecureContext && ctx.audioWorklet) {
         try {
-          await ctx.audioWorklet.addModule("/pcm-worklet.js");
+          // **Hashed, not a fixed name.** As `/pcm-worklet.js` out of
+          // `public/` this had one URL for ever, so a browser that had cached
+          // it once kept using it across every deploy — and an AudioWorklet
+          // module is cached hard. A fixed buffer-sizing bug went on being
+          // heard in one Chrome profile while the same build was clean in
+          // Edge and in incognito, which cost a long detour through three
+          // parts of the system that were already working.
+          //
+          // From `src/` with `new URL`, Vite emits it as a content-hashed
+          // asset like everything else, so a changed worklet is a changed URL
+          // and there is nothing left to serve stale.
+          await ctx.audioWorklet.addModule(
+            new URL("./pcm-worklet.js", import.meta.url).href);
           if (cancelled) return;
           const node = new AudioWorkletNode(ctx, "pcm-player");
           // The ring buffer's own account of itself, once a second. Every
