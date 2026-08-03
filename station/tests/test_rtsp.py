@@ -202,6 +202,39 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(len(calls), 2, "the fallback did not run")
         self.assertNotIn("-skip_frame", calls[1])
 
+    def test_a_camera_is_asked_about_keyframes_once_not_every_frame(self):
+        """Otherwise the preview pays the keyframe budget for ever.
+
+        Eight seconds of waiting and a second subprocess, per frame, against a
+        preview that refreshes every two and a half — on a camera that will
+        never answer differently, because whether its keyframes are flagged is
+        a property of the camera.
+        """
+        jpeg = a_real_jpeg()
+        commands = []
+
+        def fake_run(command, **kwargs):
+            commands.append(command)
+            if "-skip_frame" in command:
+                raise subprocess.TimeoutExpired(cmd="ffmpeg", timeout=8)
+            return self.run_result(stdout=jpeg)
+
+        camera = fitted_camera()
+        with mock.patch("gsu.camera.rtsp.subprocess.run", side_effect=fake_run):
+            self.assertIsNotNone(camera.capture())      # learns it, the slow way
+            commands.clear()
+            self.assertIsNotNone(camera.capture())      # and does not ask again
+            self.assertIsNotNone(camera.capture())
+
+        self.assertEqual(len(commands), 2, "one ffmpeg per capture after the first")
+        for command in commands:
+            self.assertNotIn("-skip_frame", command)
+
+    def test_what_was_learned_does_not_survive_a_rebuild(self):
+        # The address, the substream and the encoder can all change under a
+        # driver, and the cost of asking again is one slow capture.
+        self.assertIsNone(fitted_camera()._skip_frame_works)
+
     def test_the_two_attempts_together_do_not_exceed_the_old_timeout(self):
         # Or the preview loop's own pacing is broken by a camera that is merely
         # slow, which is the failure this was traded against.

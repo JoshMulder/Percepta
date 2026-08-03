@@ -245,6 +245,11 @@ class RtspCamera:
         self.last_bytes = 0
         self.last_capture_ms = 0.0
         self._last_dims: tuple[int, int] | None = None
+        #: Whether this camera's keyframes are flagged where `-skip_frame
+        #: nokey` can see them. None until a capture has found out. False makes
+        #: every later capture skip straight to the plain decode — see
+        #: `capture`, and note this is per driver, so a rebuild asks again.
+        self._skip_frame_works: bool | None = None
 
     # --- the interface ----------------------------------------------------
 
@@ -326,9 +331,31 @@ class RtspCamera:
         # the second. A camera that flags its keyframes answers the first with
         # a clean picture; one that does not still gets a preview. The two
         # budgets together are the timeout this always had.
+        #
+        # **And the answer is remembered.** Asking again on every capture makes
+        # a camera that will never answer it pay the keyframe budget for every
+        # frame, for ever: eight seconds of waiting and a second subprocess,
+        # against a preview that refreshes every two and a half. It is a
+        # property of the camera, so it is worth exactly one capture to learn.
+        # Held on the driver, so a rebuild asks again — the address, the
+        # substream and the encoder can all change under it, and the cost of
+        # being wrong is one slow capture.
         try:
-            done, last_error, timed_out = self._one_capture(
-                ["-skip_frame", "nokey"], KEYFRAME_WAIT_S)
+            done, last_error, timed_out = (None, "", True)
+            tried_keyframes = self._skip_frame_works is not False
+            if tried_keyframes:
+                done, last_error, timed_out = self._one_capture(
+                    ["-skip_frame", "nokey"], KEYFRAME_WAIT_S)
+                if done is not None:
+                    self._skip_frame_works = True
+                elif timed_out:
+                    if self._skip_frame_works is None:
+                        log.info(
+                            "%s does not flag its keyframes within %.0fs; "
+                            "decoding without waiting for one from now on.",
+                            redact(self._url), KEYFRAME_WAIT_S,
+                        )
+                    self._skip_frame_works = False
             if done is None and timed_out:
                 # **A timeout, and only a timeout, earns the second attempt.**
                 #
@@ -337,8 +364,16 @@ class RtspCamera:
                 # refused, no route — will say the same thing again without
                 # `-skip_frame`, so retrying it just doubles the subprocesses
                 # aimed at a camera that has already answered clearly.
+                #
+                # The whole budget when the keyframe attempt was skipped: there
+                # is nothing else spending it, and a camera already known not to
+                # flag keyframes should not also be given less time than one
+                # that has never been tried.
                 done, last_error, timed_out = self._one_capture(
-                    [], CAPTURE_TIMEOUT_S - KEYFRAME_WAIT_S)
+                    [],
+                    CAPTURE_TIMEOUT_S - KEYFRAME_WAIT_S if tried_keyframes
+                    else CAPTURE_TIMEOUT_S,
+                )
         except OSError as exc:
             return self._failed(f"ffmpeg could not be run: {exc}")
 
