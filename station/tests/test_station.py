@@ -1216,6 +1216,40 @@ class LocalStreamViewerTests(unittest.TestCase):
         self.assertGreater(tee.local_resyncs, 0)
         self.assertEqual(tee.stats()["local_resyncs"], tee.local_resyncs)
 
+    def test_the_code_is_taken_out_of_whatever_was_pasted(self):
+        """The console offers `CODE@host#fingerprint` as one string to carry.
+
+        Somebody handed a string pastes the string, and the whole of it went
+        to the platform as the token: 103 characters against a 64-character
+        field, which is a validation failure that reached the technician as
+        "the box sent something the platform could not read. This is a bug."
+
+        The two extra facts are ones the box already has — the address came
+        from bootstrap, and the fingerprint pins a CA that means nothing once
+        the platform is behind a publicly trusted certificate.
+        """
+        from gsu.enrolment import split_code
+
+        code = "CZS2-JQFW-ZH6E"
+        host = "percepta.example.com"
+        fingerprint = "a" * 64
+
+        self.assertEqual(split_code(f"{code}@{host}#{fingerprint}"),
+                         (code, host, fingerprint))
+        self.assertEqual(split_code(f"{code}@{host}"), (code, host, ""))
+        self.assertEqual(split_code(f"{code}#{fingerprint}"),
+                         (code, "", fingerprint))
+        self.assertEqual(split_code(f"  {code}  "), (code, "", ""))
+
+    def test_the_code_that_is_sent_fits_the_field_it_is_sent_to(self):
+        # The whole point: the contract caps `token` at 64 characters, and the
+        # string the console hands out is longer than that on any real host.
+        from gsu.enrolment import split_code
+
+        pasted = "CZS2-JQFW-ZH6E@percepta.aeronavics.com#" + "a" * 64
+        self.assertGreater(len(pasted), 64, "the bundle used to fit after all")
+        self.assertLessEqual(len(split_code(pasted)[0]), 64)
+
     def test_removing_a_viewer_closes_it(self):
         from gsu.transport.stream import LocalViewer
         tee = self.tee()

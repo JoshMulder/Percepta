@@ -113,6 +113,39 @@ def _explain(body: str) -> str:
     return "; ".join(parts)
 
 
+def split_code(entered: str) -> tuple[str, str, str]:
+    """Take the code out of whatever was pasted in.
+
+    The platform's console offers the code with two other facts folded in, as
+    `CODE@host#fingerprint` — one string for an installer to carry. Only the
+    code is a credential. The host is the platform's address, which every box
+    has already been given by `bootstrap.sh`, and the fingerprint pins the
+    platform's own CA, which is meaningless once it is behind a proxy with a
+    publicly trusted certificate.
+
+    **Somebody handed a string will paste the string**, and until this the
+    whole of it went to the platform as the token. At 103 characters against a
+    64-character field that is a validation failure, which reached the
+    technician as "the box sent something the platform could not read. This is
+    a bug." It was not wrong.
+
+    Returns (code, host, fingerprint); the last two are "" when absent. Both
+    are parsed rather than discarded so the caller can say when they disagree
+    with this box's configuration — enrolling against the wrong platform is
+    the failure the fingerprint existed to prevent, and silently ignoring the
+    fields would reintroduce it by another route.
+    """
+    text = entered.strip()
+    code, _, rest = text.partition("@")
+    if rest:
+        host, _, fingerprint = rest.partition("#")
+    else:
+        # `CODE#fingerprint`, from a platform that states no host.
+        host = ""
+        code, _, fingerprint = code.partition("#")
+    return code.strip(), host.strip(), fingerprint.strip()
+
+
 @dataclass(frozen=True)
 class Standing:
     """What `/api/enrol/status` says. Thin by design."""
@@ -146,7 +179,21 @@ class EnrolmentClient:
             raise clock.ClockImplausible(
                 f"Refusing to enrol: {reason} Sync time and try again."
             )
-        body = self._post("/api/enrol", {"token": token.strip(), "hardware": hardware})
+        code, host, _ = split_code(token)
+        if host and host.lower() not in self.platform_url.lower():
+            # Not fatal: the address in the code is the name the operator
+            # happened to reach the console by, and a box legitimately reaches
+            # the same platform by another — a LAN address, a different proxy
+            # name. But it is also exactly what enrolling the right box against
+            # the wrong platform looks like, so it is said out loud rather than
+            # dropped on the floor.
+            log.warning(
+                "The code names %s and this station is configured for %s. "
+                "Enrolling against the configured address; if that is not the "
+                "platform the code came from, this will be refused.",
+                host, self.platform_url,
+            )
+        body = self._post("/api/enrol", {"token": code, "hardware": hardware})
         return Enrolment.from_response(body)
 
     def renew(self, secret: str) -> Enrolment:
