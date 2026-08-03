@@ -93,10 +93,20 @@ describe("a fitted sensor", () => {
 });
 
 describe("data outranks the slot report", () => {
-  it("shows readings that are actually arriving", () => {
-    // A slot reported empty while its stream is live is a contradiction, and
-    // showing what the station is really sending is the safer half of it.
+  // This is the responsiveness path, not a corner case. `fitted` comes from the
+  // health frame, which the station only re-emits every 30 seconds and only
+  // updates after its own rediscovery notices a plugged-in sensor — while the
+  // telemetry stream for that sensor starts on the next tick. `statusOf` used
+  // to short-circuit to "not-fitted" on a `fitted === false` health verdict
+  // before ever consulting the reading, so a sensor coming online sat red for
+  // up to a minute and people reloaded to clear it. Deferring to these two
+  // lines is what makes it flip the instant a reading arrives.
+  it("shows a reading that is arriving even while health still says empty", () => {
     expect(panelStatus(NOW, NOW, STALE, false)).toBe("live");
+  });
+
+  it("stays not-fitted while health says empty and nothing is arriving", () => {
+    expect(panelStatus(null, NOW, STALE, false)).toBe("not-fitted");
   });
 });
 

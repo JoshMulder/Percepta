@@ -595,15 +595,12 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
   };
 
   const statusOf = (kind: StreamKind) => {
-    // The station's own statement comes first, because it is a statement
-    // rather than an inference. A slot with nothing selected is Not fitted the
-    // moment the first health frame lands — no grace period, and it never
-    // becomes a fault however long you wait.
-    // The stream's own frame first: it arrives at the stream's cadence, where
-    // the health frame that carries the same fact is every 30 seconds. On a
-    // console that has just switched station that is the difference between
-    // knowing now and showing a red X for half a minute.
-    if (unfitted[kind] || fittedFor(kind) === false) return "not-fitted" as const;
+    // The stream's own current self-report first, because it refreshes on every
+    // frame. `unfitted[kind]` is set the moment a frame says `available: false,
+    // not_fitted` and cleared the moment one carries readings again — so a slot
+    // that gains or loses a sensor flips here immediately, with no reload and no
+    // wait for the 30-second health frame.
+    if (unfitted[kind]) return "not-fitted" as const;
 
     // A stream that declares itself unavailable is arriving but carries no
     // readings. It used to count as live, on the reasoning that the station is
