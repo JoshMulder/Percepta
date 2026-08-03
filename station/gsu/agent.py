@@ -144,6 +144,11 @@ class Agent:
         #: front end is a single device with a single reader, so exactly one of
         #: the two callers may read it in any given interval.
         self._radio_pumped = False
+        #: The gate state the last published `radio` frame carried, as
+        #: (squelch_open, monitor). None until one has gone out. Compared
+        #: against on every sub-tick so an edge does not wait for the sweep —
+        #: see `_pump_radio`.
+        self._radio_gate: tuple[bool, bool] | None = None
         #: Monotonic time of the last receiver read, held across sweeps so the
         #: audio timeline is the wall clock rather than the sum of the
         #: intervals we intended to sleep for. None until the first pump.
@@ -1160,10 +1165,15 @@ class Agent:
             reading.to_payload() if reading is not None
             else self.unavailable_payload("power", reports)
         )
-        self._publish_telemetry(
-            radio_payload if radio_payload is not None
-            else self.unavailable_payload("radio", reports)
-        )
+        if radio_payload is not None:
+            self._publish_radio(radio_payload)
+        else:
+            # The console has been told the stream is unavailable, so whatever
+            # the gate does next is news to it whichever way it lands. A
+            # receiver that comes back must not have its first state swallowed
+            # as "unchanged" against a reading from before it went away.
+            self._radio_gate = None
+            self._publish_telemetry(self.unavailable_payload("radio", reports))
         self._publish_telemetry(
             {"kind": "light", "on": self.light.on} if self.light is not None
             else self.unavailable_payload("light", reports)
@@ -1187,19 +1197,51 @@ class Agent:
 
         self._update_link_state()
 
-    def _pump_radio(self, dt: float) -> dict | None:
+    def _pump_radio(self, dt: float, publish_gate_change: bool = False) -> dict | None:
         """Read the receiver once, publish any audio, keep the telemetry.
 
         The single reader of the front end. Audio goes out the moment it
         exists, because it is a stream; the telemetry waits for the next sweep,
         because a signal level is a reading and eight a second is seven more
         than anybody needs.
+
+        `publish_gate_change` is for the callers with no sweep behind them —
+        see the gate note below. The sweep passes nothing, because it is about
+        to publish this very payload a few lines later.
         """
         if self.radio is None:
             return None
         telemetry, audio = self.radio.tick(dt)
         self._radio_telemetry = telemetry
         self._radio_pumped = True
+
+        # **The gate is an edge, not a reading, and it does not wait.**
+        #
+        # Everything else on this payload is a level: rssi, the floor, the
+        # threshold. Once a second is plenty for those and the reason the rest
+        # of the frame waits for the sweep. `squelch_open` is not one of them —
+        # it is the console's channel-open light, and a light that comes on
+        # after the sound it is announcing is worse than no light, because the
+        # operator reads it as a second, later event.
+        #
+        # Audio leaves on the sub-tick that produced it; the frame saying the
+        # gate opened left on the next sweep, up to a second behind. So the
+        # console lit the LED most of a second after it started playing, and
+        # dropped it most of a second after the audio stopped.
+        #
+        # Publishing the edge does not replace the fixed cadence — the sweep
+        # still sends this stream every second whether anything changed or not,
+        # which is what `transport.md` requires of a droppable stream. It adds a
+        # frame when the gate moves, and the receiver's hang time bounds how
+        # often that can be: a signal sitting on the threshold cannot close more
+        # than once per HANG_SECONDS, so this is a few hundred bytes on an over,
+        # not a new cadence.
+        if publish_gate_change:
+            gate = (bool(telemetry.get("squelch_open")),
+                    bool(telemetry.get("monitor")))
+            if gate != self._radio_gate:
+                self._publish_radio(telemetry)
+
         if audio is None:
             return None
         # Recorded whether or not it can be sent, and whether or not anybody
@@ -1226,11 +1268,12 @@ class Agent:
     def _sleep_pumping_radio(self, until: float) -> None:
         """Wait for the next full sweep, running the radio at AUDIO_TICK_S.
 
-        The radio's own telemetry is not published here — that stays on the
-        one-second cadence with every other reading, because a signal level is
-        a reading and nobody needs it eight times a second. Only the audio goes
-        out, and only when the squelch is open, which is the same gate as
-        before and the reason this costs nothing on a quiet channel.
+        The radio's own readings are not published here — the levels stay on
+        the one-second cadence with everything else, because a signal level is
+        a reading and nobody needs it eight times a second. What does go out is
+        the audio, only when the squelch is open, and a `radio` frame on the
+        sub-tick where the gate itself moves, which is the one field on that
+        payload nobody can wait a second for. See `_pump_radio`.
         """
         # Paced against a deadline, and demodulating the time that actually
         # passed — not the interval we meant to sleep for.
@@ -1278,7 +1321,11 @@ class Agent:
                 # Clamped, so a stalled box asks for a burst it cannot use
                 # rather than an unbounded one. Falling behind after a stall is
                 # right — stale airband audio is worth less than the gap.
-                self._pump_radio(min(elapsed, AUDIO_TICK_S * 4))
+                # The gate change goes out from here, because the next sweep is
+                # up to a second away and the console's channel-open light must
+                # not trail the audio it is announcing.
+                self._pump_radio(min(elapsed, AUDIO_TICK_S * 4),
+                                 publish_gate_change=True)
             except Exception:  # noqa: BLE001 - a dead loop is a dead site
                 log.exception("Radio sub-tick failed; continuing.")
 
@@ -1385,6 +1432,18 @@ class Agent:
 
     def _publish_telemetry(self, payload: dict) -> bool:
         return self._publish(TELEMETRY, self._stamp_simulated(payload))
+
+    def _publish_radio(self, payload: dict) -> bool:
+        """Publish a `radio` frame, remembering the gate state it carried.
+
+        Every route out — the sweep and the sub-tick edge — goes through here,
+        so "what has the console been told" is one fact in one place. Recording
+        it on the sweep's frame as well is what stops the next sub-tick sending
+        a duplicate of something that has just gone.
+        """
+        self._radio_gate = (bool(payload.get("squelch_open")),
+                            bool(payload.get("monitor")))
+        return self._publish_telemetry(payload)
 
     def _stamp_simulated(self, payload: dict) -> dict:
         """Mark a stream whose source is a demo sensor.
