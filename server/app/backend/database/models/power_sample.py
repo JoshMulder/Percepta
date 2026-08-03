@@ -34,6 +34,12 @@ class PowerSample(UUIDMixin, TimestampMixin, Base):
     battery_v: Mapped[float | None] = mapped_column(Float, nullable=True)
     pv_w: Mapped[float | None] = mapped_column(Float, nullable=True)
     load_w: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Nullable and separate from "0 W" on purpose: a site with no grid and no
+    # generator omits these, the same way the live payload does, so the history
+    # chart can leave the source out rather than draw a flat line at zero that
+    # reads as "fitted, delivering nothing" (see the contract note on mains_w).
+    mains_w: Mapped[float | None] = mapped_column(Float, nullable=True)
+    generator_w: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     __table_args__ = (
         UniqueConstraint(

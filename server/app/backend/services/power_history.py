@@ -177,6 +177,10 @@ class PowerHistory:
                         battery_v=payload.get("battery_v"),
                         pv_w=payload.get("pv_w"),
                         load_w=payload.get("load_w"),
+                        # `.get` leaves these None when the source is not fitted,
+                        # which is exactly what the chart wants — absent, not zero.
+                        mains_w=payload.get("mains_w"),
+                        generator_w=payload.get("generator_w"),
                     )
                     # Two workers may both see the same minute; the first wins
                     # and the second is a no-op rather than an error.

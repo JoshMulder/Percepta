@@ -6,6 +6,7 @@ import { IconChart } from "./Icons";
 import type { StreamState } from "../useVideoStream";
 import {
   BatteryChart,
+  PowerFlowHistory,
   SOC_WINDOWS,
   type SocSample,
   type SocWindowKey,
@@ -244,6 +245,10 @@ function PowerPanelInner({
               </button>
             </div>
             <BatteryChart samples={history} loading={historyLoading} />
+            {/* Under the state of charge: the flows that explain its shape —
+                load and solar always, the grid and generator where fitted. */}
+            <h5 className="power-detail-sub">Power flow</h5>
+            <PowerFlowHistory samples={history} loading={historyLoading} />
           </div>
         </div>
       )}

@@ -492,7 +492,16 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
         .powerHistory(stationId, hours)
         .then((points) => {
           if (cancelled) return;
-          setSocHistory(points.map((p) => ({ t: Date.parse(p.t), soc: p.soc })));
+          setSocHistory(
+            points.map((p) => ({
+              t: Date.parse(p.t),
+              soc: p.soc,
+              pv: p.pv,
+              load: p.load,
+              mains: p.mains,
+              gen: p.gen,
+            })),
+          );
         })
         .catch(() => !cancelled && setSocHistory([]))
         .finally(() => !cancelled && setSocLoading(false));

@@ -1652,6 +1652,46 @@ body {
 .chart-foot .muted {
   margin-left: auto;
 }
+
+/* The power-flow history under the state of charge, in the same popout. Same
+   plotting box as the battery chart so the two share a time axis by eye. */
+.power-series svg {
+  display: block;
+  width: 100%;
+  height: 3.4rem;
+  background: #060a0e;
+  border: 1px solid var(--line);
+  border-radius: var(--s1);
+}
+.series-line {
+  fill: none;
+  stroke-width: 1.4;
+  vector-effect: non-scaling-stroke;
+}
+/* Wraps to a second row on a narrow dialog rather than clipping a source. */
+.series-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+  margin-top: var(--s1);
+  font: 0.7rem var(--mono);
+  color: var(--muted);
+}
+.series-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.series-swatch {
+  width: 0.7rem;
+  height: 0.2rem;
+  border-radius: 1px;
+}
+.series-key b {
+  color: var(--text);
+  font-weight: 600;
+}
 /* ------------------------------------------------- full-bleed top viewer */
 
 /* The viewer has no panel surround: it runs edge to edge across the bar and
@@ -3203,3 +3243,11 @@ body {
    you are already looking at the curve, not at a glance. */
 .power-detail-v { font: 0.75rem var(--mono); color: var(--muted); }
 .power-detail-head .window-switch { margin-left: auto; }
+/* Divides the state-of-charge chart above from the flows below, without a
+   second header bar competing with the dialog's own. */
+.power-detail-sub {
+  margin: 0.9rem 0 0.4rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--muted);
+}

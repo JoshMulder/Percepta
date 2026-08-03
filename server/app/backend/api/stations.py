@@ -45,6 +45,14 @@ class StationSummary(BaseModel):
 class PowerPoint(BaseModel):
     t: str
     soc: float
+    # The flows the history popout charts beneath the state of charge. Null,
+    # not 0, when the source is not fitted — a site with no grid or no generator
+    # leaves them out and the chart leaves them off the legend. Short keys: a
+    # 7-day window is a few hundred of these and the names repeat on every one.
+    pv: float | None = None
+    load: float | None = None
+    mains: float | None = None
+    gen: float | None = None
 
 
 class StationDetail(StationSummary):
@@ -207,7 +215,14 @@ def power_history(
 
     since = datetime.now(UTC) - timedelta(hours=window)
     rows = db.execute(
-        select(PowerSample.at, PowerSample.soc_pct)
+        select(
+            PowerSample.at,
+            PowerSample.soc_pct,
+            PowerSample.pv_w,
+            PowerSample.load_w,
+            PowerSample.mains_w,
+            PowerSample.generator_w,
+        )
         .where(
             PowerSample.ground_station_id == station_id,
             PowerSample.at >= since,
@@ -224,7 +239,17 @@ def power_history(
         picked[-1] = rows[-1]
         rows = picked
 
-    return [PowerPoint(t=at.isoformat(), soc=soc) for at, soc in rows]
+    return [
+        PowerPoint(
+            t=r.at.isoformat(),
+            soc=r.soc_pct,
+            pv=r.pv_w,
+            load=r.load_w,
+            mains=r.mains_w,
+            gen=r.generator_w,
+        )
+        for r in rows
+    ]
 
 
 @router.get("/{station_id}", response_model=StationDetail)

@@ -3,7 +3,24 @@ import { useMemo } from "react";
 export interface SocSample {
   t: number;
   soc: number;
+  // The power flows, in watts, recorded at the same minute as the SoC. Null
+  // where the source is not fitted (no grid, no generator); the flow chart
+  // leaves an all-null series off entirely rather than drawing it flat at zero.
+  pv?: number | null;
+  load?: number | null;
+  mains?: number | null;
+  gen?: number | null;
 }
+
+/** The four flows drawn under the state of charge, in the order they read in
+ *  the legend, each matched to the colour its source has in the power diagram
+ *  (PowerFlow.tsx / styles.css) so the two are read as the same thing. */
+const POWER_SERIES = [
+  { key: "load", label: "Load", colour: "#d7dee7" },
+  { key: "pv", label: "Solar", colour: "#e8b04b" },
+  { key: "mains", label: "AC In", colour: "#00a0dc" },
+  { key: "gen", label: "Generator", colour: "#b98cf0" },
+] as const;
 
 /** Selectable windows. These come from the server's recorded history, not a
  *  browser buffer, so they can outlast the tab - `hours` is what the API takes. */
@@ -88,6 +105,111 @@ export function BatteryChart({
         <span className={`muted${!line && !loading ? "" : " hidden"}`}>
           no history yet
         </span>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The power flows behind the battery, over the same window.
+ *
+ * State of charge is the answer to "will it last"; this is the answer to "why"
+ * — solar tailing off at dusk, the load climbing, the generator picking up the
+ * shortfall. Drawn as plain lines, not areas: four filled bands would occlude
+ * each other, and here the crossings (solar falling below load, say) are the
+ * whole point.
+ *
+ * A source that is not fitted is null throughout its column and drops out of
+ * both the chart and the legend — a site with no grid shows three lines, not a
+ * fourth pinned to the floor pretending an AC input exists. The scale is shared
+ * across every drawn series so their heights are comparable, and anchored by
+ * the watt figures in the legend rather than a drawn axis.
+ */
+export function PowerFlowHistory({
+  samples,
+  loading,
+}: {
+  samples: SocSample[];
+  loading?: boolean;
+}) {
+  const W = 100;
+  const H = 34;
+
+  const drawn = useMemo(() => {
+    if (samples.length < 2) return [];
+    const t0 = samples[0].t;
+    const span = Math.max(1, samples[samples.length - 1].t - t0);
+    let max = 0;
+    const raw = POWER_SERIES.map((s) => {
+      const pts = samples.map((sample) => {
+        const v = sample[s.key];
+        if (v === null || v === undefined || Number.isNaN(v)) return null;
+        if (v > max) max = v;
+        return { x: ((sample.t - t0) / span) * W, v };
+      });
+      let last: number | null = null;
+      for (let i = pts.length - 1; i >= 0; i--) {
+        if (pts[i]) {
+          last = pts[i]!.v;
+          break;
+        }
+      }
+      return { ...s, pts, present: pts.some((p) => p !== null), last };
+    });
+    // A touch of headroom so the peak is not welded to the top edge, and never
+    // divide by zero on a window where every source read 0 W.
+    const yMax = Math.max(1, max * 1.08);
+    return raw
+      .filter((s) => s.present)
+      .map((s) => {
+        // The line breaks across a null rather than leaping the gap: a source
+        // that only ran for part of the window should read as absent the rest,
+        // not as a diagonal drawn through data that was never there.
+        let d = "";
+        let pen = false;
+        for (const p of s.pts) {
+          if (!p) {
+            pen = false;
+            continue;
+          }
+          const y = H - (p.v / yMax) * H;
+          d += `${pen ? "L" : "M"}${p.x.toFixed(2)} ${y.toFixed(2)} `;
+          pen = true;
+        }
+        return {
+          key: s.key,
+          label: s.label,
+          colour: s.colour,
+          d: d.trim(),
+          last: s.last,
+        };
+      });
+  }, [samples]);
+
+  return (
+    <div className="power-series">
+      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden>
+        {drawn.map((s) => (
+          <path
+            key={s.key}
+            className="series-line"
+            d={s.d}
+            stroke={s.colour}
+          />
+        ))}
+      </svg>
+      <div className="series-legend">
+        {drawn.length === 0 ? (
+          <span className="muted">{loading ? "loading…" : "no history yet"}</span>
+        ) : (
+          drawn.map((s) => (
+            <span key={s.key} className="series-key">
+              <span className="series-swatch" style={{ background: s.colour }} />
+              {s.label}
+              {s.last !== null && <b>{Math.round(s.last)} W</b>}
+            </span>
+          ))
+        )}
       </div>
     </div>
   );

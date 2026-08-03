@@ -81,9 +81,17 @@ export const api = {
   mapConfig: (id: string) => request<MapConfig>(`/api/stations/${id}/map`),
 
   powerHistory: (id: string, hours: number) =>
-    request<{ t: string; soc: number }[]>(
-      `/api/stations/${id}/power/history?hours=${hours}`,
-    ),
+    request<
+      {
+        t: string;
+        soc: number;
+        // Absent (null) at a site without that source — see the API's PowerPoint.
+        pv?: number | null;
+        load?: number | null;
+        mains?: number | null;
+        gen?: number | null;
+      }[]
+    >(`/api/stations/${id}/power/history?hours=${hours}`),
 
   /* Commands. Each returns 202: the station has been told, and what it actually
      did arrives on the telemetry stream. Nothing here reports success on the
