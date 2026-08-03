@@ -137,6 +137,12 @@ class Agent:
         self.camera = None
         self.radio: RadioController | None = None
         self._last_discovery = 0.0
+        #: Set when a rebuild skipped the camera because the live stream held
+        #: the sensor. Without it the deferral was permanent: the only other
+        #: thing that rebuilds is rediscovery, which asks whether anything is
+        #: *missing*, and the camera it declined to replace is present and
+        #: working. See `build_devices` and the loop in `run`.
+        self._camera_rebuild_owed = False
         #: The newest radio telemetry a pump produced, waiting for the next
         #: full sweep to publish it. See `_pump_radio`.
         self._radio_telemetry: dict | None = None
@@ -532,11 +538,20 @@ class Agent:
         the trigger used to be circular: snapshots failed *because* the encoder
         held the sensor, the slot reported failed, and rediscovery then treated
         the one working consumer of the camera as a broken camera. The slot is
-        rebuilt on the first pass after the stream ends.
+        rebuilt on the first pass after the stream ends — which needs
+        `_camera_rebuild_owed` to be remembered, because nothing else would ever
+        ask. Rediscovery only fires for a slot that is *missing*, and the camera
+        this declined to replace is present and working: it is the demo one, and
+        an operator who has just pointed the station at an RTSP URL watches it
+        go on showing the demo until somebody restarts the box.
         """
         context = self.device_context()
         self._last_discovery = time.monotonic()
         keep_camera = self._stream_holds_camera()
+        # Set when this pass leaves the camera alone, cleared when it builds
+        # one. Assigned rather than or-ed: a rebuild that did the camera has
+        # discharged the debt however it was incurred.
+        self._camera_rebuild_owed = keep_camera
 
         if self.radio is not None:
             try:
@@ -1015,6 +1030,15 @@ class Agent:
                     started - self._last_discovery > REDISCOVER_SECONDS
                     and self._anything_missing()
                 ):
+                    self.build_devices()
+                elif self._camera_rebuild_owed and not self._stream_holds_camera():
+                    # The stream has let go of the sensor, so the camera swap
+                    # that was deferred can happen now. Not on the rediscovery
+                    # interval and not behind `_anything_missing`: this is a
+                    # configuration change somebody made and is waiting on, not
+                    # a hunt for hardware that might have been plugged back in.
+                    log.info("Applying the deferred camera change now the live "
+                             "stream has released the sensor.")
                     self.build_devices()
                 if self.transport is None or not self.transport.connected:
                     # Also checked when there is no transport at all: a refused
