@@ -1896,5 +1896,77 @@ def _markers(data: bytes) -> dict[int, bytes]:
     return found
 
 
+class StuckStartingTests(AgentFixture):
+    """"starting" is the one state nothing was watching, and it wedged the box.
+
+    `start()` sets the state to "starting" and then does four things that can
+    fail: open an uplink, wait on the sensor, probe the camera, spawn an
+    encoder. Each anticipated failure moves the state on. An *exception* did
+    not — and the command router catches exceptions so that one bad command
+    cannot stop the sensing loop, so the throw was logged and the session sat
+    in "starting" for the life of the process.
+
+    Nothing recovered it. `tick()` returned early on anything that was not
+    "streaming", and `Agent._stream_holds_camera()` counts "starting" as
+    holding the sensor, so the camera slot was never rebuilt either: a camera
+    someone had just reconfigured waited on a stream that would never start.
+
+    What that looked like from outside: the camera reporting connected, no
+    video, and a restart of the container putting it right.
+    """
+
+    def _exploding_source(self, when: str):
+        """A source that raises where `start` does not expect one."""
+        class Source(_InstantSource):
+            def start(self, on_unit) -> bool:
+                raise RuntimeError(when)
+        source = Source()
+        self.agent.stream._build_source = lambda settings: source
+        return source
+
+    def test_an_exception_while_starting_does_not_latch_the_state(self):
+        self._exploding_source("the encoder blew up")
+        self.agent.stream.start({"_local": True})
+        self.assertEqual(self.agent.stream.state, "unavailable")
+        self.assertIn("could not be started", self.agent.stream.reason)
+
+    def test_it_gives_the_sensor_back_on_the_way_out(self):
+        # A start that failed holding the sensor locks every later attempt out
+        # of a camera nothing is using.
+        self._exploding_source("boom")
+        self.agent.stream.start({"_local": True})
+        self.assertIsNone(self.agent.sensor_lease.holder)
+
+    def test_the_camera_slot_is_not_left_pinned(self):
+        # The wedge that made this worth finding: "starting" reads as holding
+        # the sensor, so rediscovery skips the camera for ever.
+        self._exploding_source("boom")
+        self.agent.stream.start({"_local": True})
+        self.assertFalse(self.agent._stream_holds_camera())
+
+    def test_a_start_that_never_finishes_is_given_up_on(self):
+        # The backstop for the case an exception handler cannot reach: a start
+        # that is still going, on another thread, long after it should be.
+        import gsu.stream as stream_module
+
+        self.agent.stream.state = "starting"
+        self.agent.stream._starting_at = (
+            time.monotonic() - stream_module.STARTING_LIMIT_S - 1
+        )
+        self.agent.stream.tick()
+        self.assertEqual(self.agent.stream.state, "unavailable")
+        self.assertIn("did not finish starting", self.agent.stream.reason)
+        self.assertFalse(self.agent._stream_holds_camera())
+
+    def test_a_start_still_within_its_time_is_left_alone(self):
+        # Legitimate starts are not fast: an ffprobe is allowed 15s and the
+        # sensor wait another 10. This must not become a deadline for a slow
+        # camera on a cold link.
+        self.agent.stream.state = "starting"
+        self.agent.stream._starting_at = time.monotonic()
+        self.agent.stream.tick()
+        self.assertEqual(self.agent.stream.state, "starting")
+
+
 if __name__ == "__main__":
     unittest.main()

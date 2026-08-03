@@ -65,6 +65,27 @@ DEFAULT_LEASE_S = 30.0
 #: nobody is holding it.
 SENSOR_WAIT_S = 10.0
 
+#: Longest a stream may sit in "starting" before `tick` calls it stuck.
+#:
+#: **"starting" is the one state nothing was watching, and it wedges the box.**
+#: `start()` sets it, then opens an uplink, waits on the sensor, probes the
+#: camera and spawns an encoder. Every failure it anticipates moves the state on
+#: — but an *exception* anywhere in that stretch does not, and the command
+#: router catches exceptions so that one bad command cannot stop the loop. The
+#: station then carries on with the state still reading "starting", for ever:
+#: `tick()` returns early on anything that is not "streaming", so nothing
+#: reconsiders it, and `Agent._stream_holds_camera()` counts "starting" as
+#: holding the sensor — so the camera slot is never rebuilt either, and a
+#: deferred camera change waits on a stream that will never finish starting.
+#: What an operator sees is a camera reporting connected, no video ever, and a
+#: restart putting it right.
+#:
+#: Generous, because a legitimate start is not fast: an ffprobe against the
+#: camera is allowed 15 s, the sensor wait another 10, and the uplink and the
+#: encoder spawn come on top. This is a backstop for a start that is not
+#: happening, not a deadline for a slow one.
+STARTING_LIMIT_S = 90.0
+
 
 class StreamSession:
     """The one live encoder this station has, and the rules about when it runs."""
@@ -101,6 +122,9 @@ class StreamSession:
         self._codec_mismatch = ""
         self._session_open = False
         self._last_frame_at: float | None = None
+        #: When this session entered "starting". `tick` uses it to notice a
+        #: start that never finished — see STARTING_LIMIT_S.
+        self._starting_at: float | None = None
         #: True while the only reason this encoder is running is somebody on
         #: the station's own setup page. The platform never asked, so nothing
         #: will ever renew the lease on its behalf and nothing will send a
@@ -203,6 +227,42 @@ class StreamSession:
         # source is a drawing routine. One predicate decides, shared with
         # video.py.
         self.state = "starting"
+        self._starting_at = time.monotonic()
+        try:
+            return self._start_encoder(settings, source, uplink, lease)
+        except Exception as exc:  # noqa: BLE001 - reported, never left latched
+            # **The state must not be left at "starting".** Everything from here
+            # to "streaming" has an anticipated failure that moves the state on,
+            # and none of that helps if something raises instead: the router
+            # above catches exceptions so one bad command cannot stop the loop,
+            # so the throw is logged and the session sits in "starting" for the
+            # life of the process — no video, and the camera slot pinned because
+            # "starting" counts as holding the sensor.
+            log.exception("The live stream failed to start.")
+            self.reason = f"the stream could not be started: {exc}"[:200]
+            self.state = "unavailable"
+            self._starting_at = None
+            self._release_sensor()
+            try:
+                uplink.close()
+            except Exception:  # noqa: BLE001 - already on the failure path
+                pass
+            self.uplink = None
+            self.source = None
+            return self.reason
+
+    def _start_encoder(self, settings, source, uplink, lease: float) -> str:
+        """The half of `start` that runs with the state at "starting".
+
+        Split out so that one `try` in the caller covers all of it. Every exit
+        from here either moves the state off "starting" or raises, and the
+        caller turns a raise into "unavailable" — there is no path that returns
+        with it still set.
+
+        `lease` is passed rather than re-derived: it is only in the sentence
+        this returns, and recomputing it here would be a second place for the
+        platform's spelling of the field to be read.
+        """
         camera = getattr(self.agent, "camera", None)
         if sensor_exclusive(camera):
             token = self.agent.sensor_lease.acquire("the live stream", SENSOR_WAIT_S)
@@ -420,8 +480,38 @@ class StreamSession:
         """Called from the sensing loop. This is the fail-closed half.
 
         Everything that stops a stream without being told to stop happens here:
-        an expired lease, the ceiling, and an encoder that has died on its own.
+        an expired lease, the ceiling, an encoder that has died on its own, and
+        a start that never finished.
         """
+        if self.state == "starting":
+            # A start that has not finished in STARTING_LIMIT_S is not slow, it
+            # is stuck — and a stuck "starting" is the worst state this class
+            # has, because nothing else reconsiders it. It reports no video, and
+            # it pins the camera slot shut: `Agent._stream_holds_camera()` reads
+            # "starting" as holding the sensor, so rediscovery skips the camera
+            # and a deferred camera change waits on a stream that will never
+            # start. Until this, only restarting the container cleared it.
+            if (self._starting_at is not None
+                    and time.monotonic() - self._starting_at > STARTING_LIMIT_S):
+                self.reason = (
+                    f"the stream did not finish starting within "
+                    f"{STARTING_LIMIT_S:.0f}s and has been given up on. The "
+                    f"camera is free again; ask for it again to retry."
+                )
+                log.error("%s", self.reason)
+                self.state = "unavailable"
+                self._starting_at = None
+                # The sensor above all: a stream stuck holding it locks out
+                # every later attempt at a camera nothing is using.
+                self._release_sensor()
+                if self.uplink is not None:
+                    try:
+                        self.uplink.close()
+                    except Exception:  # noqa: BLE001 - already giving up
+                        pass
+                    self.uplink = None
+                self.source = None
+            return
         if self.state != "streaming":
             return
         if self._codec_mismatch:
