@@ -59,6 +59,15 @@ function parseFreqMhz(text: string): number {
 
 const digitsOf = (text: string) => text.replace(/\D/g, "");
 
+/** What the frequency box shows as it is typed: airband is always xxx.xxx, so
+ *  the point is inserted after the third digit rather than being something the
+ *  operator has to key. At most six digits; the sixth completes the frequency.
+ *  "128950" and "128.950" and "128.9" all format to the same running value. */
+export function formatFreqEntry(raw: string): string {
+  const digits = digitsOf(raw).slice(0, 6);
+  return digits.length > 3 ? `${digits.slice(0, 3)}.${digits.slice(3)}` : digits;
+}
+
 interface Preset {
   hz: number;
   name: string;
@@ -221,12 +230,12 @@ function RadioPanelInner({
   };
 
   const onType = (value: string) => {
-    // At most six digits; the sixth completes the frequency and tunes, which is
-    // what makes "118700" a single fluent action rather than type-then-Enter.
-    let next = value;
-    while (digitsOf(next).length > 6) next = next.slice(0, -1);
-    setTyping(next);
-    if (digitsOf(next).length === 6) commitTyped(next);
+    // The point goes in after the third digit as they type, so "128950" shows
+    // as "128.950" — the airband format — and the sixth digit tunes, one fluent
+    // action rather than type-then-Enter.
+    const shown = formatFreqEntry(value);
+    setTyping(shown);
+    if (digitsOf(shown).length === 6) commitTyped(shown);
   };
 
   const persist = (next: (Preset | null)[]) => {
