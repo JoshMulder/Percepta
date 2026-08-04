@@ -102,6 +102,29 @@ class FilterDesignTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             am.design_lowpass(250, 8000.0, SAMPLE_RATE)
 
+    def test_the_bandpass_passes_voice_and_rejects_the_rest(self):
+        taps = am.design_bandpass(am.VOICE_TAPS, 300.0, 3400.0, 24_000).astype(np.float64)
+        size = 8192
+        response = np.abs(np.fft.rfft(taps, size))
+        freqs = np.fft.rfftfreq(size, 1.0 / 24_000)
+
+        def at(hz: float) -> float:
+            return float(response[int(np.argmin(np.abs(freqs - hz)))])
+
+        # Flat across the voice band.
+        self.assertGreater(at(1000.0), 0.9)
+        self.assertGreater(at(2500.0), 0.85)
+        # The rumble below and the hiss above are gone.
+        self.assertLess(at(0.0), 0.05, "DC must be blocked")
+        self.assertLess(at(60.0), 0.3, "low rumble rejected")
+        self.assertLess(at(6000.0), 0.1, "the hiss band above voice is gone")
+
+    def test_the_bandpass_refuses_corners_it_cannot_meet(self):
+        with self.assertRaises(ValueError):
+            am.design_bandpass(am.VOICE_TAPS, 3400.0, 300.0, 24_000)  # low > high
+        with self.assertRaises(ValueError):
+            am.design_bandpass(am.VOICE_TAPS, 300.0, 13_000.0, 24_000)  # above Nyquist
+
 
 def direct_decimate(samples, taps, factor):
     """The obvious implementation: filter everything, keep every Nth.
@@ -152,6 +175,29 @@ class PolyphaseTests(unittest.TestCase):
 
         self.assertEqual(joined.size, whole.size)
         np.testing.assert_allclose(joined, whole, atol=1e-6)
+
+
+@unittest.skipIf(np is None, "numpy is not installed")
+class FirFilterTests(unittest.TestCase):
+    def test_state_survives_ragged_blocks(self):
+        """Same as the decimator: the audio filter runs on whatever the last
+        tick produced, so a chopped stream must equal the whole one."""
+        taps = am.design_bandpass(101, 300.0, 3400.0, 24_000)
+        rng = np.random.default_rng(5)
+        signal = rng.normal(0, 1, 4000).astype(np.float32)
+
+        whole = am.FirFilter(taps).process(signal)
+
+        chunked = am.FirFilter(taps)
+        pieces, cursor = [], 0
+        for size in (3, 777, 1, 1200, 19):
+            pieces.append(chunked.process(signal[cursor : cursor + size]))
+            cursor += size
+        pieces.append(chunked.process(signal[cursor:]))
+        joined = np.concatenate(pieces)
+
+        self.assertEqual(joined.size, whole.size)
+        np.testing.assert_allclose(joined, whole, atol=1e-4)
 
 
 @unittest.skipIf(np is None, "numpy is not installed")
@@ -297,9 +343,44 @@ class DemodulationTests(unittest.TestCase):
         Remote-Radio as-is — at full modulation it puts the peak at 0.905,
         which is a healthy level with headroom left before `to_pcm16` clips.
         """
-        audio = self.demodulate(airband_iq(1.0, audio_hz=1000.0, depth=0.1))
+        # Voice filter off: this measures the AGC and limiter gain, and a
+        # band-pass at unity in the middle of its passband would only add ripple
+        # to a figure asserted to a hundredth.
+        audio = self.demodulate(
+            airband_iq(1.0, audio_hz=1000.0, depth=0.1), voice_filter=False)
         recovered = float(np.sqrt(2.0) * np.std(audio[12_000:]))
         self.assertAlmostEqual(recovered, 0.1 * am.LIMIT_GAIN, delta=0.01)
+
+    def test_the_voice_filter_removes_out_of_band_audio(self):
+        """A 5 kHz tone is inside the channel but above the voice band, so the
+        voice filter should all but erase it while leaving speech alone."""
+        iq = airband_iq(0.5, audio_hz=5000.0, depth=0.5)
+        on = self.demodulate(iq, voice_filter=True)
+        off = self.demodulate(iq, voice_filter=False)
+        on_rms = float(np.sqrt(np.mean(on[4000:] ** 2)))
+        off_rms = float(np.sqrt(np.mean(off[4000:] ** 2)))
+        self.assertGreater(off_rms, 0.05, "the tone is there without the filter")
+        self.assertLess(on_rms, off_rms * 0.2, "and mostly gone with it")
+
+    def test_the_voice_filter_keeps_speech(self):
+        audio = self.demodulate(
+            airband_iq(0.5, audio_hz=1000.0, depth=0.5), voice_filter=True)
+        tone, purity = self.dominant_tone(audio[4000:])
+        self.assertAlmostEqual(tone, 1000.0, delta=15.0)
+        self.assertGreater(purity, 20.0, "a voice-band tone must survive the filter")
+
+    def test_a_narrow_channel_filter_rejects_high_audio(self):
+        """The RF side: a 6 kHz tone's sidebands sit at ±6 kHz, inside the 8 kHz
+        channel but outside a 4 kHz one, so narrowing the channel filter removes
+        it before the envelope detector. Voice filter off, to isolate the RF one.
+        """
+        iq = airband_iq(0.5, audio_hz=6000.0, depth=0.5)
+        wide = self.demodulate(iq, cutoff_hz=8000.0, voice_filter=False)
+        narrow = self.demodulate(iq, cutoff_hz=4000.0, voice_filter=False)
+        wide_rms = float(np.sqrt(np.mean(wide[4000:] ** 2)))
+        narrow_rms = float(np.sqrt(np.mean(narrow[4000:] ** 2)))
+        self.assertGreater(wide_rms, 0.05, "the 8 kHz channel passes it")
+        self.assertLess(narrow_rms, wide_rms * 0.3, "the 4 kHz channel rejects it")
 
     def test_the_channel_filter_rejects_an_adjacent_channel(self):
         """Measured at the filter, before the AGC.

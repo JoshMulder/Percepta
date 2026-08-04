@@ -122,11 +122,24 @@ class RtlSdrFrontEnd:
         gain: float | str = 37.2,
         ppm: int = 0,
         bias_tee: bool = False,
+        channel_bw_hz: float = 8000.0,
+        voice_filter: bool = True,
         resource: str = "",
     ) -> None:
         self.gain = self._coerce_gain(gain)
         self.ppm = self._coerce_int(ppm)
         self.bias_tee = self._coerce_bool(bias_tee)
+        # The RF channel filter width and the audio voice band-pass — see the
+        # demodulator. Clamped: the channel filter is also the decimation's
+        # anti-alias, so it cannot exceed the audio Nyquist (its 8 kHz default is
+        # already at the edge), and a floor keeps a typo from filtering the voice
+        # away entirely.
+        try:
+            bw = float(channel_bw_hz)
+        except (TypeError, ValueError):
+            bw = 8000.0
+        self.channel_bw_hz = min(8000.0, max(2000.0, bw))
+        self.voice_filter = self._coerce_bool(voice_filter)
         #: The inventory allocates a tuner by serial number, as `rtlsdr:<serial>`.
         self.serial_hint = resource.split(":", 1)[1] if ":" in resource else ""
         if self.serial_hint.startswith("unprogrammed@"):
@@ -419,7 +432,10 @@ class RtlSdrFrontEnd:
                 device.close()
                 return
             self._am = am
-            self._demod = am.AmDemodulator(SAMPLE_RATE, AUDIO_RATE, OFFSET_HZ)
+            self._demod = am.AmDemodulator(
+                SAMPLE_RATE, AUDIO_RATE, OFFSET_HZ,
+                cutoff_hz=self.channel_bw_hz, voice_filter=self.voice_filter,
+            )
             self._device = device
             self._failures = 0
             self._reason = ""

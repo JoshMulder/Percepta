@@ -2101,6 +2101,34 @@ class DevicePickerTests(unittest.TestCase):
         self.assertIn("action='/radio' data-radio>", panel)
         self.assertIn("id=radio-status", panel)
 
+    def test_the_channel_and_voice_filters_are_offered_on_the_real_receiver(self):
+        # Commissioning settings on the real device — surfaced from the registry
+        # as dev_<param> fields, minus gain/ppm which have their own controls.
+        # Previewed against rtlsdr-airband; the demo receiver has no such params.
+        panel = self.console._section_devices(
+            self.agent.snapshot(), "tok", "radio", chosen="rtlsdr-airband")
+        self.assertIn("dev_voice_filter", panel)
+        self.assertIn("dev_channel_bw_hz", panel)
+        self.assertIn("dev_bias_tee", panel)
+        # The voice filter defaults on (its registry default), so it renders
+        # checked before anything is stored.
+        self.assertIn("id=dev_voice_filter name=dev_voice_filter value='1' checked",
+                      panel)
+
+    def test_setting_the_filters_persists_them_as_device_params(self):
+        # A dev_<param> change rebuilds the receiver and is stored with the
+        # device. Called directly, so no live hardware is needed — the params
+        # land in the inventory whether or not the dongle opens.
+        self.console._set_radio({
+            "type_id": ["rtlsdr-airband"],
+            "dev_channel_bw_hz": ["5000"],
+            # dev_voice_filter omitted — an unticked box, so a real "off".
+        })
+        fitted = self.agent.inventory.fitted["radio"]
+        self.assertEqual(fitted.type_id, "rtlsdr-airband")
+        self.assertEqual(fitted.params.get("channel_bw_hz"), 5000)
+        self.assertFalse(fitted.params.get("voice_filter"))
+
     def test_the_volume_control_is_outside_the_apply_form(self):
         # Local only: moving the volume must not post a settings change, so it
         # sits after the form (its status line, radio-status, is the form's last

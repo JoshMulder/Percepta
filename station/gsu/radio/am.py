@@ -92,6 +92,11 @@ AGC_TAU_S = 0.10
 #: than clip square.
 LIMIT_GAIN = 1.5
 
+#: Taps for the audio voice band-pass. 201 at 24 kHz gives a transition a few
+#: hundred Hz wide — enough to lift the voice band clear of the hiss above it
+#: and the rumble below, without a filter so long its group delay is audible.
+VOICE_TAPS = 201
+
 
 def design_lowpass(numtaps: int, cutoff_hz: float, fs: float) -> np.ndarray:
     """Windowed-sinc lowpass, Hamming window, unity gain at DC.
@@ -119,6 +124,47 @@ def design_lowpass(numtaps: int, cutoff_hz: float, fs: float) -> np.ndarray:
     taps *= np.hamming(numtaps)
     taps /= taps.sum()  # unity at DC, so the filter does not change the level
     return taps.astype(np.float32)
+
+
+def design_bandpass(numtaps: int, low_hz: float, high_hz: float, fs: float) -> np.ndarray:
+    """Windowed-sinc band-pass: the lowpass at `high_hz` minus the one at `low_hz`.
+
+    Both lowpasses are unity at DC, so their difference is zero at DC, roughly
+    unity between the corners and zero above `high_hz` — a linear-phase voice
+    filter built from the one FIR design this module already has. Its response is
+    asserted against the closed form in `tests/test_radio_am.py`.
+    """
+    if not 0.0 < low_hz < high_hz < fs / 2:
+        raise ValueError(f"band-pass needs 0 < {low_hz} < {high_hz} < {fs / 2}")
+    return design_lowpass(numtaps, high_hz, fs) - design_lowpass(numtaps, low_hz, fs)
+
+
+class FirFilter:
+    """A streaming real FIR, its state carried across blocks like the decimator.
+
+    The audio band-pass runs on the real demodulated signal a block at a time,
+    and the station hands over whatever the last tick produced — so the filter
+    keeps the samples straddling a block boundary, exactly as the decimator keeps
+    its own, and there is no discontinuity where two ticks meet.
+    """
+
+    def __init__(self, taps: np.ndarray) -> None:
+        self.taps = np.asarray(taps, dtype=np.float32)
+        self._state = np.zeros(max(self.taps.size - 1, 0), dtype=np.float32)
+
+    def reset(self) -> None:
+        self._state = np.zeros_like(self._state)
+
+    def process(self, samples: np.ndarray) -> np.ndarray:
+        samples = np.asarray(samples, dtype=np.float32)
+        if samples.size == 0:
+            return samples
+        buffer = np.concatenate([self._state, samples])
+        out = np.convolve(buffer, self.taps, "valid").astype(np.float32)
+        self._state = (
+            buffer[-(self.taps.size - 1):] if self.taps.size > 1 else buffer[:0]
+        )
+        return out
 
 
 class PolyphaseDecimator:
@@ -319,6 +365,9 @@ class AmDemodulator:
         offset_hz: float,
         cutoff_hz: float = 8000.0,
         numtaps: int = 251,
+        voice_filter: bool = True,
+        voice_low_hz: float = 300.0,
+        voice_high_hz: float = 3400.0,
     ) -> None:
         if sample_rate % audio_rate:
             raise ValueError(
@@ -328,13 +377,26 @@ class AmDemodulator:
         self.sample_rate = int(sample_rate)
         self.audio_rate = int(audio_rate)
         self.decimation = self.sample_rate // self.audio_rate
-        # 8 kHz: the occupied bandwidth of an AM airband channel is ±7.5 kHz, so
-        # this is the channel filter and it matches `dsp.CHANNEL_HALF_HZ`. The
-        # transition runs out to the 12 kHz alias edge, which 251 Hamming taps
-        # at 240 ksps just about buys.
+        # The RF channel filter. 8 kHz by default — the occupied bandwidth of an
+        # AM airband channel is ±7.5 kHz — and it doubles as the anti-alias for
+        # the decimation to the audio rate, so its transition has to be inside
+        # the 12 kHz audio Nyquist, which 251 Hamming taps at 240 ksps buys.
+        # Narrowing it (a commissioning setting) rejects adjacent-channel and
+        # out-of-band energy before the envelope detector ever sees it.
         self._mixer = Mixer(sample_rate, offset_hz)
         self._decimator = PolyphaseDecimator(
             self.decimation, design_lowpass(numtaps, cutoff_hz, sample_rate)
+        )
+        # The audio voice band-pass. The channel filter above hands the whole
+        # ±cutoff to the envelope detector, so everything from voice_high up to
+        # the audio Nyquist is hiss carrying no speech, and everything below
+        # voice_low is rumble and carrier-AGC thump. This lifts the band that
+        # matters clear of both. Off returns the full-band audio — for listening
+        # to something that is not voice.
+        self._voice = (
+            FirFilter(design_bandpass(VOICE_TAPS, voice_low_hz, voice_high_hz,
+                                      self.audio_rate))
+            if voice_filter else None
         )
         self._carrier = 0.0
         self._alpha = 1.0 - math.exp(
@@ -342,12 +404,14 @@ class AmDemodulator:
         )
 
     def reset(self) -> None:
-        """Retune, or a gap in demodulation. Forget the filter and the carrier:
-        both describe a channel we are no longer listening to, and an AGC still
+        """Retune, or a gap in demodulation. Forget the filters and the carrier:
+        all describe a channel we are no longer listening to, and an AGC still
         holding the last channel's carrier would open on the new one at whatever
         gain the old one needed."""
         self._mixer.reset()
         self._decimator.reset()
+        if self._voice is not None:
+            self._voice.reset()
         self._carrier = 0.0
 
     def process(self, samples: np.ndarray, fade_in: bool = False) -> np.ndarray:
@@ -366,6 +430,11 @@ class AmDemodulator:
         envelope = np.abs(channel)
         carrier = self._smooth_carrier(envelope)
         audio = envelope / np.maximum(carrier, 1e-9) - 1.0
+        # The voice band-pass sits between the carrier-normalised audio and the
+        # limiter: it removes the hiss and rumble, and the soft limit then tames
+        # whatever peaks are left in the band that remains.
+        if self._voice is not None:
+            audio = self._voice.process(audio)
         audio = np.tanh(LIMIT_GAIN * audio).astype(np.float32)
 
         if fade_in:

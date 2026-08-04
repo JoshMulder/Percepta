@@ -230,6 +230,22 @@ REGISTRY: tuple[DeviceType, ...] = (
                            "unless an active antenna is actually fitted: volts "
                            "into a passive antenna do nothing and into a short "
                            "are worse. Needs the rtl-sdr-blog driver."),
+            Parameter("channel_bw_hz", "Channel filter (±Hz)", "number", 8000,
+                      required=False,
+                      help="The RF channel filter, applied before demodulation. "
+                           "The 8 kHz default passes the whole AM channel "
+                           "(±7.5 kHz occupied). Narrowing it — 4000–6000 at a "
+                           "noisy or congested site — rejects adjacent channels "
+                           "and out-of-band energy before the envelope detector, "
+                           "at the cost of the top of the voice band if taken "
+                           "too far. Clamped to 2000–8000."),
+            Parameter("voice_filter", "Voice filter (300–3400 Hz)", "bool",
+                      True, required=False,
+                      help="A band-pass on the demodulated audio, over the comms "
+                           "voice band. Lifts speech clear of the hiss above it "
+                           "and the rumble below — the biggest single cleanup "
+                           "for airband. On for voice; off for the full-band "
+                           "audio if you are listening to something that is not."),
         ),
         provides=("freq_hz", "rssi_db", "noise_floor_db", "threshold_db",
                   "squelch_open", "auto_squelch", "monitor", "gain", "gains",

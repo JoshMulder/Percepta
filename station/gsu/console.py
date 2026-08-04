@@ -1167,11 +1167,13 @@ class Console:
         act on the live receiver and are saved in its own state file, surviving a
         restart.
 
-        Two controls are device-level, because the front end has to be reopened
-        for them: which receiver the tuner is assigned to, and the bias tee.
-        Those are stored in the inventory and rebuild the receiver — but only
-        when they actually change, so setting a gain or a squelch does not tear
-        the tuner down.
+        Some controls are device-level, because the front end has to be reopened
+        for them: which receiver the tuner is assigned to, the bias tee, and the
+        channel and voice filters. Those are stored in the inventory and rebuild
+        the receiver — but only when they actually change, so setting a gain or a
+        squelch does not tear the tuner down. They arrive as `dev_<param>` fields
+        and are typed from the registry, so a new device parameter needs no
+        change here.
 
         Transcription is a persisted site setting the sensing loop re-reads every
         tick: it takes effect at once and survives a restart, but only does
@@ -1183,31 +1185,45 @@ class Console:
         this single Apply.
         """
         type_id = (form.get("type_id") or [""])[0]
-        if type_id and registry.get(type_id) is None:
+        device = registry.get(type_id) if type_id else None
+        if type_id and device is None:
             raise ValueError(f"{type_id!r} is not a device this station supports.")
         resource = (form.get("resource") or [""])[0] or None
-        bias_tee = bool(form.get("bias_tee"))
 
         # Rebuild only when a device-level setting changed — a gain or squelch
         # tweak on every Apply must not keep tearing the tuner down and back up.
         previous = self.agent.inventory.fitted.get("radio")
         prev_type = previous.type_id if previous else ""
         prev_params = dict((previous.params or {}) if previous else {})
-        prev_bias = bool(prev_params.get("bias_tee"))
         prev_resource = previous.resource if previous else None
+
+        # The device-rebuild parameters, read from the `dev_<param>` fields and
+        # typed from the registry. gain and ppm are skipped: they are stored
+        # device parameters too, but the receiver overrides them from its own
+        # live state, so they are operated below rather than rebuilt here — and
+        # whatever was stored for them is carried forward untouched.
+        new_params = dict(prev_params) if type_id == prev_type else {}
+        if device is not None:
+            for parameter in device.parameters:
+                if parameter.name in ("gain", "ppm"):
+                    continue
+                field = f"dev_{parameter.name}"
+                if parameter.type == "bool":
+                    new_params[parameter.name] = bool(form.get(field))
+                else:
+                    raw = (form.get(field) or [""])[0].strip()
+                    if raw != "":
+                        new_params[parameter.name] = (
+                            (float(raw) if "." in raw else int(raw))
+                            if parameter.type == "number" else raw
+                        )
         device_changed = (
             type_id != prev_type
-            or (bool(type_id) and bias_tee != prev_bias)
+            or (bool(type_id) and new_params != prev_params)
             or (bool(type_id) and resource != prev_resource)
         )
         if device_changed:
-            # Carry forward whatever else was stored (the vestigial gain/ppm
-            # defaults the controller overrides from its own state) and set only
-            # the bias tee, so nothing an installer never saw is dropped.
-            params = dict(prev_params) if type_id == prev_type else {}
-            if type_id:
-                params["bias_tee"] = bias_tee
-            self.agent.inventory.set_device("radio", type_id, params, resource)
+            self.agent.inventory.set_device("radio", type_id, new_params, resource)
             self.agent.build_devices()
 
         # Live operate commands, on whatever receiver exists now — a fresh one if
@@ -2679,23 +2695,6 @@ class Console:
                 + "><span class=muted>Bypasses the squelch, for bringing an "
                 "antenna up.</span></div>"
             )
-            # Bias tee is a front-end setting (the dongle opens with it on or
-            # off), so it is one of the two things here that rebuild the
-            # receiver, and it is persisted with the device rather than in the
-            # receiver's live state.
-            if selected_device is not None:
-                bias = next(
-                    (p for p in selected_device.parameters if p.name == "bias_tee"),
-                    None,
-                )
-                if bias is not None:
-                    checked = " checked" if stored.get("bias_tee") else ""
-                    out.append(
-                        f"<div class=field><label for=bias_tee>{html.escape(bias.label)}"
-                        "</label><input type=checkbox id=bias_tee name=bias_tee "
-                        f"value='1'{checked}><span class=muted>Rebuilds the "
-                        "receiver.</span></div>"
-                    )
             # Crystal correction — live-settable, a starting guess for a tuner
             # that can come up mis-programmed (see the registry note).
             current_ppm = rs.get("ppm") or 0
@@ -2704,6 +2703,35 @@ class Console:
                 "<input type=number id=ppm name=ppm "
                 f"value='{int(current_ppm)}'></div>"
             )
+            # The device-rebuild parameters — the bias tee, the channel filter,
+            # the voice filter — rendered straight from the registry, minus gain
+            # and ppm, which have their own live controls above. Each opens the
+            # front end differently, so changing one rebuilds the receiver; they
+            # post as `dev_<param>` and are persisted with the device. Adding a
+            # radio parameter to the registry surfaces here with no change.
+            if selected_device is not None:
+                for parameter in selected_device.parameters:
+                    if parameter.name in ("gain", "ppm"):
+                        continue
+                    pid = f"dev_{parameter.name}"
+                    label = html.escape(parameter.label)
+                    tip = (f"<span class=muted>{html.escape(parameter.help)}</span>"
+                           if parameter.help else "")
+                    value = stored.get(parameter.name, parameter.default)
+                    if parameter.type == "bool":
+                        on = " checked" if value else ""
+                        out.append(
+                            f"<div class=field><label for={pid}>{label}</label>"
+                            f"<input type=checkbox id={pid} name={pid} value='1'{on}>"
+                            f"{tip}</div>"
+                        )
+                    else:
+                        field_type = "number" if parameter.type == "number" else "text"
+                        out.append(
+                            f"<div class=field><label for={pid}>{label}</label>"
+                            f"<input type={field_type} id={pid} name={pid} "
+                            f"value='{html.escape(str(value))}'>{tip}</div>"
+                        )
             # The site/position dict, under `position` — NOT `state["station"]`,
             # which is the station's *name* (a string) once enrolled and was the
             # crash that took this whole page down: `'str' object has no
