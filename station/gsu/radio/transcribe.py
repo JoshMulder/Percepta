@@ -17,6 +17,7 @@ searchable gist of what was said, not a record of it.
 
 from __future__ import annotations
 
+import array
 import logging
 import queue
 import shutil
@@ -30,6 +31,11 @@ from pathlib import Path
 from typing import Callable
 
 log = logging.getLogger("gsu.radio")
+
+#: whisper.cpp accepts one sample rate — 16 kHz mono — and rejects a WAV at any
+#: other rate outright, writing no transcript. The receiver's audio is 24 kHz,
+#: so an over is resampled to this before it is handed over.
+WHISPER_RATE = 16000
 
 #: How many un-transcribed overs to hold before dropping the oldest. Small on
 #: purpose: the queue is there to ride out a burst, not to build a backlog a
@@ -163,13 +169,14 @@ class Transcriber:
                 log.exception("Recording a transcript failed; continuing.")
 
     def _transcribe(self, over: _Over) -> str:
+        pcm = resample_to_whisper(over.pcm, over.rate)
         with tempfile.TemporaryDirectory() as directory:
             wav_path = Path(directory) / "over.wav"
             with wave.open(str(wav_path), "wb") as handle:
                 handle.setnchannels(1)
                 handle.setsampwidth(2)
-                handle.setframerate(over.rate)
-                handle.writeframes(over.pcm)
+                handle.setframerate(WHISPER_RATE)
+                handle.writeframes(pcm)
             return run_whisper(self._binary, self._model or "", wav_path)
 
     def shutdown(self) -> None:
@@ -178,6 +185,38 @@ class Transcriber:
         if thread is not None:
             thread.join(timeout=1.0)
         self._thread = None
+
+
+def resample_to_whisper(pcm: bytes, rate: int) -> bytes:
+    """16-bit mono PCM at `rate` to the 16 kHz whisper.cpp demands.
+
+    Linear interpolation, in stdlib rather than numpy so this file keeps its
+    no-heavy-deps promise — the transcriber is a background, niced worker and a
+    few thousand multiplies on an over it is about to spend seconds on a model
+    for is nothing. Enough for a transcript that is only after the gist, and the
+    voice content is well under the 8 kHz that 16 kHz carries — doubly so once
+    the receiver's voice filter has been through it.
+    """
+    if rate == WHISPER_RATE or not pcm:
+        return pcm
+    src = array.array("h")
+    src.frombytes(pcm)
+    n_in = len(src)
+    if n_in < 2:
+        return pcm
+    n_out = round(n_in * WHISPER_RATE / rate)
+    if n_out < 2:
+        return pcm
+    step = (n_in - 1) / (n_out - 1)
+    out = array.array("h", bytes(2 * n_out))
+    for i in range(n_out):
+        pos = i * step
+        j = int(pos)
+        frac = pos - j
+        a = src[j]
+        b = src[j + 1] if j + 1 < n_in else a
+        out[i] = max(-32768, min(32767, int(round(a + (b - a) * frac))))
+    return out.tobytes()
 
 
 def run_whisper(binary: str, model: str, wav_path: Path) -> str:

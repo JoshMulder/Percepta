@@ -6,14 +6,16 @@ keeps transcription from ever competing with the audio path — not about the
 model, which only a real Pi can exercise.
 """
 
+import array
 import time
 import unittest
+import wave
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
 from gsu.radio import transcribe
-from gsu.radio.transcribe import QUEUE_MAX, Transcriber
+from gsu.radio.transcribe import QUEUE_MAX, WHISPER_RATE, Transcriber
 
 # One second of (silent) 16-bit mono at 8 kHz — past MIN_OVER_SECONDS.
 _OVER = b"\x01\x00" * 8000
@@ -30,6 +32,56 @@ class CleanTests(unittest.TestCase):
     def test_an_over_with_no_speech_is_empty_not_a_tag(self):
         self.assertEqual(transcribe.clean_transcript("[BLANK_AUDIO]\n"), "")
         self.assertEqual(transcribe.clean_transcript("   \n\n"), "")
+
+
+class ResampleTests(unittest.TestCase):
+    def test_24k_becomes_16k(self):
+        # One second at 24 kHz must come back as one second at 16 kHz — the rate
+        # whisper.cpp will accept, and the whole reason transcription was silent.
+        pcm = b"\x01\x00" * 24_000
+        out = transcribe.resample_to_whisper(pcm, 24_000)
+        self.assertEqual(len(out) // 2, 16_000)
+
+    def test_16k_is_passed_straight_through(self):
+        pcm = b"\x02\x00" * 16_000
+        self.assertIs(transcribe.resample_to_whisper(pcm, 16_000), pcm)
+
+    def test_a_ramp_keeps_its_shape(self):
+        # A rising ramp resampled must still rise monotonically — a sign the
+        # interpolation is not scrambling the samples.
+        ramp = array.array("h", [i - 1000 for i in range(2000)])
+        out = array.array("h")
+        out.frombytes(transcribe.resample_to_whisper(ramp.tobytes(), 24_000))
+        self.assertTrue(all(out[i] <= out[i + 1] for i in range(len(out) - 1)))
+
+
+class WhisperInputRateTests(unittest.TestCase):
+    def test_the_wav_handed_to_whisper_is_16k(self):
+        # The end-to-end guard: whatever the over's rate, the WAV the CLI is
+        # given is 16 kHz. Before this the WAV was 24 kHz and whisper wrote
+        # nothing, so every transcript was empty.
+        seen = {}
+
+        def fake(command, **_):
+            wav = command[command.index("-f") + 1]
+            with wave.open(wav, "rb") as handle:
+                seen["rate"] = handle.getframerate()
+            out = command[command.index("-of") + 1]
+            Path(out + ".txt").write_text("cleared to land\n")
+            return mock.Mock(returncode=0)
+
+        got = []
+        with mock.patch.object(transcribe.subprocess, "run", side_effect=fake), \
+                mock.patch.object(transcribe.shutil, "which", return_value=None):
+            t = Transcriber(lambda *a: got.append(a), enabled=True)
+            t.installed = True
+            t.start()
+            t.submit(b"\x01\x00" * 24_000, 24_000, 118_700_000, datetime.now(UTC))
+            deadline = time.time() + 3.0
+            while not got and time.time() < deadline:
+                time.sleep(0.02)
+            t.shutdown()
+        self.assertEqual(seen.get("rate"), WHISPER_RATE)
 
 
 class RunWhisperTests(unittest.TestCase):
