@@ -106,6 +106,13 @@ export const api = {
       }[]
     >(`/api/stations/${id}/weather/history?hours=${hours}`),
 
+  /** The station's airband transcriptions, newest first. Empty unless on-box
+   *  transcription is enabled. */
+  radioTranscripts: (id: string) =>
+    request<{ t: string; clock: string; message: string }[]>(
+      `/api/stations/${id}/radio/transcripts`,
+    ),
+
   /** Registration and type for an ADS-B contact, by its ICAO hex — the fields
    *  the transponder does not broadcast. Every field but `icao` is null for an
    *  aircraft no registry has; the platform caches the answer, so calling this

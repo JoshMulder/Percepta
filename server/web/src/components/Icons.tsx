@@ -227,6 +227,18 @@ export function IconChart({ className = "icon" }: Props) {
   );
 }
 
+export function IconTranscript({ className = "icon" }: Props) {
+  // Lines of text: the transcription log this opens. A short last line so it
+  // reads as writing rather than a menu.
+  return (
+    <svg {...base} className={className}>
+      <path d="M5 6.5h14" />
+      <path d="M5 11h14" />
+      <path d="M5 15.5h8" />
+    </svg>
+  );
+}
+
 export function IconSettings({ className = "icon" }: Props) {
   // Eight straight teeth and a hub, not the usual many-curved cog. These icons
   // render at 1.15em - about 14px - with a 1.8 stroke, and at that size the

@@ -3,8 +3,14 @@ import { useEffect, useRef, useState } from "react";
 import { memo } from "react";
 import { api } from "../api";
 import type { Capability, RadioPayload } from "../types";
-import { IconSpeaker } from "./Icons";
+import { IconSpeaker, IconTranscript } from "./Icons";
 import { NotPermitted } from "./Panels";
+
+interface Transcript {
+  t: string;
+  clock: string;
+  message: string;
+}
 
 /**
  * Airband receiver controls, ported from Remote-Radio's own client so an
@@ -137,6 +143,9 @@ function RadioPanelInner({
   const [volume, setVolume] = useState(1);
   const [muted, setMuted] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [transcriptsOpen, setTranscriptsOpen] = useState(false);
+  const [transcripts, setTranscripts] = useState<Transcript[]>([]);
+  const [transcriptsLoading, setTranscriptsLoading] = useState(false);
 
   /**
    * Optimistic frequency, exactly as Remote-Radio does it: stepping updates
@@ -193,6 +202,23 @@ function RadioPanelInner({
     },
     [],
   );
+
+  // The transcription log, fetched when the popout opens rather than kept live:
+  // these are discrete events an operator goes looking for, not a stream. Empty
+  // unless the station has on-box transcription enabled.
+  useEffect(() => {
+    if (!transcriptsOpen) return;
+    let cancelled = false;
+    setTranscriptsLoading(true);
+    api
+      .radioTranscripts(stationId)
+      .then((rows) => !cancelled && setTranscripts(rows))
+      .catch(() => !cancelled && setTranscripts([]))
+      .finally(() => !cancelled && setTranscriptsLoading(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [transcriptsOpen, stationId]);
 
   if (!canListen) return <NotPermitted what="the radio" />;
 
@@ -303,6 +329,18 @@ function RadioPanelInner({
 
   return (
     <div className="radio">
+      {/* The transcription log, behind a button in the corner like the graph
+          popouts. */}
+      <button
+        type="button"
+        className="power-detail-btn"
+        onClick={() => setTranscriptsOpen(true)}
+        title="Transcription history"
+        aria-label="Transcription history"
+      >
+        <IconTranscript />
+      </button>
+
       <div className="freq-row">
         <div className="step-col">
           <button type="button" className="step" title="+1 MHz"
@@ -554,6 +592,62 @@ function RadioPanelInner({
       >
         PTT
       </button>
+
+      {transcriptsOpen && (
+        <div
+          className="power-detail-scrim"
+          onClick={() => setTranscriptsOpen(false)}
+          role="presentation"
+        >
+          <div
+            className="power-detail"
+            role="dialog"
+            aria-label="Transcription history"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="power-detail-head">
+              <h4>Transcriptions</h4>
+              <button
+                type="button"
+                className="contact-close"
+                style={{ marginLeft: "auto" }}
+                onClick={() => setTranscriptsOpen(false)}
+                aria-label="Close"
+              >
+                ×
+              </button>
+            </div>
+            <div className="transcript-list">
+              {transcriptsLoading && transcripts.length === 0 ? (
+                <p className="muted">loading…</p>
+              ) : transcripts.length === 0 ? (
+                <p className="muted">
+                  No transcriptions yet. They appear here when the station has
+                  on-box transcription switched on.
+                </p>
+              ) : (
+                transcripts.map((tr, i) => (
+                  <div className="transcript-row" key={`${tr.t}-${i}`}>
+                    <time
+                      className="transcript-time"
+                      title={new Date(tr.t).toLocaleString()}
+                    >
+                      {new Date(tr.t).toLocaleTimeString([], {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })}
+                      {/* A box with no synced clock cannot be trusted on the
+                          minute; the tilde says the time is approximate. */}
+                      {tr.clock === "unsynced" ? " ~" : ""}
+                    </time>
+                    <span className="transcript-text">{tr.message}</span>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

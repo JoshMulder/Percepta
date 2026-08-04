@@ -55,6 +55,15 @@ class PowerPoint(BaseModel):
     gen: float | None = None
 
 
+class TranscriptPoint(BaseModel):
+    #: The station's own time for the transmission. `clock` says whether to
+    #: trust it — a box with no battery-backed clock still logs, it just cannot
+    #: place the entry on a timeline with confidence.
+    t: str
+    clock: str
+    message: str
+
+
 class WeatherPoint(BaseModel):
     t: str
     # Each nullable, and null is "no such sensor", not zero — a station may have
@@ -322,6 +331,52 @@ def weather_history(
             pressure=r.pressure_hpa,
             wind=r.wind_kt,
         )
+        for r in rows
+    ]
+
+
+@router.get(
+    "/{station_id}/radio/transcripts", response_model=list[TranscriptPoint]
+)
+def radio_transcripts(
+    station_id: uuid.UUID,
+    limit: int = 100,
+    identity: Identity = Depends(get_identity),
+    db: Session = Depends(get_db),
+) -> list[TranscriptPoint]:
+    """The station's airband transcriptions, newest first.
+
+    These are `radio.transmission` events — the ledger the station writes when
+    on-box transcription is enabled — read straight from the event table rather
+    than a downsample, because a transmission has no newer version to thin to.
+    Behind telemetry.view, the same as the rest of the radio.
+    """
+    from backend.auth.authorization import capabilities_for
+    from backend.auth.capabilities import Capability
+    from backend.database.models.station_event import StationEvent
+
+    granted = capabilities_for(
+        db,
+        user_id=identity.user_id,
+        organization_id=identity.organization_id,
+        ground_station_id=station_id,
+    )
+    if Capability.TELEMETRY_VIEW not in granted:
+        raise HTTPException(status_code=404, detail="Station not available")
+
+    capped = max(1, min(500, limit))
+    rows = db.execute(
+        select(StationEvent.at, StationEvent.clock, StationEvent.message)
+        .where(
+            StationEvent.ground_station_id == station_id,
+            StationEvent.type == "radio.transmission",
+        )
+        .order_by(StationEvent.received_at.desc())
+        .limit(capped)
+    ).all()
+
+    return [
+        TranscriptPoint(t=r.at.isoformat(), clock=r.clock, message=r.message or "")
         for r in rows
     ]
 
