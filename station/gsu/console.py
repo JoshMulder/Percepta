@@ -2548,23 +2548,25 @@ class Console:
                     "<div class=muted>No source for: "
                     + html.escape(", ".join(selected_device.absent)) + "</div>"
                 )
-        # The button is the no-script fallback. With the nonce'd script running
-        # each field applies the moment it changes and a freshly-picked device
-        # commits itself, so the button hides and its .field is given over to a
-        # status line the fetch writes — the same treatment the radio panel's
-        # Apply gets. In a .field with no label so it sits under the controls,
-        # beside the (hidden) button, rather than under the labels.
+        # No Save button. The script applies each field the moment it changes
+        # and commits a freshly-picked device on load, so there is nothing to
+        # press — its .field holds only the status line the fetch writes (the
+        # outcome of each change: detected, or the reason it was not). This is
+        # the one control on the page that genuinely needs the script: with it
+        # blocked the picker still re-renders, but a device is committed over
+        # fetch and there is no button behind it. In a .field with no label so
+        # the line sits under the controls, not under the labels.
         if slot != "radio":
             out.append(
-                "<div class=field><button type=submit>Save</button>"
+                "<div class=field>"
                 "<span class='muted device-status' aria-live=polite></span>"
                 "</div></form>"
             )
         else:
-            # Radio has no Save here — its one button is the Apply below. Close
-            # the (now field-less) /device form so its hidden slot/type_id and
-            # csrf are still well-formed markup; nothing submits it, and the
-            # nonce'd dirty-check skips a form with no submit button.
+            # Radio commits through the Apply below, not here. Close the (now
+            # field-less) /device form so its hidden slot/type_id and csrf are
+            # still well-formed markup; nothing submits it, and the nonce'd
+            # apply loop skips a form with no status line of its own.
             out.append("</form>")
 
         # The live tap goes *under* the controls. It is what an installer reads
@@ -3132,12 +3134,10 @@ class Console:
   var deviceForms = document.querySelectorAll("form[data-device]");
   for (var d = 0; d < deviceForms.length; d++) {
     (function (form) {
-      var button = form.querySelector("button[type=submit]");
-      // No button is the radio slot's placeholder form — its fields live in the
-      // radio panel, which commits them. Nothing here to apply.
-      if (!button) return;
-      button.hidden = true;
       var status = form.querySelector(".device-status");
+      // No status line is the radio slot's placeholder form — its fields live in
+      // the radio panel, which commits them. Nothing here to apply.
+      if (!status) return;
       var say = function (text, bad) {
         if (!status) return;
         status.textContent = text;

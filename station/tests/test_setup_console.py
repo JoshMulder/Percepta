@@ -599,20 +599,21 @@ class ServedPageTests(unittest.TestCase):
         self.assertNotIn("script-src",
                          response.getheader("Content-Security-Policy") or "")
 
-    def test_without_javascript_the_save_button_is_simply_enabled(self):
-        # The no-JS path is acceptable degradation, which means the rendered
-        # button must be a plain working Save — never disabled, since only the
-        # script (which is absent here) would hide it and apply on change.
+    def test_the_device_form_has_no_save_button(self):
+        # There is no Save button on the Devices tab at all — not hidden, not
+        # disabled, gone. The script applies each field on change and commits a
+        # picked device on load, so nothing is left to press. Unlike the rest of
+        # the page this one control needs the script; a bare Save button coming
+        # back is the regression, so the absence is asserted rather than assumed.
         _, _, body = self.page("/devices")
-        self.assertIn("<button type=submit>Save</button>", body)
-        self.assertNotIn("<button type=submit disabled", body)
+        self.assertNotIn(">Save</button>", body)
 
     def test_the_device_form_is_marked_for_instant_apply(self):
-        # The nonce'd script hides the Save button and posts each change over
-        # fetch (ajax=1), writing the outcome to this status line; a freshly
-        # picked device commits itself the same way. The status span is where
-        # the script writes, so its absence would strand the feedback the
-        # no-reload path depends on — the same marker the radio panel carries.
+        # The nonce'd script posts each change over fetch (ajax=1), writing the
+        # outcome to this status line; a freshly picked device commits itself the
+        # same way. The status span is where the script writes, and its presence
+        # is also how the script tells a real device form from the radio slot's
+        # field-less placeholder — so its absence would strand the whole path.
         _, _, body = self.page("/devices")
         self.assertIn("action='/device' data-device", body)
         self.assertIn("class='muted device-status'", body)
@@ -1418,15 +1419,14 @@ class ServedPageTests(unittest.TestCase):
             self.assertNotIn("</label><br>", body, path)
             self.assertIn("<div class=field>", body, path)
 
-    def test_the_save_buttons_sit_in_the_control_column(self):
-        # Left flush under indented controls is exactly the raggedness the
-        # grid was added to remove. The button is the no-script fallback — the
-        # script hides it and writes each change's outcome to the status line
-        # beside it — but the button and that line still sit in the control
-        # column, the same .field treatment the radio panel's Apply gets.
+    def test_the_device_status_line_sits_in_the_control_column(self):
+        # Left flush under indented controls is exactly the raggedness the grid
+        # was added to remove. The Devices tab has no Save button now — the fetch
+        # writes each change's outcome to this status line, which takes the
+        # button's old place in its own label-less .field, in the control column.
         _, _, body = self.page("/devices")
         self.assertIn(
-            "<div class=field><button type=submit>Save</button>"
+            "<div class=field>"
             "<span class='muted device-status' aria-live=polite></span></div>",
             body,
         )
