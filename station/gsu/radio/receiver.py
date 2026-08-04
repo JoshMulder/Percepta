@@ -539,6 +539,22 @@ class RadioController:
     def squelch_open(self) -> bool:
         return self._open
 
+    @property
+    def rssi_db(self) -> float:
+        """The most recent in-channel power, for the setup page's signal meter."""
+        return self._rssi_db
+
+    @property
+    def noise_floor_db(self) -> float:
+        return self._floor_db
+
+    @property
+    def available_gains(self) -> list[float]:
+        """The tuner's own gain steps, so the setup page can offer the same
+        stepped control the platform does rather than a free number the tuner
+        would only snap away from."""
+        return list(self.front_end.available_gains)
+
     def raw_sample(self) -> list[str]:
         return list(self._raw)
 

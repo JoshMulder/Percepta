@@ -2045,8 +2045,16 @@ class Agent:
                 "fitted": self.radio is not None,
                 "freq_mhz": round(self.radio.freq_hz / 1e6, 3) if self.radio else None,
                 "squelch_open": self.radio.squelch_open if self.radio else False,
+                "monitor": self.radio.monitor if self.radio else False,
                 "auto": self.radio.auto_squelch if self.radio else False,
                 "threshold_db": round(self.radio.last_threshold_db, 1) if self.radio else None,
+                # The signal meter and the stepped gain control on the setup
+                # page's radio tab — the same numbers the platform panel shows.
+                "rssi_db": round(self.radio.rssi_db, 1) if self.radio else None,
+                "floor_db": round(self.radio.noise_floor_db, 1) if self.radio else None,
+                "gain": self.radio.gain if self.radio else None,
+                "gains": self.radio.available_gains if self.radio else [],
+                "ppm": self.radio.ppm if self.radio else 0,
                 # Unconditionally here, unlike the telemetry frame, and that is
                 # the whole difference: this is served over loopback or the
                 # local network to somebody standing at the box, so 128 small

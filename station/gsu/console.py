@@ -1105,27 +1105,96 @@ class Console:
         self.message = ("good", "Saved.")
 
     def _set_radio(self, form: dict) -> None:
-        """The radio slot's own controls: retune the receiver, hold the gate
-        open for bringing an antenna up, and switch airband transcription on.
+        """The radio panel is one form with one button; this splits what it
+        carries into the two kinds of thing it holds.
 
-        Tuning and monitor act on the live receiver. Transcription is a
-        persisted site setting the sensing loop re-reads every tick, so it takes
-        effect at once and survives a restart — but only does anything when the
-        whisper.cpp binary and model are present, which the form says.
+        The dashboard drives the receiver through discrete operate commands —
+        tune, gain, squelch, monitor — and the setup page now offers the same
+        set so a box can be brought up and *heard* before it is enrolled. Those
+        act on the live receiver and are saved in its own state file, surviving a
+        restart.
 
-        This handler was missing: the `/radio` form posted to a method that did
-        not exist, so Apply raised and the page showed the exception. Added here
-        along with the transcription switch it now also carries.
+        Two controls are device-level, because the front end has to be reopened
+        for them: which receiver the tuner is assigned to, and the bias tee.
+        Those are stored in the inventory and rebuild the receiver — but only
+        when they actually change, so setting a gain or a squelch does not tear
+        the tuner down.
+
+        Transcription is a persisted site setting the sensing loop re-reads every
+        tick: it takes effect at once and survives a restart, but only does
+        anything when whisper.cpp and a model are on the box, which the form
+        says.
+
+        This replaced the earlier freq+monitor+transcribe handler when the
+        panel's two buttons — a device Save and a radio Apply — were merged into
+        this single Apply.
         """
+        type_id = (form.get("type_id") or [""])[0]
+        if type_id and registry.get(type_id) is None:
+            raise ValueError(f"{type_id!r} is not a device this station supports.")
+        resource = (form.get("resource") or [""])[0] or None
+        bias_tee = bool(form.get("bias_tee"))
+
+        # Rebuild only when a device-level setting changed — a gain or squelch
+        # tweak on every Apply must not keep tearing the tuner down and back up.
+        previous = self.agent.inventory.fitted.get("radio")
+        prev_type = previous.type_id if previous else ""
+        prev_params = dict((previous.params or {}) if previous else {})
+        prev_bias = bool(prev_params.get("bias_tee"))
+        prev_resource = previous.resource if previous else None
+        device_changed = (
+            type_id != prev_type
+            or (bool(type_id) and bias_tee != prev_bias)
+            or (bool(type_id) and resource != prev_resource)
+        )
+        if device_changed:
+            # Carry forward whatever else was stored (the vestigial gain/ppm
+            # defaults the controller overrides from its own state) and set only
+            # the bias tee, so nothing an installer never saw is dropped.
+            params = dict(prev_params) if type_id == prev_type else {}
+            if type_id:
+                params["bias_tee"] = bias_tee
+            self.agent.inventory.set_device("radio", type_id, params, resource)
+            self.agent.build_devices()
+
+        # Live operate commands, on whatever receiver exists now — a fresh one if
+        # the rebuild above ran, which reloaded freq/gain/squelch from its state
+        # file and is about to have this Apply's values put on top.
         radio = self.agent.radio
-        raw = (form.get("freq_mhz") or [""])[0].strip()
-        if raw and radio is not None:
-            try:
-                radio.tune(int(round(float(raw) * 1e6)))
-            except ValueError:
-                raise ValueError(f"{raw!r} is not a frequency in MHz.")
         if radio is not None:
+            raw = (form.get("freq_mhz") or [""])[0].strip()
+            if raw:
+                try:
+                    radio.tune(int(round(float(raw) * 1e6)))
+                except ValueError:
+                    raise ValueError(f"{raw!r} is not a frequency in MHz.")
+            gain = (form.get("gain") or [""])[0].strip()
+            if gain:
+                try:
+                    radio.set_gain("auto" if gain == "auto" else float(gain))
+                except ValueError:
+                    raise ValueError(f"{gain!r} is not a gain in dB.")
+            ppm = (form.get("ppm") or [""])[0].strip()
+            if ppm:
+                try:
+                    radio.set_ppm(int(float(ppm)))
+                except ValueError:
+                    raise ValueError(f"{ppm!r} is not a crystal correction in ppm.")
+            # AUTO wins if ticked; otherwise the slider's level, which set_squelch
+            # applies and turns AUTO off in the same move.
+            if form.get("auto_squelch"):
+                radio.set_auto_squelch(True)
+            else:
+                level = (form.get("squelch") or [""])[0].strip()
+                if level:
+                    try:
+                        radio.set_squelch(float(level))
+                    except ValueError:
+                        raise ValueError(f"{level!r} is not a squelch level in dB.")
+                else:
+                    radio.set_auto_squelch(False)
             radio.set_monitor(bool(form.get("monitor")))
+
         self.agent.site.radio_transcribe = bool(form.get("radio_transcribe"))
         self.agent.site.save(self.agent.config.site_config_path)
         self.message = ("good", "Saved.")
@@ -2322,7 +2391,12 @@ class Console:
         out.append(self._csrf_field(csrf))
 
         selected_device = registry.get(chosen_id) if chosen_id else None
-        if selected_device is not None:
+        # The radio slot folds its device parameters — the receiver assignment,
+        # the bias tee — into the single operate form in its branch below, so it
+        # renders neither the generic parameter fields here nor their Save. The
+        # owner requirement is one button on that panel, not a Save on this form
+        # and an Apply on another; `_set_radio` is what re-joins the two halves.
+        if selected_device is not None and slot != "radio":
             stored_params = (
                 (entry.params or {}) if entry and entry.type_id == chosen_id else {}
             )
@@ -2408,7 +2482,16 @@ class Console:
         # script disables it until a field differs from its loaded value. In a
         # .field with no label so that it sits under the controls rather than
         # under the labels — the only child of a row goes to column 2.
-        out.append("<div class=field><button type=submit>Save</button></div></form>")
+        if slot != "radio":
+            out.append(
+                "<div class=field><button type=submit>Save</button></div></form>"
+            )
+        else:
+            # Radio has no Save here — its one button is the Apply below. Close
+            # the (now field-less) /device form so its hidden slot/type_id and
+            # csrf are still well-formed markup; nothing submits it, and the
+            # nonce'd dirty-check skips a form with no submit button.
+            out.append("</form>")
 
         # The live tap goes *under* the controls. It is what an installer reads
         # to confirm a change worked, so it belongs after the thing they
@@ -2422,26 +2505,146 @@ class Console:
             # whole zoom mechanism, so expanding works with scripts blocked.
             out.append(self._preview(state.get("video") or {}))
         elif slot == "radio":
-            # The same spectrum the console draws, on the box itself — this is
-            # the page somebody has open while pointing an antenna, and a
-            # number in a list cannot show them a carrier appearing. Fixed
-            # size, refreshed from status.json by the nonce'd script; with no
-            # script it is a still of the moment the page was rendered.
+            # The whole radio panel is one form with one button — the owner's
+            # requirement, and the reason the generic device form above renders
+            # nothing for this slot. The dashboard drives the same receiver
+            # through discrete operate commands (tune, gain, squelch, monitor),
+            # and this page now offers the same set so a box can be brought up
+            # and *heard* before it is ever enrolled. `_set_radio` splits what
+            # this posts back into the two things it is: settings that rebuild
+            # the receiver (which one, bias tee) and live operate commands.
             radio = self.agent.radio
-            out.append(
-                f"<form method=post action='/radio'>{self._csrf_field(csrf)}"
-                "<div class=field><label for='freq_mhz'>Frequency</label>"
-                "<input type=text id='freq_mhz' name='freq_mhz' spellcheck=false "
-                f"inputmode=decimal placeholder='MHz' value='"
-                f"{radio.freq_hz / 1e6:.3f}" if radio else ""
+            rs = state.get("radio") or {}
+            stored = (
+                (entry.params or {}) if entry and entry.type_id == chosen_id else {}
             )
             out.append(
-                "'></div>"
+                f"<form method=post action='/radio'>{self._csrf_field(csrf)}"
+                f"<input type=hidden name=type_id value='{html.escape(chosen_id)}'>"
+            )
+            # The receiver this tuner is assigned to. The same field the generic
+            # device form carries for every other slot, folded in here so the
+            # radio keeps its single button. Only shown when the selected device
+            # actually consumes a resource (the demo receiver does not).
+            if selected_device is not None and selected_device.resource:
+                out.append("<div class=field><label for=resource>Receiver</label>"
+                           "<select id=resource name=resource>")
+                out.append("<option value=''>— none assigned —</option>")
+                for resource in resources:
+                    sel = (
+                        " selected"
+                        if entry and entry.type_id == chosen_id
+                        and entry.resource == resource["id"] else ""
+                    )
+                    label = f"{resource['model']} serial {resource['serial'] or 'unset'}"
+                    out.append(
+                        f"<option value='{html.escape(resource['id'])}'{sel}>"
+                        f"{html.escape(label)}</option>"
+                    )
+                out.append(
+                    "</select><span class=muted>One tuner, one band.</span></div>"
+                )
+            # Frequency — the dashboard's auto-decimal (the point after the third
+            # digit) is added by the nonce'd script; without it, type the point.
+            freq_value = f"{radio.freq_hz / 1e6:.3f}" if radio else ""
+            out.append(
+                "<div class=field><label for='freq_mhz'>Frequency</label>"
+                "<input type=text id='freq_mhz' name='freq_mhz' spellcheck=false "
+                f"inputmode=decimal placeholder='MHz' value='{freq_value}'></div>"
+            )
+            # Gain, in the tuner's own steps — the same discrete list the platform
+            # offers, read from the device so a value the tuner cannot honour
+            # cannot be picked. AUTO only because the tuner supports it; the
+            # airband default is a fixed gain (see the receiver's docstring).
+            gains = rs.get("gains") or []
+            current_gain = rs.get("gain")
+            out.append("<div class=field><label for=gain>Tuner gain (dB)</label>"
+                       "<select id=gain name=gain>")
+            out.append(
+                "<option value=auto"
+                + (" selected" if current_gain == "auto" else "")
+                + ">AUTO</option>"
+            )
+            for step in gains:
+                sel = (
+                    " selected"
+                    if isinstance(current_gain, (int, float))
+                    and abs(float(current_gain) - float(step)) < 0.05 else ""
+                )
+                out.append(f"<option value='{step}'{sel}>{float(step):.1f}</option>")
+            out.append("</select></div>")
+            # Squelch — an absolute threshold in dB, or AUTO. The same two
+            # controls the dashboard has, over the same live signal readout
+            # (below) so the number can be set against what is being heard.
+            threshold_db = rs.get("threshold_db")
+            thr = threshold_db if isinstance(threshold_db, (int, float)) else -70.0
+            out.append(
+                "<div class=field><label for=squelch>Squelch (dB)</label>"
+                "<input type=range id=squelch name=squelch min=-110 max=-10 "
+                f"step=1 value='{thr:.0f}'>"
+                f"<output id=squelch-out>{thr:.0f}</output></div>"
+            )
+            out.append(
+                "<div class=field><label for=auto_squelch>Auto squelch</label>"
+                "<input type=checkbox id=auto_squelch name=auto_squelch value='1'"
+                + (" checked" if rs.get("auto") else "")
+                + "><span class=muted>Tracks the noise floor. Unticking freezes "
+                "the threshold where it is.</span></div>"
+            )
+            # The live signal, moved by the poll: the number the squelch is set
+            # against. rssi / floor / open, exactly what the dashboard shows.
+            rssi, floor = rs.get("rssi_db"), rs.get("floor_db")
+            rssi_txt = f"{rssi:.1f}" if isinstance(rssi, (int, float)) else "—"
+            floor_txt = f"{floor:.1f}" if isinstance(floor, (int, float)) else "—"
+            out.append(
+                "<div class=field><label>Signal</label>"
+                f"<span id=signal class=muted>{rssi_txt} dB, floor {floor_txt} dB"
+                + (", open" if rs.get("squelch_open") else "")
+                + "</span></div>"
+            )
+            out.append(
                 "<div class=field><label for='monitor'>Hold gate open</label>"
                 "<input type=checkbox id='monitor' name='monitor' value='1'"
                 + (" checked" if radio and radio.monitor else "")
                 + "><span class=muted>Bypasses the squelch, for bringing an "
                 "antenna up.</span></div>"
+            )
+            # Listen. The whole reason audio belongs on this page: an installer
+            # tests the receiver here before enrolment. /audio.wav is the
+            # demodulator's own PCM straight off the box — before Opus, the
+            # broker and the platform's fan-out — attached as a local listener
+            # and streamed only while this element is playing (preload=none). The
+            # gate decides what is in it: silence while the squelch is shut, so
+            # "Hold gate open" above is how you hear a band that is quiet.
+            out.append(
+                "<div class=field><label for=listen>Listen</label>"
+                "<audio id=listen controls preload=none src='/audio.wav'></audio>"
+                "<span class=muted>Bench test before enrolment.</span></div>"
+            )
+            # Bias tee is a front-end setting (the dongle opens with it on or
+            # off), so it is one of the two things here that rebuild the
+            # receiver, and it is persisted with the device rather than in the
+            # receiver's live state.
+            if selected_device is not None:
+                bias = next(
+                    (p for p in selected_device.parameters if p.name == "bias_tee"),
+                    None,
+                )
+                if bias is not None:
+                    checked = " checked" if stored.get("bias_tee") else ""
+                    out.append(
+                        f"<div class=field><label for=bias_tee>{html.escape(bias.label)}"
+                        "</label><input type=checkbox id=bias_tee name=bias_tee "
+                        f"value='1'{checked}><span class=muted>Rebuilds the "
+                        "receiver.</span></div>"
+                    )
+            # Crystal correction — live-settable, a starting guess for a tuner
+            # that can come up mis-programmed (see the registry note).
+            current_ppm = rs.get("ppm") or 0
+            out.append(
+                "<div class=field><label for=ppm>Crystal (ppm)</label>"
+                "<input type=number id=ppm name=ppm "
+                f"value='{int(current_ppm)}'></div>"
             )
             # The site/position dict, under `position` — NOT `state["station"]`,
             # which is the station's *name* (a string) once enrolled and was the
@@ -2617,6 +2820,18 @@ class Console:
       freqInput.value = digits.length > 3
         ? digits.slice(0, 3) + "." + digits.slice(3)
         : digits;
+    });
+  }
+  // The squelch slider shows the dB it is on as it moves, and moving it unticks
+  // AUTO — the same "a manual level means manual" the station enforces in
+  // set_squelch, said in the UI so the two controls do not disagree on screen.
+  var squelch = document.getElementById("squelch");
+  var squelchOut = document.getElementById("squelch-out");
+  var autoSquelch = document.getElementById("auto_squelch");
+  if (squelch) {
+    squelch.addEventListener("input", function () {
+      if (squelchOut) squelchOut.textContent = squelch.value;
+      if (autoSquelch) autoSquelch.checked = false;
     });
   }
   var forms = document.querySelectorAll("form[data-device]");
@@ -2813,6 +3028,17 @@ class Console:
         .then(function (s) {
           if (!s) return;
           if (spec && s.radio) drawSpectrum(s.radio);
+          // The signal readout under the squelch, moved live so the threshold
+          // can be set against what is being heard right now.
+          var signal = document.getElementById("signal");
+          if (signal && s.radio) {
+            var r = s.radio;
+            var db = function (v) {
+              return (typeof v === "number") ? v.toFixed(1) : "\\u2014";
+            };
+            signal.textContent = db(r.rssi_db) + " dB, floor " + db(r.floor_db)
+              + " dB" + (r.squelch_open ? ", open" : "");
+          }
           if (raw && s.raw_samples) {
             var lines = s.raw_samples[raw.getAttribute("data-slot")] || [];
             raw.textContent = lines.join("\\n");
