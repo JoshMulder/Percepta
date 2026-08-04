@@ -40,7 +40,7 @@ describe("WeatherHistory", () => {
     expect(rows()).toEqual(["Temperature", "Wind"]);
   });
 
-  it("shows the latest value and the window's range", () => {
+  it("shows the latest value and a y-axis of the window's range", () => {
     render(
       <WeatherHistory
         samples={[
@@ -49,9 +49,14 @@ describe("WeatherHistory", () => {
         ]}
       />,
     );
-    const text = document.querySelector(".weather-row")?.textContent ?? "";
-    expect(text).toContain("16.4");
-    expect(text).toContain("12.0–16.4");
+    const row = document.querySelector(".weather-row");
+    // The current value in the head, and the range as the axis top and bottom.
+    expect(row?.textContent).toContain("16.4");
+    const axis = Array.from(row?.querySelectorAll(".chart-y") ?? []).map(
+      (e) => e.textContent,
+    );
+    expect(axis).toContain("16.4 °C");
+    expect(axis).toContain("12.0 °C");
   });
 
   it("says so rather than drawing an empty box before there is history", () => {

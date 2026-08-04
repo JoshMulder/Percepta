@@ -114,22 +114,29 @@ export function WeatherHistory({
             <span className="weather-row-now">
               <b>{r.last.toFixed(r.digits)}</b> {r.unit}
             </span>
-            <span className="weather-row-range">
-              {r.min.toFixed(r.digits)}–{r.max.toFixed(r.digits)}
+          </div>
+          <div className="chart-plot">
+            <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden>
+              <path
+                className="weather-area"
+                d={r.area}
+                style={{ fill: r.colour, fillOpacity: 0.14 }}
+              />
+              <path
+                className="weather-line"
+                d={r.line}
+                style={{ stroke: r.colour }}
+              />
+            </svg>
+            {/* The y-axis: the top and bottom of this series over the window,
+                which is the scale the trace is drawn against. */}
+            <span className="chart-y top">
+              {r.max.toFixed(r.digits)} {r.unit}
+            </span>
+            <span className="chart-y bot">
+              {r.min.toFixed(r.digits)} {r.unit}
             </span>
           </div>
-          <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden>
-            <path
-              className="weather-area"
-              d={r.area}
-              style={{ fill: r.colour, fillOpacity: 0.14 }}
-            />
-            <path
-              className="weather-line"
-              d={r.line}
-              style={{ stroke: r.colour }}
-            />
-          </svg>
         </div>
       ))}
     </div>

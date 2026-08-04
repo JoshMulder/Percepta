@@ -85,15 +85,23 @@ export function BatteryChart({
    */
   return (
     <div className="battery-chart">
-      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden>
-        <line className="chart-shed" x1="0" y1={shedY} x2={W} y2={shedY} />
-        {line && (
-          <>
-            <path className="chart-area" d={area} />
-            <path className="chart-line" d={line} />
-          </>
-        )}
-      </svg>
+      <div className="chart-plot">
+        <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden>
+          <line className="chart-shed" x1="0" y1={shedY} x2={W} y2={shedY} />
+          {line && (
+            <>
+              <path className="chart-area" d={area} />
+              <path className="chart-line" d={line} />
+            </>
+          )}
+        </svg>
+        {/* Fixed 0–100 scale, with the 20% shed line called out — the number
+            that actually matters, since that is where the station starts
+            dropping load. */}
+        <span className="chart-y top">100%</span>
+        <span className="chart-y shed">{SHED_PCT}%</span>
+        <span className="chart-y bot">0%</span>
+      </div>
       <div className="chart-foot">
         {line ? (
           <span className={trend >= 0 ? "trend up" : "trend down"}>
@@ -135,8 +143,8 @@ export function PowerFlowHistory({
   const W = 100;
   const H = 34;
 
-  const drawn = useMemo(() => {
-    if (samples.length < 2) return [];
+  const { drawn, peak } = useMemo(() => {
+    if (samples.length < 2) return { drawn: [], peak: 0 };
     const t0 = samples[0].t;
     const span = Math.max(1, samples[samples.length - 1].t - t0);
     let max = 0;
@@ -159,7 +167,7 @@ export function PowerFlowHistory({
     // A touch of headroom so the peak is not welded to the top edge, and never
     // divide by zero on a window where every source read 0 W.
     const yMax = Math.max(1, max * 1.08);
-    return raw
+    const drawnSeries = raw
       .filter((s) => s.present)
       .map((s) => {
         // The line breaks across a null rather than leaping the gap: a source
@@ -184,20 +192,31 @@ export function PowerFlowHistory({
           last: s.last,
         };
       });
+    return { drawn: drawnSeries, peak: Math.round(max) };
   }, [samples]);
 
   return (
     <div className="power-series">
-      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden>
-        {drawn.map((s) => (
-          <path
-            key={s.key}
-            className="series-line"
-            d={s.d}
-            stroke={s.colour}
-          />
-        ))}
-      </svg>
+      <div className="chart-plot">
+        <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden>
+          {drawn.map((s) => (
+            <path
+              key={s.key}
+              className="series-line"
+              d={s.d}
+              stroke={s.colour}
+            />
+          ))}
+        </svg>
+        {drawn.length > 0 && (
+          <>
+            {/* One watt scale shared across all four sources, so their heights
+                compare. */}
+            <span className="chart-y top">{peak} W</span>
+            <span className="chart-y bot">0 W</span>
+          </>
+        )}
+      </div>
       <div className="series-legend">
         {drawn.length === 0 ? (
           <span className="muted">{loading ? "loading…" : "no history yet"}</span>
@@ -261,14 +280,22 @@ export function LoadHistory({
 
   return (
     <div className="load-chart">
-      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden>
+      <div className="chart-plot">
+        <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden>
+          {line && (
+            <>
+              <path className="load-area" d={area} />
+              <path className="load-line" d={line} />
+            </>
+          )}
+        </svg>
         {line && (
           <>
-            <path className="load-area" d={area} />
-            <path className="load-line" d={line} />
+            <span className="chart-y top">{Math.round(peak)} W</span>
+            <span className="chart-y bot">0 W</span>
           </>
         )}
-      </svg>
+      </div>
       <div className="series-legend">
         {last === null ? (
           <span className="muted">{loading ? "loading…" : "no history yet"}</span>

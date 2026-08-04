@@ -1718,6 +1718,37 @@ body {
   border: 1px solid var(--line);
   border-radius: var(--s1);
 }
+/* A y-axis on any of the popout charts: the top and bottom of the drawn range,
+   labelled in the plot's own corner. The plots stretch (preserveAspectRatio
+   none), so the labels are HTML overlaid on the box rather than SVG text, which
+   would stretch with it. */
+.chart-plot {
+  position: relative;
+}
+.chart-plot .chart-y {
+  position: absolute;
+  left: 0.3rem;
+  font: 0.6rem var(--mono);
+  color: var(--muted);
+  pointer-events: none;
+  /* Legible wherever the trace happens to pass behind it. */
+  text-shadow: 0 0 0.2rem #060a0e, 0 0 0.2rem #060a0e;
+}
+.chart-plot .chart-y.top {
+  top: 0.2rem;
+}
+.chart-plot .chart-y.bot {
+  bottom: 0.2rem;
+}
+/* The load-shed line at 20%, in the warn colour that marks it on the trace. */
+.chart-plot .chart-y.shed {
+  bottom: 20%;
+  color: var(--warn);
+}
+.chart-plot svg {
+  display: block;
+}
+
 /* The dedicated load area — its own scale, so a quiet site still reads. */
 .load-area {
   fill: rgba(215, 222, 231, 0.16);
@@ -3325,11 +3356,13 @@ body {
 }
 .power-detail-btn {
   position: absolute;
-  /* Hard into the corner: negative insets pull it past the panel's own padding
-     so it sits flush with the panel edge rather than floating in from it. */
-  top: -0.35rem;
+  /* Up into the panel's header row, top-right, level with the title. The button
+     lives in the panel body (below the header), so a negative top lifts it over
+     the header's height into that row; `.card-body` does not clip and `.card`
+     clips only at its outer edge, which the button stays inside. */
+  top: -2rem;
   right: -0.35rem;
-  z-index: 1;
+  z-index: 2;
   flex: none;
   background: none;
   border: 1px solid transparent;
