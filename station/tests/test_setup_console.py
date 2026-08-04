@@ -2068,17 +2068,27 @@ class DevicePickerTests(unittest.TestCase):
             self.assertIn(f">{float(step):.1f}</option>", panel)
 
     def test_the_squelch_controls_match_the_dashboard(self):
-        # The same threshold-or-AUTO pair the dashboard has, over a live signal
-        # readout the poll moves.
+        # The platform's signal indicator, verbatim: a threshold-or-AUTO pair
+        # over a meter (fill = signal, hairline = floor, thumb = threshold) and a
+        # readout with the channel LED — not a bare number.
         panel = self._radio_panel()
         self.assertIn("name=squelch", panel)
         self.assertIn("name=auto_squelch", panel)
-        self.assertIn("id=signal", panel)
+        self.assertIn("class=radio-readout", panel)
+        self.assertIn("class=meter", panel)
+        self.assertIn("id=meter-fill", panel)
+        self.assertIn("id=sig-led", panel)
 
     def test_the_panel_lets_the_receiver_be_heard_before_enrolment(self):
         # No volume control was the gap: an installer could not test the radio
-        # here. The audio element streams the same /audio.wav the CLI examples do.
-        self.assertIn("src='/audio.wav'", self._radio_panel())
+        # here. It is a volume slider, not a play button — dragging it starts the
+        # audio, the same as the platform — over the same /audio.wav the CLI
+        # examples use.
+        panel = self._radio_panel()
+        self.assertIn("src='/audio.wav'", panel)
+        self.assertIn("id=volume", panel)
+        # A volume control, not the browser's transport: no controls attribute.
+        self.assertNotIn("<audio id=listen controls", panel)
 
     def _save_camera(self, type_id, **params):
         form = {"slot": ["camera"], "type_id": [type_id]}

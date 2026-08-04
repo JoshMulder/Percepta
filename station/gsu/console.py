@@ -484,6 +484,44 @@ STYLE = """
  .spectrum { display: block; max-width: 100%; background: var(--panel-2);
    border: 1px solid var(--line); border-radius: .375rem; margin-bottom: .6rem; }
 
+ /* The signal meter, matching the platform's settings panel so the bar an
+    operator learns to read means the same in both places: a readout row, then a
+    slim bar whose fill is the in-channel signal, a hairline at the noise floor,
+    and the squelch threshold as a thumb riding the same dB scale — set the
+    level against the signal it gates, not on a control beside it. The gradient
+    is fixed to the scale (a colour is a level, not a fill), and the dB->%
+    mapping is the platform's verbatim: -90 floor, -10 saturation. */
+ .radio-readout { display: flex; gap: 1rem; align-items: center;
+   flex-wrap: wrap; font-size: .82rem; color: var(--muted); margin: 0 0 .1rem; }
+ .radio-readout b { color: var(--text); font-weight: 600; }
+ .led { width: .8rem; height: .8rem; border-radius: 50%; background: #17222c;
+   border: 1px solid var(--line); flex: none; }
+ .led.on { background: #3fb950; border-color: #3fb950;
+   box-shadow: 0 0 .5rem #3fb950; }
+ .meter { position: relative; height: .5rem; margin: .45rem 0;
+   background: #060a0e; border: 1px solid var(--line); border-radius: .25rem;
+   overflow: visible; }
+ .meter-fill { position: absolute; inset: 0 auto 0 0; border-radius: .25rem;
+   background: linear-gradient(90deg, #3fb950, #d29922 75%, #f85149);
+   transition: width 150ms linear; }
+ .meter-floor { position: absolute; top: -.15rem; bottom: -.15rem; width: 1px;
+   background: var(--dim); opacity: .7; }
+ .squelch-overlay { position: absolute; left: 0; right: 0; top: 50%;
+   height: 1.5rem; transform: translateY(-50%); width: 100%; margin: 0;
+   appearance: none; -webkit-appearance: none; background: none; padding: 0;
+   border: 0; cursor: ew-resize; }
+ .squelch-overlay::-webkit-slider-thumb { -webkit-appearance: none;
+   appearance: none; width: 1rem; height: 1rem; border-radius: 50%;
+   background: var(--brand); border: 2px solid var(--bg);
+   box-shadow: 0 0 .4rem rgba(0,160,220,.6); cursor: ew-resize; }
+ .squelch-overlay::-moz-range-thumb { width: 1rem; height: 1rem;
+   border-radius: 50%; background: var(--brand); border: 2px solid var(--bg);
+   box-shadow: 0 0 .4rem rgba(0,160,220,.6); cursor: ew-resize; }
+ /* Volume, not a play button — dragging it is the gesture that starts the
+    audio, the same as the platform. Fills the control column. */
+ .volume-row { display: flex; align-items: center; gap: .6rem; }
+ .volume-row input[type=range] { flex: 1; min-width: 6rem; }
+
  pre.raw { font: .8rem ui-monospace, monospace; color: var(--text);
    background: var(--panel-2); border: 1px solid var(--line-soft);
    border-radius: .375rem; padding: .55rem .7rem; margin: .4rem 0 .6rem;
@@ -2573,16 +2611,44 @@ class Console:
                 )
                 out.append(f"<option value='{step}'{sel}>{float(step):.1f}</option>")
             out.append("</select></div>")
-            # Squelch — an absolute threshold in dB, or AUTO. The same two
-            # controls the dashboard has, over the same live signal readout
-            # (below) so the number can be set against what is being heard.
+            # Squelch and the signal it gates, as one indicator — the platform's
+            # settings panel verbatim: a readout, then a meter whose fill is the
+            # in-channel signal, a hairline at the noise floor, and the squelch
+            # threshold as a thumb on the same dB scale. Setting the level
+            # against the signal beats a slider with nothing to aim at. The poll
+            # moves the fill, the floor, the readout and the channel LED; the
+            # thumb is the operator's, and moving it leaves AUTO (see the script
+            # and set_squelch). dB->%: -90 floor, -10 saturation, as the platform.
+            rssi, floor = rs.get("rssi_db"), rs.get("floor_db")
             threshold_db = rs.get("threshold_db")
             thr = threshold_db if isinstance(threshold_db, (int, float)) else -70.0
+            rssi_txt = f"{rssi:.0f} dB" if isinstance(rssi, (int, float)) else "—"
+            floor_txt = f"{floor:.0f} dB" if isinstance(floor, (int, float)) else "—"
+            rssi_pct = (
+                max(0.0, min(100.0, ((rssi + 90) / 80) * 100))
+                if isinstance(rssi, (int, float)) else 0.0
+            )
+            floor_pct = (
+                max(0.0, min(100.0, ((floor + 90) / 80) * 100))
+                if isinstance(floor, (int, float)) else 0.0
+            )
+            led = " on" if rs.get("squelch_open") else ""
             out.append(
-                "<div class=field><label for=squelch>Squelch (dB)</label>"
-                "<input type=range id=squelch name=squelch min=-110 max=-10 "
-                f"step=1 value='{thr:.0f}'>"
-                f"<output id=squelch-out>{thr:.0f}</output></div>"
+                "<div class=field><label>Squelch</label><div>"
+                "<div class=radio-readout>"
+                f"<span>Signal <b id=sig-rssi>{rssi_txt}</b></span>"
+                f"<span>Floor <b id=sig-floor>{floor_txt}</b></span>"
+                f"<span>Threshold <b id=sig-thr>{thr:.0f} dB</b></span>"
+                f"<span id=sig-led class='led{led}' "
+                "title='Channel open'></span></div>"
+                "<div class=meter>"
+                f"<div id=meter-fill class=meter-fill style='width:{rssi_pct:.1f}%'>"
+                "</div>"
+                f"<div id=meter-floor class=meter-floor style='left:{floor_pct:.1f}%'>"
+                "</div>"
+                "<input class=squelch-overlay type=range id=squelch name=squelch "
+                f"min=-110 max=-10 step=1 value='{thr:.0f}' "
+                "aria-label='Squelch threshold'></div></div></div>"
             )
             out.append(
                 "<div class=field><label for=auto_squelch>Auto squelch</label>"
@@ -2591,17 +2657,6 @@ class Console:
                 + "><span class=muted>Tracks the noise floor. Unticking freezes "
                 "the threshold where it is.</span></div>"
             )
-            # The live signal, moved by the poll: the number the squelch is set
-            # against. rssi / floor / open, exactly what the dashboard shows.
-            rssi, floor = rs.get("rssi_db"), rs.get("floor_db")
-            rssi_txt = f"{rssi:.1f}" if isinstance(rssi, (int, float)) else "—"
-            floor_txt = f"{floor:.1f}" if isinstance(floor, (int, float)) else "—"
-            out.append(
-                "<div class=field><label>Signal</label>"
-                f"<span id=signal class=muted>{rssi_txt} dB, floor {floor_txt} dB"
-                + (", open" if rs.get("squelch_open") else "")
-                + "</span></div>"
-            )
             out.append(
                 "<div class=field><label for='monitor'>Hold gate open</label>"
                 "<input type=checkbox id='monitor' name='monitor' value='1'"
@@ -2609,17 +2664,23 @@ class Console:
                 + "><span class=muted>Bypasses the squelch, for bringing an "
                 "antenna up.</span></div>"
             )
-            # Listen. The whole reason audio belongs on this page: an installer
-            # tests the receiver here before enrolment. /audio.wav is the
+            # Listen — a volume control, not a play button, the same as the
+            # platform's front panel. Dragging it is the gesture that starts the
+            # audio (browsers block autoplay until one) and 0 pauses it, so a
+            # page left open is silent and pulls nothing. /audio.wav is the
             # demodulator's own PCM straight off the box — before Opus, the
-            # broker and the platform's fan-out — attached as a local listener
-            # and streamed only while this element is playing (preload=none). The
-            # gate decides what is in it: silence while the squelch is shut, so
-            # "Hold gate open" above is how you hear a band that is quiet.
+            # broker and the platform's fan-out — streamed only while playing
+            # (preload none). The gate decides what is in it: silence while the
+            # squelch is shut, so "Hold gate open" above is how you hear a quiet
+            # band.
             out.append(
-                "<div class=field><label for=listen>Listen</label>"
-                "<audio id=listen controls preload=none src='/audio.wav'></audio>"
-                "<span class=muted>Bench test before enrolment.</span></div>"
+                "<div class=field><label for=volume>Listen</label>"
+                "<div class=volume-row>"
+                "<input type=range id=volume min=0 max=1 step=0.05 value=0 "
+                "aria-label='Listen volume'>"
+                "<span class=muted>Drag to listen — bench test before enrolment."
+                "</span></div>"
+                "<audio id=listen preload=none src='/audio.wav'></audio></div>"
             )
             # Bias tee is a front-end setting (the dongle opens with it on or
             # off), so it is one of the two things here that rebuild the
@@ -2822,16 +2883,33 @@ class Console:
         : digits;
     });
   }
-  // The squelch slider shows the dB it is on as it moves, and moving it unticks
-  // AUTO — the same "a manual level means manual" the station enforces in
-  // set_squelch, said in the UI so the two controls do not disagree on screen.
+  // The squelch thumb writes its dB into the readout as it moves, and moving it
+  // unticks AUTO — the same "a manual level means manual" the station enforces
+  // in set_squelch, said in the UI so the two controls do not disagree on
+  // screen.
   var squelch = document.getElementById("squelch");
-  var squelchOut = document.getElementById("squelch-out");
   var autoSquelch = document.getElementById("auto_squelch");
+  var sigThr = document.getElementById("sig-thr");
   if (squelch) {
     squelch.addEventListener("input", function () {
-      if (squelchOut) squelchOut.textContent = squelch.value;
+      if (sigThr) sigThr.textContent = squelch.value + " dB";
       if (autoSquelch) autoSquelch.checked = false;
+    });
+  }
+  // Volume, not a play button. The drag is the user gesture browsers require
+  // before audio may start, so playback begins on the first move; 0 pauses it,
+  // which stops the station streaming to a page nobody is listening to.
+  var listen = document.getElementById("listen");
+  var volume = document.getElementById("volume");
+  if (listen && volume) {
+    volume.addEventListener("input", function () {
+      var v = Number(volume.value);
+      listen.volume = v;
+      if (v > 0) {
+        if (listen.paused) listen.play().catch(function () {});
+      } else {
+        listen.pause();
+      }
     });
   }
   var forms = document.querySelectorAll("form[data-device]");
@@ -3028,16 +3106,41 @@ class Console:
         .then(function (s) {
           if (!s) return;
           if (spec && s.radio) drawSpectrum(s.radio);
-          // The signal readout under the squelch, moved live so the threshold
-          // can be set against what is being heard right now.
-          var signal = document.getElementById("signal");
-          if (signal && s.radio) {
+          // The signal meter under the squelch, moved live so the threshold can
+          // be set against what is being heard: fill to the signal, a hairline
+          // at the noise floor, the readout and the channel LED. The dB->% scale
+          // is the platform's (-90 floor, -10 saturation), and the keys are the
+          // status.json ones — rssi_db / floor_db, not the telemetry schema's.
+          if (s.radio) {
             var r = s.radio;
             var db = function (v) {
-              return (typeof v === "number") ? v.toFixed(1) : "\\u2014";
+              return (typeof v === "number") ? v.toFixed(0) + " dB" : "\\u2014";
             };
-            signal.textContent = db(r.rssi_db) + " dB, floor " + db(r.floor_db)
-              + " dB" + (r.squelch_open ? ", open" : "");
+            var pct = function (v) {
+              return (typeof v === "number")
+                ? Math.max(0, Math.min(100, ((v + 90) / 80) * 100)) : 0;
+            };
+            var setText = function (id, text) {
+              var el = document.getElementById(id);
+              if (el) el.textContent = text;
+            };
+            setText("sig-rssi", db(r.rssi_db));
+            setText("sig-floor", db(r.floor_db));
+            var fill = document.getElementById("meter-fill");
+            if (fill) fill.style.width = pct(r.rssi_db) + "%";
+            var mfloor = document.getElementById("meter-floor");
+            if (mfloor) mfloor.style.left = pct(r.floor_db) + "%";
+            var led = document.getElementById("sig-led");
+            if (led) led.className = "led" + (r.squelch_open ? " on" : "");
+            // While AUTO rides the floor the station owns the threshold, so
+            // track it here — but never out from under a hand on the slider.
+            var thr = document.getElementById("squelch");
+            var auto = document.getElementById("auto_squelch");
+            if (thr && auto && auto.checked && document.activeElement !== thr
+                && typeof r.threshold_db === "number") {
+              thr.value = r.threshold_db;
+              setText("sig-thr", r.threshold_db.toFixed(0) + " dB");
+            }
           }
           if (raw && s.raw_samples) {
             var lines = s.raw_samples[raw.getAttribute("data-slot")] || [];
