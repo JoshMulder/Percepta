@@ -219,9 +219,22 @@ def gain(
     listener's reception rather than producing an obvious symptom. That is a
     configuration decision, not an operating one.
     """
+    # The gain select posts every step as a string — "37.2", and "auto" for the
+    # one non-numeric value the tuner takes. Pydantic's `str | float` keeps a
+    # JSON string a string (it prefers the exact type over coercing), so a
+    # numeric gain arrived here as "37.2" and this guard rejected it with a 422
+    # — the "Gain failed — the station did not accept it." an operator saw on
+    # every gain but AUTO. Coerce the numeric string to the float the station
+    # and the audit log both want; reject only what is neither "auto" nor a
+    # number.
     value = body.gain
     if isinstance(value, str) and value != "auto":
-        raise HTTPException(status_code=422, detail="gain must be 'auto' or a number")
+        try:
+            value = float(value)
+        except ValueError:
+            raise HTTPException(
+                status_code=422, detail="gain must be 'auto' or a number"
+            ) from None
     _dispatch(station_id, {"kind": "radio.gain", "gain": value})
     _audit(
         request=request, identity=identity, station_id=station_id,
