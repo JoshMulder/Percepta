@@ -88,6 +88,40 @@ and run this again." ;;
   esac
 fi
 
+# The clock, before the build depends on it. A box whose clock is behind — a Pi
+# with no RTC that has not reached an NTP server, which is most fresh ones —
+# makes apt reject Debian's repositories as "not valid yet", and the build then
+# fails a hundred lines later with an error that never mentions the time. The
+# reference, with no network to ask: this checkout cannot predate the commit it
+# is on, so a clock an hour or more before that commit is wrong. A fixed floor
+# stands in when this is not a git checkout.
+now_epoch=$(date +%s)
+clock_ref=1735689600  # 2025-01-01 UTC, before any real deploy of this code
+if command -v git >/dev/null 2>&1; then
+  commit_epoch=$(git log -1 --format=%ct 2>/dev/null || true)
+  [ -n "$commit_epoch" ] && clock_ref=$commit_epoch
+fi
+if [ "$now_epoch" -lt "$((clock_ref - 3600))" ]; then
+  die "The system clock looks wrong. It reads:
+
+    $(date)
+
+which is before this code was even committed. A clock that is behind makes apt
+reject Debian's repositories as 'not valid yet', and the build then fails with
+an error that never mentions the time.
+
+NTP has evidently not corrected it — on a fresh Pi that is normal — so set it by
+hand to the real current local time and run this again:
+
+    sudo date -s 'YYYY-MM-DD HH:MM:SS'
+
+Then, once the box is up, get NTP working so it stays right — a station's TLS,
+its enrolment token and every timestamp depend on the clock:
+
+    sudo apt-get install --reinstall chrony   # recreates chrony's user, if missing
+    sudo systemctl restart chrony"
+fi
+
 # Existing values become the defaults, so re-running is safe and changing one
 # answer does not mean retyping the rest.
 #
