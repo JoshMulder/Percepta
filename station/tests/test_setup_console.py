@@ -526,22 +526,43 @@ class ServedPageTests(unittest.TestCase):
         self.assertEqual(id(self.agent.radio), before)
 
     def test_picking_a_device_marks_the_form_to_commit(self):
-        # Picking only re-renders — it stores nothing, so a device's parameters
-        # can be filled in before anything is written. The type lives in a hidden
-        # field the fresh render leaves equal to every default, so nothing on the
-        # form looks changed; without a marker the picked device would sit there
-        # uncommitted, which is how the radio once got stuck on a dead receiver.
-        # `data-changed` is that marker: the script reads it and commits the pick
-        # over fetch, so choosing a device takes with no button to press.
-        # Matched on the form tag, not anywhere in the page: the script that
-        # reads the attribute also contains its name.
-        _, body = self.request("GET", "/devices?slot=radio")
-        self.assertIn("data-device>", body)          # nothing picked yet
-
+        # Picking only re-renders — it stores nothing. `data-changed` marks the
+        # form the script then commits. Asserted on a NON-radio slot on purpose:
+        # the radio slot's /device form is the field-less placeholder the apply
+        # loop skips (it has no `.device-status`), so the marker there is inert.
+        # The form that actually commits a picked device is this one, and it is
+        # the one that carries the status span.
         from gsu.devices import registry
-        other = next(d for d in registry.by_slot("radio"))
-        _, body = self.request("GET", f"/devices?slot=radio&type={other.id}")
+        other = next(d for d in registry.by_slot("weather")
+                     if d.id != "simulated-weather")
+        _, body = self.request("GET", "/devices?slot=weather")
+        self.assertIn("data-device>", body)          # nothing picked yet
+        _, body = self.request("GET", f"/devices?slot=weather&type={other.id}")
         self.assertIn("data-device data-changed>", body)
+        self.assertIn("class='muted device-status'", body)  # the real, committing form
+
+    def test_a_field_bearing_pick_is_not_auto_committed_only_a_bare_one_is(self):
+        # The load-time auto-commit is gated: it fires only for a picked device
+        # with nothing to fill in (un-fit, or a param-less device). A field-bearing
+        # device — a camera, a serial receiver — must NOT commit on the bare pick,
+        # or _set_device would POST blank fields, wipe the previous device's stored
+        # address and password, and drop a running stream, all with zero typing.
+        # The gate is client-side, so lock its shape in source…
+        source = (Path(__file__).resolve().parents[1] / "gsu" / "console.py").read_text()
+        self.assertIn(
+            'if (form.hasAttribute("data-changed") && !editable) apply();', source)
+        self.assertIn(
+            'form.querySelector("input:not([type=hidden]), select, textarea")', source)
+        # …and confirm the render feeds it correctly: a field-bearing pick shows
+        # editable parameter fields (so the gate skips it), while un-fitting shows
+        # none (so the gate commits it).
+        from gsu.devices import registry
+        serial = next(d for d in registry.by_slot("weather")
+                      if d.id != "simulated-weather")
+        _, field_bearing = self.request("GET", f"/devices?slot=weather&type={serial.id}")
+        self.assertIn("name='p_", field_bearing)
+        _, unfit = self.request("GET", "/devices?slot=weather&type=")
+        self.assertNotIn("name='p_", unfit)
 
     def test_un_fitting_a_slot_is_selectable_at_all(self):
         # "— not fitted —" posts `type=` with nothing after it. parse_qs drops

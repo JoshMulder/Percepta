@@ -366,10 +366,11 @@ class ContainerTests(unittest.TestCase):
     def test_the_base_image_is_pinned_by_digest(self):
         # An unpinned base is a different station every time it is rebuilt. The
         # pin moved onto an `ARG BASE=` line that both FROM stages build on via
-        # ${BASE}, so match the digest wherever it is declared and check that
-        # FROM actually uses it — a stray unpinned FROM would still be caught.
+        # ${BASE}, so anchor the digest to that declaration — matching it
+        # anywhere would pass on an unpinned base with a digest left in a comment
+        # — and check FROM actually builds on ${BASE}.
         self.assertRegex(
-            self.dockerfile, r"python:3\.11-slim-bookworm@sha256:[0-9a-f]{64}")
+            self.dockerfile, r"ARG BASE=python:3\.11-slim-bookworm@sha256:[0-9a-f]{64}")
         self.assertRegex(self.dockerfile, r"FROM \$\{BASE\}")
 
     def test_it_runs_as_a_non_root_user(self):

@@ -3182,7 +3182,16 @@ class Console:
       // fetch like every other change.
       form.addEventListener("submit", function (e) { e.preventDefault(); apply(); });
       form.addEventListener("change", apply);
-      if (form.hasAttribute("data-changed")) apply();
+      // Auto-commit a freshly-picked device ONLY when it has nothing to fill in
+      // — un-fitting a slot, or a device with no parameters. A field-bearing
+      // device (a camera, a serial receiver) must NOT commit on the bare pick:
+      // that POSTs blank fields, and _set_device replaces the slot's params
+      // wholesale, so a stored address and password are wiped and a running
+      // camera stream is torn down before a single character is typed. Merely
+      // selecting a type to compare it must lose nothing. For those, the field
+      // edits above are what commit — deliberately, once something is entered.
+      var editable = form.querySelector("input:not([type=hidden]), select, textarea");
+      if (form.hasAttribute("data-changed") && !editable) apply();
     })(deviceForms[d]);
   }
   // The live camera, through Media Source Extensions.
