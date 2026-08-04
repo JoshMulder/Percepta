@@ -1094,7 +1094,7 @@ body {
   /* Fixed, not max-height: the box stays one size as transmissions arrive and
      scrolls inside, rather than growing and shoving the page around while the
      poll refreshes it. */
-  height: min(65vh, 32rem);
+  height: min(78vh, 44rem);
   overflow-y: auto;
 }
 .transcript-row {

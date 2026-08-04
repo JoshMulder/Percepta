@@ -618,7 +618,7 @@ function RadioPanelInner({
             onClick={(e) => e.stopPropagation()}
           >
             <div className="power-detail-head">
-              <h4>Transcriptions</h4>
+              <h4>Previous Transmissions</h4>
               <button
                 type="button"
                 className="contact-close"
