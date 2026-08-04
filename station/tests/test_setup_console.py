@@ -2132,14 +2132,14 @@ class DevicePickerTests(unittest.TestCase):
 
     def test_the_panel_lets_the_receiver_be_heard_before_enrolment(self):
         # No volume control was the gap: an installer could not test the radio
-        # here. It is a volume slider, not a play button — dragging it starts the
-        # audio, the same as the platform — over the same /audio.wav the CLI
-        # examples use.
+        # here. It is a volume slider driving a Web Audio player — no <audio>
+        # element and no play button — over the same /audio.wav the CLI examples
+        # use. The slider is in the section; the fetch lives in the page script.
         panel = self._radio_panel()
-        self.assertIn("src='/audio.wav'", panel)
         self.assertIn("id=volume", panel)
-        # A volume control, not the browser's transport: no controls attribute.
-        self.assertNotIn("<audio id=listen controls", panel)
+        self.assertNotIn("<audio", panel)
+        from gsu.console import Console
+        self.assertIn("/audio.wav", Console._devices_script("nonce"))
 
     def _save_camera(self, type_id, **params):
         form = {"slot": ["camera"], "type_id": [type_id]}

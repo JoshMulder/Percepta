@@ -2732,22 +2732,23 @@ class Console:
             )
             # Listen — a volume control, not a play button, the same as the
             # platform's front panel. Outside the form on purpose: it is local
-            # only, so moving it must not post a settings change. Dragging it is
-            # the gesture that starts the audio (browsers block autoplay until
-            # one) and 0 pauses it, so a page left open is silent and pulls
-            # nothing. /audio.wav is the demodulator's own PCM straight off the
-            # box — before Opus, the broker and the platform's fan-out — streamed
-            # only while playing (preload none). The gate decides what is in it:
-            # silence while the squelch is shut, so "Hold gate open" is how you
-            # hear a quiet band.
+            # only, so moving it must not post a settings change. The slider is
+            # the whole transport: the nonce'd script pulls /audio.wav (the
+            # demodulator's own PCM, before Opus and the link) through Web Audio,
+            # started by the drag off zero — the gesture a browser requires — and
+            # stopped at zero, so a muted or closed page pulls nothing off the
+            # box. Web Audio rather than an <audio> element because that buffered
+            # without limit and drifted ever further behind; the script schedules
+            # each chunk against the clock and drops backlog past a cap. The gate
+            # decides what is in it: silence while the squelch is shut, so "Hold
+            # gate open" is how you hear a quiet band.
             out.append(
                 "<div class=field><label for=volume>Listen</label>"
                 "<div class=volume-row>"
                 "<input type=range id=volume min=0 max=1 step=0.05 value=0 "
                 "aria-label='Listen volume'>"
                 "<span class=muted>Drag to listen — bench test before enrolment."
-                "</span></div>"
-                "<audio id=listen preload=none src='/audio.wav'></audio></div>"
+                "</span></div></div>"
             )
             out.append("<div class=field><label>Spectrum</label></div>")
             out.append(
@@ -2922,44 +2923,107 @@ class Console:
       if (autoSquelch) autoSquelch.checked = false;
     });
   }
-  // Volume, not a play button. The drag is the user gesture browsers require
-  // before audio may start, so playback begins on the first move; 0 pauses it,
-  // which stops the station streaming to a page nobody is listening to.
-  var listen = document.getElementById("listen");
+  // Listen, through Web Audio rather than an <audio> element.
+  //
+  // /audio.wav is raw PCM16 mono — the demodulator's own output. An <audio>
+  // element played it but buffered without limit, so the box drifted ever
+  // further behind the platform. This schedules each chunk against the context
+  // clock with a fixed lead and DROPS backlog past a cap, so latency stays put:
+  // the platform's own scheduled engine, ported (its AudioWorklet is
+  // secure-context-only and a LAN-served page is not one, so the worklet would
+  // not run here anyway). No manual resampling — the browser resamples the
+  // 24 kHz buffers on playback.
+  //
+  // The volume slider is the whole transport. Dragging it off zero is the user
+  // gesture a browser needs to start audio and the request to hear it; zero
+  // aborts the fetch, so a muted or closed page pulls nothing off the box.
   var volume = document.getElementById("volume");
-  if (listen && volume) {
+  if (volume) {
+    var audioCtx = null, audioGain = null, audioAbort = null, nextTime = 0;
+    var streamRate = 24000;
+    var schedule = function (samples) {
+      if (!audioCtx || audioCtx.state === "closed" || !samples.length) return;
+      var buf = audioCtx.createBuffer(1, samples.length, streamRate);
+      buf.copyToChannel(samples, 0);
+      var src = audioCtx.createBufferSource();
+      src.buffer = buf;
+      src.connect(audioGain);
+      var now = audioCtx.currentTime, LEAD = 0.2, CAP = 0.6;
+      // First chunk, an underrun, or a backlog past the cap all reset the cursor
+      // to one lead ahead. The cap is what stops a jitter burst adding latency
+      // for the rest of the session — the whole point over the <audio> element.
+      if (nextTime < now + 0.02 || nextTime > now + CAP) nextTime = now + LEAD;
+      src.start(nextTime);
+      nextTime += buf.duration;
+    };
+    var leftover = null;
+    var feed = function (bytes) {
+      // PCM16 is two bytes a sample, and a TCP read can split one; carry the odd
+      // byte to the next.
+      if (leftover) {
+        var m = new Uint8Array(leftover.length + bytes.length);
+        m.set(leftover, 0); m.set(bytes, leftover.length);
+        bytes = m; leftover = null;
+      }
+      var n = bytes.length >> 1;
+      if (bytes.length & 1) leftover = new Uint8Array([bytes[bytes.length - 1]]);
+      if (!n) return;
+      var dv = new DataView(bytes.buffer, bytes.byteOffset, n * 2);
+      var samples = new Float32Array(n);
+      for (var i = 0; i < n; i++) samples[i] = dv.getInt16(i * 2, true) / 32768;
+      schedule(samples);
+    };
+    var stream = function (signal) {
+      fetch("/audio.wav", { credentials: "same-origin", signal: signal })
+        .then(function (res) {
+          if (!res.ok || !res.body) return;
+          var reader = res.body.getReader();
+          var head = [], headLen = 0, haveHead = false;
+          var pump = function (result) {
+            if (result.done) return;
+            var bytes = result.value;
+            if (!haveHead) {
+              head.push(bytes); headLen += bytes.length;
+              if (headLen < 44) return reader.read().then(pump);
+              var all = new Uint8Array(headLen), at = 0;
+              head.forEach(function (b) { all.set(b, at); at += b.length; });
+              // The sample rate is bytes 24-27 of the WAV header, little-endian,
+              // so the player follows the station rather than assuming 24 kHz.
+              var rate = new DataView(all.buffer).getUint32(24, true);
+              if (rate > 0) streamRate = rate;
+              haveHead = true; head = null;
+              bytes = all.subarray(44);
+            }
+            feed(bytes);
+            return reader.read().then(pump);
+          };
+          return reader.read().then(pump);
+        })
+        .catch(function () {});
+    };
+    var start = function () {
+      if (!audioCtx) {
+        var AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return;
+        try { audioCtx = new AC(); } catch (e) { return; }
+        audioGain = audioCtx.createGain();
+        audioGain.connect(audioCtx.destination);
+      }
+      audioCtx.resume().catch(function () {});
+      if (audioAbort) return;              // already streaming
+      audioAbort = new AbortController();
+      nextTime = 0; leftover = null;
+      stream(audioAbort.signal);
+    };
+    var stop = function () {
+      if (audioAbort) { audioAbort.abort(); audioAbort = null; }
+      nextTime = 0;
+    };
     volume.addEventListener("input", function () {
       var v = Number(volume.value);
-      listen.volume = v;
-      if (v > 0) {
-        if (listen.paused) listen.play().catch(function () {});
-      } else {
-        listen.pause();
-      }
+      if (v > 0) { start(); if (audioGain) audioGain.gain.value = v; }
+      else { if (audioGain) audioGain.gain.value = 0; stop(); }
     });
-  }
-  // Keep the audio near the live edge. A streamed <audio> element plays out
-  // everything it has buffered and never catches up on its own, so latency only
-  // grows — which is why the box lagged the platform, whose Web-Audio path trims
-  // its own jitter buffer. Rather than seek (which stalls a live WAV with no
-  // duration), play slightly faster while behind: pitch is preserved, so the
-  // catch-up is inaudible, and it eases back to 1x once level with the edge.
-  if (listen) {
-    listen.preservesPitch = true;
-    setInterval(function () {
-      if (listen.paused || !listen.buffered || !listen.buffered.length) {
-        listen.playbackRate = 1;
-        return;
-      }
-      var edge = listen.buffered.end(listen.buffered.length - 1);
-      var lag = edge - listen.currentTime;
-      // A big backlog (after a stall) is not worth playing through at 1.1x;
-      // jump most of it and let the fine trim take the rest.
-      if (lag > 3) { try { listen.currentTime = edge - 0.3; } catch (e) {} listen.playbackRate = 1; }
-      else if (lag > 1.0) listen.playbackRate = 1.1;
-      else if (lag > 0.4) listen.playbackRate = 1.04;
-      else listen.playbackRate = 1;
-    }, 500);
   }
   // The radio settings apply the moment a control changes — no Apply button to
   // find, and no page reload to tear down the audio being listened to. The
