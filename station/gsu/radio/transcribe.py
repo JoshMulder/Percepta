@@ -281,9 +281,12 @@ def whisper_transcribe(binary: str, model: str, wav_path: Path) -> tuple[str, st
     if shutil.which("nice"):
         command = ["nice", "-n", str(NICE)] + command
     try:
+        # Both streams captured: whisper.cpp prints its diagnostics to whichever
+        # it prints them to, and a build that puts the reason for a non-zero exit
+        # on stdout (not stderr) is exactly how "exited 1: no output" happened.
         result = subprocess.run(
             command,
-            stdout=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=TRANSCRIBE_TIMEOUT_S,
             check=False,
@@ -291,9 +294,10 @@ def whisper_transcribe(binary: str, model: str, wav_path: Path) -> tuple[str, st
     except (OSError, subprocess.SubprocessError) as exc:
         return "", f"{binary!r} did not run: {exc}"
     if result.returncode != 0:
-        tail = " ".join(
-            (result.stderr or b"").decode("utf-8", "replace").split()[-40:]
-        )
+        streams = b" ".join(
+            s for s in (result.stderr, result.stdout) if isinstance(s, (bytes, bytearray))
+        ).decode("utf-8", "replace")
+        tail = " ".join(streams.split()[-60:])
         return "", f"{binary!r} exited {result.returncode}: {tail or 'no output'}"
     try:
         text = output.with_suffix(".txt").read_text(
