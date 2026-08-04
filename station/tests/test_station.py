@@ -37,6 +37,57 @@ def agent_in(directory: str, traffic: str = "low") -> Agent:
     return Agent(config)
 
 
+class TranscriptionAccumulationTests(unittest.TestCase):
+    """The glue between the radio pump and the transcriber: gather one over's
+    audio while the squelch is open, and hand the whole of it over when the gate
+    closes. The transcriber itself is exercised in test_transcribe."""
+
+    class _StubTranscriber:
+        available = True
+
+        def __init__(self):
+            self.submitted = []
+
+        def submit(self, pcm, rate, freq_hz, started_at):
+            self.submitted.append((pcm, rate, freq_hz))
+
+        def shutdown(self):
+            pass
+
+    def test_an_over_is_gathered_and_submitted_when_the_gate_closes(self):
+        from gsu.radio.audio import AUDIO_RATE
+
+        with tempfile.TemporaryDirectory() as directory:
+            agent = agent_in(directory)
+            self.addCleanup(agent.shutdown)
+            stub = self._StubTranscriber()
+            agent.transcriber = stub
+
+            agent._accumulate_over(True, b"AA", 118_700_000)
+            agent._accumulate_over(True, b"BB", 118_700_000)
+            self.assertEqual(stub.submitted, [], "submitted mid-over")
+
+            agent._accumulate_over(False, b"", 118_700_000)
+            self.assertEqual(
+                stub.submitted, [(b"AABB", AUDIO_RATE, 118_700_000)],
+                "the whole over was not handed over as one",
+            )
+
+    def test_a_new_over_does_not_carry_the_previous_one(self):
+        with tempfile.TemporaryDirectory() as directory:
+            agent = agent_in(directory)
+            self.addCleanup(agent.shutdown)
+            stub = self._StubTranscriber()
+            agent.transcriber = stub
+
+            agent._accumulate_over(True, b"AA", 118_700_000)
+            agent._accumulate_over(False, b"", 118_700_000)
+            agent._accumulate_over(True, b"CC", 121_500_000)
+            agent._accumulate_over(False, b"", 121_500_000)
+
+            self.assertEqual([s[0] for s in stub.submitted], [b"AA", b"CC"])
+
+
 class PayloadTests(unittest.TestCase):
     """Every kind the station emits, against the contract's own schemas."""
 

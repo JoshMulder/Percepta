@@ -41,6 +41,7 @@ from .enrolment import EnrolmentClient, Renewer
 from .health import Health
 from .radio.audio import AUDIO_RATE
 from .radio.receiver import RadioController
+from .radio.transcribe import Transcriber
 from .store import LocalStore
 from .stream import StreamSession
 from .transport import (
@@ -122,6 +123,22 @@ class Agent:
         self.health = Health()
         self.site = SiteConfig.load(config.site_config_path)
         self.store = LocalStore(config.store_path, config.recordings_dir)
+        # Airband transcription, off unless configured and the binary and model
+        # are both present. Reads captured overs on a low-priority thread; live
+        # audio always wins. See gsu/radio/transcribe.py.
+        self.transcriber = Transcriber(
+            self._record_transcript,
+            binary=config.radio_whisper_bin,
+            model=config.radio_whisper_model,
+            enabled=config.radio_transcribe,
+        )
+        #: The over currently being spoken, accumulated while the squelch is open
+        #: and handed to the transcriber when it closes. Only used when
+        #: transcription is available, so a station without it buffers nothing.
+        self._over_pcm = bytearray()
+        self._over_open = False
+        self._over_started_at: datetime | None = None
+        self._over_freq_hz = 0
         self.credentials = CredentialStore(config.credential_path)
         self.ca = tls.CaStore(config.ca_path)
         # Two roots, deliberately. The broker is pinned to a private CA; the
@@ -1025,6 +1042,8 @@ class Agent:
         health_due = 0.0
         next_tick = time.monotonic()
         log.info("Station agent %s running at %.1f Hz.", AGENT_VERSION, 1 / tick)
+        # A no-op unless transcription is available; safe to call unconditionally.
+        self.transcriber.start()
 
         try:
             while not self._stop.is_set():
@@ -1268,6 +1287,42 @@ class Agent:
 
         self._update_link_state()
 
+    def _accumulate_over(self, open_now: bool, pcm: bytes, freq_hz: int) -> None:
+        """Collect one transmission's audio while the squelch is open, and hand
+        the whole over to the transcriber the tick the gate closes — a model
+        reads a whole over far better than the 125 ms slices the loop runs in."""
+        if open_now:
+            if not self._over_open:
+                self._over_open = True
+                self._over_freq_hz = freq_hz
+                self._over_started_at = datetime.now(UTC)
+                self._over_pcm = bytearray()
+            if pcm:
+                self._over_pcm.extend(pcm)
+        elif self._over_open:
+            self._over_open = False
+            self.transcriber.submit(
+                bytes(self._over_pcm), AUDIO_RATE, self._over_freq_hz,
+                self._over_started_at or datetime.now(UTC),
+            )
+            self._over_pcm = bytearray()
+
+    def _record_transcript(
+        self, freq_hz: int, started_at: datetime, duration_s: float, text: str
+    ) -> None:
+        """Write a transcript as an event, from the transcription worker thread.
+
+        `store.record_event` is safe to call from here — the store's connection
+        is `check_same_thread=False` behind a lock. The event syncs to the
+        platform's stream like any other, so the transcript needs no transport of
+        its own.
+        """
+        self.store.record_event(
+            "radio.transmission",
+            "info",
+            f"{freq_hz / 1e6:.3f} MHz, {duration_s:.0f}s: {text}",
+        )
+
     def _pump_radio(self, dt: float, publish_gate_change: bool = False,
                     publish_spectrum: bool = False) -> dict | None:
         """Read the receiver once, publish any audio, keep the telemetry.
@@ -1322,6 +1377,18 @@ class Agent:
         spectrum_due = publish_spectrum and "spectrum" in telemetry
         if gate_moved or spectrum_due:
             self._publish_radio(telemetry)
+
+        # Accumulate the current over for transcription and submit it when the
+        # gate closes. Before the `audio is None` return below, because the gate
+        # closing — which is exactly when an over ends — produces no audio.
+        # Guarded on availability so a station without transcription buffers
+        # nothing.
+        if self.transcriber.available:
+            self._accumulate_over(
+                bool(telemetry.get("squelch_open")),
+                self.radio.last_pcm if self.radio is not None else b"",
+                int(telemetry.get("freq_hz", 0)),
+            )
 
         if audio is None:
             return None
@@ -2075,6 +2142,7 @@ class Agent:
         # next start fails with a device-busy that reads like broken hardware.
         self.stream.stop("the station is shutting down")
         self.video.stop()
+        self.transcriber.shutdown()
         if self.radio is not None:
             try:
                 self.radio.shutdown()

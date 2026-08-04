@@ -102,6 +102,19 @@ class AgentConfig:
     #: default reflects that; "busy" is for exercising the audio path.
     airband_traffic: str = "low"
 
+    #: Notate airband transmissions into the event log, on the box, offline.
+    #: Off by default: it is CPU work on a small board, and whether recording and
+    #: transcribing a channel is permitted is the operator's call and depends on
+    #: where the station is. When on, each over the squelch passes is handed to
+    #: whisper.cpp on a low-priority thread — live audio always wins, and overs
+    #: are dropped rather than queued without bound if the board falls behind.
+    radio_transcribe: bool = False
+    #: The whisper.cpp binary (on PATH) and the model file for the above. A
+    #: missing binary or model turns transcription off with one log line rather
+    #: than an error — the station image ships both when the feature is wanted.
+    radio_whisper_bin: str = "whisper-cli"
+    radio_whisper_model: str | None = None
+
     # --- trust (gsu/tls.py), which is two roots and not one ---------------
     #: The **broker's** CA. Normally delivered by the enrolment response as
     #: `broker.ca_pem` and persisted at `ca_path`; this pre-provisions or
@@ -166,6 +179,10 @@ class AgentConfig:
             setup_window_minutes=float(_env("GSU_SETUP_WINDOW_MINUTES", "30")),
             demo=_env("GSU_DEMO", "0") not in ("0", "false", "no", ""),
             airband_traffic=_env("GSU_AIRBAND_TRAFFIC", "low"),
+            radio_transcribe=_env("GSU_RADIO_TRANSCRIBE", "0")
+            not in ("0", "false", "no", ""),
+            radio_whisper_bin=_env("GSU_WHISPER_BIN", "whisper-cli"),
+            radio_whisper_model=_env("GSU_WHISPER_MODEL"),
             stream_sink=_env("GSU_STREAM_SINK"),
             encoder=_env("GSU_ENCODER", "auto"),
             media_url=_env("GSU_MEDIA_URL"),
