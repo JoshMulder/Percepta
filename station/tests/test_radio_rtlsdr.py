@@ -44,6 +44,7 @@ class FakeDongle:
         self.freq_hz = 0
         self.gain = None
         self.ppm = None
+        self.bias_tee = False
         self.flushed = 0
         self.streaming = False
         self.open_error: Exception | None = None
@@ -54,11 +55,12 @@ class FakeDongle:
         self.noise_power = 1e-6
         self._phase = 0
 
-    def open(self, freq_hz, gain, ppm):
+    def open(self, freq_hz, gain, ppm, bias_tee=False):
         if self.open_error is not None:
             raise self.open_error
         self.is_open = True
         self.freq_hz, self.gain, self.ppm = freq_hz, gain, ppm
+        self.bias_tee = bool(bias_tee)
 
     def start_stream(self):
         self.streaming = True
@@ -278,6 +280,23 @@ class FrontEndTests(unittest.TestCase):
 
     def test_a_nonsense_gain_falls_back_rather_than_raising(self):
         self.assertEqual(self.make(gain="rather a lot").gain, 37.2)
+
+    def test_the_bias_tee_is_off_unless_asked_for(self):
+        front_end = self.make()
+        open_now(front_end)
+        self.assertFalse(self.dongles[0].bias_tee)
+
+    def test_the_bias_tee_choice_reaches_the_dongle(self):
+        # The RTL-SDR Blog V4 feature: power a mast-head amplifier down the coax.
+        front_end = self.make(bias_tee=True)
+        open_now(front_end)
+        self.assertTrue(self.dongles[0].bias_tee)
+
+    def test_the_bias_tee_accepts_a_stored_string(self):
+        # A saved config may carry the checkbox as a string rather than a bool.
+        front_end = self.make(bias_tee="on")
+        open_now(front_end)
+        self.assertTrue(self.dongles[0].bias_tee)
 
     def test_the_allocated_tuner_is_the_one_opened(self):
         """The registry allocates a dongle by serial because airband and

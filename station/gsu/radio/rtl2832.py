@@ -110,7 +110,11 @@ def load_library() -> ctypes.CDLL:
     raise RtlError(
         "librtlsdr is not installed (tried " + ", ".join(SONAMES) + "). "
         "`sudo apt install librtlsdr0` provides it; `rtl-sdr` adds the "
-        "command-line tools that are useful for proving the dongle works."
+        "command-line tools that are useful for proving the dongle works. "
+        "**An RTL-SDR Blog V4 needs the rtl-sdr-blog fork of the driver, not "
+        "Debian's mainline package** — the V4's R828D tuner will not initialise "
+        "on mainline librtlsdr, so build it from github.com/rtlsdrblog/rtl-sdr-blog "
+        "(a V3 is fine on either)."
     )
 
 
@@ -164,6 +168,13 @@ def _declare(lib: ctypes.CDLL) -> ctypes.CDLL:
     ]
     lib.rtlsdr_get_tuner_type.restype = ctypes.c_int
     lib.rtlsdr_get_tuner_type.argtypes = [void_p]
+    # The bias tee that powers an antenna LNA down the coax. Present in the
+    # RTL-SDR Blog fork (what the V4 needs) and in recent mainline librtlsdr;
+    # declared only if the symbol is there, because an older library simply
+    # cannot switch it and that is not a fault — see `set_bias_tee`.
+    if hasattr(lib, "rtlsdr_set_bias_tee"):
+        lib.rtlsdr_set_bias_tee.restype = ctypes.c_int
+        lib.rtlsdr_set_bias_tee.argtypes = [void_p, ctypes.c_int]
     return lib
 
 
@@ -213,10 +224,13 @@ class RtlDevice:
         self.model = ""
         self.tuner = "unknown"
         self.gains: list[float] = []
+        self.bias_tee = False
 
     # --- lifecycle --------------------------------------------------------
 
-    def open(self, freq_hz: int, gain: float | str, ppm: int = 0) -> None:
+    def open(
+        self, freq_hz: int, gain: float | str, ppm: int = 0, bias_tee: bool = False
+    ) -> None:
         """Claim the dongle and program it. Raises; the front end reports."""
         count = int(self.lib.rtlsdr_get_device_count())
         if count == 0:
@@ -240,7 +254,7 @@ class RtlDevice:
 
         try:
             self._identify(index)
-            self._program(freq_hz, gain, ppm)
+            self._program(freq_hz, gain, ppm, bias_tee)
         except Exception:
             self.close()
             raise
@@ -304,7 +318,9 @@ class RtlDevice:
             return []
         return [value / 10.0 for value in buffer]  # librtlsdr reports tenths
 
-    def _program(self, freq_hz: int, gain: float | str, ppm: int) -> None:
+    def _program(
+        self, freq_hz: int, gain: float | str, ppm: int, bias_tee: bool = False
+    ) -> None:
         self._check(
             self.lib.rtlsdr_set_sample_rate(self._handle, self.sample_rate),
             f"set sample rate to {self.sample_rate}",
@@ -342,15 +358,46 @@ class RtlDevice:
                     "disable the RTL2832 digital AGC")
         self.set_ppm(ppm)
         self.set_gain(gain)
+        self.set_bias_tee(bias_tee)
         self.set_freq(freq_hz)
 
         log.info(
             "RTL-SDR open: %s (%s tuner, serial %r) on %.4f MHz "
-            "(+%d kHz offset), %d ksps, gain %s, ppm %d.",
+            "(+%d kHz offset), %d ksps, gain %s, ppm %d, bias tee %s.",
             self.model or "RTL2832U", self.tuner, self.serial or "unprogrammed",
             freq_hz / 1e6, self.offset_hz // 1000, self.sample_rate // 1000,
-            gain, ppm,
+            gain, ppm, "on" if self.bias_tee else "off",
         )
+
+    def set_bias_tee(self, on: bool) -> None:
+        """Power (or unpower) an antenna LNA down the coax.
+
+        A switch on the antenna port, not a receiver setting: off unless an
+        active antenna is fitted, because volts into a passive antenna do nothing
+        and into a short are worse. The RTL-SDR Blog V4 has one, and this is
+        where it earns "V4 support" beyond the tuner the driver already handles.
+
+        Needs the rtl-sdr-blog driver or a recent librtlsdr for the symbol. On an
+        older library it is unavailable rather than a fault — a receiver with no
+        bias tee still receives, so this logs and carries on rather than refusing
+        to open.
+        """
+        want = bool(on)
+        if not hasattr(self.lib, "rtlsdr_set_bias_tee"):
+            self.bias_tee = False
+            if want:
+                log.warning(
+                    "Bias tee asked for but this librtlsdr has no "
+                    "rtlsdr_set_bias_tee — the RTL-SDR Blog driver provides it. "
+                    "Leaving the antenna port unpowered."
+                )
+            return
+        with self._io_lock:
+            self._check(
+                self.lib.rtlsdr_set_bias_tee(self._handle, 1 if want else 0),
+                f"{'enable' if want else 'disable'} the bias tee",
+            )
+        self.bias_tee = want
 
     def close(self) -> None:
         """Stop the reader, wait for it, then release the dongle.

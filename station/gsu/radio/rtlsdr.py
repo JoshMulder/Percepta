@@ -121,10 +121,12 @@ class RtlSdrFrontEnd:
         self,
         gain: float | str = 37.2,
         ppm: int = 0,
+        bias_tee: bool = False,
         resource: str = "",
     ) -> None:
         self.gain = self._coerce_gain(gain)
         self.ppm = self._coerce_int(ppm)
+        self.bias_tee = self._coerce_bool(bias_tee)
         #: The inventory allocates a tuner by serial number, as `rtlsdr:<serial>`.
         self.serial_hint = resource.split(":", 1)[1] if ":" in resource else ""
         if self.serial_hint.startswith("unprogrammed@"):
@@ -399,7 +401,7 @@ class RtlSdrFrontEnd:
 
             device = rtl2832.RtlDevice(SAMPLE_RATE, OFFSET_HZ)
             device.serial_hint = self.serial_hint
-            device.open(self.freq_hz, self.gain, self.ppm)
+            device.open(self.freq_hz, self.gain, self.ppm, self.bias_tee)
             applied = device.applied_gain()
             if applied is not None and self.gain != "auto":
                 self.gain = applied
@@ -505,3 +507,11 @@ class RtlSdrFrontEnd:
             return int(float(str(value)))
         except (TypeError, ValueError):
             return 0
+
+    @staticmethod
+    def _coerce_bool(value: object) -> bool:
+        # The setup form sends a checkbox as a real bool; a stored config may
+        # carry a string. "off" and "0" are off, everything else truthy is on.
+        if isinstance(value, str):
+            return value.strip().lower() not in ("", "0", "false", "no", "off")
+        return bool(value)

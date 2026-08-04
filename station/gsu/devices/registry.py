@@ -223,6 +223,13 @@ REGISTRY: tuple[DeviceType, ...] = (
                            "error reported, and a channel that is silent after "
                            "a restart wants a power-cycle before it wants a "
                            "number here."),
+            Parameter("bias_tee", "Bias tee (power an antenna LNA)", "bool",
+                      False, required=False,
+                      help="Puts a DC voltage on the antenna port to power a "
+                           "mast-head amplifier, as on an RTL-SDR Blog V4. Off "
+                           "unless an active antenna is actually fitted: volts "
+                           "into a passive antenna do nothing and into a short "
+                           "are worse. Needs the rtl-sdr-blog driver."),
         ),
         provides=("freq_hz", "rssi_db", "noise_floor_db", "threshold_db",
                   "squelch_open", "auto_squelch", "monitor", "gain", "gains",
@@ -230,9 +237,12 @@ REGISTRY: tuple[DeviceType, ...] = (
         absent=("tx",),
         notes="Receive only. Demodulates on the station and uplinks audio only "
               "while the squelch is open — IQ never leaves the site, which is "
-              "the whole design on a metered link. Needs numpy and the "
-              "librtlsdr shared library (`apt install librtlsdr0`); the slot "
-              "says which is missing if either is. Stopped through its own "
+              "the whole design on a metered link. Works with any RTL2832U "
+              "dongle: the tuner (R820T2, R828D) and its gain table are read "
+              "from the device. An RTL-SDR Blog V4 needs the rtl-sdr-blog "
+              "driver, not Debian's mainline librtlsdr0, or its R828D will not "
+              "initialise. Needs numpy and the librtlsdr shared library; the "
+              "slot says which is missing if either is. Stopped through its own "
               "close, never with a signal: a dongle killed mid-transfer needs "
               "a physical replug.",
     ),
