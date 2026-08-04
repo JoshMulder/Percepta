@@ -309,7 +309,27 @@ class RtlSdrFrontEnd:
         self._reason = ""
         spectrum = self._best_snapshot(samples, snapshots_for(seconds))
         self._last_spectrum = spectrum
-        return Block(spectrum_db=spectrum, bin_hz=BIN_HZ, seconds=seconds)
+        clip, peak = self._front_end_level(samples)
+        return Block(spectrum_db=spectrum, bin_hz=BIN_HZ, seconds=seconds,
+                     clip_fraction=clip, peak_dbfs=peak)
+
+    def _front_end_level(self, samples) -> tuple[float, float]:
+        """How hard the raw IQ is driving the ADC, for managed gain.
+
+        Measured on the raw samples before any channel filter, because overload
+        is a front-end fact: a strong signal *out* of the tuned channel clips the
+        converter without ever raising in-channel power, and that is exactly the
+        case a fixed gain has to be chosen against. `to_complex` maps the 8-bit
+        rails to ±1, so a component at 1.0 is a clipped sample.
+        """
+        np = self._am.np
+        real = np.abs(samples.real)
+        imag = np.abs(samples.imag)
+        clipped = (real >= 0.98) | (imag >= 0.98)
+        clip = float(np.count_nonzero(clipped)) / samples.size
+        peak = float(max(real.max(), imag.max()))
+        peak_dbfs = 20.0 * float(np.log10(peak)) if peak > 1e-6 else -120.0
+        return clip, peak_dbfs
 
     def _best_snapshot(self, samples, snapshots: int) -> list[float]:
         """Of several periodograms across the block, the one with the most

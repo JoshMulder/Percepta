@@ -478,6 +478,21 @@ class ServedPageTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(self.agent.radio.gain, step)
 
+    def test_managed_gain_can_be_selected_and_settles_on_a_step(self):
+        # Selecting "managed" puts the receiver into the software AGC, which
+        # holds a fixed step it reports back — not the literal word on the wire.
+        self.agent.inventory.set_device("radio", "simulated-airband", {}, None)
+        self.agent.build_devices()
+        token, csrf, _ = self.page("/devices?slot=radio")
+        self.request(
+            "POST", "/radio",
+            f"type_id=simulated-airband&gain=managed&csrf={csrf}",
+            {"Cookie": token},
+        )
+        self.assertEqual(self.agent.radio.gain, "managed")
+        self.assertIn(self.agent.radio.managed_gain_db,
+                      self.agent.radio.available_gains)
+
     def test_a_bad_ajax_apply_answers_with_the_reason_not_a_redirect(self):
         # A refused value comes back as ok:false with the message, for the status
         # line to show — still a 200 JSON, not a redirect the fetch cannot read.
@@ -2145,6 +2160,14 @@ class DevicePickerTests(unittest.TestCase):
         self.assertTrue(gains)
         for step in gains:
             self.assertIn(f">{float(step):.1f}</option>", panel)
+
+    def test_the_gain_offers_auto_and_managed_alongside_the_steps(self):
+        # AUTO is the tuner's own AGC; Managed is the software one that holds a
+        # fixed step. Both sit above the discrete gains in the same select.
+        panel = self._radio_panel()
+        self.assertIn("<option value=auto", panel)
+        self.assertIn("<option value=managed", panel)
+        self.assertIn("id=gain-managed", panel)
 
     def test_the_squelch_controls_match_the_dashboard(self):
         # The platform's signal indicator, verbatim: a threshold-or-AUTO pair

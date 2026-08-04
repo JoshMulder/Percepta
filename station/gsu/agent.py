@@ -2054,6 +2054,9 @@ class Agent:
                 "floor_db": round(self.radio.noise_floor_db, 1) if self.radio else None,
                 "gain": self.radio.gain if self.radio else None,
                 "gains": self.radio.available_gains if self.radio else [],
+                "managed_gain_db": (
+                    self.radio.managed_gain_db if self.radio else None
+                ),
                 "ppm": self.radio.ppm if self.radio else 0,
                 # Unconditionally here, unlike the telemetry frame, and that is
                 # the whole difference: this is served over loopback or the

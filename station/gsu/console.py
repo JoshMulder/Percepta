@@ -1240,7 +1240,8 @@ class Console:
             gain = (form.get("gain") or [""])[0].strip()
             if gain:
                 try:
-                    radio.set_gain("auto" if gain == "auto" else float(gain))
+                    radio.set_gain(
+                        gain if gain in ("auto", "managed") else float(gain))
                 except ValueError:
                     raise ValueError(f"{gain!r} is not a gain in dB.")
             ppm = (form.get("ppm") or [""])[0].strip()
@@ -2623,16 +2624,30 @@ class Console:
             )
             # Gain, in the tuner's own steps — the same discrete list the platform
             # offers, read from the device so a value the tuner cannot honour
-            # cannot be picked. AUTO only because the tuner supports it; the
-            # airband default is a fixed gain (see the receiver's docstring).
+            # cannot be picked. AUTO hands it to the tuner's own AGC (which
+            # desenses on a strong carrier); Managed lets the box hold the highest
+            # fixed step that does not overload; the airband default is a plain
+            # fixed gain (see the receiver's docstring). The managed step it has
+            # settled on is shown beside the select, refreshed by the poll.
             gains = rs.get("gains") or []
             current_gain = rs.get("gain")
+            managed_db = rs.get("managed_gain_db")
+            managed_note = (
+                f"· {managed_db:.1f} dB"
+                if current_gain == "managed" and isinstance(managed_db, (int, float))
+                else ""
+            )
             out.append("<div class=field><label for=gain>Tuner gain (dB)</label>"
                        "<select id=gain name=gain>")
             out.append(
                 "<option value=auto"
                 + (" selected" if current_gain == "auto" else "")
                 + ">AUTO</option>"
+            )
+            out.append(
+                "<option value=managed"
+                + (" selected" if current_gain == "managed" else "")
+                + ">Managed</option>"
             )
             for step in gains:
                 sel = (
@@ -2641,7 +2656,10 @@ class Console:
                     and abs(float(current_gain) - float(step)) < 0.05 else ""
                 )
                 out.append(f"<option value='{step}'{sel}>{float(step):.1f}</option>")
-            out.append("</select></div>")
+            out.append(
+                f"</select><span id=gain-managed class=muted>{managed_note}</span>"
+                "</div>"
+            )
             # Squelch and the signal it gates, as one indicator — the platform's
             # settings panel verbatim: a readout, then a meter whose fill is the
             # in-channel signal, a hairline at the noise floor, and the squelch
@@ -3354,22 +3372,32 @@ class Console:
             // AUTO is coupled to the slider (dragging it leaves AUTO), so treat a
             // drag as editing AUTO too and leave it alone until the drag ends.
             if (idle(auto) && !dragging) auto.checked = !!r.auto;
-            // The gain select matches by number, not string: its option values
-            // are the tuner's steps rendered as Python floats ("0.0", "37.2")
-            // and r.gain is a JSON number, so "0" would never match "0.0".
+            // The gain select: "auto" and "managed" match their own option,
+            // and a numeric gain matches by number because the step options are
+            // Python floats ("0.0", "37.2") while r.gain is a JSON number.
             var gainEl = document.getElementById("gain");
             if (idle(gainEl)) {
-              var want = (r.gain === "auto") ? "auto" : Number(r.gain);
+              var word = (r.gain === "auto" || r.gain === "managed");
               for (var gi = 0; gi < gainEl.options.length; gi++) {
                 var ov = gainEl.options[gi].value;
-                var hit = (want === "auto")
-                  ? (ov === "auto")
-                  : (ov !== "auto" && Math.abs(Number(ov) - want) < 0.05);
+                var hit = word
+                  ? (ov === r.gain)
+                  : (ov !== "auto" && ov !== "managed"
+                     && Math.abs(Number(ov) - Number(r.gain)) < 0.05);
                 if (hit) {
                   if (gainEl.selectedIndex !== gi) gainEl.selectedIndex = gi;
                   break;
                 }
               }
+            }
+            // The step managed gain settled on, beside the select. Cleared when
+            // the mode is off. Updated even while the select is focused — it is
+            // a readout, not the control.
+            var gainManaged = document.getElementById("gain-managed");
+            if (gainManaged) {
+              gainManaged.textContent =
+                (r.gain === "managed" && typeof r.managed_gain_db === "number")
+                  ? "\\u00b7 " + r.managed_gain_db.toFixed(1) + " dB" : "";
             }
             // Squelch: follow the receiver's threshold whenever the slider is not
             // being dragged here — AUTO riding the floor, or a manual level set

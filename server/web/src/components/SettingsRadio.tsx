@@ -313,6 +313,7 @@ export function SettingsRadio({
             <span>RF gain</span>
             <select value={String(gain)} onChange={(e) => onGain(e.target.value)}>
               <option value="auto">Auto</option>
+              <option value="managed">Managed</option>
               {gains.map((g) => (
                 <option key={g} value={g}>
                   {g.toFixed(1)} dB
@@ -320,10 +321,16 @@ export function SettingsRadio({
               ))}
             </select>
             <small>
-              Auto desenses the tuner near a strong transmitter — a stronger
-              signal can then read <em>lower</em> on the meter. A mast-mounted
-              antenna at a remote site is exactly where that bites, which is why
-              a fixed gain is usually the right answer here.
+              Auto hands the gain to the tuner's own AGC, which desenses near a
+              strong transmitter — a stronger signal can then read <em>lower</em>
+              {" "}on the meter. <strong>Managed</strong> instead holds the
+              highest <em>fixed</em> gain that does not overload and nudges it
+              slowly, so it adapts without the AGC's blowout; a plain fixed gain
+              is the other choice.
+              {gain === "managed" &&
+                typeof radio.managed_gain_db === "number" && (
+                  <> Currently <strong>{radio.managed_gain_db.toFixed(1)} dB</strong>.</>
+                )}
             </small>
           </label>
 

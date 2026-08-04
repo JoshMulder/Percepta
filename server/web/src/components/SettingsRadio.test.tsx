@@ -55,6 +55,35 @@ function show(radio: RadioPayload) {
 const autoButton = () => screen.getByRole("button", { name: /Auto squelch/ });
 const slider = () => screen.getByLabelText("Squelch threshold") as HTMLInputElement;
 
+function showConfigurable(radio: RadioPayload) {
+  return render(
+    <SettingsRadio
+      radio={radio}
+      caps={["radio.listen", "radio.control", "config.write"]}
+      stationId="s1"
+      stationName="Bench"
+    />,
+  );
+}
+
+describe("RF gain", () => {
+  it("offers Managed and shows the step it has settled on", () => {
+    showConfigurable(payload({ gain: "managed", managed_gain_db: 37.2 }));
+    const select = screen.getByRole("combobox") as HTMLSelectElement;
+    expect(select.value).toBe("managed");
+    expect(screen.getByText(/Currently/).textContent).toContain("37.2 dB");
+  });
+
+  it("sends managed when it is chosen", () => {
+    const setGain = vi.spyOn(api, "setGain").mockResolvedValue({ accepted: true });
+    showConfigurable(payload({ gain: 37.2 }));
+    fireEvent.change(screen.getByRole("combobox"), {
+      target: { value: "managed" },
+    });
+    expect(setGain).toHaveBeenCalledWith("s1", "managed");
+  });
+});
+
 describe("the AUTO button", () => {
   it("says what the operator just did, without waiting for the station", () => {
     vi.spyOn(api, "autoSquelch").mockResolvedValue({ accepted: true });

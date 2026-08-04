@@ -92,6 +92,23 @@ FREQ_MAX_HZ = 137_000_000
 #: gap in it does not arrive as two clipped fragments. Every receiver does this.
 HANG_SECONDS = 0.6
 
+#: Managed gain: how often to re-evaluate, and the window either side of which
+#: it steps. It sets a *fixed* tuner gain and only nudges it this often, one step
+#: at a time — unlike the tuner's own AGC, which moves the analogue gain
+#: continuously and desenses on a strong in-band carrier. Between steps the gain
+#: is constant, so every dBFS level stays comparable and the squelch keeps
+#: meaning something, which is the whole reason not to use the hardware AGC.
+MANAGED_EVAL_S = 4.0
+#: More than this fraction of the raw IQ pinned at the ADC rails is overload:
+#: step the gain down. Small, because clipping an AM envelope is audible at once.
+MANAGED_CLIP_HIGH = 0.002
+#: If even the loudest sample over an evaluation sat below this, there is plenty
+#: of headroom to raise the gain and recover SNR on a quiet antenna.
+MANAGED_HEADROOM_CEIL_DBFS = -12.0
+#: Where managed gain starts when it has no better idea — a mid-table gain that
+#: is unlikely to be either overloaded or deaf, so it converges from near.
+MANAGED_START_DB = 30.0
+
 
 def _decimate_db(bins: list[float], target: int) -> list[int]:
     """Fewer bins, rounded to whole dB, keeping the peaks.
@@ -120,11 +137,23 @@ class Block:
     `spectrum_db` is per-bin power in dBFS, centred on the tuned frequency, and
     must extend to at least ±50 kHz — the floor cannot be measured outside the
     channel if the front end never shows outside the channel.
+
+    `clip_fraction` and `peak_dbfs` describe the *raw* front-end level, before
+    any channel filtering, so managed gain can steer on overload — which a
+    strong out-of-channel signal causes without ever raising in-channel power.
+    Defaulted so a front end that does not measure them (the simulator, the
+    dead-block path) simply reports a quiet, unclipped front end.
     """
 
     spectrum_db: list[float]
     bin_hz: float
     seconds: float
+    #: Fraction of raw I/Q components pinned at the 8-bit ADC rails — the
+    #: overload signal. Zero on a front end with headroom.
+    clip_fraction: float = 0.0
+    #: The loudest raw I/Q component in the block, in dBFS (full scale is 0).
+    #: How much headroom there is to raise the gain. Quiet by default.
+    peak_dbfs: float = -120.0
 
 
 @runtime_checkable
@@ -215,9 +244,18 @@ class RadioController:
         # radio panel uses. Bounded — a tap, never a history.
         self._raw: deque[str] = deque(maxlen=4)
 
+        #: Managed gain: the fixed step it has settled on (None until it starts),
+        #: when it next evaluates, and the worst clip and loudest peak seen since
+        #: — accumulated across ticks so a single quiet or loud block cannot
+        #: decide a step on its own.
+        self._managed_gain: float | None = None
+        self._managed_eval_at = 0.0
+        self._managed_clip = 0.0
+        self._managed_peak = -120.0
+
         self._load()
         self.front_end.tune(self.freq_hz)
-        self.front_end.set_gain(self.gain)
+        self._apply_gain()
         self.front_end.set_ppm(self.ppm)
 
     # --- persistence ----------------------------------------------------
@@ -236,6 +274,10 @@ class RadioController:
         self.auto_squelch = bool(state.get("auto_squelch", self.auto_squelch))
         threshold = state.get("manual_threshold_db")
         self.manual_threshold_db = None if threshold is None else float(threshold)
+        # The step managed gain had settled on, so it restarts near it rather
+        # than sweeping up from the middle again on every boot.
+        stored_managed = state.get("managed_gain")
+        self._managed_gain = None if stored_managed is None else float(stored_managed)
         log.info("Receiver state restored: %.3f MHz, gain %s, ppm %s.",
                  self.freq_hz / 1e6, self.gain, self.ppm)
 
@@ -248,6 +290,7 @@ class RadioController:
             "ppm": self.ppm,
             "auto_squelch": self.auto_squelch,
             "manual_threshold_db": self.manual_threshold_db,
+            "managed_gain": self._managed_gain,
         }
         try:
             tmp = self.state_path.with_suffix(".tmp")
@@ -295,8 +338,80 @@ class RadioController:
         )
 
     def set_gain(self, gain: float | str) -> None:
-        self.gain = gain if gain == "auto" else float(gain)
-        self.front_end.set_gain(self.gain)
+        # Three kinds: "auto" hands the analogue gain to the tuner's own AGC,
+        # "managed" lets this class pick and hold a fixed step, and a number is a
+        # fixed gain outright. Only the last two keep the dBFS scale still enough
+        # for the squelch to mean anything — "managed" is the honest version of
+        # what an operator wants from "auto" without the analogue AGC's blowout.
+        self.gain = gain if gain in ("auto", "managed") else float(gain)
+        self._apply_gain()
+        self._save()
+
+    def _apply_gain(self) -> None:
+        """Put the controller's gain choice onto the front end. Called from
+        `set_gain` and from construction, where the loaded gain may be any of the
+        three kinds and "managed" must not reach the front end, which only
+        understands "auto" or a number."""
+        if self.gain == "managed":
+            self._enter_managed()
+        else:
+            self.front_end.set_gain(self.gain)
+
+    def _enter_managed(self) -> None:
+        """Begin (or resume) managed gain: pick a starting fixed step and let the
+        loop in `tick` converge from there."""
+        gains = list(self.front_end.available_gains)
+        if not gains:
+            # Nothing to manage — hold a nominal fixed gain so the receiver still
+            # works, rather than leaving it wherever it happened to be.
+            self.front_end.set_gain(MANAGED_START_DB)
+            return
+        if self._managed_gain in gains:
+            start = self._managed_gain           # resume where it was left
+        else:
+            start = min(gains, key=lambda g: abs(g - MANAGED_START_DB))
+        self._managed_gain = start
+        self._managed_eval_at = 0.0              # evaluate on the next tick
+        self._managed_clip = 0.0
+        self._managed_peak = -120.0
+        self.front_end.set_gain(start)
+
+    def _manage_gain(self, clip_fraction: float, peak_dbfs: float) -> None:
+        """One tick of the managed-gain loop, when the mode is on.
+
+        Accumulate the worst clip and the loudest peak since the last decision so
+        a single block cannot swing the gain, then every MANAGED_EVAL_S step it
+        one notch: down if anything overloaded, up only if even the loudest
+        sample had headroom to spare, otherwise hold. One step at a time settles
+        rather than hunts.
+        """
+        if self.gain != "managed":
+            return
+        self._managed_clip = max(self._managed_clip, clip_fraction)
+        self._managed_peak = max(self._managed_peak, peak_dbfs)
+        now = time.monotonic()
+        if now < self._managed_eval_at:
+            return
+        self._managed_eval_at = now + MANAGED_EVAL_S
+        clip, peak = self._managed_clip, self._managed_peak
+        self._managed_clip, self._managed_peak = 0.0, -120.0
+
+        gains = list(self.front_end.available_gains)
+        if not gains:
+            return
+        try:
+            index = gains.index(self._managed_gain)
+        except ValueError:
+            index = min(range(len(gains)),
+                        key=lambda i: abs(gains[i] - (self._managed_gain or MANAGED_START_DB)))
+        if clip > MANAGED_CLIP_HIGH and index > 0:
+            index -= 1
+        elif clip == 0.0 and peak < MANAGED_HEADROOM_CEIL_DBFS and index < len(gains) - 1:
+            index += 1
+        else:
+            return                               # comfortable — leave it alone
+        self._managed_gain = gains[index]
+        self.front_end.set_gain(self._managed_gain)
         self._save()
 
     def spectrum_for_display(self) -> list[int]:
@@ -392,6 +507,9 @@ class RadioController:
         self._last_spectrum = block.spectrum_db
         self._rssi_db = dsp.in_channel_power_db(block.spectrum_db, block.bin_hz)
         self._floor_db = dsp.noise_floor_db(block.spectrum_db, block.bin_hz)
+        # Managed gain steers on the raw front-end level, so it runs every tick,
+        # gate open or shut — overload is a front-end fact, not a channel one.
+        self._manage_gain(block.clip_fraction, block.peak_dbfs)
 
         if self.auto_squelch or self.manual_threshold_db is None:
             threshold = dsp.auto_threshold_db(self._floor_db)
@@ -417,6 +535,13 @@ class RadioController:
             "monitor": self.monitor,
             "gain": self.gain,
             "gains": list(self.front_end.available_gains),
+            # The fixed step managed gain has settled on, so a console showing
+            # "Managed" can also show what it chose. None when not managed.
+            "managed_gain_db": (
+                round(self._managed_gain, 1)
+                if self.gain == "managed" and self._managed_gain is not None
+                else None
+            ),
             "ppm": self.ppm,
             # Receive-only hardware. The console disables PTT from this, and
             # there is no transmit path in this station to enable.
@@ -554,6 +679,12 @@ class RadioController:
         stepped control the platform does rather than a free number the tuner
         would only snap away from."""
         return list(self.front_end.available_gains)
+
+    @property
+    def managed_gain_db(self) -> float | None:
+        """The fixed step managed gain has settled on, or None when the mode is
+        off — for a console showing "Managed" to also show what it chose."""
+        return self._managed_gain if self.gain == "managed" else None
 
     def raw_sample(self) -> list[str]:
         return list(self._raw)

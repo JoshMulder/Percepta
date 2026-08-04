@@ -22,7 +22,7 @@ except ImportError:  # pragma: no cover
 
 if np is not None:
     from gsu.radio import rtl2832, rtlsdr
-    from gsu.radio.receiver import RadioController
+    from gsu.radio.receiver import Block, RadioController
     from gsu.radio.rtlsdr import N_FFT, OFFSET_HZ, SAMPLE_RATE, RtlSdrFrontEnd
 else:  # pragma: no cover - the class bodies below are read at import time
     N_FFT = OFFSET_HZ = SAMPLE_RATE = 0
@@ -606,3 +606,99 @@ class SnapshotCadenceTests(unittest.TestCase):
         # The rate per *second* never drops below the original design intent.
         for dt in (0.125, 0.25, 0.5, 1.0):
             self.assertGreaterEqual(snapshots_for(dt) / dt, 1 / SNAPSHOT_SPAN_S, dt)
+
+
+class _ManagedStub:
+    """The least a front end can be for the managed-gain loop: a gain table and
+    a record of what it was last told to use."""
+
+    tx_capable = False
+
+    def __init__(self, gains):
+        self.available_gains = list(gains)
+        self.gain = None
+
+    def tune(self, freq_hz):
+        pass
+
+    def set_gain(self, gain):
+        self.gain = gain
+
+    def set_ppm(self, ppm):
+        pass
+
+    def read(self, seconds):  # pragma: no cover - the loop is driven directly
+        return Block([], 500.0, seconds)
+
+    def demodulate(self, samples):  # pragma: no cover
+        return [0.0] * samples
+
+    def shutdown(self):
+        pass
+
+
+@unittest.skipIf(np is None, "numpy is not installed")
+class ManagedGainTests(unittest.TestCase):
+    """The software AGC: a fixed gain, stepped slowly toward the highest that
+    does not overload — the honest version of what an operator wants from
+    'auto', without the analogue AGC's blowout or its floating dBFS scale."""
+
+    GAINS = [0.0, 12.5, 25.4, 37.2, 49.6]
+
+    def managed(self):
+        controller = RadioController(_ManagedStub(self.GAINS))
+        controller.set_gain("managed")
+        return controller
+
+    @staticmethod
+    def evaluate(controller, clip, peak):
+        """One decision now, rather than waiting out MANAGED_EVAL_S."""
+        controller._managed_eval_at = 0.0
+        controller._manage_gain(clip, peak)
+        return controller._managed_gain
+
+    def test_entering_managed_picks_a_real_step_not_the_word(self):
+        controller = self.managed()
+        self.assertEqual(controller.gain, "managed")
+        self.assertIn(controller.front_end.gain, self.GAINS)
+        self.assertEqual(controller.managed_gain_db, controller.front_end.gain)
+
+    def test_overload_steps_the_gain_down(self):
+        controller = self.managed()
+        start = controller._managed_gain
+        self.evaluate(controller, clip=0.01, peak=-1.0)   # pinned at the rails
+        self.assertLess(controller._managed_gain, start)
+        self.assertEqual(controller.front_end.gain, controller._managed_gain)
+
+    def test_plenty_of_headroom_steps_the_gain_up(self):
+        controller = self.managed()
+        start = controller._managed_gain
+        self.evaluate(controller, clip=0.0, peak=-40.0)   # dead quiet
+        self.assertGreater(controller._managed_gain, start)
+
+    def test_a_comfortable_level_holds(self):
+        controller = self.managed()
+        start = controller._managed_gain
+        self.evaluate(controller, clip=0.0, peak=-6.0)    # in the hold band
+        self.assertEqual(controller._managed_gain, start)
+
+    def test_it_never_steps_off_either_end_of_the_table(self):
+        controller = self.managed()
+        for _ in range(10):
+            self.evaluate(controller, clip=0.05, peak=-1.0)
+        self.assertEqual(controller._managed_gain, self.GAINS[0])
+        for _ in range(10):
+            self.evaluate(controller, clip=0.0, peak=-60.0)
+        self.assertEqual(controller._managed_gain, self.GAINS[-1])
+
+    def test_leaving_managed_stops_the_loop(self):
+        controller = self.managed()
+        controller.set_gain(37.2)
+        self.assertEqual(controller.gain, 37.2)
+        self.assertIsNone(controller.managed_gain_db)
+        self.evaluate(controller, clip=0.05, peak=-1.0)   # a no-op now
+        self.assertEqual(controller.front_end.gain, 37.2)
+
+
+if __name__ == "__main__":
+    unittest.main()

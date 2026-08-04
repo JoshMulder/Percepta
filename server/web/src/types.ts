@@ -280,9 +280,12 @@ export interface RadioPayload extends Availability {
    *  at commissioning. */
   spectrum?: number[];
   span_hz?: number;
-  /** Tuner gain: "auto" or a fixed dB value, and what the hardware offers. */
+  /** Tuner gain: a fixed dB value, "auto" (the tuner's own AGC) or "managed"
+   *  (the station's software AGC, which holds a fixed step). */
   gain?: string | number;
   gains?: number[];
+  /** The fixed step managed gain has settled on, when gain is "managed". */
+  managed_gain_db?: number | null;
   /** Crystal correction in parts per million, trimmed once at commissioning. */
   ppm?: number;
   /** False until certified transmit hardware exists. Always false today. */
