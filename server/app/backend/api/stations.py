@@ -55,6 +55,17 @@ class PowerPoint(BaseModel):
     gen: float | None = None
 
 
+class WeatherPoint(BaseModel):
+    t: str
+    # Each nullable, and null is "no such sensor", not zero — a station may have
+    # no humidity module or no barometer, and the chart leaves that trace out
+    # rather than drawing it flat along the bottom.
+    temp: float | None = None
+    humidity: float | None = None
+    pressure: float | None = None
+    wind: float | None = None
+
+
 class StationDetail(StationSummary):
     capabilities: list[str]
     devices: list[DeviceSummary]
@@ -247,6 +258,69 @@ def power_history(
             load=r.load_w,
             mains=r.mains_w,
             gen=r.generator_w,
+        )
+        for r in rows
+    ]
+
+
+@router.get("/{station_id}/weather/history", response_model=list[WeatherPoint])
+def weather_history(
+    station_id: uuid.UUID,
+    hours: int = 12,
+    identity: Identity = Depends(get_identity),
+    db: Session = Depends(get_db),
+) -> list[WeatherPoint]:
+    """Weather over a window, for the trend charts. The twin of `power_history`
+    — same capability, same windows, same thinning."""
+    from datetime import UTC, datetime, timedelta
+
+    from backend.auth.authorization import capabilities_for
+    from backend.auth.capabilities import Capability
+    from backend.database.models.weather_sample import WeatherSample
+
+    granted = capabilities_for(
+        db,
+        user_id=identity.user_id,
+        organization_id=identity.organization_id,
+        ground_station_id=station_id,
+    )
+    if Capability.TELEMETRY_VIEW not in granted:
+        raise HTTPException(status_code=404, detail="Station not available")
+
+    window = POWER_WINDOWS.get(hours)
+    if window is None:
+        raise HTTPException(status_code=422, detail="Unsupported window")
+
+    since = datetime.now(UTC) - timedelta(hours=window)
+    rows = db.execute(
+        select(
+            WeatherSample.at,
+            WeatherSample.temperature_c,
+            WeatherSample.humidity_pct,
+            WeatherSample.pressure_hpa,
+            WeatherSample.wind_kt,
+        )
+        .where(
+            WeatherSample.ground_station_id == station_id,
+            WeatherSample.at >= since,
+        )
+        .order_by(WeatherSample.at)
+    ).all()
+
+    limit = 400
+    if len(rows) > limit:
+        step = len(rows) / limit
+        picked = [rows[min(len(rows) - 1, int(i * step))] for i in range(limit)]
+        picked[-1] = rows[-1]
+        rows = picked
+
+    return [
+        WeatherPoint(
+            t=r.at.isoformat(),
+            temp=r.temperature_c,
+            humidity=r.humidity_pct,
+            pressure=r.pressure_hpa,
+            wind=r.wind_kt,
         )
         for r in rows
     ]

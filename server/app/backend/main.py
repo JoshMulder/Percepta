@@ -28,6 +28,7 @@ from backend.database.session import check_database_connection
 from backend.realtime.endpoint import websocket_endpoint
 from backend.realtime.hub import hub
 from backend.services.power_history import power_history
+from backend.services.weather_history import weather_history
 from backend.services.station_ingest import station_ingest
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,7 @@ async def lifespan(app: FastAPI):
     # starting it first only means it sits idle for a moment.
     await station_ingest.start()
     await power_history.start()
+    await weather_history.start()
     # Keeps watched stations streaming. Silence is the stop signal, so this
     # task existing is what makes on-demand video actually stop.
     leases = asyncio.create_task(renew_leases())
@@ -84,6 +86,7 @@ async def lifespan(app: FastAPI):
         leases.cancel()
         audio.cancel()
         await power_history.stop()
+        await weather_history.stop()
         await station_ingest.stop()
         await hub.stop()
 

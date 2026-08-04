@@ -43,6 +43,7 @@ import { FloodlightPanel, has, NotPermitted, PowerPanel, VideoPanel } from "./Pa
 import { MapSkeleton, PanelState, panelStatus } from "./PanelState";
 import { RadioPanel } from "./RadioPanel";
 import { WeatherPanel } from "./WeatherPanel";
+import type { WeatherSample } from "./WeatherChart";
 
 /**
  * Below this the two-column layout stops being worth defending. Rather than
@@ -203,6 +204,11 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
   const [socHistory, setSocHistory] = useState<SocSample[]>([]);
   const [socLoading, setSocLoading] = useState(false);
   const [socWindow, setSocWindow] = useState<SocWindowKey>("12h");
+  // Weather history, the same shape as the power history above — the two share
+  // the window set and the fetch-and-refresh pattern.
+  const [weatherHistory, setWeatherHistory] = useState<WeatherSample[]>([]);
+  const [weatherLoading, setWeatherLoading] = useState(false);
+  const [weatherWindow, setWeatherWindow] = useState<SocWindowKey>("12h");
   const [streamsSince, setStreamsSince] = useState<number | null>(null);
   // Staleness is a function of elapsed time, so nothing re-renders on its own
   // when data simply stops. This ticks so a panel can go faulty in silence.
@@ -453,6 +459,7 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
     // A station's battery history is its own; carrying it across would draw one
     // site's curve under another's readings.
     setSocHistory([]);
+    setWeatherHistory([]);
     // And drop any audio still queued from the station being left - playing out
     // the previous site's traffic after switching is worse than a gap.
     audioRef.current.flush();
@@ -528,6 +535,40 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stationId, socWindow, caps.join(",")]);
+
+  // The same, for weather.
+  useEffect(() => {
+    if (!stationId || !has(caps, "telemetry.view")) return;
+    const hours =
+      SOC_WINDOWS.find((w) => w.key === weatherWindow)?.hours ?? 12;
+    let cancelled = false;
+    const load = () => {
+      setWeatherLoading(true);
+      api
+        .weatherHistory(stationId, hours)
+        .then((points) => {
+          if (cancelled) return;
+          setWeatherHistory(
+            points.map((p) => ({
+              t: Date.parse(p.t),
+              temp: p.temp,
+              humidity: p.humidity,
+              pressure: p.pressure,
+              wind: p.wind,
+            })),
+          );
+        })
+        .catch(() => !cancelled && setWeatherHistory([]))
+        .finally(() => !cancelled && setWeatherLoading(false));
+    };
+    load();
+    const id = window.setInterval(load, 60_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stationId, weatherWindow, caps.join(",")]);
 
   // Once the station and its capabilities are known the panels stop changing
   // shape, and the sidebar can be measured once and revealed.
@@ -807,7 +848,13 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
           status={stateFor("weather")}
           label="Weather station"
         >
-          <WeatherPanel weather={weather} />
+          <WeatherPanel
+            weather={weather}
+            history={weatherHistory}
+            historyLoading={weatherLoading}
+            windowKey={weatherWindow}
+            onWindowChange={setWeatherWindow}
+          />
         </PanelState>
       ) : (
         <NotPermitted what="weather telemetry" />

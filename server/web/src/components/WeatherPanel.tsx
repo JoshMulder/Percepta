@@ -1,6 +1,8 @@
-import { memo } from "react";
-import { SKY_LABEL, SkyIcon } from "./Icons";
+import { memo, useState } from "react";
+import { SOC_WINDOWS, type SocWindowKey } from "./BatteryChart";
+import { IconChart, SKY_LABEL, SkyIcon } from "./Icons";
 import { NoSource } from "./PanelState";
+import { WeatherHistory, type WeatherSample } from "./WeatherChart";
 import type { WeatherPayload } from "../types";
 
 const POINTS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
@@ -17,7 +19,20 @@ function cardinal(deg: number): string {
  * METAR or a weather station reports. Showing one without the other is how
  * these displays end up 180 degrees wrong.
  */
-function WeatherPanelInner({ weather }: { weather: WeatherPayload | null }) {
+function WeatherPanelInner({
+  weather,
+  history,
+  historyLoading,
+  windowKey,
+  onWindowChange,
+}: {
+  weather: WeatherPayload | null;
+  history: WeatherSample[];
+  historyLoading?: boolean;
+  windowKey: SocWindowKey;
+  onWindowChange: (key: SocWindowKey) => void;
+}) {
+  const [detailOpen, setDetailOpen] = useState(false);
   // Dashes, not an early return: the panel has to hold its full height with no
   // data so the sidebar's scale does not change when the first reading lands.
   const has = weather !== null;
@@ -46,6 +61,18 @@ function WeatherPanelInner({ weather }: { weather: WeatherPayload | null }) {
 
   return (
     <div className="weather">
+      {/* Same affordance as the power panel: the history lives behind a button
+          in the corner rather than competing with the live readout. */}
+      <button
+        type="button"
+        className="power-detail-btn"
+        onClick={() => setDetailOpen(true)}
+        title="Weather history"
+        aria-label="Weather history"
+      >
+        <IconChart />
+      </button>
+
       <div className="rose-wrap">
         <svg viewBox="0 0 120 120" className="rose" role="img"
              aria-label={
@@ -209,6 +236,45 @@ function WeatherPanelInner({ weather }: { weather: WeatherPayload | null }) {
         </div>
       </dl>
 
+      {detailOpen && (
+        <div
+          className="power-detail-scrim"
+          onClick={() => setDetailOpen(false)}
+          role="presentation"
+        >
+          <div
+            className="power-detail"
+            role="dialog"
+            aria-label="Weather history"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="power-detail-head">
+              <h4>Weather</h4>
+              <div className="window-switch" role="group" aria-label="Chart period">
+                {SOC_WINDOWS.map((w) => (
+                  <button
+                    key={w.key}
+                    type="button"
+                    className={`window-btn${w.key === windowKey ? " active" : ""}`}
+                    onClick={() => onWindowChange(w.key)}
+                  >
+                    {w.label}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                className="contact-close"
+                onClick={() => setDetailOpen(false)}
+                aria-label="Close"
+              >
+                ×
+              </button>
+            </div>
+            <WeatherHistory samples={history} loading={historyLoading} />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

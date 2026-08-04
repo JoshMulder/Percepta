@@ -93,6 +93,19 @@ export const api = {
       }[]
     >(`/api/stations/${id}/power/history?hours=${hours}`),
 
+  /** Weather over a window, for the trend charts. Each field is null where the
+   *  station has no sensor for it. */
+  weatherHistory: (id: string, hours: number) =>
+    request<
+      {
+        t: string;
+        temp?: number | null;
+        humidity?: number | null;
+        pressure?: number | null;
+        wind?: number | null;
+      }[]
+    >(`/api/stations/${id}/weather/history?hours=${hours}`),
+
   /** Registration and type for an ADS-B contact, by its ICAO hex — the fields
    *  the transponder does not broadcast. Every field but `icao` is null for an
    *  aircraft no registry has; the platform caches the answer, so calling this
