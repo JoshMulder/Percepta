@@ -1658,13 +1658,25 @@ body {
 
 /* The power-flow history under the state of charge, in the same popout. Same
    plotting box as the battery chart so the two share a time axis by eye. */
-.power-series svg {
+.power-series svg,
+.load-chart svg {
   display: block;
   width: 100%;
   height: 8.5rem;
   background: #060a0e;
   border: 1px solid var(--line);
   border-radius: var(--s1);
+}
+/* The dedicated load area — its own scale, so a quiet site still reads. */
+.load-area {
+  fill: rgba(215, 222, 231, 0.16);
+  stroke: none;
+}
+.load-line {
+  fill: none;
+  stroke: #d7dee7;
+  stroke-width: 1.4;
+  vector-effect: non-scaling-stroke;
 }
 .series-line {
   fill: none;
@@ -3262,20 +3274,24 @@ body {
 }
 .power-detail-btn {
   position: absolute;
-  top: 0;
-  right: 0;
+  /* Hard into the corner: negative insets pull it past the panel's own padding
+     so it sits flush with the panel edge rather than floating in from it. */
+  top: -0.35rem;
+  right: -0.35rem;
   z-index: 1;
   flex: none;
   background: none;
   border: 1px solid transparent;
   border-radius: 0.25rem;
   color: var(--muted);
-  padding: 0.15rem 0.25rem;
+  padding: 0.3rem 0.35rem;
   cursor: pointer;
   line-height: 0;
 }
 .power-detail-btn:hover { color: var(--text); border-color: var(--line); }
-.power-detail-btn .icon { width: 1.05em; height: 1.05em; }
+/* A bigger target and a bigger glyph — it opens the one panel that holds a
+   day's history, and it was easy to miss at the old size. */
+.power-detail-btn .icon { width: 1.6em; height: 1.6em; }
 
 .power-detail-scrim {
   position: fixed;

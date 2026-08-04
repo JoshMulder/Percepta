@@ -214,3 +214,75 @@ export function PowerFlowHistory({
     </div>
   );
 }
+
+/**
+ * The load, on its own, as a filled area.
+ *
+ * The flow chart above carries load as one line among four, which answers "how
+ * do the sources balance". This answers a different question — "what is the site
+ * actually drawing, and when did it spike" — and a filled area against its own
+ * scale reads that at a glance where a shared-scale line cannot. The scale is
+ * the window's own peak, so a quiet site's few watts still fill the box rather
+ * than sitting flat along the bottom under a chart scaled for a generator.
+ */
+export function LoadHistory({
+  samples,
+  loading,
+}: {
+  samples: SocSample[];
+  loading?: boolean;
+}) {
+  const W = 100;
+  const H = 34;
+
+  const { area, line, last, peak } = useMemo(() => {
+    if (samples.length < 2) {
+      return { area: "", line: "", last: null as number | null, peak: 0 };
+    }
+    const t0 = samples[0].t;
+    const span = Math.max(1, samples[samples.length - 1].t - t0);
+    const pts: { x: number; v: number }[] = [];
+    for (const s of samples) {
+      if (s.load === null || s.load === undefined || Number.isNaN(s.load)) continue;
+      pts.push({ x: ((s.t - t0) / span) * W, v: s.load });
+    }
+    if (pts.length < 2) {
+      return { area: "", line: "", last: null, peak: 0 };
+    }
+    const peak = Math.max(1, ...pts.map((p) => p.v));
+    const scale = peak * 1.08;
+    const xy = pts.map((p) => ({ x: p.x, y: H - (p.v / scale) * H }));
+    const line = xy
+      .map((p, i) => `${i ? "L" : "M"}${p.x.toFixed(2)} ${p.y.toFixed(2)}`)
+      .join(" ");
+    const area = `${line} L${xy[xy.length - 1].x.toFixed(2)} ${H} L${xy[0].x.toFixed(2)} ${H} Z`;
+    return { area, line, last: pts[pts.length - 1].v, peak };
+  }, [samples]);
+
+  return (
+    <div className="load-chart">
+      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden>
+        {line && (
+          <>
+            <path className="load-area" d={area} />
+            <path className="load-line" d={line} />
+          </>
+        )}
+      </svg>
+      <div className="series-legend">
+        {last === null ? (
+          <span className="muted">{loading ? "loading…" : "no history yet"}</span>
+        ) : (
+          <>
+            <span className="series-key">
+              now <b>{Math.round(last)} W</b>
+            </span>
+            <span className="series-key">
+              peak <b>{Math.round(peak)} W</b>
+            </span>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}

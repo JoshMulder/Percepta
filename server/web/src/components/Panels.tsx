@@ -6,6 +6,7 @@ import { IconChart } from "./Icons";
 import type { StreamState } from "../useVideoStream";
 import {
   BatteryChart,
+  LoadHistory,
   PowerFlowHistory,
   SOC_WINDOWS,
   type SocSample,
@@ -245,6 +246,10 @@ function PowerPanelInner({
               </button>
             </div>
             <BatteryChart samples={history} loading={historyLoading} />
+            {/* The site's own draw, on its own scale — what it is pulling and
+                when it spiked, which the shared-scale flow chart cannot show. */}
+            <h5 className="power-detail-sub">Load</h5>
+            <LoadHistory samples={history} loading={historyLoading} />
             {/* Under the state of charge: the flows that explain its shape —
                 load and solar always, the grid and generator where fitted. */}
             <h5 className="power-detail-sub">Power flow</h5>
