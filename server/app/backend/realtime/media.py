@@ -156,6 +156,15 @@ class MediaRelay:
         #: Called when a station should start or stop sending. Wired to the
         #: command channel by the API layer, so this module never imports it.
         self.on_demand_changed = None
+        #: Seconds to keep a station streaming after its last viewer leaves, so a
+        #: reload or a tab-flip returns to a live stream (instantly, with the
+        #: group-of-pictures cache above) rather than paying the encoder spin-up
+        #: again. 0 stops the instant the last viewer goes — the strict on-demand
+        #: posture. Set by the API layer from configuration.
+        self.linger_seconds = 0
+        #: A pending "stop after the linger" task per station, so a viewer coming
+        #: back inside the window cancels the stop it would otherwise have sent.
+        self._linger: dict[uuid.UUID, asyncio.Task] = {}
 
     async def stream(
         self, station_id: uuid.UUID, organization_id: uuid.UUID
@@ -199,6 +208,11 @@ class MediaRelay:
         stream.init_segment = None
         stream.recent.clear()
         stream.recent_bytes = 0
+        # A linger stop queued for a stream that has already gone is moot; drop
+        # it rather than firing a video.stop at a station that is no longer there.
+        pending = self._linger.pop(station_id, None)
+        if pending is not None:
+            pending.cancel()
         # Close every viewer rather than leaving them on a stream that has
         # stopped. A frozen last frame is indistinguishable from a working
         # camera looking at something that is not moving.
@@ -307,7 +321,17 @@ class MediaRelay:
         queue: asyncio.Queue[bytes | str | None] = asyncio.Queue(maxsize=64)
         first = len(stream.viewers) == 0
         stream.viewers.add(queue)
+        # A viewer returning inside the linger window cancels the stop that was
+        # queued when the last one left. The stream never stopped, so this is the
+        # instant return the linger exists to give — no encoder spin-up, and the
+        # start below is skipped because this is not the first viewer of a cold
+        # stream.
+        pending = self._linger.pop(station_id, None)
+        if pending is not None:
+            pending.cancel()
         if first and self.on_demand_changed is not None:
+            # Idempotent at the station if it was lingering (already streaming),
+            # a real start if it was cold.
             await self.on_demand_changed(stream, True)
         return stream, queue
 
@@ -318,6 +342,31 @@ class MediaRelay:
         if stream is None:
             return
         stream.viewers.discard(queue)
+        if stream.viewers or self.on_demand_changed is None:
+            return
+        if self.linger_seconds <= 0:
+            await self.on_demand_changed(stream, False)
+            return
+        # Keep it running for a moment rather than stopping the instant the last
+        # viewer goes: a reload is the common reason a viewer leaves, and a cold
+        # restart of the encoder is the cost this avoids. If nobody is back when
+        # the window elapses, `_linger_then_stop` stops it.
+        existing = self._linger.pop(station_id, None)
+        if existing is not None:
+            existing.cancel()
+        self._linger[station_id] = asyncio.create_task(
+            self._linger_then_stop(stream)
+        )
+
+    async def _linger_then_stop(self, stream: StationStream) -> None:
+        try:
+            await asyncio.sleep(self.linger_seconds)
+        except asyncio.CancelledError:
+            return
+        self._linger.pop(stream.station_id, None)
+        # Re-checked, never assumed: a viewer may have come and gone again during
+        # the window. The stop only fires if the stream is still unwatched, which
+        # also makes the cancel above an optimisation rather than the guarantee.
         if not stream.viewers and self.on_demand_changed is not None:
             await self.on_demand_changed(stream, False)
 

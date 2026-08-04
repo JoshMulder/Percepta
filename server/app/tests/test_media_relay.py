@@ -112,3 +112,59 @@ def test_a_fresh_publisher_session_clears_the_group() -> None:
         return relay.get(station_id).snapshot_for_new_viewer()
 
     assert asyncio.run(scenario()) == []
+
+
+# --- the warm linger -----------------------------------------------------
+
+
+def _recording_relay(linger: float) -> tuple[MediaRelay, list[str]]:
+    calls: list[str] = []
+
+    async def on_demand(stream, wanted: bool) -> None:  # noqa: ANN001
+        calls.append("start" if wanted else "stop")
+
+    relay = MediaRelay()
+    relay.on_demand_changed = on_demand
+    relay.linger_seconds = linger
+    return relay, calls
+
+
+def test_with_no_linger_the_stream_stops_the_instant_the_last_viewer_leaves() -> None:
+    async def scenario() -> list[str]:
+        relay, calls = _recording_relay(0)
+        station_id, organization_id = uuid.uuid4(), uuid.uuid4()
+        _, queue = await relay.attach(station_id, organization_id)
+        await relay.detach(station_id, queue)
+        return calls
+
+    assert asyncio.run(scenario()) == ["start", "stop"]
+
+
+def test_the_linger_defers_the_stop_and_it_fires_if_nobody_returns() -> None:
+    async def scenario() -> tuple[list[str], list[str]]:
+        relay, calls = _recording_relay(0.05)
+        station_id, organization_id = uuid.uuid4(), uuid.uuid4()
+        _, queue = await relay.attach(station_id, organization_id)
+        await relay.detach(station_id, queue)
+        during = list(calls)  # the stop has not been sent yet
+        await asyncio.sleep(0.15)  # the window elapses with nobody back
+        return during, calls
+
+    during, after = asyncio.run(scenario())
+    assert during == ["start"]
+    assert after == ["start", "stop"]
+
+
+def test_a_viewer_returning_inside_the_window_cancels_the_stop() -> None:
+    async def scenario() -> list[str]:
+        relay, calls = _recording_relay(0.1)
+        station_id, organization_id = uuid.uuid4(), uuid.uuid4()
+        _, queue = await relay.attach(station_id, organization_id)
+        await relay.detach(station_id, queue)
+        await asyncio.sleep(0.02)  # still inside the window
+        await relay.attach(station_id, organization_id)  # back again
+        await asyncio.sleep(0.15)  # past where the stop would have fired
+        return calls
+
+    # The stream never stopped, so the encoder never had to spin up again.
+    assert "stop" not in asyncio.run(scenario())

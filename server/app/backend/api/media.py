@@ -415,3 +415,7 @@ async def renew_leases() -> None:
 
 
 relay.on_demand_changed = _demand_changed
+# Keep a stream up briefly after its last viewer leaves, so a reload returns to
+# it live. Read once here rather than per-detach: the same place the demand
+# callback is wired, and the relay stays free of the config import.
+relay.linger_seconds = settings.stream_linger_seconds

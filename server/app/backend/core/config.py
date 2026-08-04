@@ -113,6 +113,20 @@ class Settings(BaseSettings):
 
     stream_revalidate_seconds: int = 60
 
+    # How long a station keeps streaming after its last viewer leaves, so a
+    # reload or a tab-flip returns to a live stream instead of paying the encoder
+    # spin-up again (paired with the relay's group-of-pictures cache, which makes
+    # that return instant). This is bandwidth spent while nobody is watching -
+    # the exact thing on-demand video exists to avoid - so it is deliberately
+    # short, and 0 disables it entirely for a deployment that wants the strict
+    # posture. At ~3 Mbit/s a 10 s window is a few megabytes of metered link per
+    # session-end. Keep it well under the lease window the station runs on
+    # (LEASE_SECONDS minus RENEW_SECONDS, ~20 s): the platform stops renewing the
+    # instant the last viewer leaves, so a linger longer than that lets the lease
+    # expire mid-window and the stream stops early — harmless, but not the effect
+    # asked for.
+    stream_linger_seconds: int = 8
+
     # Cross-worker fan-out and immediate revocation over Redis. Turning this off
     # confines fan-out to a single process, so WEB_CONCURRENCY must then be 1 or
     # subscribers on other workers silently miss frames.
