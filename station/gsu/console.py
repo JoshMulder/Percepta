@@ -2431,7 +2431,7 @@ class Console:
             out.append(
                 f"<form method=post action='/radio'>{self._csrf_field(csrf)}"
                 "<div class=field><label for='freq_mhz'>Frequency</label>"
-                "<input type=number step='0.001' id='freq_mhz' name='freq_mhz' "
+                "<input type=text id='freq_mhz' name='freq_mhz' spellcheck=false "
                 f"inputmode=decimal placeholder='MHz' value='"
                 f"{radio.freq_hz / 1e6:.3f}" if radio else ""
             )
@@ -2601,6 +2601,18 @@ class Console:
       go.hidden = true;
       select.addEventListener("change", function () { form.submit(); });
     })(pickers[p]);
+  }
+  // Airband is always xxx.xxx, so the point goes in after the third digit as the
+  // operator types — the same behaviour the dashboard has. "128950" shows as
+  // "128.950".
+  var freqInput = document.getElementById("freq_mhz");
+  if (freqInput) {
+    freqInput.addEventListener("input", function () {
+      var digits = freqInput.value.replace(/\\D/g, "").slice(0, 6);
+      freqInput.value = digits.length > 3
+        ? digits.slice(0, 3) + "." + digits.slice(3)
+        : digits;
+    });
   }
   var forms = document.querySelectorAll("form[data-device]");
   for (var i = 0; i < forms.length; i++) {
@@ -2852,7 +2864,10 @@ class Console:
         })
         .catch(function () {});
     };
-    setInterval(poll, 2500);
+    // The spectrum wants to move, not step: on the radio tab poll fast enough
+    // that a carrier appearing is visible, which on a loopback link costs
+    // nothing. Everything else stays lazy.
+    setInterval(poll, spec ? 300 : 2500);
   }
 
   // Say that a save is happening.
