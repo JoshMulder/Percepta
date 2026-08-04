@@ -1796,13 +1796,36 @@ class MediaUplinkTests(unittest.TestCase):
         self.assertTrue(uplink.begin("avc1.420033", b"\x00\x00\x00\x18ftypisom"))
         self.assertTrue(uplink.send(b"moof-and-mdat", keyframe=True))
         messages = _wait_for(lambda: self.server.messages
-                             if len(self.server.messages) >= 4 else None) or []
+                             if len(self.server.messages) >= 5 else None) or []
         kinds = [opcode for opcode, _ in messages]
-        self.assertEqual(kinds[:4], [1, 1, 2, 2], "text, text, binary, binary")
+        # codec(text), init(text), init segment(binary), then the keyframe
+        # marker(text) before the keyframe fragment(binary).
+        self.assertEqual(kinds[:5], [1, 1, 2, 1, 2],
+                         "text, text, binary, text, binary")
         self.assertEqual(json.loads(messages[0][1]), {"codec": "avc1.420033"})
         self.assertEqual(messages[1][1], b"init")
         self.assertEqual(messages[2][1], b"\x00\x00\x00\x18ftypisom")
-        self.assertEqual(messages[3][1], b"moof-and-mdat")
+        self.assertEqual(messages[3][1], b"key")
+        self.assertEqual(messages[4][1], b"moof-and-mdat")
+
+    def test_a_keyframe_is_flagged_on_the_wire_and_a_delta_is_not(self):
+        # The relay caches from the last keyframe, so it has to be told which
+        # fragment is one — it must not read the media to find out. A keyframe is
+        # preceded by a "key" text frame; a delta is a bare binary with none.
+        uplink = self.uplink()
+        self.assertTrue(uplink.open(), uplink.reason)
+        self.addCleanup(uplink.close)
+        self.assertTrue(uplink.begin("avc1.420033", b"init-seg"))
+        self.assertTrue(uplink.send(b"K", keyframe=True))
+        self.assertTrue(uplink.send(b"p", keyframe=False))
+        messages = _wait_for(lambda: self.server.messages
+                             if len(self.server.messages) >= 6 else None) or []
+        kinds = [opcode for opcode, _ in messages]
+        # codec, init, init-seg, key, K, p — the delta carries no marker.
+        self.assertEqual(kinds[:6], [1, 1, 2, 1, 2, 2])
+        self.assertEqual(messages[3][1], b"key")
+        self.assertEqual(messages[4][1], b"K")
+        self.assertEqual(messages[5][1], b"p")
 
     def test_a_real_stream_arrives_intact_and_in_order(self):
         # End to end through the muxer: what the platform receives is what the

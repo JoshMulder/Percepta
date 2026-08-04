@@ -47,14 +47,26 @@ LEASE_SECONDS = 30
 #: the lease so a single dropped renewal does not stop the stream.
 RENEW_SECONDS = 10
 
-#: Fragments held for a viewer that attaches mid-stream. Only the init segment
-#: is strictly required; one keyframe fragment beyond it means a new viewer sees
-#: a picture in about a second rather than waiting for the next one.
+#: Held for a viewer that attaches mid-stream: the init segment, and the current
+#: group of pictures — everything since the last keyframe. Handing a new viewer a
+#: keyframe plus the frames that follow it is a decodable run, so a picture
+#: appears at once instead of waiting up to a whole keyframe interval for the
+#: next one. Keeping only the single most recent fragment (as this once did) did
+#: not deliver that: the most recent fragment is almost always a delta, which
+#: decodes as nothing on its own.
 #:
-#: Deliberately tiny. A buffer here is latency for everyone and a memory leak
-#: per station, and this is a live view - a viewer who wants the last minute
-#: wants recordings, which is a different feature entirely.
-KEEP_FRAGMENTS = 1
+#: This does not buffer the live path — every fragment is still forwarded to
+#: watchers the instant it arrives; the group is a side-cache read only at
+#: attach. It is bounded in bytes AND in fragment count, because a pathological
+#: keyframe interval must not turn a live cache into an unbounded per-station
+#: leak, and because the whole group is replayed to a joiner in one burst — the
+#: viewer's own staging queue has to hold it intact, so the count here is what
+#: keeps that bounded and the two must be sized together (web/useVideoStream.ts).
+#: A group that outgrows either bound is dropped whole — never truncated, which
+#: would strand a keyframe-less run that decodes as nothing — and the joiner
+#: then waits for the next keyframe, exactly as it did before the cache existed.
+GOP_CACHE_MAX_BYTES = 8 * 1024 * 1024
+GOP_CACHE_MAX_FRAGMENTS = 120
 
 
 #: Live viewer sockets, by the session that opened them.
@@ -107,7 +119,11 @@ class StationStream:
     #: the video simply never appears. The station knows what its encoder
     #: produced, so it says, rather than the browser guessing.
     codec: str | None = None
+    #: The current group of pictures — the last keyframe fragment and every
+    #: delta since — replayed to a viewer that attaches mid-stream so it has a
+    #: decodable run at once. `recent_bytes` is its running size, for the cap.
     recent: list[bytes] = field(default_factory=list)
+    recent_bytes: int = 0
     #: A queue carries bytes (media), str (control, e.g. the codec) or None to
     #: close. Control has to travel the same path as media because a viewer
     #: attaches *before* the station starts - see set_codec.
@@ -171,6 +187,7 @@ class MediaRelay:
         stream.init_segment = None
         stream.codec = None
         stream.recent.clear()
+        stream.recent_bytes = 0
         log.info("Media: station %s started publishing.", station_id)
         return stream
 
@@ -181,6 +198,7 @@ class MediaRelay:
         stream.publishing = False
         stream.init_segment = None
         stream.recent.clear()
+        stream.recent_bytes = 0
         # Close every viewer rather than leaving them on a stream that has
         # stopped. A frozen last frame is indistinguishable from a working
         # camera looking at something that is not moving.
@@ -215,6 +233,7 @@ class MediaRelay:
             )
             stream.init_segment = None
             stream.recent.clear()
+            stream.recent_bytes = 0
         stream.codec = codec
         message = json.dumps({"codec": codec, "reset": changed})
         for queue in list(stream.viewers):
@@ -222,7 +241,8 @@ class MediaRelay:
                 queue.put_nowait(message)
 
     async def publish(
-        self, station_id: uuid.UUID, fragment: bytes, *, is_init: bool = False
+        self, station_id: uuid.UUID, fragment: bytes, *,
+        is_init: bool = False, keyframe: bool = False,
     ) -> None:
         stream = self._streams.get(station_id)
         if stream is None:
@@ -232,6 +252,8 @@ class MediaRelay:
 
         if is_init:
             stream.init_segment = fragment
+            stream.recent.clear()
+            stream.recent_bytes = 0
             # Forwarded as well as kept, for the same reason as the codec: the
             # viewers that made the station start are already attached, and
             # without this they wait for an initialisation segment that has
@@ -241,8 +263,22 @@ class MediaRelay:
                     queue.put_nowait(fragment)
             return
 
-        stream.recent.append(fragment)
-        del stream.recent[:-KEEP_FRAGMENTS]
+        # Hold the current group of pictures for a late joiner. A keyframe (the
+        # station marks it — the relay must not read the media to find out)
+        # starts a fresh group; a delta extends it; a delta arriving before any
+        # keyframe is not held, because on its own it decodes as nothing. A group
+        # that outgrows the cap is dropped rather than held unbounded — the
+        # joiner then waits for the next keyframe, as it did before this cache.
+        if keyframe:
+            stream.recent = [fragment]
+            stream.recent_bytes = len(fragment)
+        elif stream.recent:
+            stream.recent.append(fragment)
+            stream.recent_bytes += len(fragment)
+            if (stream.recent_bytes > GOP_CACHE_MAX_BYTES
+                    or len(stream.recent) > GOP_CACHE_MAX_FRAGMENTS):
+                stream.recent.clear()
+                stream.recent_bytes = 0
 
         for queue in list(stream.viewers):
             try:

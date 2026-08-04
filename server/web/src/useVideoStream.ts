@@ -39,6 +39,14 @@ import { ApiError, api } from "./api";
 
 export type StreamState = "idle" | "connecting" | "playing" | "unavailable";
 
+/** Staging-queue ceiling, in fragments. Sized to hold one whole group of
+ *  pictures replayed at attach in a burst — the relay bounds a group at
+ *  GOP_CACHE_MAX_FRAGMENTS (120) plus the init segment, and this leaves headroom
+ *  for the live fragments that land while that burst drains. Kept in step with
+ *  backend/realtime/media.py: too low and the burst's front (init/keyframe) is
+ *  spliced away and nothing decodes. */
+const MAX_PENDING = 192;
+
 export function useVideoStream(
   video: React.RefObject<HTMLVideoElement | null>,
   stationId: string | null,
@@ -247,9 +255,18 @@ export function useVideoStream(
           return;
         }
         pending.push(event.data as ArrayBuffer);
-        // Never let a backlog build: this is a live view, and old fragments are
-        // worth less than the time it takes to play them.
-        if (pending.length > 24) pending.splice(0, pending.length - 24);
+        // Bound the staging queue, but from BELOW live, never the front: a viewer
+        // attaching mid-stream is handed the whole current group of pictures in
+        // one burst (init + keyframe + the frames since), and splicing off the
+        // front would drop the init segment or the keyframe and leave a run that
+        // decodes as nothing. So the cap sits above the relay's per-group
+        // fragment bound (GOP_CACHE_MAX_FRAGMENTS, +1 for the init segment, plus
+        // headroom for the live fragments that arrive while the burst drains) and
+        // trims the OLDEST only once past it. Latency is kept in check by catchUp,
+        // not by this — this is only a memory bound.
+        if (pending.length > MAX_PENDING) {
+          pending.splice(0, pending.length - MAX_PENDING);
+        }
         drain();
         if (!cancelled) {
           // Media arriving is the one signal that the whole path works, so it

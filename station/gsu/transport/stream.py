@@ -10,7 +10,14 @@ the station owes is the shape:
     text    {"codec": "avc1.640028"}     once, before the init segment
     text    init                         a new encoder session starts here
     binary  ftyp + moov                  the initialisation segment
+    text    key                          the next fragment is a keyframe
     binary  moof + mdat                  one per frame, from then on
+
+The `key` marker precedes every keyframe fragment so the relay can cache from
+the last one — a viewer attaching mid-stream is then handed a decodable run and
+sees a picture at once, rather than waiting for the next keyframe. The relay
+must not read the media to find keyframes itself (it is a byte pipe), so the
+station says, the same way it says the codec and the session start.
 
 **The station id is never sent.** It is derived from the credential at the far
 end, because a box holding a valid secret still cannot be trusted to say which
@@ -206,6 +213,17 @@ class MediaUplink(StreamUplink):
                            else "the media uplink is not connected")
             return self._drop()
         if self._should_skip(keyframe):
+            return self._drop()
+        # A keyframe is announced before its fragment, so the relay can cache
+        # from the last one and hand a viewer attaching mid-stream a decodable
+        # run — a picture at once rather than a wait for the next keyframe. The
+        # relay forwards bytes without reading them (it is a byte pipe), so the
+        # station is what says which fragment is a keyframe, the same way it says
+        # the codec and the session start. One text frame per keyframe interval,
+        # negligible against the fragment it precedes.
+        if keyframe and not self.socket.send_text("key"):
+            if self.socket.close_reason:
+                self.reason = self.socket.close_reason
             return self._drop()
         if not self.socket.send_binary(fragment):
             if self.socket.close_reason:

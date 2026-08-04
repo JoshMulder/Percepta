@@ -151,6 +151,11 @@ async def media_ingest(websocket: WebSocket) -> None:
         credential_id, station_id, lambda: websocket.close(code=4401),
     ))
 
+    # Set by a "key" control frame, consumed by the binary fragment it precedes:
+    # the station announces a keyframe so the relay can cache from it without
+    # reading the media. Cleared after each fragment and on any session reset, so
+    # a lost binary cannot leave a stale flag mislabelling a later delta.
+    pending_keyframe = False
     try:
         while True:
             message = await websocket.receive()
@@ -176,16 +181,25 @@ async def media_ingest(websocket: WebSocket) -> None:
 
             if data is not None:
                 # The first binary frame of a session is the initialisation
-                # segment. Everything after it is a media fragment.
+                # segment. Everything after it is a media fragment, keyframe or
+                # not according to the marker that preceded it.
+                is_init = stream.init_segment is None
                 await relay.publish(
-                    station_id, data, is_init=stream.init_segment is None
+                    station_id, data,
+                    is_init=is_init,
+                    keyframe=pending_keyframe and not is_init,
                 )
+                pending_keyframe = False
                 continue
 
             # Text frames are control. Deliberately minimal: the station says
-            # when a new encoder session begins and what its encoder produced -
-            # the two things the relay cannot work out for itself without
-            # parsing the media, which is exactly what it must not do.
+            # when a new encoder session begins, what its encoder produced, and
+            # which fragment is a keyframe - the three things the relay cannot
+            # work out for itself without parsing the media, which is exactly
+            # what it must not do.
+            if text == "key":
+                pending_keyframe = True
+                continue
             if text == "init":
                 # Discards the segment and fragments, and deliberately NOT the
                 # codec. The documented order is codec, then `init`, then the
@@ -195,6 +209,8 @@ async def media_ingest(websocket: WebSocket) -> None:
                 # it (publisher_connected), which is the case that matters.
                 stream.init_segment = None
                 stream.recent.clear()
+                stream.recent_bytes = 0
+                pending_keyframe = False
                 continue
             if text.startswith("{"):
                 try:
