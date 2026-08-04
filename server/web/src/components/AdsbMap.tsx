@@ -1,6 +1,9 @@
 import maplibregl from "maplibre-gl";
 import { memo, useEffect, useRef, useState } from "react";
 import { iconFor, isRotorcraft } from "../adsbIcons";
+import { cachedAircraftInfo, fetchAircraftInfo } from "../aircraftInfo";
+import { buildLabel } from "../adsbLabel";
+import { useDisplayPrefs } from "../displayPrefs";
 import type { Aircraft, MapConfig } from "../types";
 import { ContactDetail } from "./ContactDetail";
 
@@ -99,6 +102,12 @@ function AdsbMapInner({
    *  panel you deliberately opened is not interrupted by the pointer crossing
    *  something else on the way to it — a pin wins until it is dismissed. */
   const [hovered, setHovered] = useState<string | null>(null);
+  const prefs = useDisplayPrefs();
+  const wantRegistration = prefs.labelFields.includes("registration");
+  /** Bumped when a batch of registration lookups resolves, purely to re-run the
+   *  marker loop so it re-reads the now-populated cache. The registrations
+   *  themselves live in the shared `aircraftInfo` cache, not here. */
+  const [regVersion, setRegVersion] = useState(0);
   const selected = pinned ?? hovered;
   /** So the marker handlers, which are created once per contact and live
    *  outside React, can set state without being rebuilt on every selection. */
@@ -313,6 +322,32 @@ function AdsbMapInner({
   }, [basemap, config.basemaps]);
 
   /**
+   * Registrations for the labels, but only when the operator has asked for them.
+   *
+   * Registration is not in the ADS-B stream — it is a per-contact lookup, and
+   * putting it on the label means looking up every aircraft on screen rather
+   * than only the one whose card is open. So the lookups are gated on the field
+   * being selected: nobody pays for tail numbers on the map unless they turned
+   * them on. The results land in the shared cache; the version bump just tells
+   * the marker loop below to re-read it once a batch has resolved.
+   */
+  useEffect(() => {
+    if (!wantRegistration) return;
+    let cancelled = false;
+    const pending = aircraft
+      .filter((c) => cachedAircraftInfo(c.icao) === undefined)
+      .map((c) => fetchAircraftInfo(c.icao).catch(() => undefined));
+    if (pending.length) {
+      void Promise.allSettled(pending).then(() => {
+        if (!cancelled) setRegVersion((v) => v + 1);
+      });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [aircraft, wantRegistration]);
+
+  /**
    * Update contacts in place rather than clearing and rebuilding.
    *
    * Recreating every marker once a second destroys and recreates a dozen DOM
@@ -331,7 +366,10 @@ function AdsbMapInner({
 
       const pos: [number, number] = [contact.longitude, contact.latitude];
       const colour = contact.alert ? ALERT_COLOUR : CONTACT_COLOUR;
-      const label = contact.callsign?.trim() || contact.icao;
+      const registration = wantRegistration
+        ? cachedAircraftInfo(contact.icao)?.registration ?? null
+        : null;
+      const label = buildLabel(contact, prefs, registration);
       const icon = iconFor(contact.emitter_type);
 
       let marker = existing.get(contact.icao);
@@ -442,7 +480,9 @@ function AdsbMapInner({
       marker.remove();
       existing.delete(icao);
     }
-  }, [aircraft, compact, selected]);
+    // `prefs` re-labels on a units or field change; `regVersion` re-labels once
+    // a batch of registration lookups has landed in the cache.
+  }, [aircraft, compact, selected, prefs, regVersion]);
 
   /** A selected contact that has left the airspace must not leave a panel of
    *  values behind that no longer describe anything. Handled here rather than

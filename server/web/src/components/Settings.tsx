@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { Capability, Me, RadioPayload } from "../types";
 import { SettingsAccount } from "./SettingsAccount";
+import { SettingsDisplay } from "./SettingsDisplay";
 import { SettingsOrganization } from "./SettingsOrganization";
 import { SettingsPlatform } from "./SettingsPlatform";
 import { SettingsRadio } from "./SettingsRadio";
@@ -22,7 +23,7 @@ import { SettingsStation } from "./SettingsStation";
  * unpleasant to use. Different job, different rules.
  */
 
-type Tab = "account" | "radio" | "station" | "organization" | "platform";
+type Tab = "account" | "display" | "radio" | "station" | "organization" | "platform";
 
 export function Settings({
   me,
@@ -63,6 +64,9 @@ export function Settings({
 
   const tabs: { id: Tab; label: string }[] = [
     { id: "account", label: "My account" },
+    // Available to everyone: these are display choices for the person looking,
+    // gated by no capability.
+    { id: "display", label: "Display" },
     ...(canRadio ? [{ id: "radio" as Tab, label: "Radio" }] : []),
     ...(canConfigure ? [{ id: "station" as Tab, label: "Stations" }] : []),
     ...(isAdmin ? [{ id: "organization" as Tab, label: "Organisation" }] : []),
@@ -133,6 +137,7 @@ export function Settings({
             {tab === "account" && (
               <SettingsAccount me={me} onProfileChanged={onProfileChanged} />
             )}
+            {tab === "display" && <SettingsDisplay />}
             {tab === "radio" && (
               <SettingsRadio
                 radio={radio}

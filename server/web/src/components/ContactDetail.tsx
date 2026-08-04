@@ -1,57 +1,8 @@
-import { useEffect, useState } from "react";
+import { useAircraftInfo } from "../aircraftInfo";
 import { emitterName } from "../adsbIcons";
-import { api } from "../api";
+import { useDisplayPrefs } from "../displayPrefs";
+import { FEET_PER_METRE, formatAltitude } from "../format";
 import type { Aircraft } from "../types";
-
-interface AircraftInfo {
-  icao: string;
-  registration: string | null;
-  type_code: string | null;
-  model: string | null;
-  manufacturer: string | null;
-  operator: string | null;
-}
-
-/** A tail number and a model do not change for an airframe, so a hex looked up
- *  once is kept for the life of the tab and never fetched again. */
-const infoCache = new Map<string, AircraftInfo>();
-
-/**
- * The registration and model behind an ICAO address, fetched when a card opens.
- *
- * These are not in the ADS-B stream — the platform looks them up and the console
- * asks only for the contact it is showing, which is why this is on the card
- * rather than the map: a dozen lookups a session, not one per contact per
- * second. A miss or an error leaves it null and the card falls back to the
- * emitter category, so nothing here is load-bearing.
- */
-function useAircraftInfo(icao: string): AircraftInfo | null {
-  const [info, setInfo] = useState<AircraftInfo | null>(
-    () => infoCache.get(icao) ?? null,
-  );
-  useEffect(() => {
-    const cached = infoCache.get(icao);
-    if (cached) {
-      setInfo(cached);
-      return;
-    }
-    let cancelled = false;
-    setInfo(null);
-    api
-      .aircraftInfo(icao)
-      .then((data) => {
-        infoCache.set(icao, data);
-        if (!cancelled) setInfo(data);
-      })
-      .catch(() => {
-        /* The card shows the category regardless; a failed lookup is silence. */
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [icao]);
-  return info;
-}
 
 /**
  * One ADS-B contact, in full.
@@ -71,16 +22,7 @@ function useAircraftInfo(icao: string): AircraftInfo | null {
  * in the last 50 pixels would waste the whole exercise.
  */
 
-const FEET_PER_METRE = 3.28084;
 const KM_PER_NM = 1.852;
-
-/** Metres and feet together, because altitude is the one number here an
- *  aviation reader will want in feet and everything else in this console is
- *  metric. Neither unit is made the "real" one. */
-function altitudeText(metres: number): string {
-  const feet = Math.round(metres * FEET_PER_METRE);
-  return `${Math.round(metres).toLocaleString()} m · ${feet.toLocaleString()} ft`;
-}
 
 function Row({
   label,
@@ -134,6 +76,7 @@ export function ContactDetail({
   // all the transponder broadcasts. The lookup below fills in the specific model
   // and the tail number, which are not in ADS-B, when a registry has them.
   const category = emitterName(emitter_type);
+  const { altitudeUnit } = useDisplayPrefs();
   const info = useAircraftInfo(icao);
   // Model when a registry has it, category otherwise: "Boeing 737-838" says more
   // than "Large aircraft", but the category is always there to fall back on.
@@ -186,7 +129,7 @@ export function ContactDetail({
         {altitude === null || altitude === undefined ? (
           <span className="contact-absent">Altitude not reported</span>
         ) : (
-          <strong>{altitudeText(altitude)}</strong>
+          <strong>{formatAltitude(altitude, altitudeUnit)}</strong>
         )}
       </div>
 
@@ -198,7 +141,7 @@ export function ContactDetail({
             empty row invites the reading that it failed. */}
         {altitude_corrected_m !== null && altitude_corrected_m !== undefined && (
           <Row label="Corrected" wide>
-            {altitudeText(altitude_corrected_m)}
+            {formatAltitude(altitude_corrected_m, altitudeUnit)}
             <span className="contact-note"> against this station's barometer</span>
           </Row>
         )}

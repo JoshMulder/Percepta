@@ -1,6 +1,8 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { _resetAircraftInfo } from "../aircraftInfo";
 import { api } from "../api";
+import { _resetDisplayPrefs, setDisplayPrefs } from "../displayPrefs";
 import type { Aircraft } from "../types";
 import { ContactDetail } from "./ContactDetail";
 
@@ -30,6 +32,10 @@ afterEach(() => vi.restoreAllMocks());
 // so it cannot fill in a registration behind a test's back or update state after
 // the test has moved on — the tests that care about the lookup opt in below.
 beforeEach(() => {
+  // The lookup cache and the display prefs are module-global; clear both so one
+  // test's registration or unit choice cannot answer for the next.
+  _resetAircraftInfo();
+  _resetDisplayPrefs();
   vi.spyOn(api, "aircraftInfo").mockImplementation(() => new Promise(() => {}));
 });
 
@@ -117,6 +123,26 @@ describe("altitude, which is what the panel is for", () => {
     show({ altitude_m: 0 });
     expect(text()).toContain("0 m");
     expect(text()).not.toMatch(/Altitude not reported/i);
+  });
+
+  it("shows both units by default", () => {
+    show({ altitude_m: 3500 });
+    expect(text()).toContain("3500 m");
+    expect(text()).toContain("11483 ft");
+  });
+
+  it("shows only feet when that is the chosen unit", () => {
+    setDisplayPrefs({ altitudeUnit: "ft" });
+    show({ altitude_m: 3500 });
+    expect(text()).toContain("11483 ft");
+    expect(text()).not.toContain("3500 m");
+  });
+
+  it("shows only metres when that is the chosen unit", () => {
+    setDisplayPrefs({ altitudeUnit: "m" });
+    show({ altitude_m: 3500 });
+    expect(text()).toContain("3500 m");
+    expect(text()).not.toContain("11483 ft");
   });
 });
 

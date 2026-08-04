@@ -2284,6 +2284,23 @@ body {
 .settings-section h4 { margin: 0 0 2px; font-size: 14px; font-weight: 600; }
 .settings-section.danger h3 { color: var(--danger); border-bottom-color: rgba(255, 122, 69, 0.3); }
 
+/* Display-preference controls (Settings → Display). */
+.pref-note { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.4; }
+.pref-checks { display: flex; flex-direction: column; gap: 10px; }
+.pref-check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  font-size: 14px;
+}
+.pref-check input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--brand);
+  cursor: pointer;
+}
+
 .settings-pane .field {
   display: flex;
   flex-direction: column;
@@ -2819,7 +2836,12 @@ body {
 }
 .map-contact span {
   font: 0.6rem var(--mono);
-  white-space: nowrap;
+  /* `pre` so a multi-field label keeps the line breaks the label builder puts
+     between fields; centred so the stack sits under the glyph. An empty label
+     collapses the box to nothing, so a marker with no chosen fields is just the
+     glyph. */
+  white-space: pre;
+  text-align: center;
   /* A backdrop rather than a glow. Two stacked text-shadows were enough over
      water and open country and lost badly against a white rooftop or a
      motorway, which is exactly where the aircraft worth reading tend to be.
