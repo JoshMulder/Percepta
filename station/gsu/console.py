@@ -2867,6 +2867,11 @@ class Console:
         script = """
 "use strict";
 (function () {
+  // Until when the poll must leave the radio controls alone: a control just
+  // changed here is mid-apply, and the poll reading back the not-yet-applied
+  // value would flick it to the old setting and back. The same idea as the
+  // platform's settle timers. Shared between the instant-apply and the poll.
+  var radioSettleUntil = 0;
   function fingerprint(form) {
     var out = [];
     var fields = form.querySelectorAll("input, select");
@@ -2933,6 +2938,29 @@ class Console:
       }
     });
   }
+  // Keep the audio near the live edge. A streamed <audio> element plays out
+  // everything it has buffered and never catches up on its own, so latency only
+  // grows — which is why the box lagged the platform, whose Web-Audio path trims
+  // its own jitter buffer. Rather than seek (which stalls a live WAV with no
+  // duration), play slightly faster while behind: pitch is preserved, so the
+  // catch-up is inaudible, and it eases back to 1x once level with the edge.
+  if (listen) {
+    listen.preservesPitch = true;
+    setInterval(function () {
+      if (listen.paused || !listen.buffered || !listen.buffered.length) {
+        listen.playbackRate = 1;
+        return;
+      }
+      var edge = listen.buffered.end(listen.buffered.length - 1);
+      var lag = edge - listen.currentTime;
+      // A big backlog (after a stall) is not worth playing through at 1.1x;
+      // jump most of it and let the fine trim take the rest.
+      if (lag > 3) { try { listen.currentTime = edge - 0.3; } catch (e) {} listen.playbackRate = 1; }
+      else if (lag > 1.0) listen.playbackRate = 1.1;
+      else if (lag > 0.4) listen.playbackRate = 1.04;
+      else listen.playbackRate = 1;
+    }, 500);
+  }
   // The radio settings apply the moment a control changes — no Apply button to
   // find, and no page reload to tear down the audio being listened to. The
   // button is the no-script fallback and is hidden here; a fetch posts the whole
@@ -2951,6 +2979,9 @@ class Console:
     };
     var busy = false, again = false;
     var apply = function () {
+      // Hold the poll off these controls while the change is applied and echoed
+      // back, so it cannot briefly revert them to the pre-change reading.
+      radioSettleUntil = Date.now() + 2000;
       if (busy) { again = true; return; }
       busy = true;
       var data = new URLSearchParams(new FormData(radioForm));
@@ -3201,12 +3232,57 @@ class Console:
             if (mfloor) mfloor.style.left = pct(r.floor_db) + "%";
             var led = document.getElementById("sig-led");
             if (led) led.className = "led" + (r.squelch_open ? " on" : "");
-            // While AUTO rides the floor the station owns the threshold, so
-            // track it here — but never out from under a hand on the slider.
+
+            // Mirror the receiver's live settings into the controls, so a change
+            // made from the platform shows here too — the box and the platform
+            // drive the same receiver and must not disagree on screen. Two
+            // guards: never touch a control the operator has focused (that is
+            // the one being changed here), and stay off all of them for a beat
+            // after a local change, so the poll cannot read back a value that is
+            // still being applied and flick the control to the old setting. The
+            // meter above is exempt: it is a reading, not a control.
+            var settling = Date.now() < radioSettleUntil;
+            var idle = function (el) {
+              return el && !settling && document.activeElement !== el;
+            };
             var thr = document.getElementById("squelch");
             var auto = document.getElementById("auto_squelch");
-            if (thr && auto && auto.checked && document.activeElement !== thr
-                && typeof r.threshold_db === "number") {
+            var dragging = thr && document.activeElement === thr;
+            var freqEl = document.getElementById("freq_mhz");
+            if (idle(freqEl) && typeof r.freq_mhz === "number") {
+              var f = r.freq_mhz.toFixed(3);
+              if (freqEl.value !== f) freqEl.value = f;
+            }
+            var ppmEl = document.getElementById("ppm");
+            if (idle(ppmEl) && r.ppm != null && ppmEl.value !== String(r.ppm)) {
+              ppmEl.value = String(r.ppm);
+            }
+            var monEl = document.getElementById("monitor");
+            if (idle(monEl)) monEl.checked = !!r.monitor;
+            // AUTO is coupled to the slider (dragging it leaves AUTO), so treat a
+            // drag as editing AUTO too and leave it alone until the drag ends.
+            if (idle(auto) && !dragging) auto.checked = !!r.auto;
+            // The gain select matches by number, not string: its option values
+            // are the tuner's steps rendered as Python floats ("0.0", "37.2")
+            // and r.gain is a JSON number, so "0" would never match "0.0".
+            var gainEl = document.getElementById("gain");
+            if (idle(gainEl)) {
+              var want = (r.gain === "auto") ? "auto" : Number(r.gain);
+              for (var gi = 0; gi < gainEl.options.length; gi++) {
+                var ov = gainEl.options[gi].value;
+                var hit = (want === "auto")
+                  ? (ov === "auto")
+                  : (ov !== "auto" && Math.abs(Number(ov) - want) < 0.05);
+                if (hit) {
+                  if (gainEl.selectedIndex !== gi) gainEl.selectedIndex = gi;
+                  break;
+                }
+              }
+            }
+            // Squelch: follow the receiver's threshold whenever the slider is not
+            // being dragged here — AUTO riding the floor, or a manual level set
+            // from the platform, both then show up.
+            if (idle(thr) && typeof r.threshold_db === "number") {
               thr.value = r.threshold_db;
               setText("sig-thr", r.threshold_db.toFixed(0) + " dB");
             }
