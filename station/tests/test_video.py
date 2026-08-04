@@ -1231,6 +1231,29 @@ class OnDemandTests(AgentFixture):
         self.assertEqual(self.agent.stream.stop(), "not streaming")
         self.assertEqual(self.agent.stream.state, "idle")
 
+    def test_a_frozen_source_that_is_still_alive_is_stopped_as_a_stall(self):
+        # The reported bug: the picture freezes but the encoder has not exited,
+        # so `source.running` stays True and nothing above notices — the platform
+        # holds the last frame and health still says streaming. The frame
+        # watchdog is what catches it.
+        from gsu.stream import STALL_LIMIT_S
+
+        self.agent.stream._build_source = lambda settings: _InstantSource()
+        self.agent.stream.start({"lease_s": 300})
+        self.assertEqual(self.agent.stream.state, "streaming")
+
+        self.agent.stream._last_frame_at = time.monotonic() - STALL_LIMIT_S - 1
+        self.agent.step(1.0)
+        self.assertEqual(self.agent.stream.state, "unavailable")
+        self.assertIn("stalled", self.agent.stream.reason)
+
+    def test_a_stream_still_delivering_frames_is_left_alone(self):
+        self.agent.stream._build_source = lambda settings: _InstantSource()
+        self.agent.stream.start({"lease_s": 300})
+        self.agent.stream._last_frame_at = time.monotonic()
+        self.agent.step(1.0)
+        self.assertEqual(self.agent.stream.state, "streaming")
+
     def test_the_commands_are_dispatched_and_reported(self):
         start = self.handler("video.start")
         stop = self.handler("video.stop")

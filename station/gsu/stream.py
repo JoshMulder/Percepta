@@ -86,6 +86,26 @@ SENSOR_WAIT_S = 10.0
 #: happening, not a deadline for a slow one.
 STARTING_LIMIT_S = 90.0
 
+#: Longest a *streaming* session may go without a frame before `tick` calls it
+#: stalled and stops it.
+#:
+#: The failure this catches: the encoder is still alive — `source.running` is
+#: True, ffmpeg has not exited — but no frames are coming out. An RTSP feed whose
+#: TCP connection stays up while the camera wedges, a network path that black-
+#: holes mid-stream. Nothing above notices, because everything above asks whether
+#: the process died, and it did not. The platform holds the last frame it got: a
+#: frozen picture that reads as a live one, and a health frame that still says
+#: "streaming". Stopping it makes the stall visible (the console sees the stream
+#: go unavailable with a reason) and lets the platform re-request, which rebuilds
+#: the source onto a fresh connection — the recovery that used to need a station
+#: restart.
+#:
+#: Generous enough to cover the wait for the first frame after the encoder is
+#: spawned (state goes to "streaming" before any frame arrives, and a camera with
+#: a long keyframe interval can take several seconds), and short enough that a
+#: frozen picture is caught in seconds rather than sitting there indefinitely.
+STALL_LIMIT_S = 12.0
+
 
 class StreamSession:
     """The one live encoder this station has, and the rules about when it runs."""
@@ -533,6 +553,22 @@ class StreamSession:
         ceiling = float(self.agent.site.stream_max_minutes or 0) * 60
         if ceiling and self.started_at and now - self.started_at > ceiling:
             self.stop(f"the {ceiling / 60:.0f} minute ceiling was reached")
+            return
+        # A source that is alive but has stopped delivering frames — the frozen-
+        # picture case `source.running` cannot see (see STALL_LIMIT_S). Measured
+        # from the last frame, or from the start if none has arrived yet, so it
+        # catches both a mid-stream freeze and a stream that spawned an encoder
+        # and never produced a first frame.
+        last_frame = self._last_frame_at or self.started_at
+        if last_frame is not None and now - last_frame > STALL_LIMIT_S:
+            self.reason = (
+                f"no video frame for {STALL_LIMIT_S:.0f}s — the source has "
+                f"stalled (a frozen picture, not a live one). Stopped so the "
+                f"platform reconnects and the source is rebuilt."
+            )
+            log.error("%s", self.reason)
+            self.stop(self.reason)
+            self.state = "unavailable"
             return
         if self.source is not None and not self.source.running:
             self.reason = self.source.reason or "the encoder exited"
