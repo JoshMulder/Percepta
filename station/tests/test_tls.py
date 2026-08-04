@@ -444,6 +444,38 @@ class AgentRefusalTests(unittest.TestCase):
         finally:
             restarted.shutdown()
 
+    def test_dropping_a_pinned_ca_for_public_trust_is_recorded_not_only_logged(self):
+        # A box pinned yesterday, moved to a public-certificate broker today: the
+        # pin is dropped (correctly — a stale pin would refuse every connection),
+        # but that is a real reduction in the broker's trust and the console now
+        # shows the result as a plain green "public certificate" row. So the
+        # transition itself must leave a trace an operator can find — an event,
+        # the same as a CA rotation gets, not just a log line.
+        from gsu.credentials import Broker, Credential, Enrolment, Site
+        from gsu import tls
+
+        agent = Agent(AgentConfig(home=self.home, setup_enabled=False,
+                                  single_instance=False, demo=True))
+        try:
+            self.enrol(agent)                               # pins self.ca
+            self.assertTrue(agent.trust.pinned)
+            now = datetime.now(UTC)
+            agent._attach(Enrolment(
+                station_id=STATION,
+                credential=Credential("bearer", "secret", now + timedelta(days=90),
+                                      now + timedelta(days=45)),
+                broker=Broker(url="rediss://broker.example:443/0",
+                              ca_mode=tls.TRUST_SYSTEM),
+                site=Site("Test", "UTC", -43.5, 172.6),
+                config_version=1, enrolled_at=now,
+            ))
+            self.assertEqual(agent.trust.mode, tls.TRUST_SYSTEM)
+            self.assertFalse((self.home / "broker-ca.pem").exists())  # pin cleared
+            kinds = {e.kind for e in agent.store.recent_events()}
+            self.assertIn("tls.ca_dropped", kinds)
+        finally:
+            agent.shutdown()
+
 
 if __name__ == "__main__":
     unittest.main()

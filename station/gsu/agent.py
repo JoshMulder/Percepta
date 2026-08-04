@@ -339,6 +339,17 @@ class Agent:
                     "store from here.", self.config.ca_path,
                 )
                 self.ca.clear()
+                # Recorded, not merely logged — the same as a CA rotation below.
+                # Dropping a pin is a real reduction in the broker's trust
+                # (from one CA to the whole public bundle), and the console now
+                # shows the result as a plain green "public certificate" row, so
+                # the transition itself needs a trace an operator can find.
+                self.store.record_event(
+                    "tls.ca_dropped", "warning",
+                    "Broker CA pin dropped: the platform now states a public "
+                    "certificate, so the broker is verified against the system "
+                    "trust store from here.",
+                )
             self.trust = self._resolve_broker_trust(stated_mode=mode)
             return
         if not pem:

@@ -550,7 +550,7 @@ class ServedPageTests(unittest.TestCase):
         # The gate is client-side, so lock its shape in source…
         source = (Path(__file__).resolve().parents[1] / "gsu" / "console.py").read_text()
         self.assertIn(
-            'if (form.hasAttribute("data-changed") && !editable) apply();', source)
+            'if (form.hasAttribute("data-changed") && !editable) applyDevice();', source)
         self.assertIn(
             'form.querySelector("input:not([type=hidden]), select, textarea")', source)
         # …and confirm the render feeds it correctly: a field-bearing pick shows
@@ -563,6 +563,35 @@ class ServedPageTests(unittest.TestCase):
         self.assertIn("name='p_", field_bearing)
         _, unfit = self.request("GET", "/devices?slot=weather&type=")
         self.assertNotIn("name='p_", unfit)
+
+    def test_the_instant_apply_engine_is_shared_and_times_out(self):
+        # Radio and device apply were near-identical copies; they now share one
+        # engine, so the subtle in-flight coalescing and the failure wording live
+        # in one place and cannot drift. And a request that never answers is
+        # abandoned on a timeout rather than freezing the form on "Saving…" until
+        # the browser's own dead-socket timeout finally gives up.
+        source = (Path(__file__).resolve().parents[1] / "gsu" / "console.py").read_text()
+        self.assertEqual(source.count("function makeInstantApply("), 1)
+        self.assertIn('radioForm, "/radio"', source)
+        self.assertIn('makeInstantApply(form, "/device", status, null)', source)
+        self.assertIn("AbortController", source)
+        self.assertIn("APPLY_TIMEOUT_MS", source)
+        self.assertIn("fetch(url, {", source)          # the one shared fetch
+        self.assertNotIn('fetch("/radio"', source)     # no per-form copies left
+        self.assertNotIn('fetch("/device"', source)
+
+    def test_the_slot_pill_is_refreshed_from_the_poll(self):
+        # The pill is server-rendered and an inline apply never reloads, so the
+        # poll updates it from the per-slot report — it carries the id/slot the
+        # poll keys off. The poll's status->pill map mirrors STATUS_PILL, and this
+        # asserts the two cannot drift on what a state is called or coloured.
+        from gsu.console import STATUS_PILL
+        _, body = self.request("GET", "/devices?slot=weather")
+        self.assertIn("id=slot-pill", body)
+        self.assertIn("data-pill-slot='weather'", body)
+        source = (Path(__file__).resolve().parents[1] / "gsu" / "console.py").read_text()
+        for status, (css, wording) in STATUS_PILL.items():
+            self.assertIn(f'{status}: ["{css}", "{wording}"]', source, status)
 
     def test_un_fitting_a_slot_is_selectable_at_all(self):
         # "— not fitted —" posts `type=` with nothing after it. parse_qs drops

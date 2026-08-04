@@ -2406,10 +2406,14 @@ class Console:
                 chosen_id = chosen
 
         out.append("<div class=card>")
+        # The pill carries its slot and an id so the poll can refresh it: an
+        # inline apply never reloads, so without this the pill would keep saying
+        # "Disconnected" beside a status line that already read "detected".
         out.append(
             "<div class=slot-head><strong>"
             f"{html.escape(SLOT_LABELS.get(slot, slot.title()))}</strong>"
-            f"<span class='pill {css}'>{html.escape(wording)}</span></div>"
+            f"<span id=slot-pill data-pill-slot='{slot}' class='pill {css}'>"
+            f"{html.escape(wording)}</span></div>"
         )
         # No "selected:" or "found:" lines. Both were the same fact twice on
         # one card: the dropdown below shows what is selected, and the pill
@@ -2927,16 +2931,16 @@ class Console:
     def _devices_script(nonce: str) -> str:
         """The one script this app carries, admitted by a per-response nonce.
 
-        Three jobs, all progressive enhancement over a page that already works
-        without it: the save button goes disabled until a field differs from
-        its loaded value, and the datastream field — or, on the camera tab,
-        the frame preview and its age — refreshes from status.json, same auth
-        gate as every page, every 2.5 seconds, nothing off-box (the CSP's
-        connect-src enforces that). Password fields count as changed when
-        non-empty: their loaded value is never in the page to compare
-        against, by design. The preview image is re-fetched with a timestamp
-        query because the response is no-store and the browser still needs
-        the src to change before it asks again.
+        Its jobs: apply each radio and device change the moment it lands, over a
+        coalescing ajax fetch with no reload (makeInstantApply), so a control
+        moved or a device picked takes without a Save button — the one place on
+        the page that needs the script, said in a <noscript>; and refresh the
+        live readings — the datastream field or, on the camera tab, the frame
+        preview and its age, plus the slot pill and the radio meters — from
+        status.json, same auth gate as every page, every 2.5 s, nothing off-box
+        (the CSP's connect-src enforces that). The preview image is re-fetched
+        with a timestamp query because the response is no-store and the browser
+        still needs the src to change before it asks again.
         """
         script = """
 "use strict";
@@ -2946,6 +2950,63 @@ class Console:
   // value would flick it to the old setting and back. The same idea as the
   // platform's settle timers. Shared between the instant-apply and the poll.
   var radioSettleUntil = 0;
+  // How long an apply may wait before it is abandoned. Longer than the slowest
+  // honest save — a network camera's rebuild plus its detection grace — and far
+  // shorter than a browser's own dead-socket timeout, which can be minutes: a
+  // request that never answers must not strand the form on "Saving…" with every
+  // later edit swallowed into `again`.
+  var APPLY_TIMEOUT_MS = 20000;
+  // One instant-apply engine for both the radio panel and the device forms.
+  // Coalesce in-flight posts, POST the whole form as ajax (so the answer is a
+  // line to show, not a reload), and write the outcome to a status line. Was
+  // copied out twice; the coalescing and the failure wording are subtle enough
+  // that one copy is worth having. `before` runs on every call, coalesced ones
+  // included — the radio uses it to hold the poll off its own controls.
+  function makeInstantApply(form, url, statusEl, before) {
+    var busy = false, again = false;
+    var say = function (text, bad) {
+      if (!statusEl) return;
+      statusEl.textContent = text;
+      statusEl.style.color = bad ? "var(--danger)" : "";
+    };
+    var apply = function () {
+      if (before) before();
+      if (busy) { again = true; return; }
+      busy = true;
+      var data = new URLSearchParams(new FormData(form));
+      data.set("ajax", "1");
+      say("Saving\\u2026", false);
+      var done = function (text, bad) {
+        busy = false;
+        say(text, bad);
+        if (again) { again = false; apply(); }
+      };
+      // Abandon a request that never answers, so a dead link does not freeze the
+      // form on "Saving…" until the browser's own timeout finally gives up.
+      var ctrl = ("AbortController" in window) ? new AbortController() : null;
+      var timer = ctrl
+        ? window.setTimeout(function () { ctrl.abort(); }, APPLY_TIMEOUT_MS)
+        : 0;
+      fetch(url, {
+        method: "POST",
+        body: data,
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        signal: ctrl ? ctrl.signal : undefined
+      })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (j) {
+          if (timer) window.clearTimeout(timer);
+          if (!j) done("Not saved — reload and try again.", true);
+          else done(j.message || "Saved.", !j.ok);
+        })
+        .catch(function () {
+          if (timer) window.clearTimeout(timer);
+          done("Not saved — no answer from the station.", true);
+        });
+    };
+    return apply;
+  }
   // Picking a device re-renders the page for it. The Change button beside the
   // select does this without script; with script the select alone is enough,
   // so the button hides and choosing costs one interaction instead of two.
@@ -3096,51 +3157,20 @@ class Console:
   if (radioForm) {
     var applyBtn = radioForm.querySelector("button[type=submit]");
     if (applyBtn) applyBtn.hidden = true;
-    var radioStatus = document.getElementById("radio-status");
-    var say = function (text, bad) {
-      if (!radioStatus) return;
-      radioStatus.textContent = text;
-      radioStatus.style.color = bad ? "var(--danger)" : "";
-    };
-    var busy = false, again = false;
-    var apply = function () {
+    var applyRadio = makeInstantApply(
+      radioForm, "/radio", document.getElementById("radio-status"),
       // Hold the poll off these controls while the change is applied and echoed
       // back, so it cannot briefly revert them to the pre-change reading.
-      radioSettleUntil = Date.now() + 2000;
-      if (busy) { again = true; return; }
-      busy = true;
-      var data = new URLSearchParams(new FormData(radioForm));
-      data.set("ajax", "1");
-      say("Saving\\u2026", false);
-      var done = function (text, bad) {
-        busy = false;
-        say(text, bad);
-        if (again) { again = false; apply(); }
-      };
-      fetch("/radio", {
-        method: "POST",
-        body: data,
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" }
-      })
-        .then(function (r) { return r.ok ? r.json() : null; })
-        .then(function (j) {
-          if (!j) done("Not saved — reload and try again.", true);
-          else done(j.message || "Saved.", !j.ok);
-        })
-        .catch(function () {
-          done("Not saved — no answer from the station.", true);
-        });
-    };
+      function () { radioSettleUntil = Date.now() + 2000; });
     // Enter in a field would otherwise submit the form for real (a reload);
     // take it over too, so every route to a change goes through the fetch.
-    radioForm.addEventListener("submit", function (e) { e.preventDefault(); apply(); });
-    radioForm.addEventListener("change", apply);
+    radioForm.addEventListener("submit", function (e) { e.preventDefault(); applyRadio(); });
+    radioForm.addEventListener("change", applyRadio);
     // A receiver just picked from the dropdown arrives with its type differing
     // from what is stored (`data-changed`); commit it without waiting for a
     // control to move, so choosing a receiver takes here as it does on every
     // other slot.
-    if (radioForm.hasAttribute("data-changed")) apply();
+    if (radioForm.hasAttribute("data-changed")) applyRadio();
   }
   // The Devices tab applies each change the moment it lands. Picking a device
   // re-renders the page for the chosen type (the pick form above, a
@@ -3158,42 +3188,11 @@ class Console:
       // No status line is the radio slot's placeholder form — its fields live in
       // the radio panel, which commits them. Nothing here to apply.
       if (!status) return;
-      var say = function (text, bad) {
-        if (!status) return;
-        status.textContent = text;
-        status.style.color = bad ? "var(--danger)" : "";
-      };
-      var busy = false, again = false;
-      var apply = function () {
-        if (busy) { again = true; return; }
-        busy = true;
-        var data = new URLSearchParams(new FormData(form));
-        data.set("ajax", "1");
-        say("Saving\\u2026", false);
-        var done = function (text, bad) {
-          busy = false;
-          say(text, bad);
-          if (again) { again = false; apply(); }
-        };
-        fetch("/device", {
-          method: "POST",
-          body: data,
-          credentials: "same-origin",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" }
-        })
-          .then(function (r) { return r.ok ? r.json() : null; })
-          .then(function (j) {
-            if (!j) done("Not saved — reload and try again.", true);
-            else done(j.message || "Saved.", !j.ok);
-          })
-          .catch(function () {
-            done("Not saved — no answer from the station.", true);
-          });
-      };
+      var applyDevice = makeInstantApply(form, "/device", status, null);
       // Enter in a field would submit for real (a reload); route it through the
       // fetch like every other change.
-      form.addEventListener("submit", function (e) { e.preventDefault(); apply(); });
-      form.addEventListener("change", apply);
+      form.addEventListener("submit", function (e) { e.preventDefault(); applyDevice(); });
+      form.addEventListener("change", applyDevice);
       // Auto-commit a freshly-picked device ONLY when it has nothing to fill in
       // — un-fitting a slot, or a device with no parameters. A field-bearing
       // device (a camera, a serial receiver) must NOT commit on the bare pick:
@@ -3203,7 +3202,7 @@ class Console:
       // selecting a type to compare it must lose nothing. For those, the field
       // edits above are what commit — deliberately, once something is entered.
       var editable = form.querySelector("input:not([type=hidden]), select, textarea");
-      if (form.hasAttribute("data-changed") && !editable) apply();
+      if (form.hasAttribute("data-changed") && !editable) applyDevice();
     })(deviceForms[d]);
   }
   // The live camera, through Media Source Extensions.
@@ -3478,6 +3477,28 @@ class Console:
           if (raw && s.raw_samples) {
             var lines = s.raw_samples[raw.getAttribute("data-slot")] || [];
             raw.textContent = lines.join("\\n");
+          }
+          // The slot-head pill, refreshed from the same per-slot report. An
+          // inline apply never reloads, so this is what stops the pill reading
+          // "Disconnected" beside a status line that already says the device
+          // answered. The status->pill map mirrors STATUS_PILL in console.py;
+          // the four states are stable.
+          var pill = document.getElementById("slot-pill");
+          if (pill && s.devices) {
+            var wantSlot = pill.getAttribute("data-pill-slot");
+            for (var pi = 0; pi < s.devices.length; pi++) {
+              if (s.devices[pi].slot !== wantSlot) continue;
+              var PILL = {
+                present: ["ok", "Connected"],
+                stalled: ["warn", "Disconnected"],
+                configured_absent: ["warn", "Disconnected"],
+                not_fitted: ["off", "Not fitted"]
+              };
+              var pv = PILL[s.devices[pi].status] || ["off", s.devices[pi].status];
+              pill.className = "pill " + pv[0];
+              pill.textContent = pv[1];
+              break;
+            }
           }
           // Three states, one at a time, and **the station decides which**.
           //
