@@ -136,7 +136,26 @@ class ClockTests(unittest.TestCase):
              mock.patch.object(clock, "_timedatectl", return_value=None):
             state = clock.discipline(force=True)
         self.assertIs(state.synchronised, True)
-        self.assertNotEqual(state.source, "none")
+        # Relabelled, not just "not none": the source becomes ntp and the detail
+        # says the truth — synced, by something not visible from in here.
+        self.assertEqual(state.source, "ntp")
+        self.assertIn("adjtimex", state.detail)
+
+    def test_a_visible_daemon_that_agrees_with_the_kernel_keeps_its_own_label(self):
+        # kernel=True AND a probe that already reports True: the relabel branch
+        # must NOT fire, so a GPS refclock's own source/detail survive rather
+        # than being flattened to a generic "ntp". This is the common case where
+        # a daemon IS visible (not a container) and the two simply agree.
+        self.addCleanup(setattr, clock, "_cached", None)
+        with mock.patch.object(clock, "_kernel_synchronised", return_value=True), \
+             mock.patch.object(clock, "_chrony", return_value=(
+                 True, "gps", "chronyd tracking PPS at stratum 1")), \
+             mock.patch.object(clock, "_timesyncd", return_value=None), \
+             mock.patch.object(clock, "_timedatectl", return_value=None):
+            state = clock.discipline(force=True)
+        self.assertIs(state.synchronised, True)
+        self.assertEqual(state.source, "gps")
+        self.assertIn("PPS", state.detail)
 
     def test_the_kernel_is_believed_over_a_probe_that_claims_sync(self):
         # And the other way round: the kernel says the clock is not disciplined,

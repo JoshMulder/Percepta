@@ -890,8 +890,10 @@ mutating POST, plus an `Origin` check; `Host` must be an IP literal or a
 lets a public web page drive this form from inside a technician's browser;
 request bodies bounded at 64 KB before they are read, because `Content-Length`
 is attacker-controlled and this box has 1 GB of RAM; per-peer lockout after five
-failed passwords; `no-store` and a CSP allowing no script and no framing on
-every response; and the stored camera password is never rendered back — the page
+failed passwords; `no-store` and a CSP allowing no framing and no script beyond
+the one per-response nonce'd block (which the Devices tab now needs to configure
+a device — that one control does not degrade without it, and says so in a
+`<noscript>`); and the stored camera password is never rendered back — the page
 shows *that* one is stored, and a blank field means "unchanged".
 
 **g. What is not solved: the setup page is plain HTTP.** Anyone already on the

@@ -46,11 +46,13 @@ reasoning is all in that module's docstring. What this file owes it:
 - every response carries `Cache-Control: no-store` and a CSP that permits no
   frame, no off-box form target and no script beyond the one inline block a
   response may carry under a per-response nonce. Those scripts are progressive
-  enhancement only — live save buttons, a refreshing datastream field, the
-  camera preview's re-fetch on Devices, and Escape-to-close on Connection —
-  and every page keeps working with them blocked or absent. The two overlays
-  are the proof: the preview's click-to-expand is a checkbox and the location
-  editor is a `:target` dialog, neither of which is script
+  enhancement — a refreshing datastream field, the camera preview's re-fetch on
+  Devices, and Escape-to-close on Connection — with one deliberate exception:
+  configuring a device on the Devices tab commits over a fetch and has no Save
+  button behind it, so that single control needs the script, and a `<noscript>`
+  says so. Everything else keeps working with the scripts blocked or absent —
+  the two overlays are the proof: the preview's click-to-expand is a checkbox
+  and the location editor is a `:target` dialog, neither of which is script
 - every state-changing POST carries a CSRF token bound to the session cookie
 - the `Host` header must be an IP literal, `localhost` or a `.local` name, which
   is what stops a public web page rebinding its own name to this station's
@@ -2453,12 +2455,15 @@ class Console:
         # `data-changed` when the device on screen is not the device stored.
         #
         # Picking a device only re-renders — that is the whole point of the
-        # split above — so the act of picking leaves nothing for the dirty
-        # check to notice: the type lives in a hidden field, which the
-        # fingerprint skips, and every visible field already equals its
-        # freshly-rendered default. The result was a page offering a device
-        # you could select and then not save, with no field you could touch to
-        # release the button. Switching back to a demo device was impossible.
+        # split above — so nothing on the form looks changed: the type is in a
+        # hidden field and every visible field equals its freshly-rendered
+        # default. This marker is how the script knows a fresh pick is sitting
+        # there uncommitted, and with no Save button it is what drives the
+        # commit: the apply loop reads `data-changed` and, for a device with
+        # nothing to fill in (an un-fit slot, a param-less device), commits it on
+        # load — which is what makes un-fitting a slot or switching to a demo
+        # device take. A field-bearing device is left for its own field edits to
+        # commit, so a bare pick cannot overwrite a working device (see the loop).
         pending = chosen_id != ((entry.type_id or "") if entry else "")
         out.append(
             f"<form method=post action='/device' data-device"
@@ -2568,6 +2573,13 @@ class Console:
             out.append(
                 "<div class=field>"
                 "<span class='muted device-status' aria-live=polite></span>"
+                # Device config is the one control that needs the script — the
+                # commit is a fetch with no Save button behind it. Every other
+                # control degrades; this one would be a silent dead form, so a
+                # no-JS browser is told why rather than left editing fields that
+                # never save. Mirrors the camera preview's own <noscript>.
+                "<noscript><span class=muted>Configuring a device needs "
+                "JavaScript enabled in this browser.</span></noscript>"
                 "</div></form>"
             )
         else:

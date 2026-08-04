@@ -1444,11 +1444,12 @@ class ServedPageTests(unittest.TestCase):
         # Left flush under indented controls is exactly the raggedness the grid
         # was added to remove. The Devices tab has no Save button now — the fetch
         # writes each change's outcome to this status line, which takes the
-        # button's old place in its own label-less .field, in the control column.
+        # button's old place as the first child of its own label-less .field, in
+        # the control column (a <noscript> hint follows it in the same field).
         _, _, body = self.page("/devices")
         self.assertIn(
             "<div class=field>"
-            "<span class='muted device-status' aria-live=polite></span></div>",
+            "<span class='muted device-status' aria-live=polite></span>",
             body,
         )
 

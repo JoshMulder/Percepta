@@ -312,7 +312,15 @@ def discipline(force: bool = False) -> Discipline:
                 return value
 
     rtc = rtc_present()
-    kernel = _kernel_synchronised()
+    # Guarded like the probes below. _kernel_synchronised() is written never to
+    # raise, but discipline() must not break the health frame if some ctypes
+    # error it did not foresee (a ctypes.ArgumentError is not OSError) ever
+    # escapes — the whole reason the loop below swallows probe exceptions.
+    try:
+        kernel = _kernel_synchronised()
+    except Exception:  # noqa: BLE001 - diagnostics must not break the loop
+        log.debug("Kernel clock probe failed.", exc_info=True)
+        kernel = None
     answer: tuple[bool | None, str, str] | None = None
     for probe in (_chrony, _timesyncd, _timedatectl):
         try:
