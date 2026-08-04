@@ -7,6 +7,7 @@ model, which only a real Pi can exercise.
 """
 
 import array
+import tempfile
 import time
 import unittest
 import wave
@@ -105,13 +106,79 @@ class RunWhisperTests(unittest.TestCase):
         with mock.patch.object(
             transcribe.subprocess, "run", side_effect=OSError("no such binary")
         ):
-            import tempfile
-
             with tempfile.TemporaryDirectory() as directory:
                 out = transcribe.run_whisper(
                     "x", "m", Path(directory) / "over.wav"
                 )
         self.assertEqual(out, "")
+
+
+class WhisperFailureTests(unittest.TestCase):
+    """The failures that used to be swallowed. A silent whisper.cpp was
+    indistinguishable from a quiet channel, which is why transcription 'not
+    working' had no thread to pull; now every failure names itself."""
+
+    def _run(self, run_result=None, side_effect=None, write=None):
+        with tempfile.TemporaryDirectory() as directory:
+            wav = Path(directory) / "over.wav"
+            wav.write_bytes(b"")
+
+            def fake(command, **_):
+                if write is not None:
+                    out = command[command.index("-of") + 1]
+                    Path(out + ".txt").write_text(write)
+                return run_result
+
+            with mock.patch.object(
+                transcribe.subprocess, "run",
+                side_effect=side_effect or fake,
+            ):
+                return transcribe.whisper_transcribe("whisper-cli", "m", wav)
+
+    def test_a_nonzero_exit_surfaces_whispers_own_stderr(self):
+        text, error = self._run(
+            run_result=mock.Mock(returncode=1, stderr=b"error: failed to load model")
+        )
+        self.assertEqual(text, "")
+        self.assertIn("exited 1", error)
+        self.assertIn("failed to load model", error)
+
+    def test_a_clean_exit_that_wrote_nothing_is_flagged(self):
+        text, error = self._run(run_result=mock.Mock(returncode=0, stderr=b""))
+        self.assertEqual(text, "")
+        self.assertIn("wrote no", error)
+
+    def test_success_returns_text_and_no_error(self):
+        text, error = self._run(
+            run_result=mock.Mock(returncode=0, stderr=b""), write="roger that\n"
+        )
+        self.assertEqual(text, "roger that")
+        self.assertEqual(error, "")
+
+
+class SelfTestTests(unittest.TestCase):
+    def test_it_logs_a_broken_whisper_at_start_up(self):
+        # A model that exists (this file) so the self-test runs, and a subprocess
+        # that fails — the box must say so at start-up, not transcribe nothing in
+        # silence until someone keys up a radio to find out.
+        t = Transcriber(lambda *a: None, enabled=True, model=__file__)
+        t.installed = True
+        with mock.patch.object(
+            transcribe.subprocess, "run",
+            return_value=mock.Mock(returncode=1, stderr=b"error: bad model"),
+        ):
+            with self.assertLogs("gsu.radio", level="WARNING") as logs:
+                t._self_test()
+        self.assertTrue(any("self-test FAILED" in line for line in logs.output))
+
+    def test_it_is_skipped_when_there_is_no_model(self):
+        # No model to test against — start() already said unavailable, so the
+        # self-test must not run whisper (nor log a failure) here.
+        t = Transcriber(lambda *a: None, enabled=True, model=None)
+        t.installed = True
+        with mock.patch.object(transcribe.subprocess, "run") as run:
+            t._self_test()
+        run.assert_not_called()
 
 
 class AvailabilityTests(unittest.TestCase):

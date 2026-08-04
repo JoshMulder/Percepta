@@ -150,6 +150,7 @@ class Transcriber:
                 pass
 
     def _run(self) -> None:
+        self._self_test()
         while not self._stop.is_set():
             try:
                 over = self._queue.get(timeout=0.5)
@@ -167,6 +168,38 @@ class Transcriber:
                 self._on_text(over.freq_hz, over.started_at, duration, text)
             except Exception:  # noqa: BLE001
                 log.exception("Recording a transcript failed; continuing.")
+
+    def _self_test(self) -> None:
+        """Prove the pipeline works before a transmission has to.
+
+        On a remote box nobody can key up a radio to check transcription, and
+        `_probe` only looks for the files — not that whisper.cpp actually runs
+        against them. So the worker runs it once on a second of silence at
+        start-up and logs the result: a broken binary, a model it cannot load or
+        a flag this build does not take becomes one clear log line rather than a
+        channel that transcribes nothing for no visible reason. Skipped when
+        there is no model to test against, which `start()` has already reported.
+        """
+        if not self._model or not Path(self._model).exists():
+            return
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                wav_path = Path(directory) / "selftest.wav"
+                with wave.open(str(wav_path), "wb") as handle:
+                    handle.setnchannels(1)
+                    handle.setsampwidth(2)
+                    handle.setframerate(WHISPER_RATE)
+                    handle.writeframes(b"\x00\x00" * WHISPER_RATE)  # 1 s of silence
+                _, error = whisper_transcribe(self._binary, self._model, wav_path)
+        except Exception as exc:  # noqa: BLE001 - a self-test must never crash the worker
+            log.warning("Airband transcription self-test could not run: %s.", exc)
+            return
+        if error:
+            log.warning(
+                "Airband transcription self-test FAILED — %s. Transmissions will "
+                "be recorded but not transcribed until this is fixed.", error)
+        else:
+            log.info("Airband transcription self-test passed; whisper.cpp is working.")
 
     def _transcribe(self, over: _Over) -> str:
         pcm = resample_to_whisper(over.pcm, over.rate)
@@ -220,9 +253,21 @@ def resample_to_whisper(pcm: bytes, rate: int) -> bytes:
 
 
 def run_whisper(binary: str, model: str, wav_path: Path) -> str:
-    """Run whisper.cpp over a WAV and return the transcript, or empty on any
-    failure — a missing binary, a non-zero exit, a timeout. Run through `nice`
-    where it exists so it never competes with the audio path."""
+    """The transcript for a WAV, or empty on any failure. Logs *why* on a
+    failure — that this used to swallow was the reason a broken model or a wrong
+    flag looked exactly like a quiet channel from the outside."""
+    text, error = whisper_transcribe(binary, model, wav_path)
+    if error:
+        log.warning("Airband transcription failed: %s", error)
+    return text
+
+
+def whisper_transcribe(binary: str, model: str, wav_path: Path) -> tuple[str, str]:
+    """Run whisper.cpp over a WAV. Returns (transcript, error): the error is a
+    human string on any failure — a missing binary, a non-zero exit carrying
+    whisper's own stderr, a timeout, an output file that was never written — and
+    empty on success. Run through `nice` where it exists so it never competes
+    with the audio path."""
     output = wav_path.with_suffix("")  # whisper writes <output>.txt with -otxt
     command = [
         binary,
@@ -236,23 +281,30 @@ def run_whisper(binary: str, model: str, wav_path: Path) -> str:
     if shutil.which("nice"):
         command = ["nice", "-n", str(NICE)] + command
     try:
-        subprocess.run(
+        result = subprocess.run(
             command,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             timeout=TRANSCRIBE_TIMEOUT_S,
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        log.warning("whisper.cpp did not run: %s", exc)
-        return ""
+        return "", f"{binary!r} did not run: {exc}"
+    if result.returncode != 0:
+        tail = " ".join(
+            (result.stderr or b"").decode("utf-8", "replace").split()[-40:]
+        )
+        return "", f"{binary!r} exited {result.returncode}: {tail or 'no output'}"
     try:
         text = output.with_suffix(".txt").read_text(
             encoding="utf-8", errors="replace"
         )
     except OSError:
-        return ""
-    return clean_transcript(text)
+        return "", (
+            f"{binary!r} exited 0 but wrote no {output.with_suffix('.txt').name} — "
+            "check the flags against this whisper.cpp build"
+        )
+    return clean_transcript(text), ""
 
 
 def clean_transcript(text: str) -> str:
