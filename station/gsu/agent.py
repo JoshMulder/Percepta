@@ -130,7 +130,9 @@ class Agent:
             self._record_transcript,
             binary=config.radio_whisper_bin,
             model=config.radio_whisper_model,
-            enabled=config.radio_transcribe,
+            # The env override or the site toggle; the site one is the setup
+            # page's switch and is re-read live in `_pump_radio`.
+            enabled=config.radio_transcribe or self.site.radio_transcribe,
         )
         #: The over currently being spoken, accumulated while the squelch is open
         #: and handed to the transcriber when it closes. Only used when
@@ -446,6 +448,11 @@ class Agent:
                 # this elevation and refuses without it, so the setup page edits
                 # the two together.
                 "adsb_baro_correction": self.site.adsb_baro_correction,
+                "radio_transcribe": self.site.radio_transcribe,
+                # So the setup page can show "installed / switched off" apart
+                # from "not installed", and why.
+                "transcribe_installed": self.transcriber.installed,
+                "transcribe_reason": self.transcriber.install_reason,
             },
             "platform": {
                 "latitude": site.latitude if site else None,
@@ -1378,6 +1385,10 @@ class Agent:
         if gate_moved or spectrum_due:
             self._publish_radio(telemetry)
 
+        # The setup-page switch, read live so it takes effect without a restart.
+        self.transcriber.enabled = (
+            self.config.radio_transcribe or self.site.radio_transcribe
+        )
         # Accumulate the current over for transcription and submit it when the
         # gate closes. Before the `audio is None` return below, because the gate
         # closing — which is exactly when an over ends — produces no audio.

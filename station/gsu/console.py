@@ -1104,6 +1104,32 @@ class Console:
             latitude, longitude, elevation, baro_correction=correction)
         self.message = ("good", "Saved.")
 
+    def _set_radio(self, form: dict) -> None:
+        """The radio slot's own controls: retune the receiver, hold the gate
+        open for bringing an antenna up, and switch airband transcription on.
+
+        Tuning and monitor act on the live receiver. Transcription is a
+        persisted site setting the sensing loop re-reads every tick, so it takes
+        effect at once and survives a restart — but only does anything when the
+        whisper.cpp binary and model are present, which the form says.
+
+        This handler was missing: the `/radio` form posted to a method that did
+        not exist, so Apply raised and the page showed the exception. Added here
+        along with the transcription switch it now also carries.
+        """
+        radio = self.agent.radio
+        raw = (form.get("freq_mhz") or [""])[0].strip()
+        if raw and radio is not None:
+            try:
+                radio.tune(int(round(float(raw) * 1e6)))
+            except ValueError:
+                raise ValueError(f"{raw!r} is not a frequency in MHz.")
+        if radio is not None:
+            radio.set_monitor(bool(form.get("monitor")))
+        self.agent.site.radio_transcribe = bool(form.get("radio_transcribe"))
+        self.agent.site.save(self.agent.config.site_config_path)
+        self.message = ("good", "Saved.")
+
     def _reset(self, form: dict) -> None:
         """Return the box to how it shipped.
 
@@ -2416,6 +2442,21 @@ class Console:
                 + (" checked" if radio and radio.monitor else "")
                 + "><span class=muted>Bypasses the squelch, for bringing an "
                 "antenna up.</span></div>"
+            )
+            station = state.get("station") or {}
+            transcribe_on = " checked" if station.get("radio_transcribe") else ""
+            note = (
+                "Logs what is heard on the airband, on the box, with whisper.cpp."
+                if station.get("transcribe_installed")
+                else "Needs whisper.cpp on the station: "
+                + html.escape(station.get("transcribe_reason") or "not installed")
+                + "."
+            )
+            out.append(
+                "<div class=field><label for='radio_transcribe'>Transcribe</label>"
+                "<input type=checkbox id='radio_transcribe' "
+                f"name='radio_transcribe' value='1'{transcribe_on}>"
+                f"<span class=muted>{note}</span></div>"
                 "<div class=field><button type=submit>Apply</button></div></form>"
             )
             out.append("<div class=field><label>Spectrum</label></div>")

@@ -77,10 +77,19 @@ class AvailabilityTests(unittest.TestCase):
         )
         self.assertFalse(t.available)
 
-    def test_off_when_disabled_even_if_everything_is_present(self):
+    def test_installed_but_switched_off_is_unavailable(self):
+        # The setup-page switch is `enabled`; the tools being present is
+        # `installed`. Available only when both hold.
         with mock.patch.object(transcribe.shutil, "which", return_value="/usr/bin/x"):
             t = Transcriber(lambda *a: None, enabled=False, model=__file__)
+        self.assertTrue(t.installed)
+        self.assertFalse(t.enabled)
         self.assertFalse(t.available)
+
+    def test_the_install_reason_names_what_is_missing(self):
+        t = Transcriber(lambda *a: None, enabled=True, model=None)
+        self.assertFalse(t.installed)
+        self.assertIn("model", t.install_reason)
 
     def test_submit_is_a_no_op_when_unavailable(self):
         t = Transcriber(lambda *a: None, enabled=False)
@@ -90,10 +99,11 @@ class AvailabilityTests(unittest.TestCase):
 
 class QueueTests(unittest.TestCase):
     def _available(self, on_text):
-        # Availability is a hardware question; force it so the queue logic can be
+        # `installed` is a hardware question; force it so the queue logic can be
         # tested without a binary or a model on the machine running the suite.
-        t = Transcriber(on_text, enabled=False)
-        t.available = True
+        # `available` is then a property of installed AND the live switch.
+        t = Transcriber(on_text, enabled=True)
+        t.installed = True
         return t
 
     def test_a_full_queue_drops_the_oldest_rather_than_blocking(self):

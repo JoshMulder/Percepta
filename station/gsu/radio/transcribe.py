@@ -77,30 +77,43 @@ class Transcriber:
         self._queue: "queue.Queue[_Over]" = queue.Queue(maxsize=QUEUE_MAX)
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
-        #: Whether transcription can actually run: enabled, and the binary and
-        #: model both present. Read by the agent so it does not even buffer overs
-        #: when the feature is off.
-        self.available = bool(enabled) and self._resolve()
+        #: Whether the binary and model are present — fixed at construction, a
+        #: deployment fact. Separate from `enabled`, which is the operator's live
+        #: switch, so the setup page can show "not installed" distinctly from
+        #: "switched off".
+        self.installed, self.install_reason = self._probe()
+        #: The live switch, from the site config (or the env override). Set by
+        #: the agent each tick so the setup-page toggle takes effect at once.
+        self.enabled = bool(enabled)
 
-    def _resolve(self) -> bool:
+    @property
+    def available(self) -> bool:
+        """Whether an over should actually be transcribed right now: the tools
+        are installed and the operator has it switched on."""
+        return self.installed and self.enabled
+
+    def _probe(self) -> tuple[bool, str]:
+        """Are the binary and model both present? A reason if not, for the setup
+        page to show — this does not run the model, only look for it."""
         if not self._model:
-            log.info("Airband transcription is on but no model is set "
-                     "(GSU_WHISPER_MODEL); leaving it off.")
-            return False
+            return False, "no model file is configured (GSU_WHISPER_MODEL)"
         if shutil.which(self._binary) is None:
-            log.info("Airband transcription is on but %r is not on PATH; "
-                     "leaving it off.", self._binary)
-            return False
+            return False, f"the {self._binary!r} binary is not on the station's PATH"
         if not Path(self._model).exists():
-            log.info("Airband transcription is on but the model %s is missing; "
-                     "leaving it off.", self._model)
-            return False
-        log.info("Airband transcription on: %s with %s.", self._binary, self._model)
-        return True
+            return False, f"the model file {self._model} is not present"
+        return True, ""
 
     def start(self) -> None:
-        if not self.available or self._thread is not None:
+        # Started whenever the tools are installed, not only when switched on:
+        # the worker idles on an empty queue, so toggling on later needs no
+        # restart. It logs its state once here.
+        if not self.installed:
+            log.info("Airband transcription unavailable: %s.", self.install_reason)
             return
+        if self._thread is not None:
+            return
+        log.info("Airband transcription ready: %s with %s.",
+                 self._binary, self._model)
         self._thread = threading.Thread(
             target=self._run, name="transcribe", daemon=True
         )

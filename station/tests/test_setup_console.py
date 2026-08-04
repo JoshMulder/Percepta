@@ -424,6 +424,17 @@ class ServedPageTests(unittest.TestCase):
         self.assertEqual(response.status, 200)
         self.assertIn(f"<strong>{SLOT_LABELS[registry.SLOTS[0]]}</strong>", body)
 
+    def test_the_radio_form_saves_the_transcription_switch(self):
+        # The /radio Apply carries the transcription toggle — and its handler
+        # existed nowhere until now: the form posted to a missing method.
+        token, csrf, _ = self.page()
+        self.request("POST", "/radio", f"radio_transcribe=1&csrf={csrf}",
+                     {"Cookie": token})
+        self.assertTrue(self.agent.site.radio_transcribe)
+        # An unchecked box sends nothing, so its absence is a real "off".
+        self.request("POST", "/radio", f"csrf={csrf}", {"Cookie": token})
+        self.assertFalse(self.agent.site.radio_transcribe)
+
     def test_picking_a_device_leaves_something_to_save(self):
         # Picking only re-renders — it stores nothing, so that a device's
         # parameters can be filled in before anything is written. The cost was

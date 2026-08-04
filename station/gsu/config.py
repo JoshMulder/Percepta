@@ -366,6 +366,13 @@ class SiteConfig:
     #: in health telemetry; it never falls back to an approximation.
     adsb_baro_correction: bool = False
 
+    #: Transcribe airband transmissions into the event log. The setup page's
+    #: switch, live: the agent reads it every sub-tick, so turning it on or off
+    #: takes effect without a restart. Only has any effect when the whisper.cpp
+    #: binary and model are actually present — the env override
+    #: `GSU_RADIO_TRANSCRIBE` and this are OR'd, so either turns it on.
+    radio_transcribe: bool = False
+
     low_battery_pct: float = 20.0
     critical_battery_pct: float = 10.0
     #: Duty cycling: the floodlight is the first load shed, and it is shed by
