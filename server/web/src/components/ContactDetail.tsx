@@ -1,5 +1,57 @@
+import { useEffect, useState } from "react";
 import { emitterName } from "../adsbIcons";
+import { api } from "../api";
 import type { Aircraft } from "../types";
+
+interface AircraftInfo {
+  icao: string;
+  registration: string | null;
+  type_code: string | null;
+  model: string | null;
+  manufacturer: string | null;
+  operator: string | null;
+}
+
+/** A tail number and a model do not change for an airframe, so a hex looked up
+ *  once is kept for the life of the tab and never fetched again. */
+const infoCache = new Map<string, AircraftInfo>();
+
+/**
+ * The registration and model behind an ICAO address, fetched when a card opens.
+ *
+ * These are not in the ADS-B stream — the platform looks them up and the console
+ * asks only for the contact it is showing, which is why this is on the card
+ * rather than the map: a dozen lookups a session, not one per contact per
+ * second. A miss or an error leaves it null and the card falls back to the
+ * emitter category, so nothing here is load-bearing.
+ */
+function useAircraftInfo(icao: string): AircraftInfo | null {
+  const [info, setInfo] = useState<AircraftInfo | null>(
+    () => infoCache.get(icao) ?? null,
+  );
+  useEffect(() => {
+    const cached = infoCache.get(icao);
+    if (cached) {
+      setInfo(cached);
+      return;
+    }
+    let cancelled = false;
+    setInfo(null);
+    api
+      .aircraftInfo(icao)
+      .then((data) => {
+        infoCache.set(icao, data);
+        if (!cancelled) setInfo(data);
+      })
+      .catch(() => {
+        /* The card shows the category regardless; a failed lookup is silence. */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [icao]);
+  return info;
+}
 
 /**
  * One ADS-B contact, in full.
@@ -78,10 +130,15 @@ export function ContactDetail({
     alert,
   } = contact;
 
-  // The emitter category in words — "Helicopter", "Large aircraft". This is the
-  // type the transponder actually broadcasts; a specific model or a tail number
-  // is not in ADS-B and would need a lookup keyed by the ICAO address.
-  const type = emitterName(emitter_type);
+  // The emitter category in words — "Helicopter", "Large aircraft" — which is
+  // all the transponder broadcasts. The lookup below fills in the specific model
+  // and the tail number, which are not in ADS-B, when a registry has them.
+  const category = emitterName(emitter_type);
+  const info = useAircraftInfo(icao);
+  // Model when a registry has it, category otherwise: "Boeing 737-838" says more
+  // than "Large aircraft", but the category is always there to fall back on.
+  const type = info?.model ?? category;
+  const registration = info?.registration ?? null;
 
   const stale = seconds_since_contact !== null
     && seconds_since_contact !== undefined
@@ -184,11 +241,15 @@ export function ContactDetail({
             : squawk.toString().padStart(4, "0")}
         </Row>
 
-        {/* The ADS-B emitter category, in words. Not the model — the transponder
-            does not broadcast one — but "Helicopter" or "Large aircraft" is more
-            than the glyph alone says at a glance. Absent reads as not reported,
-            like every other unsent field. */}
+        {/* The model where a registry has it, the emitter category otherwise.
+            Absent only when the transponder sent no category and no lookup
+            answered — reads as not reported, like every other unsent field. */}
         <Row label="Type">{type ?? <Absent />}</Row>
+
+        {/* Only when known. A tail number is not in ADS-B, so an aircraft no
+            registry has simply shows no Registration row, the same way the
+            ground state is omitted when the receiver cannot know it. */}
+        {registration && <Row label="Registration">{registration}</Row>}
 
         {on_ground !== null && on_ground !== undefined && (
           <Row label="State">{on_ground ? "on the ground" : "airborne"}</Row>

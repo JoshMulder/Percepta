@@ -93,6 +93,20 @@ export const api = {
       }[]
     >(`/api/stations/${id}/power/history?hours=${hours}`),
 
+  /** Registration and type for an ADS-B contact, by its ICAO hex — the fields
+   *  the transponder does not broadcast. Every field but `icao` is null for an
+   *  aircraft no registry has; the platform caches the answer, so calling this
+   *  per card open is cheap. */
+  aircraftInfo: (icao: string) =>
+    request<{
+      icao: string;
+      registration: string | null;
+      type_code: string | null;
+      model: string | null;
+      manufacturer: string | null;
+      operator: string | null;
+    }>(`/api/aircraft/${encodeURIComponent(icao)}`),
+
   /* Commands. Each returns 202: the station has been told, and what it actually
      did arrives on the telemetry stream. Nothing here reports success on the
      hardware's behalf. */

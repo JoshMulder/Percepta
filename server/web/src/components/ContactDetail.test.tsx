@@ -1,5 +1,6 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { api } from "../api";
 import type { Aircraft } from "../types";
 import { ContactDetail } from "./ContactDetail";
 
@@ -23,6 +24,14 @@ import { ContactDetail } from "./ContactDetail";
  */
 
 afterEach(cleanup);
+afterEach(() => vi.restoreAllMocks());
+
+// The card looks the aircraft up when it opens. By default that never resolves,
+// so it cannot fill in a registration behind a test's back or update state after
+// the test has moved on — the tests that care about the lookup opt in below.
+beforeEach(() => {
+  vi.spyOn(api, "aircraftInfo").mockImplementation(() => new Promise(() => {}));
+});
 
 /** A contact with everything present, so each test can remove exactly the one
  *  thing it is about and nothing else varies. */
@@ -272,6 +281,42 @@ describe("rows that only exist when there is something to say", () => {
     show({ emitter_type: 0 });
     expect(rowLabels()).toContain("Type");
     expect(text()).not.toContain("aircraft");
+  });
+
+  it("fills in the registration and model once the lookup answers", async () => {
+    vi.mocked(api.aircraftInfo).mockResolvedValueOnce({
+      icao: "C81A34",
+      registration: "ZK-HBX",
+      type_code: "AS50",
+      model: "Airbus H125",
+      manufacturer: "Airbus",
+      operator: null,
+    });
+    show({ icao: "C81A34", emitter_type: 7 }); // A7 — the glyph says helicopter
+
+    // The tail number arrives asynchronously and gets its own row.
+    expect(await screen.findByText("ZK-HBX")).toBeTruthy();
+    expect(rowLabels()).toContain("Registration");
+    // And the specific model supersedes the bare category on the Type row.
+    expect(text()).toContain("Airbus H125");
+    expect(text()).not.toContain("Helicopter");
+  });
+
+  it("shows no Registration row for an aircraft no registry has", async () => {
+    vi.mocked(api.aircraftInfo).mockResolvedValueOnce({
+      icao: "AE1234",
+      registration: null,
+      type_code: null,
+      model: null,
+      manufacturer: null,
+      operator: null,
+    });
+    show({ icao: "AE1234", emitter_type: 7 });
+
+    // Wait for the resolved (empty) lookup, then confirm it added nothing: no
+    // Registration row, and the Type falls back to the category.
+    await screen.findByText("Helicopter");
+    expect(rowLabels()).not.toContain("Registration");
   });
 });
 

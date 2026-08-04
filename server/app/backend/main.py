@@ -8,6 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.responses import Response
 from starlette.types import Scope
 
+from backend.api.aircraft import router as aircraft_router
 from backend.api.broker import router as broker_router
 from backend.api.account import router as account_router
 from backend.api.auth import router as auth_router
@@ -90,6 +91,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Percepta", lifespan=lifespan)
 
 app.include_router(account_router)
+app.include_router(aircraft_router)
 app.include_router(auth_router)
 app.include_router(broker_router)
 app.include_router(commands_router)
