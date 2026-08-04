@@ -2069,7 +2069,14 @@ body {
 }
 .panel-shimmer {
   position: absolute;
-  inset: 0;
+  /* Fill the whole card, not just the padded box the readings sit in. Inset
+     from the border, the shimmer reads as a square floating inside the panel
+     rather than the panel itself loading. These negatives cancel .card-body's
+     padding (0.2rem 0.8rem 0.6rem) so it reaches the card's rounded border,
+     which the card's overflow:hidden then clips. PanelState only ever renders
+     inside a sidebar .card (the main panel is the map/video, with its own
+     skeleton), so that padding is the one context to match. */
+  inset: -0.2rem -0.8rem -0.6rem;
   background: linear-gradient(
     90deg,
     rgba(36, 49, 61, 0) 20%,
