@@ -2548,13 +2548,17 @@ class Console:
                     "<div class=muted>No source for: "
                     + html.escape(", ".join(selected_device.absent)) + "</div>"
                 )
-        # Enabled without script (degradation the design accepts); the nonce'd
-        # script disables it until a field differs from its loaded value. In a
-        # .field with no label so that it sits under the controls rather than
-        # under the labels — the only child of a row goes to column 2.
+        # The button is the no-script fallback. With the nonce'd script running
+        # each field applies the moment it changes and a freshly-picked device
+        # commits itself, so the button hides and its .field is given over to a
+        # status line the fetch writes — the same treatment the radio panel's
+        # Apply gets. In a .field with no label so it sits under the controls,
+        # beside the (hidden) button, rather than under the labels.
         if slot != "radio":
             out.append(
-                "<div class=field><button type=submit>Save</button></div></form>"
+                "<div class=field><button type=submit>Save</button>"
+                "<span class='muted device-status' aria-live=polite></span>"
+                "</div></form>"
             )
         else:
             # Radio has no Save here — its one button is the Apply below. Close
@@ -2589,7 +2593,8 @@ class Console:
                 (entry.params or {}) if entry and entry.type_id == chosen_id else {}
             )
             out.append(
-                f"<form method=post action='/radio' data-radio>{self._csrf_field(csrf)}"
+                "<form method=post action='/radio' data-radio"
+                f"{' data-changed' if pending else ''}>{self._csrf_field(csrf)}"
                 f"<input type=hidden name=type_id value='{html.escape(chosen_id)}'>"
             )
             # The receiver this tuner is assigned to. The same field the generic
@@ -2919,18 +2924,6 @@ class Console:
   // value would flick it to the old setting and back. The same idea as the
   // platform's settle timers. Shared between the instant-apply and the poll.
   var radioSettleUntil = 0;
-  function fingerprint(form) {
-    var out = [];
-    var fields = form.querySelectorAll("input, select");
-    for (var i = 0; i < fields.length; i++) {
-      var f = fields[i];
-      if (f.type === "hidden") continue;
-      if (f.type === "checkbox") out.push(f.name + "=" + f.checked);
-      else if (f.type === "password") out.push(f.name + "=" + (f.value ? "!" : ""));
-      else out.push(f.name + "=" + f.value);
-    }
-    return out.join("&");
-  }
   // Picking a device re-renders the page for it. The Change button beside the
   // select does this without script; with script the select alone is enough,
   // so the button hides and choosing costs one interaction instead of two.
@@ -3121,22 +3114,68 @@ class Console:
     // take it over too, so every route to a change goes through the fetch.
     radioForm.addEventListener("submit", function (e) { e.preventDefault(); apply(); });
     radioForm.addEventListener("change", apply);
+    // A receiver just picked from the dropdown arrives with its type differing
+    // from what is stored (`data-changed`); commit it without waiting for a
+    // control to move, so choosing a receiver takes here as it does on every
+    // other slot.
+    if (radioForm.hasAttribute("data-changed")) apply();
   }
-  var forms = document.querySelectorAll("form[data-device]");
-  for (var i = 0; i < forms.length; i++) {
+  // The Devices tab applies each change the moment it lands. Picking a device
+  // re-renders the page for the chosen type (the pick form above, a
+  // navigation); from there every field commits on change with no Save button
+  // to find, over a fetch that carries the `ajax` marker so the answer is a
+  // line to show and not a reload that would tear down the camera preview. A
+  // device just picked arrives with `data-changed` and commits itself, so
+  // choosing one — including un-fitting a slot or switching to a demo device,
+  // neither of which has a field to touch — is all it takes. In-flight posts
+  // coalesce, so a quick series of edits cannot pile up driver rebuilds.
+  var deviceForms = document.querySelectorAll("form[data-device]");
+  for (var d = 0; d < deviceForms.length; d++) {
     (function (form) {
       var button = form.querySelector("button[type=submit]");
+      // No button is the radio slot's placeholder form — its fields live in the
+      // radio panel, which commits them. Nothing here to apply.
       if (!button) return;
-      var loaded = fingerprint(form);
-      // A pending device change is already a change, whatever the fields say.
-      var picked = form.hasAttribute("data-changed");
-      button.disabled = !picked;
-      var update = function () {
-        button.disabled = !picked && fingerprint(form) === loaded;
+      button.hidden = true;
+      var status = form.querySelector(".device-status");
+      var say = function (text, bad) {
+        if (!status) return;
+        status.textContent = text;
+        status.style.color = bad ? "var(--danger)" : "";
       };
-      form.addEventListener("input", update);
-      form.addEventListener("change", update);
-    })(forms[i]);
+      var busy = false, again = false;
+      var apply = function () {
+        if (busy) { again = true; return; }
+        busy = true;
+        var data = new URLSearchParams(new FormData(form));
+        data.set("ajax", "1");
+        say("Saving\\u2026", false);
+        var done = function (text, bad) {
+          busy = false;
+          say(text, bad);
+          if (again) { again = false; apply(); }
+        };
+        fetch("/device", {
+          method: "POST",
+          body: data,
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" }
+        })
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (j) {
+            if (!j) done("Not saved — reload and try again.", true);
+            else done(j.message || "Saved.", !j.ok);
+          })
+          .catch(function () {
+            done("Not saved — no answer from the station.", true);
+          });
+      };
+      // Enter in a field would submit for real (a reload); route it through the
+      // fetch like every other change.
+      form.addEventListener("submit", function (e) { e.preventDefault(); apply(); });
+      form.addEventListener("change", apply);
+      if (form.hasAttribute("data-changed")) apply();
+    })(deviceForms[d]);
   }
   // The live camera, through Media Source Extensions.
   //
@@ -3484,10 +3523,10 @@ class Console:
   document.addEventListener("submit", function (event) {
     var form = event.target;
     if (!form || form.nodeName !== "FORM" || form.getAttribute("data-busy")) return;
-    // The radio form never navigates — its own handler applies each change over
-    // fetch and preventDefaults the submit — so this "Working…" treatment, meant
-    // for a form that is about to reload the page, does not apply to it.
-    if (form.hasAttribute("data-radio")) return;
+    // The radio and device forms never navigate — their own handlers apply each
+    // change over fetch and preventDefault the submit — so this "Working…"
+    // treatment, meant for a form about to reload the page, does not apply.
+    if (form.hasAttribute("data-radio") || form.hasAttribute("data-device")) return;
     var button = (event.submitter && event.submitter.nodeName === "BUTTON")
       ? event.submitter
       : form.querySelector("button[type=submit]");

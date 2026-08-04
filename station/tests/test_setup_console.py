@@ -525,14 +525,14 @@ class ServedPageTests(unittest.TestCase):
         )
         self.assertEqual(id(self.agent.radio), before)
 
-    def test_picking_a_device_leaves_something_to_save(self):
-        # Picking only re-renders — it stores nothing, so that a device's
-        # parameters can be filled in before anything is written. The cost was
-        # that the act of picking left the save button disabled: the type is a
-        # hidden field, which the dirty check skips, and every visible field
-        # already equalled its freshly-rendered default. A device you could
-        # select and then not save, with nothing you could touch to release the
-        # button — which is how the radio got stuck on a dead receiver.
+    def test_picking_a_device_marks_the_form_to_commit(self):
+        # Picking only re-renders — it stores nothing, so a device's parameters
+        # can be filled in before anything is written. The type lives in a hidden
+        # field the fresh render leaves equal to every default, so nothing on the
+        # form looks changed; without a marker the picked device would sit there
+        # uncommitted, which is how the radio once got stuck on a dead receiver.
+        # `data-changed` is that marker: the script reads it and commits the pick
+        # over fetch, so choosing a device takes with no button to press.
         # Matched on the form tag, not anywhere in the page: the script that
         # reads the attribute also contains its name.
         _, body = self.request("GET", "/devices?slot=radio")
@@ -601,10 +601,39 @@ class ServedPageTests(unittest.TestCase):
 
     def test_without_javascript_the_save_button_is_simply_enabled(self):
         # The no-JS path is acceptable degradation, which means the rendered
-        # button must not be disabled — only the script may disable it.
+        # button must be a plain working Save — never disabled, since only the
+        # script (which is absent here) would hide it and apply on change.
         _, _, body = self.page("/devices")
         self.assertIn("<button type=submit>Save</button>", body)
         self.assertNotIn("<button type=submit disabled", body)
+
+    def test_the_device_form_is_marked_for_instant_apply(self):
+        # The nonce'd script hides the Save button and posts each change over
+        # fetch (ajax=1), writing the outcome to this status line; a freshly
+        # picked device commits itself the same way. The status span is where
+        # the script writes, so its absence would strand the feedback the
+        # no-reload path depends on — the same marker the radio panel carries.
+        _, _, body = self.page("/devices")
+        self.assertIn("action='/device' data-device", body)
+        self.assertIn("class='muted device-status'", body)
+
+    def test_a_device_change_applies_over_fetch_without_a_reload(self):
+        # Choosing or editing a device posts with ajax=1 and gets a small JSON
+        # answer — not the 303 the no-script fallback gets — so the page, and
+        # any camera preview on it, is never reloaded. This is what makes a
+        # device selection take on change with no Save button to press.
+        token, csrf, _ = self.page("/devices?slot=weather")
+        response, body = self.request(
+            "POST", "/device",
+            f"ajax=1&slot=weather&type_id=simulated-weather&csrf={csrf}",
+            {"Cookie": token},
+        )
+        self.assertEqual(response.status, 200)
+        self.assertIn("application/json", response.getheader("Content-Type") or "")
+        payload = json.loads(body)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(
+            self.agent.inventory.fitted["weather"].type_id, "simulated-weather")
 
     def test_status_json_carries_the_raw_samples_the_script_polls(self):
         from gsu.devices import registry
@@ -1391,9 +1420,16 @@ class ServedPageTests(unittest.TestCase):
 
     def test_the_save_buttons_sit_in_the_control_column(self):
         # Left flush under indented controls is exactly the raggedness the
-        # grid was added to remove.
+        # grid was added to remove. The button is the no-script fallback — the
+        # script hides it and writes each change's outcome to the status line
+        # beside it — but the button and that line still sit in the control
+        # column, the same .field treatment the radio panel's Apply gets.
         _, _, body = self.page("/devices")
-        self.assertIn("<div class=field><button type=submit>Save</button></div>", body)
+        self.assertIn(
+            "<div class=field><button type=submit>Save</button>"
+            "<span class='muted device-status' aria-live=polite></span></div>",
+            body,
+        )
 
 
 class StationPositionTests(unittest.TestCase):
