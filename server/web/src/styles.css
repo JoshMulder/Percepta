@@ -1082,11 +1082,19 @@ body {
 }
 
 /* The transcription log popout. */
+/* A little wider than the power popout it shares a shell with — airband chatter
+   runs long and wrapping it every few words is hard to read. */
+.transcript-detail {
+  width: min(64rem, calc(100vw - 3rem));
+}
 .transcript-list {
   display: flex;
   flex-direction: column;
   gap: 0.6rem;
-  max-height: min(60vh, 30rem);
+  /* Fixed, not max-height: the box stays one size as transmissions arrive and
+     scrolls inside, rather than growing and shoving the page around while the
+     poll refreshes it. */
+  height: min(65vh, 32rem);
   overflow-y: auto;
 }
 .transcript-row {

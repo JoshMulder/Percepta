@@ -47,6 +47,11 @@ const CHANNEL_HZ = 25_000;
 // remembering if they ever move server-side.
 const PRESET_SLOTS = 4;
 
+/** How often the open transcription log re-fetches, so new transmissions appear
+ *  without the operator closing and re-opening it. Cheap — it reads the event
+ *  table, not a downsample — and only runs while the popout is open. */
+const TRANSCRIPT_REFRESH_MS = 4_000;
+
 /**
  * Remote-Radio's parser, verbatim in behaviour.
  *
@@ -203,20 +208,27 @@ function RadioPanelInner({
     [],
   );
 
-  // The transcription log, fetched when the popout opens rather than kept live:
-  // these are discrete events an operator goes looking for, not a stream. Empty
-  // unless the station has on-box transcription enabled.
+  // The transcription log, kept live while the popout is open so a new
+  // transmission appears without closing and re-opening it — which is what an
+  // operator watching a channel actually wants. Only polls while open, and only
+  // the first fetch shows the loader or clears to empty; a failed refresh keeps
+  // what is on screen. Empty unless the station has on-box transcription on.
   useEffect(() => {
     if (!transcriptsOpen) return;
     let cancelled = false;
-    setTranscriptsLoading(true);
-    api
-      .radioTranscripts(stationId)
-      .then((rows) => !cancelled && setTranscripts(rows))
-      .catch(() => !cancelled && setTranscripts([]))
-      .finally(() => !cancelled && setTranscriptsLoading(false));
+    const load = (initial: boolean) => {
+      if (initial) setTranscriptsLoading(true);
+      api
+        .radioTranscripts(stationId)
+        .then((rows) => !cancelled && setTranscripts(rows))
+        .catch(() => initial && !cancelled && setTranscripts([]))
+        .finally(() => initial && !cancelled && setTranscriptsLoading(false));
+    };
+    load(true);
+    const timer = window.setInterval(() => load(false), TRANSCRIPT_REFRESH_MS);
     return () => {
       cancelled = true;
+      window.clearInterval(timer);
     };
   }, [transcriptsOpen, stationId]);
 
@@ -600,7 +612,7 @@ function RadioPanelInner({
           role="presentation"
         >
           <div
-            className="power-detail"
+            className="power-detail transcript-detail"
             role="dialog"
             aria-label="Transcription history"
             onClick={(e) => e.stopPropagation()}
