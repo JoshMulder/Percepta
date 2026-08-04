@@ -2295,7 +2295,15 @@ class Console:
         if not security.get("broker_tls"):
             return ("Broker security", "PLAINTEXT — development only", "bad")
         if trust.get("mode") == "system":
-            return ("Broker security", "TLS, system CA bundle (not pinned)", "warn")
+            # Not a warning: the broker moved onto the platform's own 443 and is
+            # now the same TLS endpoint as the API, behind the same public
+            # certificate. `mode == "system"` is only ever reached because the
+            # platform stated `ca_mode: "system"` at enrolment — `resolve_broker`
+            # never falls back to it — so this is the deliberate, correct end
+            # state for a proxy-terminated broker, with no private CA to pin and
+            # none coming. Green, worded exactly as the API row: trust follows
+            # the endpoint, not the role (see tls.resolve_broker).
+            return ("Broker security", "TLS, public certificate", "ok")
         fingerprint = (trust.get("fingerprint") or "")[:23]
         return ("Broker security", f"TLS, CA pinned {fingerprint}…", "ok")
 

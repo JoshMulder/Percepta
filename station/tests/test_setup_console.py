@@ -2073,6 +2073,51 @@ class SummaryPageTests(unittest.TestCase):
                   / "gsu" / "console.py").read_text()
         self.assertNotIn("Selection and parameters are on the", source)
 
+
+class BrokerSecurityRowTests(unittest.TestCase):
+    """The one line that says whether the broker link is safe to leave running.
+
+    The broker moved onto the platform's own 443, behind the same public
+    certificate as the API (tls.resolve_broker). So a broker verified against
+    the system CA bundle is the deliberate, correct end state on a
+    proxy-terminated deployment — not a downgrade to warn about — and the row
+    must say so, or it cries wolf on every such box for ever.
+    """
+
+    def _row(self, security, trust):
+        return Console._security_row(security, trust)
+
+    def test_a_proxy_terminated_broker_is_ok_not_a_warning(self):
+        # `mode == "system"` is only ever reached because the platform stated it
+        # at enrolment; there is no private CA to pin and none coming. Green, and
+        # worded like the API row, not "not pinned" in yellow.
+        _, text, css = self._row(
+            {"broker_tls": True, "publishing": True, "broker_url": "wss://x/broker"},
+            {"mode": "system", "fingerprint": None},
+        )
+        self.assertEqual(css, "ok")
+        self.assertIn("public certificate", text)
+        self.assertNotIn("not pinned", text)
+
+    def test_a_pinned_broker_still_shows_its_fingerprint_and_is_ok(self):
+        _, text, css = self._row(
+            {"broker_tls": True, "publishing": True, "broker_url": "wss://x/broker"},
+            {"mode": "pinned", "fingerprint": "abc123def456abc123def456"},
+        )
+        self.assertEqual(css, "ok")
+        self.assertIn("pinned", text)
+
+    def test_the_genuine_failures_this_row_exists_for_are_untouched(self):
+        # Greening the public-certificate case must not soften a refused
+        # certificate or a plaintext link — the states this line is really for.
+        _, _, refused = self._row({"tls_failed": True}, {"mode": "system"})
+        self.assertEqual(refused, "bad")
+        _, _, plaintext = self._row(
+            {"broker_tls": False, "publishing": True, "broker_url": "ws://x"},
+            {"mode": "system"},
+        )
+        self.assertEqual(plaintext, "bad")
+
 class DevicePickerTests(unittest.TestCase):
     """Choosing a device re-renders the form before anything is saved.
 
