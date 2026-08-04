@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import type { AltitudeUnit } from "./format";
+import { FEET_PER_METRE, type AltitudeUnit } from "./format";
 
 /**
  * Per-operator display preferences, held in localStorage.
@@ -32,11 +32,36 @@ export interface DisplayPrefs {
   altitudeUnit: AltitudeUnit;
   /** Which fields to show on an unselected contact's map label. */
   labelFields: LabelField[];
+  /** What the operator considers a close contact worth flagging red: within
+   *  this range AND below this altitude. The station computes its own `alert`
+   *  flag for its own local alerting on its own thresholds — this is the
+   *  console's, for the person looking, and it is what drives the red styling
+   *  here. Distance in km (the map's rings are km); altitude in feet (how "low"
+   *  is read in aviation). */
+  criticalRangeKm: number;
+  criticalAltitudeFt: number;
 }
 
 const KEY = "percepta.display";
-const DEFAULTS: DisplayPrefs = { altitudeUnit: "both", labelFields: ["callsign"] };
+/** 12 km and 5,000 ft: the station's own defaults are 12 km / 1,500 m, and
+ *  5,000 ft is that altitude rounded to a figure an operator recognises. */
+const DEFAULTS: DisplayPrefs = {
+  altitudeUnit: "both",
+  labelFields: ["callsign"],
+  criticalRangeKm: 12,
+  criticalAltitudeFt: 5000,
+};
 const UNITS: AltitudeUnit[] = ["m", "ft", "both"];
+
+/** A stored number, or the default if it is missing, not a number, or outside a
+ *  sane band — a hand-edited localStorage value cannot make the whole console
+ *  flag everything or nothing. */
+function positiveWithin(value: unknown, fallback: number, max: number): number {
+  return typeof value === "number" && Number.isFinite(value)
+    && value > 0 && value <= max
+    ? value
+    : fallback;
+}
 
 function load(): DisplayPrefs {
   try {
@@ -53,6 +78,12 @@ function load(): DisplayPrefs {
             parsed.labelFields.includes(k),
           ) as LabelField[])
         : DEFAULTS.labelFields,
+      criticalRangeKm: positiveWithin(
+        parsed.criticalRangeKm, DEFAULTS.criticalRangeKm, 300,
+      ),
+      criticalAltitudeFt: positiveWithin(
+        parsed.criticalAltitudeFt, DEFAULTS.criticalAltitudeFt, 60000,
+      ),
     };
   } catch {
     return DEFAULTS;
@@ -87,6 +118,30 @@ function subscribe(notify: () => void): () => void {
  *  so it is a stable dependency between them. */
 export function useDisplayPrefs(): DisplayPrefs {
   return useSyncExternalStore(subscribe, getDisplayPrefs, getDisplayPrefs);
+}
+
+/**
+ * Whether a contact is close enough and low enough to flag red, by the
+ * operator's own thresholds.
+ *
+ * Both conditions, and altitude must be reported: the same rule the station
+ * applies for its own alerting (range AND below-altitude, an aircraft with no
+ * altitude never alerting), but judged here against the console's settings so
+ * each operator sees the airspace at the distance and height they care about.
+ * A contact with no range or no altitude is never critical — the honest answer
+ * when the thing that decides it was not reported.
+ */
+export function isCritical(
+  rangeKm: number | null | undefined,
+  altitudeM: number | null | undefined,
+  prefs: DisplayPrefs,
+): boolean {
+  if (rangeKm === null || rangeKm === undefined) return false;
+  if (altitudeM === null || altitudeM === undefined) return false;
+  return (
+    rangeKm < prefs.criticalRangeKm
+    && altitudeM * FEET_PER_METRE < prefs.criticalAltitudeFt
+  );
 }
 
 /** Test-only: forget everything, so one test's choice does not leak into the

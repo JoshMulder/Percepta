@@ -3,7 +3,7 @@ import { memo, useEffect, useRef, useState } from "react";
 import { iconFor, isRotorcraft } from "../adsbIcons";
 import { cachedAircraftInfo, fetchAircraftInfo } from "../aircraftInfo";
 import { buildLabel } from "../adsbLabel";
-import { useDisplayPrefs } from "../displayPrefs";
+import { isCritical, useDisplayPrefs } from "../displayPrefs";
 import type { Aircraft, MapConfig } from "../types";
 import { ContactDetail } from "./ContactDetail";
 
@@ -73,6 +73,18 @@ const ALERT_COLOUR = "#ff2d2d";
 /** Applied on top of tar1090's per-shape scale. Their sizes assume a map that
  *  fills a screen; this one is often a third of one. */
 const DISPLAY_SCALE = 0.9;
+
+/**
+ * The zoom each map was last left at, kept across the remount a swap forces.
+ *
+ * Console keys this component on its size (`stationId-s` / `stationId-m`), so
+ * moving airspace between the main stage and the sidebar preview tears the map
+ * down and builds a new one — which would otherwise snap back to the default
+ * zoom, losing the level the operator had set. Module-level so it outlives that
+ * unmount; keyed per station so a different station starts from its default
+ * rather than inheriting the last one's zoom. Saved on unmount, read on mount.
+ */
+const zoomMemory = new Map<string, number>();
 
 function AdsbMapInner({
   stationId,
@@ -144,6 +156,9 @@ function AdsbMapInner({
     const lat = config.latitude;
     const lon = config.longitude;
     const centre: [number, number] = [lon, lat];
+    // Per station and per size (main / small preview), which is exactly how
+    // Console keys this component — so each remembers its own last zoom.
+    const zoomKey = `${stationId}-${compact ? "s" : "m"}`;
 
     // Every basemap is a source in one style and switching toggles layer
     // visibility. The alternative - setStyle per switch - discards every custom
@@ -176,7 +191,13 @@ function AdsbMapInner({
         })),
       },
       center: centre,
-      zoom: Math.min(maxZoom, Math.max(config.min_zoom, compact ? 9 : 12)),
+      // The zoom this size was last left at, or the default for a first mount.
+      // Restoring it is what makes a swap to the preview and back return to the
+      // level the operator had, rather than resetting (see zoomMemory).
+      zoom: Math.min(
+        maxZoom,
+        Math.max(config.min_zoom, zoomMemory.get(zoomKey) ?? (compact ? 9 : 12)),
+      ),
       minZoom: config.min_zoom,
       maxZoom,
       attributionControl: false,
@@ -283,6 +304,9 @@ function AdsbMapInner({
 
     return () => {
       readyRef.current = false;
+      // Remember where this size was left, so the sibling that mounts on a swap
+      // comes up at the same zoom rather than the default.
+      zoomMemory.set(zoomKey, map.getZoom());
       if (onWheel) holder.removeEventListener("wheel", onWheel);
       markersRef.current.clear();
       map.remove();
@@ -365,9 +389,20 @@ function AdsbMapInner({
       seen.add(contact.icao);
 
       const pos: [number, number] = [contact.longitude, contact.latitude];
-      const colour = contact.alert ? ALERT_COLOUR : CONTACT_COLOUR;
-      const registration = wantRegistration
-        ? cachedAircraftInfo(contact.icao)?.registration ?? null
+      // The operator's own close-and-low threshold, not the station's alert
+      // flag: this is the console's view of what is worth drawing red.
+      const critical = isCritical(contact.range_km, contact.altitude_m, prefs);
+      const colour = critical ? ALERT_COLOUR : CONTACT_COLOUR;
+      // A resolved lookup with no tail number falls back to the callsign — the
+      // operator asked the flight number to stand in when the registry has
+      // nothing. `cached` is undefined only while the lookup is pending, so the
+      // field stays blank until there is an answer rather than flashing the
+      // callsign and then replacing it.
+      const cached = wantRegistration
+        ? cachedAircraftInfo(contact.icao)
+        : undefined;
+      const registration = cached
+        ? cached.registration ?? contact.callsign?.trim() ?? null
         : null;
       const label = buildLabel(contact, prefs, registration);
       const icon = iconFor(contact.emitter_type);
@@ -427,7 +462,7 @@ function AdsbMapInner({
       }
 
       const el = marker.getElement();
-      el.classList.toggle("alert", Boolean(contact.alert));
+      el.classList.toggle("alert", critical);
       el.classList.toggle("selected", contact.icao === selected);
       // A helicopter gets a spinning rotor; everything else keeps the hidden,
       // un-animated rotor element it was built with. Toggled every update
@@ -471,7 +506,13 @@ function AdsbMapInner({
         // Compact hides the label: at that size a dozen callsigns overlap into
         // an unreadable smear over the contacts they name.
         span.textContent = compact ? "" : label;
-        span.style.color = colour;
+        // A critical contact's label wears the red badge, and its text must be
+        // the white the stylesheet gives it — NOT this inline colour, which is
+        // the same red and would paint red-on-red, the unreadable state this
+        // fixes. Cleared so `.map-contact.alert span` (white) wins; a normal
+        // contact keeps the gold inline, and selection still overrides via
+        // `!important`. The glyph below stays `colour` either way.
+        span.style.color = critical ? "" : colour;
       }
     }
 

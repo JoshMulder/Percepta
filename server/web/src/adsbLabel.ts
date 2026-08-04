@@ -23,9 +23,17 @@ export function buildLabel(
   registration: string | null,
 ): string {
   const parts: string[] = [];
+  const seen = new Set<string>();
   for (const field of prefs.labelFields) {
     const value = fieldText(field, contact, prefs, registration);
-    if (value) parts.push(value);
+    // Skip a field that would only repeat a line already on the label. The case
+    // this is for: registration falls back to the callsign when the registry
+    // has no tail number, so a label showing both flight number and
+    // registration would otherwise print the callsign twice.
+    if (value && !seen.has(value)) {
+      seen.add(value);
+      parts.push(value);
+    }
   }
   if (parts.length === 0) parts.push(contact.icao);
   return parts.join("\n");

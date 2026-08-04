@@ -20,7 +20,13 @@ function contact(over: Partial<Aircraft> = {}): Aircraft {
 }
 
 function prefs(over: Partial<DisplayPrefs> = {}): DisplayPrefs {
-  return { altitudeUnit: "both", labelFields: ["callsign"], ...over };
+  return {
+    altitudeUnit: "both",
+    labelFields: ["callsign"],
+    criticalRangeKm: 12,
+    criticalAltitudeFt: 5000,
+    ...over,
+  };
 }
 
 describe("buildLabel", () => {
@@ -94,5 +100,16 @@ describe("buildLabel", () => {
       null,
     );
     expect(label).toBe("Helicopter");
+  });
+
+  it("does not repeat the callsign when registration fell back to it", () => {
+    // When the registry has no tail number the caller passes the callsign as
+    // the registration; a label showing both fields must not print it twice.
+    const label = buildLabel(
+      contact({ callsign: "ANZ759M" }),
+      prefs({ labelFields: ["callsign", "registration"] }),
+      "ANZ759M",
+    );
+    expect(label).toBe("ANZ759M");
   });
 });

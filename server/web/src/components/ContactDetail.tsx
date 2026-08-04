@@ -1,6 +1,6 @@
 import { useAircraftInfo } from "../aircraftInfo";
 import { emitterName } from "../adsbIcons";
-import { useDisplayPrefs } from "../displayPrefs";
+import { isCritical, useDisplayPrefs } from "../displayPrefs";
 import { FEET_PER_METRE, formatAltitude } from "../format";
 import type { Aircraft } from "../types";
 
@@ -69,19 +69,28 @@ export function ContactDetail({
     on_ground,
     simulated,
     emitter_type,
-    alert,
   } = contact;
 
   // The emitter category in words — "Helicopter", "Large aircraft" — which is
   // all the transponder broadcasts. The lookup below fills in the specific model
   // and the tail number, which are not in ADS-B, when a registry has them.
   const category = emitterName(emitter_type);
-  const { altitudeUnit } = useDisplayPrefs();
+  const prefs = useDisplayPrefs();
+  const { altitudeUnit } = prefs;
   const info = useAircraftInfo(icao);
   // Model when a registry has it, category otherwise: "Boeing 737-838" says more
   // than "Large aircraft", but the category is always there to fall back on.
   const type = info?.model ?? category;
-  const registration = info?.registration ?? null;
+  // A resolved lookup with no tail number falls back to the callsign — the
+  // operator asked the flight number to stand in when the registry has nothing.
+  // `info` is null only while the lookup is pending, so the row stays absent
+  // until there is an answer rather than flashing the callsign and replacing it.
+  const registration = info
+    ? info.registration ?? callsign?.trim() ?? null
+    : null;
+  // The console's own close-and-low judgement, on the operator's thresholds —
+  // not the station's alert flag, which is for the station's own alerting.
+  const alert = isCritical(range_km, altitude, prefs);
 
   const stale = seconds_since_contact !== null
     && seconds_since_contact !== undefined

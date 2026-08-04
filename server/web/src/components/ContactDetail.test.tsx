@@ -265,13 +265,29 @@ describe("flags that change how the rest should be read", () => {
   it("suppresses the proximity flag on a stale contact", () => {
     // "Close and low" about a position from a minute ago is a claim the data
     // no longer supports; the staleness is the more important thing to say.
-    show({ alert: true, seconds_since_contact: 45 });
+    // Close and low by the default thresholds (within 12 km, below 5,000 ft).
+    show({ range_km: 5, altitude_m: 300, seconds_since_contact: 45 });
     expect(text()).toMatch(/memory/i);
     expect(text()).not.toMatch(/Close and low/i);
   });
 
-  it("shows the proximity flag on a current one", () => {
-    show({ alert: true, seconds_since_contact: 2 });
+  it("shows the proximity flag on a current close-and-low contact", () => {
+    show({ range_km: 5, altitude_m: 300, seconds_since_contact: 2 });
+    expect(text()).toMatch(/Close and low/i);
+  });
+
+  it("does not flag a close contact that is not also low", () => {
+    // Both conditions must hold: an airliner passing overhead at cruise is not
+    // the traffic this is for. 3,500 m is ~11,500 ft, well above the default.
+    show({ range_km: 5, altitude_m: 3500, seconds_since_contact: 2 });
+    expect(text()).not.toMatch(/Close and low/i);
+  });
+
+  it("honours the operator's own critical thresholds", () => {
+    // A contact at 8 km / 3,000 ft is clear of the defaults but inside a wider
+    // ring the operator set — the flag is their view, not the station's.
+    setDisplayPrefs({ criticalRangeKm: 20, criticalAltitudeFt: 6000 });
+    show({ range_km: 8, altitude_m: 900, seconds_since_contact: 2 });
     expect(text()).toMatch(/Close and low/i);
   });
 });
@@ -328,7 +344,7 @@ describe("rows that only exist when there is something to say", () => {
     expect(text()).not.toContain("Helicopter");
   });
 
-  it("shows no Registration row for an aircraft no registry has", async () => {
+  it("falls back to the callsign as the registration when no registry has it", async () => {
     vi.mocked(api.aircraftInfo).mockResolvedValueOnce({
       icao: "AE1234",
       registration: null,
@@ -337,11 +353,22 @@ describe("rows that only exist when there is something to say", () => {
       manufacturer: null,
       operator: null,
     });
-    show({ icao: "AE1234", emitter_type: 7 });
+    show({ icao: "AE1234", callsign: "N512QS", emitter_type: 7 });
 
-    // Wait for the resolved (empty) lookup, then confirm it added nothing: no
-    // Registration row, and the Type falls back to the category.
-    await screen.findByText("Helicopter");
+    // Once the lookup resolves with no tail number, the callsign stands in on
+    // the Registration row rather than the row simply being absent.
+    await screen.findByText("Helicopter"); // the resolved (empty) lookup landed
+    expect(rowLabels()).toContain("Registration");
+    const regRow = Array.from(
+      document.querySelectorAll(".contact-row"),
+    ).find((row) => row.querySelector(".contact-k")?.textContent === "Registration");
+    expect(regRow?.querySelector(".contact-v")?.textContent).toBe("N512QS");
+  });
+
+  it("shows no Registration row while the lookup is still pending", () => {
+    // The default mock never resolves, so `info` is null and the callsign must
+    // not flash into the Registration row before there is an answer.
+    show({ icao: "C81A34", callsign: "ANZ759M", emitter_type: 7 });
     expect(rowLabels()).not.toContain("Registration");
   });
 });

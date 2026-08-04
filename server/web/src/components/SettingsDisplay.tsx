@@ -74,6 +74,52 @@ export function SettingsDisplay() {
           ))}
         </div>
       </section>
+
+      <section className="settings-section">
+        <h3>Proximity alert</h3>
+        <p className="pref-note">
+          A contact within this range <em>and</em> below this altitude is drawn
+          red — close and low, the traffic worth noticing. Both conditions must
+          hold, and an aircraft that is not reporting its altitude is never
+          flagged. This is your view; the station keeps its own alerting.
+        </p>
+        <div className="pref-fields">
+          <label className="pref-field">
+            <span>Within</span>
+            <input
+              type="number"
+              min={1}
+              max={300}
+              step={1}
+              value={prefs.criticalRangeKm}
+              onChange={(e) => {
+                const v = Number(e.target.value);
+                if (Number.isFinite(v) && v > 0) {
+                  setDisplayPrefs({ criticalRangeKm: v });
+                }
+              }}
+            />
+            <span className="pref-unit">km</span>
+          </label>
+          <label className="pref-field">
+            <span>Below</span>
+            <input
+              type="number"
+              min={100}
+              max={60000}
+              step={100}
+              value={prefs.criticalAltitudeFt}
+              onChange={(e) => {
+                const v = Number(e.target.value);
+                if (Number.isFinite(v) && v > 0) {
+                  setDisplayPrefs({ criticalAltitudeFt: v });
+                }
+              }}
+            />
+            <span className="pref-unit">ft</span>
+          </label>
+        </div>
+      </section>
     </div>
   );
 }

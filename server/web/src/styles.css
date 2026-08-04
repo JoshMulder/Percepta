@@ -2422,6 +2422,24 @@ body {
   accent-color: var(--brand);
   cursor: pointer;
 }
+.pref-fields { display: flex; gap: 18px; flex-wrap: wrap; }
+.pref-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: var(--muted);
+}
+.pref-field input {
+  width: 6.5rem;
+  font: inherit;
+  padding: 6px 8px;
+  background: var(--panel-2, #0c1219);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.pref-field .pref-unit { color: var(--muted); }
 
 .settings-pane .field {
   display: flex;
@@ -2998,6 +3016,11 @@ body {
   filter: drop-shadow(0 0 0.35rem rgba(53, 196, 138, 0.95));
 }
 .map-contact.selected span { color: var(--accent) !important; }
+/* ...but an alerting label keeps its white-on-red even when selected. Repainting
+   it the console's green over the red badge is green-on-red — unreadable, and
+   the close-and-low contact is the one label that most needs reading. More
+   specific than the rule above, so it wins the !important tie. */
+.map-contact.alert.selected span { color: #fff !important; }
 
 /* --- one contact, in full ------------------------------------------------ */
 /* Anchored bottom-left rather than beside the aircraft: a panel that follows
@@ -3093,7 +3116,9 @@ body {
 }
 .contact-flag.sim { background: rgba(126, 148, 168, 0.16); color: #b9c7d3; }
 .contact-flag.stale { background: rgba(232, 176, 75, 0.14); color: var(--warn); }
-.contact-flag.alert { background: rgba(255, 122, 69, 0.14); color: var(--danger); }
+/* White on solid red, the same alert convention as the map marker's badge — the
+   faint fill with amber text it replaced could not be read against the panel. */
+.contact-flag.alert { background: rgba(255, 45, 45, 0.92); color: #fff; }
 
 /* The answer the panel exists for, sized so it is read first. */
 .contact-altitude {
