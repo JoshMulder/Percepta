@@ -65,18 +65,29 @@ RUN git clone --depth 1 --branch "${RTLSDR_REF}" \
       -DDETACH_KERNEL_DRIVER=ON \
  && cmake --build /tmp/rtlsdr/build --target install -j "$(nproc)"
 
-# whisper.cpp, built static (BUILD_SHARED_LIBS=OFF) so whisper-cli carries its
-# own whisper/ggml and the runtime needs only libgomp and the C/C++ runtimes.
-# The CLI example is `whisper-cli` on current upstream and was `main` before, so
-# take whichever the build produced.
+# whisper.cpp, built static (BUILD_SHARED_LIBS=OFF) so the CLI carries its own
+# whisper/ggml and the runtime needs only libgomp and the C/C++ runtimes.
+#
+# **Copy the real CLI, not a deprecation shim.** Upstream renames this binary
+# from time to time — `main`, then `whisper-cli`, and a master build was seen
+# producing `whisper-whisper-cli` with `whisper-cli` left behind as a stub that
+# prints "use whisper-whisper-cli" and exits 1. `-name whisper-cli | head -1`
+# picked that stub, and transcription came up installed-but-silent: the self
+# test caught an exit 1 with the reason on stdout. Rather than track the name,
+# take the LARGEST `whisper*cli` the build produced — the real one is megabytes
+# of static whisper/ggml, the stub is a few kilobytes of printf. It lands at
+# whisper-cli regardless, which is what GSU_WHISPER_BIN points at.
 RUN git clone --depth 1 --branch "${WHISPER_REF}" \
       https://github.com/ggerganov/whisper.cpp.git /tmp/whisper \
  && cmake -S /tmp/whisper -B /tmp/whisper/build \
       -DCMAKE_BUILD_TYPE=Release \
       -DBUILD_SHARED_LIBS=OFF \
  && cmake --build /tmp/whisper/build --config Release -j "$(nproc)" \
- && cp "$(find /tmp/whisper/build/bin -name whisper-cli -o -name main | head -1)" \
-      /usr/local/bin/whisper-cli
+ && whisper_bin="$(find /tmp/whisper/build -type f -name 'whisper*cli' \
+      -printf '%s\t%p\n' | sort -rn | head -1 | cut -f2)" \
+ && test -n "${whisper_bin}" && test "$(stat -c%s "${whisper_bin}")" -gt 1000000 \
+      || { echo "no real whisper-cli built (only a deprecation stub?)"; exit 1; } \
+ && cp "${whisper_bin}" /usr/local/bin/whisper-cli
 
 # The model, pinned by name; the file is content-stable at this URL.
 RUN mkdir -p /opt/models \
