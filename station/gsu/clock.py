@@ -39,6 +39,7 @@ That is the design, and DEPLOYMENT.md carries the chrony configuration.
 
 from __future__ import annotations
 
+import ctypes
 import logging
 import os
 import shutil
@@ -222,6 +223,80 @@ def _timedatectl() -> tuple[bool | None, str, str] | None:
     return None
 
 
+#: `adjtimex(2)` status bit, set when the kernel clock is disciplined by
+#: *nothing*. Cleared by whatever is keeping time — chrony, systemd-timesyncd,
+#: ntpd, a GPS/PPS refclock — so unlike the daemon probes below it does not
+#: depend on which one is in use, or on being able to see it.
+STA_UNSYNC = 0x0040
+
+#: adjtimex()'s return value. TIME_ERROR is "the clock is not synchronised"; the
+#: other states (TIME_OK and the leap-second ones) all mean it is disciplined.
+TIME_ERROR = 5
+
+
+class _Timex(ctypes.Structure):
+    """glibc's `struct timex`, enough of it to read `status`.
+
+    Every field is named so `status` lands at the offset the kernel writes it
+    to; the trailing padding matches glibc so the buffer is the size adjtimex
+    copies back into. `modes = 0` makes the call a pure query — it needs no
+    privilege and sets nothing, which is the whole reason it is safe to run as
+    the unprivileged container user.
+    """
+
+    _fields_ = [
+        ("modes", ctypes.c_int),
+        ("offset", ctypes.c_long),
+        ("freq", ctypes.c_long),
+        ("maxerror", ctypes.c_long),
+        ("esterror", ctypes.c_long),
+        ("status", ctypes.c_int),
+        ("constant", ctypes.c_long),
+        ("precision", ctypes.c_long),
+        ("tolerance", ctypes.c_long),
+        ("time_sec", ctypes.c_long),
+        ("time_usec", ctypes.c_long),
+        ("tick", ctypes.c_long),
+        ("ppsfreq", ctypes.c_long),
+        ("jitter", ctypes.c_long),
+        ("shift", ctypes.c_int),
+        ("stabil", ctypes.c_long),
+        ("jitcnt", ctypes.c_long),
+        ("calcnt", ctypes.c_long),
+        ("errcnt", ctypes.c_long),
+        ("stbcnt", ctypes.c_long),
+        ("tai", ctypes.c_int),
+        ("_padding", ctypes.c_int * 11),
+    ]
+
+
+def _kernel_synchronised() -> bool | None:
+    """Whether the kernel clock is disciplined, from adjtimex(2) directly.
+
+    This is the one sync signal a container can always read: it shares the host
+    kernel's clock, and the STA_UNSYNC bit is set by the kernel itself, so it
+    reports the truth whether the box runs chrony (invisible from in here —
+    `chronyc` is not in the image), timesyncd, or a GPS refclock. `None` on
+    anything without this call — the dev machines — where the probes below are
+    the only answer anyway. Never raises.
+    """
+    try:
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        adjtimex = libc.adjtimex
+    except (OSError, AttributeError):
+        return None
+    adjtimex.restype = ctypes.c_int
+    buf = _Timex()
+    buf.modes = 0
+    try:
+        state = adjtimex(ctypes.byref(buf))
+    except (OSError, ValueError):
+        return None
+    if state < 0:
+        return None
+    return state != TIME_ERROR and not (buf.status & STA_UNSYNC)
+
+
 def discipline(force: bool = False) -> Discipline:
     """What is keeping this clock, cached because it is asked every health frame.
 
@@ -237,6 +312,7 @@ def discipline(force: bool = False) -> Discipline:
                 return value
 
     rtc = rtc_present()
+    kernel = _kernel_synchronised()
     answer: tuple[bool | None, str, str] | None = None
     for probe in (_chrony, _timesyncd, _timedatectl):
         try:
@@ -248,19 +324,39 @@ def discipline(force: bool = False) -> Discipline:
             break
 
     if answer is None:
-        state = Discipline(
-            None, "rtc-only" if rtc else "unknown",
+        probe_sync: bool | None = None
+        source = "rtc-only" if rtc else "unknown"
+        detail = (
             "No chrony or systemd-timesyncd found; cannot tell what is keeping "
-            "this clock." + (" A hardware RTC is present." if rtc else ""),
-            rtc,
+            "this clock." + (" A hardware RTC is present." if rtc else "")
         )
     else:
-        synchronised, source, detail = answer
-        if source == "none" and rtc:
-            source = "rtc-only"
-            detail += "; a hardware RTC is present, so the time is at least held over a reboot"
-        state = Discipline(synchronised, source, detail, rtc)
+        probe_sync, source, detail = answer
 
+    # The kernel is the authority on *whether* the clock is disciplined; the
+    # daemon probes only name *by what*. In a container the probes are half
+    # blind — chronyc is not in the image, and timesyncd's flag file belongs to
+    # a daemon the box may not even run — so they can report "nothing is keeping
+    # this clock" about one chrony is keeping perfectly. Believe the kernel for
+    # the alarm, and keep the probe only as the label.
+    if kernel is None:
+        synchronised: bool | None = probe_sync
+    else:
+        synchronised = kernel
+        if kernel and probe_sync is not True:
+            # Disciplined, but not by anything visible from in here. Say that,
+            # rather than the probe's "not synchronised", which is simply wrong.
+            source = source if source in ("gps", "ntp") else "ntp"
+            detail = (
+                "the kernel clock is synchronised (adjtimex); what is "
+                "disciplining it is not visible from inside the container"
+            )
+
+    if source == "none" and rtc and synchronised is not True:
+        source = "rtc-only"
+        detail += "; a hardware RTC is present, so the time is at least held over a reboot"
+
+    state = Discipline(synchronised, source, detail, rtc)
     with _cache_lock:
         _cached = (time.monotonic(), state)
     return state

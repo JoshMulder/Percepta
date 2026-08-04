@@ -14,6 +14,7 @@ import re
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from gsu import clock
 from gsu.agent import Agent
@@ -113,6 +114,56 @@ class ClockTests(unittest.TestCase):
         # reporting half of that claim without a receiver to hand.
         self.assertIn("PPS", clock.GPS_REFERENCE_IDS)
         self.assertIn("GPS", clock.GPS_REFERENCE_IDS)
+
+    def test_the_kernel_sync_bit_is_read_without_raising(self):
+        # adjtimex(2) is the one sync signal a container can always read — it
+        # shares the host kernel's clock. Here it only has to answer with a
+        # tri-state and never raise; the value depends on the machine.
+        self.assertIn(clock._kernel_synchronised(), (True, False, None))
+
+    def test_a_kernel_synced_clock_beats_a_blind_container_probe(self):
+        # The container has no chronyc, and timesyncd's flag file belongs to a
+        # daemon the box may not run, so the probes can report "nothing is
+        # keeping this clock" about one chrony keeps perfectly. The kernel's own
+        # bit is the authority and must win, or every chrony box alarms for ever
+        # on a clock that is fine. This is the false alarm the change removes.
+        self.addCleanup(setattr, clock, "_cached", None)
+        with mock.patch.object(clock, "_kernel_synchronised", return_value=True), \
+             mock.patch.object(clock, "_chrony", return_value=None), \
+             mock.patch.object(clock, "_timesyncd", return_value=(
+                 False, "none",
+                 "systemd-timesyncd is running but has not synchronised")), \
+             mock.patch.object(clock, "_timedatectl", return_value=None):
+            state = clock.discipline(force=True)
+        self.assertIs(state.synchronised, True)
+        self.assertNotEqual(state.source, "none")
+
+    def test_the_kernel_is_believed_over_a_probe_that_claims_sync(self):
+        # And the other way round: the kernel says the clock is not disciplined,
+        # a stale probe claims it is. The alarm should stand — every timestamp
+        # the box writes comes off the kernel clock, not the probe.
+        self.addCleanup(setattr, clock, "_cached", None)
+        with mock.patch.object(clock, "_kernel_synchronised", return_value=False), \
+             mock.patch.object(clock, "_chrony", return_value=(
+                 True, "ntp", "chronyd tracking a peer")), \
+             mock.patch.object(clock, "_timesyncd", return_value=None), \
+             mock.patch.object(clock, "_timedatectl", return_value=None):
+            state = clock.discipline(force=True)
+        self.assertIs(state.synchronised, False)
+
+    def test_the_probes_still_label_the_source_where_the_kernel_bit_is_absent(self):
+        # On the dev machines adjtimex is unavailable and returns None; the
+        # daemon probes are then the whole answer, exactly as before — including
+        # naming a GPS-disciplined chrony as such.
+        self.addCleanup(setattr, clock, "_cached", None)
+        with mock.patch.object(clock, "_kernel_synchronised", return_value=None), \
+             mock.patch.object(clock, "_chrony", return_value=(
+                 True, "gps", "chronyd tracking PPS at stratum 1")), \
+             mock.patch.object(clock, "_timesyncd", return_value=None), \
+             mock.patch.object(clock, "_timedatectl", return_value=None):
+            state = clock.discipline(force=True)
+        self.assertIs(state.synchronised, True)
+        self.assertEqual(state.source, "gps")
 
 
 class ShippedInventoryTests(unittest.TestCase):
