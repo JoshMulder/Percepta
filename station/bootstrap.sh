@@ -43,6 +43,51 @@ docker compose version >/dev/null 2>&1 \
   || die "Docker is installed but the compose plugin is not.
 Install docker-compose-plugin and run this again."
 
+# The daemon, not just the client. Neither check above connects to it —
+# `command -v docker` finds the binary and `docker compose version` reports the
+# plugin — so a box where this user cannot reach /var/run/docker.sock passed
+# both and failed minutes later, inside the password loop, where "permission
+# denied on the socket" read as the password being rejected. Fail here instead,
+# before a single question, and fix the usual cause: the docker group.
+if ! docker_diag=$(docker info 2>&1); then
+  case "$docker_diag" in
+    *"permission denied"*)
+      me=$(id -un)
+      if id -nG "$me" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+        die "You are in the 'docker' group, but this login session began before
+that and cannot see it yet. Log out and back in — or run 'newgrp docker' in
+this terminal — and run this again."
+      fi
+      echo "You cannot reach the Docker daemon, and '$me' is not in the 'docker'"
+      echo "group that grants it. Adding you needs sudo, and only takes effect in"
+      echo "a new login session."
+      read -r -p "Add $me to the docker group now? [Y/n]: " reply || true
+      case "${reply:-Y}" in
+        [Nn]*) die "Not added. Do it by hand, then re-run this:
+    sudo usermod -aG docker $me" ;;
+      esac
+      command -v sudo >/dev/null 2>&1 \
+        || die "sudo is not available. As root, run:
+    usermod -aG docker $me
+then have $me log out and back in, and re-run this."
+      sudo usermod -aG docker "$me" \
+        || die "Could not add $me to the docker group. As root, run:
+    usermod -aG docker $me"
+      die "Added $me to the 'docker' group. **Log out and back in** — or run
+'newgrp docker' in this terminal — so it takes effect, then run this script
+again. Group membership only applies to a new session, so this one still
+cannot reach the daemon."
+      ;;
+    *)
+      die "Docker is installed but its daemon did not answer:
+
+$docker_diag
+
+If it is not running, start it (on most systems: sudo systemctl start docker)
+and run this again." ;;
+  esac
+fi
+
 # Existing values become the defaults, so re-running is safe and changing one
 # answer does not mean retyping the rest.
 #
@@ -200,7 +245,26 @@ EOF
 
 printf '\nWrote %s.\n\n' "$ENV_FILE"
 
-docker compose up -d --build
+# The build is the longest and likeliest step to fail — it fetches Debian
+# packages and clones whisper.cpp and the rtl-sdr driver from GitHub — and
+# `set -e` would end the script on it with only docker's raw error, no sense of
+# what to do with a half-finished deploy. Catch it, and say.
+if ! docker compose up -d --build; then
+  die "The image build or container start FAILED — the error is above.
+
+Your answers are saved in $ENV_FILE, so re-running asks nothing again. The
+build needs the network, and the usual causes on a fresh box are:
+
+  * No or limited internet. The build pulls Debian packages and clones
+    whisper.cpp and the rtl-sdr driver — it cannot run fully offline.
+  * A wrong system clock. apt and TLS reject repositories as 'not valid yet'
+    when the date is off. Check with 'date'; if it is wrong, fix it
+    (e.g. 'sudo timedatectl set-ntp true') and try again.
+  * A transient Debian-mirror or GitHub hiccup — just run this again.
+
+When the cause is fixed, re-run:   ./bootstrap.sh
+Or build on its own to see it:     docker compose build"
+fi
 
 cat <<'NEXT'
 
