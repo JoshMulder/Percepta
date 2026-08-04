@@ -983,11 +983,19 @@ class Console:
         form = self._read_form(handler)
         if form is None:
             return self._deny(handler, 413, "That request was too large.")
+        # The radio tab applies each control the moment it changes, with a fetch
+        # that carries this marker. It wants a small answer it can show inline —
+        # not the 303 the form fallback needs, which would reload the page and
+        # tear down the audio the operator is listening to while they tune.
+        is_ajax = bool(form.get("ajax"))
         if not self.gate.check_csrf(session, (form.get("csrf") or [""])[0]):
             # Almost always a stale tab rather than an attack, and the wording
             # says so — but it is refused either way.
             log.warning("Setup POST from %s had no valid CSRF token.", peer)
             self.message = ("bad", "That page had gone stale. Reload and try again.")
+            if is_ajax:
+                return self._send_json(
+                    handler, {"ok": False, "message": self.message[1]}, cookie)
             return self._redirect(handler, cookie, home)
         try:
             if path == "/device":
@@ -1010,6 +1018,13 @@ class Console:
                 self.message = ("good", "Signed out.")
         except Exception as exc:  # noqa: BLE001 - shown to a person
             self.message = ("bad", str(exc))
+        if is_ajax:
+            # No redirect: answer the fetch with what happened and consume the
+            # message, so a later full render does not show it a second time.
+            ok = not (self.message and self.message[0] == "bad")
+            text = self.message[1] if self.message else "Saved."
+            self.message = None
+            return self._send_json(handler, {"ok": ok, "message": text}, cookie)
         if path == "/location" and self.message and self.message[0] == "bad":
             # A refused coordinate reopens the editor with the reason in it.
             # The fragment is a constant like every other part of this header
@@ -2557,7 +2572,7 @@ class Console:
                 (entry.params or {}) if entry and entry.type_id == chosen_id else {}
             )
             out.append(
-                f"<form method=post action='/radio'>{self._csrf_field(csrf)}"
+                f"<form method=post action='/radio' data-radio>{self._csrf_field(csrf)}"
                 f"<input type=hidden name=type_id value='{html.escape(chosen_id)}'>"
             )
             # The receiver this tuner is assigned to. The same field the generic
@@ -2664,24 +2679,6 @@ class Console:
                 + "><span class=muted>Bypasses the squelch, for bringing an "
                 "antenna up.</span></div>"
             )
-            # Listen — a volume control, not a play button, the same as the
-            # platform's front panel. Dragging it is the gesture that starts the
-            # audio (browsers block autoplay until one) and 0 pauses it, so a
-            # page left open is silent and pulls nothing. /audio.wav is the
-            # demodulator's own PCM straight off the box — before Opus, the
-            # broker and the platform's fan-out — streamed only while playing
-            # (preload none). The gate decides what is in it: silence while the
-            # squelch is shut, so "Hold gate open" above is how you hear a quiet
-            # band.
-            out.append(
-                "<div class=field><label for=volume>Listen</label>"
-                "<div class=volume-row>"
-                "<input type=range id=volume min=0 max=1 step=0.05 value=0 "
-                "aria-label='Listen volume'>"
-                "<span class=muted>Drag to listen — bench test before enrolment."
-                "</span></div>"
-                "<audio id=listen preload=none src='/audio.wav'></audio></div>"
-            )
             # Bias tee is a front-end setting (the dongle opens with it on or
             # off), so it is one of the two things here that rebuild the
             # receiver, and it is persisted with the device rather than in the
@@ -2726,7 +2723,31 @@ class Console:
                 "<input type=checkbox id='radio_transcribe' "
                 f"name='radio_transcribe' value='1'{transcribe_on}>"
                 f"<span class=muted>{note}</span></div>"
-                "<div class=field><button type=submit>Apply</button></div></form>"
+                # The button is the no-script fallback: with the nonce'd script
+                # running, each control applies the moment it changes and this is
+                # hidden, its .field given over to a status line the fetch writes.
+                "<div class=field><button type=submit>Apply</button>"
+                "<span class=muted id=radio-status aria-live=polite></span>"
+                "</div></form>"
+            )
+            # Listen — a volume control, not a play button, the same as the
+            # platform's front panel. Outside the form on purpose: it is local
+            # only, so moving it must not post a settings change. Dragging it is
+            # the gesture that starts the audio (browsers block autoplay until
+            # one) and 0 pauses it, so a page left open is silent and pulls
+            # nothing. /audio.wav is the demodulator's own PCM straight off the
+            # box — before Opus, the broker and the platform's fan-out — streamed
+            # only while playing (preload none). The gate decides what is in it:
+            # silence while the squelch is shut, so "Hold gate open" is how you
+            # hear a quiet band.
+            out.append(
+                "<div class=field><label for=volume>Listen</label>"
+                "<div class=volume-row>"
+                "<input type=range id=volume min=0 max=1 step=0.05 value=0 "
+                "aria-label='Listen volume'>"
+                "<span class=muted>Drag to listen — bench test before enrolment."
+                "</span></div>"
+                "<audio id=listen preload=none src='/audio.wav'></audio></div>"
             )
             out.append("<div class=field><label>Spectrum</label></div>")
             out.append(
@@ -2911,6 +2932,54 @@ class Console:
         listen.pause();
       }
     });
+  }
+  // The radio settings apply the moment a control changes — no Apply button to
+  // find, and no page reload to tear down the audio being listened to. The
+  // button is the no-script fallback and is hidden here; a fetch posts the whole
+  // form (the station re-applies what it is already on, so this is idempotent)
+  // and writes the outcome to the status line. In-flight requests coalesce so a
+  // quick series of changes cannot pile up rebuilds.
+  var radioForm = document.querySelector("form[data-radio]");
+  if (radioForm) {
+    var applyBtn = radioForm.querySelector("button[type=submit]");
+    if (applyBtn) applyBtn.hidden = true;
+    var radioStatus = document.getElementById("radio-status");
+    var say = function (text, bad) {
+      if (!radioStatus) return;
+      radioStatus.textContent = text;
+      radioStatus.style.color = bad ? "var(--danger)" : "";
+    };
+    var busy = false, again = false;
+    var apply = function () {
+      if (busy) { again = true; return; }
+      busy = true;
+      var data = new URLSearchParams(new FormData(radioForm));
+      data.set("ajax", "1");
+      say("Saving\\u2026", false);
+      var done = function (text, bad) {
+        busy = false;
+        say(text, bad);
+        if (again) { again = false; apply(); }
+      };
+      fetch("/radio", {
+        method: "POST",
+        body: data,
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" }
+      })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (j) {
+          if (!j) done("Not saved — reload and try again.", true);
+          else done(j.message || "Saved.", !j.ok);
+        })
+        .catch(function () {
+          done("Not saved — no answer from the station.", true);
+        });
+    };
+    // Enter in a field would otherwise submit the form for real (a reload);
+    // take it over too, so every route to a change goes through the fetch.
+    radioForm.addEventListener("submit", function (e) { e.preventDefault(); apply(); });
+    radioForm.addEventListener("change", apply);
   }
   var forms = document.querySelectorAll("form[data-device]");
   for (var i = 0; i < forms.length; i++) {
@@ -3219,6 +3288,10 @@ class Console:
   document.addEventListener("submit", function (event) {
     var form = event.target;
     if (!form || form.nodeName !== "FORM" || form.getAttribute("data-busy")) return;
+    // The radio form never navigates — its own handler applies each change over
+    // fetch and preventDefaults the submit — so this "Working…" treatment, meant
+    // for a form that is about to reload the page, does not apply to it.
+    if (form.hasAttribute("data-radio")) return;
     var button = (event.submitter && event.submitter.nodeName === "BUTTON")
       ? event.submitter
       : form.querySelector("button[type=submit]");

@@ -459,6 +459,41 @@ class ServedPageTests(unittest.TestCase):
         )
         self.assertTrue(self.agent.radio.auto_squelch)
 
+    def test_the_radio_apply_is_instant_over_fetch_without_a_reload(self):
+        # The instant-apply path: a control change posts with ajax=1 and gets a
+        # small JSON answer, not the 303 the no-script fallback gets — so the
+        # page, and the audio being listened to, is never reloaded.
+        self.agent.inventory.set_device("radio", "simulated-airband", {}, None)
+        self.agent.build_devices()
+        token, csrf, _ = self.page("/devices?slot=radio")
+        step = self.agent.radio.available_gains[1]
+        response, body = self.request(
+            "POST", "/radio",
+            f"ajax=1&type_id=simulated-airband&gain={step}&csrf={csrf}",
+            {"Cookie": token},
+        )
+        self.assertEqual(response.status, 200)
+        self.assertIn("application/json", response.getheader("Content-Type") or "")
+        payload = json.loads(body)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(self.agent.radio.gain, step)
+
+    def test_a_bad_ajax_apply_answers_with_the_reason_not_a_redirect(self):
+        # A refused value comes back as ok:false with the message, for the status
+        # line to show — still a 200 JSON, not a redirect the fetch cannot read.
+        self.agent.inventory.set_device("radio", "simulated-airband", {}, None)
+        self.agent.build_devices()
+        token, csrf, _ = self.page("/devices?slot=radio")
+        response, body = self.request(
+            "POST", "/radio",
+            f"ajax=1&type_id=simulated-airband&freq_mhz=notafreq&csrf={csrf}",
+            {"Cookie": token},
+        )
+        self.assertEqual(response.status, 200)
+        payload = json.loads(body)
+        self.assertFalse(payload["ok"])
+        self.assertIn("frequency", payload["message"].lower())
+
     def test_an_operate_only_apply_does_not_rebuild_the_receiver(self):
         # A gain or squelch tweak must not tear the tuner down: only a
         # device-level change (which receiver, bias tee) rebuilds. Same
@@ -2052,10 +2087,26 @@ class DevicePickerTests(unittest.TestCase):
         # The owner requirement that drove the rework: the device Save and the
         # radio Apply were two buttons in two places for one panel. Now there is
         # one — Apply — and no Save on the radio tab. (The picker's own button is
-        # "Change", a navigation, and the script hides it.)
+        # "Change", a navigation, and the script hides it.) The Apply button is
+        # the no-script fallback; with the script running each control applies on
+        # change.
         panel = self._radio_panel()
         self.assertEqual(panel.count(">Apply</button>"), 1)
         self.assertNotIn(">Save</button>", panel)
+
+    def test_the_radio_form_is_marked_for_instant_apply(self):
+        # The nonce'd script hides the Apply button and posts each change over
+        # fetch; it finds the form by this marker.
+        panel = self._radio_panel()
+        self.assertIn("action='/radio' data-radio>", panel)
+        self.assertIn("id=radio-status", panel)
+
+    def test_the_volume_control_is_outside_the_apply_form(self):
+        # Local only: moving the volume must not post a settings change, so it
+        # sits after the form (its status line, radio-status, is the form's last
+        # element) rather than inside it.
+        panel = self._radio_panel()
+        self.assertLess(panel.index("id=radio-status"), panel.index("id=volume"))
 
     def test_the_gain_is_a_stepped_select_of_the_tuners_own_steps(self):
         # "the same steps as the platform": a select of the tuner's gain table,
