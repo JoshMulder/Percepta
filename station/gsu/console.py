@@ -2443,7 +2443,12 @@ class Console:
                 + "><span class=muted>Bypasses the squelch, for bringing an "
                 "antenna up.</span></div>"
             )
-            station = state.get("station") or {}
+            # The site/position dict, under `position` — NOT `state["station"]`,
+            # which is the station's *name* (a string) once enrolled and was the
+            # crash that took this whole page down: `'str' object has no
+            # attribute 'get'` on an enrolled box, while an un-enrolled demo had
+            # None here and slipped through.
+            station = (state.get("position") or {}).get("station") or {}
             transcribe_on = " checked" if station.get("radio_transcribe") else ""
             note = (
                 "Logs what is heard on the airband, on the box, with whisper.cpp."

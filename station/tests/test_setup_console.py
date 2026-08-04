@@ -1989,6 +1989,20 @@ class DevicePickerTests(unittest.TestCase):
         self.assertIn(
             "<input type=hidden name=type_id value='simulated-weather'>", previewed)
 
+    def test_the_radio_page_renders_on_an_enrolled_station(self):
+        # Regression, and a page-down one: once a station is enrolled the main
+        # snapshot's `station` key is its NAME — a string — but the radio section
+        # read it as the site dict, so `station.get(...)` raised and took the
+        # whole setup page with it (ERR_EMPTY_RESPONSE). A demo box is not
+        # enrolled, so `state["station"]` was None and every test slipped past
+        # it; forcing the string is what reproduces it.
+        self.agent.inventory.set_device("radio", "simulated-airband", {}, None)
+        self.agent.build_devices()
+        snap = self.agent.snapshot()
+        snap["station"] = "Bench Station"
+        html = self.console._section_devices(snap, "tok", "radio")
+        self.assertIn("radio_transcribe", html)
+
     def _save_camera(self, type_id, **params):
         form = {"slot": ["camera"], "type_id": [type_id]}
         for name, value in params.items():
