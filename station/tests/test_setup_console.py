@@ -435,6 +435,46 @@ class ServedPageTests(unittest.TestCase):
         self.request("POST", "/radio", f"csrf={csrf}", {"Cookie": token})
         self.assertFalse(self.agent.site.radio_transcribe)
 
+    def test_the_radio_apply_sets_gain_and_squelch_on_the_live_receiver(self):
+        # The one Apply carries the operate commands too: gain in the tuner's own
+        # step, and a manual squelch level that turns AUTO off in the same move —
+        # the same discrete commands the platform sends.
+        self.agent.inventory.set_device("radio", "simulated-airband", {}, None)
+        self.agent.build_devices()
+        token, csrf, _ = self.page("/devices?slot=radio")
+        step = self.agent.radio.available_gains[1]
+        self.request(
+            "POST", "/radio",
+            f"type_id=simulated-airband&gain={step}&squelch=-55&csrf={csrf}",
+            {"Cookie": token},
+        )
+        self.assertEqual(self.agent.radio.gain, step)
+        self.assertEqual(self.agent.radio.manual_threshold_db, -55.0)
+        self.assertFalse(self.agent.radio.auto_squelch)
+        # AUTO ticked wins over the slider.
+        self.request(
+            "POST", "/radio",
+            f"type_id=simulated-airband&squelch=-55&auto_squelch=1&csrf={csrf}",
+            {"Cookie": token},
+        )
+        self.assertTrue(self.agent.radio.auto_squelch)
+
+    def test_an_operate_only_apply_does_not_rebuild_the_receiver(self):
+        # A gain or squelch tweak must not tear the tuner down: only a
+        # device-level change (which receiver, bias tee) rebuilds. Same
+        # controller object before and after is the proof.
+        self.agent.inventory.set_device("radio", "simulated-airband", {}, None)
+        self.agent.build_devices()
+        token, csrf, _ = self.page("/devices?slot=radio")
+        before = id(self.agent.radio)
+        step = self.agent.radio.available_gains[1]
+        self.request(
+            "POST", "/radio",
+            f"type_id=simulated-airband&gain={step}&csrf={csrf}",
+            {"Cookie": token},
+        )
+        self.assertEqual(id(self.agent.radio), before)
+
     def test_picking_a_device_leaves_something_to_save(self):
         # Picking only re-renders — it stores nothing, so that a device's
         # parameters can be filled in before anything is written. The cost was
@@ -2002,6 +2042,43 @@ class DevicePickerTests(unittest.TestCase):
         snap["station"] = "Bench Station"
         html = self.console._section_devices(snap, "tok", "radio")
         self.assertIn("radio_transcribe", html)
+
+    def _radio_panel(self):
+        self.agent.inventory.set_device("radio", "simulated-airband", {}, None)
+        self.agent.build_devices()
+        return self.console._section_devices(self.agent.snapshot(), "tok", "radio")
+
+    def test_the_radio_panel_has_one_button_not_a_save_and_an_apply(self):
+        # The owner requirement that drove the rework: the device Save and the
+        # radio Apply were two buttons in two places for one panel. Now there is
+        # one — Apply — and no Save on the radio tab. (The picker's own button is
+        # "Change", a navigation, and the script hides it.)
+        panel = self._radio_panel()
+        self.assertEqual(panel.count(">Apply</button>"), 1)
+        self.assertNotIn(">Save</button>", panel)
+
+    def test_the_gain_is_a_stepped_select_of_the_tuners_own_steps(self):
+        # "the same steps as the platform": a select of the tuner's gain table,
+        # read from the device, not a free number it would snap away from.
+        panel = self._radio_panel()
+        self.assertIn("<select id=gain name=gain>", panel)
+        gains = self.agent.snapshot()["radio"]["gains"]
+        self.assertTrue(gains)
+        for step in gains:
+            self.assertIn(f">{float(step):.1f}</option>", panel)
+
+    def test_the_squelch_controls_match_the_dashboard(self):
+        # The same threshold-or-AUTO pair the dashboard has, over a live signal
+        # readout the poll moves.
+        panel = self._radio_panel()
+        self.assertIn("name=squelch", panel)
+        self.assertIn("name=auto_squelch", panel)
+        self.assertIn("id=signal", panel)
+
+    def test_the_panel_lets_the_receiver_be_heard_before_enrolment(self):
+        # No volume control was the gap: an installer could not test the radio
+        # here. The audio element streams the same /audio.wav the CLI examples do.
+        self.assertIn("src='/audio.wav'", self._radio_panel())
 
     def _save_camera(self, type_id, **params):
         form = {"slot": ["camera"], "type_id": [type_id]}
