@@ -244,15 +244,31 @@ password then the fault is not here: run
 
 by hand, and put the GSU_SETUP_PASSWORD_HASH line it prints into .env."
     fi
-    read -r -s -p "Setup page password: " SETUP_PW || die "Nothing read."
-    echo
-    if [ -z "$SETUP_PW" ]; then
-      # An empty one is not "no password wanted". Without a hash the agent
-      # demotes the page to the container's own loopback, which the published
-      # port cannot reach, so the page ends up unreachable from anywhere.
-      echo "  Nothing typed. The page cannot be served without one."
-      continue
-    fi
+    # Read it, then read it again. The entry is silent (`-s`), so a typo is
+    # invisible — and a wrong password here is not a small mistake: it means a
+    # setup page nobody can reach and a reset to fix. A mismatch or an empty
+    # entry re-asks in this inner loop rather than through the outer `continue`,
+    # so a fat-fingered confirmation does not spend one of the three tries the
+    # hashing step is bounded to for docker faults.
+    while :; do
+      read -r -s -p "Setup page password: " SETUP_PW || die "Nothing read."
+      echo
+      if [ -z "$SETUP_PW" ]; then
+        # An empty one is not "no password wanted". Without a hash the agent
+        # demotes the page to the container's own loopback, which the published
+        # port cannot reach, so the page ends up unreachable from anywhere.
+        echo "  Nothing typed. The page cannot be served without one."
+        continue
+      fi
+      read -r -s -p "Confirm it: " SETUP_PW_CONFIRM || die "Nothing read."
+      echo
+      if [ "$SETUP_PW" = "$SETUP_PW_CONFIRM" ]; then
+        unset SETUP_PW_CONFIRM
+        break
+      fi
+      unset SETUP_PW SETUP_PW_CONFIRM
+      echo "  The two did not match. Try again."
+    done
     # stderr is deliberately not swallowed: the first run builds the image,
     # which is minutes on a Pi, and hiding it left somebody watching a terminal
     # that looked hung. It also carries the agent's own reason for refusing a
