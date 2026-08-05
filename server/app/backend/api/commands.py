@@ -77,6 +77,17 @@ class LightRequest(BaseModel):
     on: bool
 
 
+class UpdateRequest(BaseModel):
+    # `digest` is the immutable pin the station verifies and runs; `tag` is a
+    # human label carried through for the record and the desired version; `image`
+    # is the registry repository. Validated here so a malformed target is a 422
+    # rather than a command the station then has to refuse.
+    image: str = Field(min_length=1, max_length=400)
+    digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    tag: str = Field(default="", max_length=200)
+    force: bool = False
+
+
 def _audit(
     *,
     request: Request,
@@ -301,5 +312,36 @@ def light(
     _audit(
         request=request, identity=identity, station_id=station_id,
         action="light_set", detail={"on": body.on},
+    )
+    return {"accepted": True}
+
+
+@router.post("/update", status_code=202)
+def update(
+    station_id: uuid.UUID,
+    body: UpdateRequest,
+    request: Request,
+    identity: Identity = Depends(require_capability(Capability.STATION_UPDATE)),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Push a signed software update to the station (contract 2.1, system.update).
+
+    202: the station is told, and what it actually ends up running comes back on
+    the telemetry stream as its running version. The station runs only an image
+    whose signature it verifies (station DECISIONS.md item 48), so this cannot
+    deploy arbitrary code — but it is the most consequential thing an operator can
+    do here, which is why it has its own capability and is always audited.
+    """
+    command = {"kind": "system.update", "image": body.image, "digest": body.digest}
+    if body.tag:
+        command["tag"] = body.tag
+    if body.force:
+        command["force"] = True
+    _dispatch(station_id, command)
+    _audit(
+        request=request, identity=identity, station_id=station_id,
+        action="station_update",
+        detail={"image": body.image, "digest": body.digest,
+                "tag": body.tag, "force": body.force},
     )
     return {"accepted": True}

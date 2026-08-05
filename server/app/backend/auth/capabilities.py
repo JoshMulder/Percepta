@@ -43,6 +43,16 @@ class Capability(StrEnum):
     LIGHT_CONTROL = "light.control"
     CONFIG_WRITE = "config.write"
 
+    STATION_UPDATE = "station.update"
+    """Push a signed software update to the station (system.update). Its own
+    capability rather than CONFIG_WRITE because it is the most consequential grant
+    on the platform: it replaces the code running at an unattended site, across
+    the fleet. The station only runs images whose signature it verifies (station
+    DECISIONS.md item 48), so this cannot deploy arbitrary code — but it can move
+    a box to any *released* version, so it is granted sparingly and every use is
+    audited. Held by org admins like every capability; grant it to no one else
+    lightly."""
+
     RADIO_TRANSMIT = "radio.transmit"
     """Reserved. Never granted - the current hardware is receive-only and
     NullTransmitter refuses every PTT.
