@@ -222,18 +222,33 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
   }, []);
 
   const handleMessage = useCallback((message: ServerMessage) => {
-    // Frames for the station being left are still in flight when a switch
-    // happens, and the switch has just emptied every panel — so they land in a
-    // clean one and stick. Harmless for a stream the new station also
-    // publishes, permanent for one it does not: this is how a Pi with no
-    // weather head came to be displaying wind and pressure. See
-    // telemetryRouting.ts; a ref because this callback is deliberately stable.
-    if (!isForSelectedStation(message as { station_id?: string }, selectedRef.current)) {
-      return;
-    }
+    // Station up/down is org-wide: it arrives on the status stream for every
+    // station this user can see, and both the alerts drawer and the station
+    // list's connection state track all of them, not only the one on screen — so
+    // it is handled before the selected-station gate the readings pass through.
+    // Crucially it updates the fetched state directly: without this a station
+    // that just connected keeps the `online` it carried when the list was last
+    // fetched, so it reads "offline", its video pane (gated on `online`) stays
+    // shut, and the only fix was a page reload. Rare event, cheap to act on.
     if (message.type === "status") {
       const payload = message.payload as StatusPayload;
       if (!payload.alarm && payload.online === undefined) return;
+      if (payload.online !== undefined) {
+        const nowOnline = payload.online as boolean;
+        // Trust the event over the list's last-seen-derived `online`: it is
+        // instant, and unlike last-seen it does not keep a just-disconnected
+        // station "online" through the 120 s grace. Patch both the switcher's
+        // list entry and the watched station's detail — the latter gates the
+        // video pane — so a connect shows as connected and unlocks data at once.
+        setStations((prev) =>
+          prev.map((s) =>
+            s.id === message.station_id ? { ...s, online: nowOnline } : s,
+          ),
+        );
+        if (message.station_id === selectedRef.current) {
+          setDetail((d) => (d ? { ...d, online: nowOnline } : d));
+        }
+      }
       alertSeq.current += 1;
       setAlerts((prev) =>
         [
@@ -247,6 +262,15 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
           ...prev,
         ].slice(0, 40),
       );
+      return;
+    }
+    // Frames for the station being left are still in flight when a switch
+    // happens, and the switch has just emptied every panel — so they land in a
+    // clean one and stick. Harmless for a stream the new station also
+    // publishes, permanent for one it does not: this is how a Pi with no
+    // weather head came to be displaying wind and pressure. See
+    // telemetryRouting.ts; a ref because this callback is deliberately stable.
+    if (!isForSelectedStation(message as { station_id?: string }, selectedRef.current)) {
       return;
     }
 
@@ -426,6 +450,34 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
       .catch(() => setStations([]));
   }, []);
 
+  // Keep the list current without a reload, whatever changed it: a station
+  // enrolled or deleted by another operator, a rename, a box appearing for the
+  // first time. The server is authoritative for membership and names — but not
+  // for `online` of a station already tracked here, which stays driven by the
+  // broker's connect/disconnect events (instant, and free of the list's ±120 s
+  // last-seen grace that would otherwise keep a just-disconnected station shown
+  // as online). Only a newly-appeared station takes its `online` from the list.
+  // A transient failure leaves the last-known list in place rather than blanking
+  // the switcher.
+  const reconcile = useCallback(() => {
+    api
+      .stations()
+      .then((list) => {
+        setStations((prev) =>
+          list.map((s) => {
+            const known = prev.find((p) => p.id === s.id);
+            return known ? { ...s, online: known.online } : s;
+          }),
+        );
+        setStationId((current) =>
+          current && list.some((s) => s.id === current)
+            ? current
+            : list[0]?.id ?? null,
+        );
+      })
+      .catch(() => {});
+  }, []);
+
   // A station save can change what the map is built from — the min and max zoom,
   // the position — and those used to wait for a page reload because the config
   // is fetched only when the station changes. Refetch it here instead, so a
@@ -443,6 +495,15 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
   useEffect(() => {
     loadStations();
   }, [loadStations]);
+
+  // The backstop for everything that does not announce itself over the socket:
+  // a station added, removed or renamed elsewhere reaches this console within
+  // seconds, never on a reload. Connect/disconnect of a known station is already
+  // instant, over the status event in handleMessage.
+  useEffect(() => {
+    const id = window.setInterval(reconcile, 10000);
+    return () => window.clearInterval(id);
+  }, [reconcile]);
 
   useEffect(() => {
     if (!stationId) return;
