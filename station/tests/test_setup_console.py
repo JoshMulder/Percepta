@@ -576,26 +576,29 @@ class ServedPageTests(unittest.TestCase):
         self.assertIn("data-device data-changed>", body)
         self.assertIn("class='muted device-status'", body)  # the real, committing form
 
-    def test_a_field_bearing_pick_is_not_auto_committed_only_a_bare_one_is(self):
-        # The load-time auto-commit is gated: it fires only for a picked device
-        # with nothing to fill in (un-fit, or a param-less device). A field-bearing
-        # device — a camera, a serial receiver — must NOT commit on the bare pick,
-        # or _set_device would POST blank fields, wipe the previous device's stored
-        # address and password, and drop a running stream, all with zero typing.
-        # The gate is client-side, so lock its shape in source…
+    def test_a_pick_auto_commits_only_when_no_field_is_left_blank(self):
+        # The load-time auto-commit fires for a picked device that is ready as
+        # rendered: un-fit, param-less, or one whose defaults are already complete
+        # (the demo sources, a GPIO relay — which is what makes power, light and
+        # the demo camera save on the pick). A device left with an EMPTY field — a
+        # network camera with no address, a serial receiver with no port — must
+        # NOT commit on the bare pick, or _set_device would POST a half-filled
+        # config and, on a re-pick, wipe stored values and drop a running stream
+        # with zero typing. The gate is client-side, so lock its shape in source…
         source = (Path(__file__).resolve().parents[1] / "gsu" / "console.py").read_text()
         self.assertIn(
-            'if (form.hasAttribute("data-changed") && !editable) applyDevice();', source)
+            'if (form.hasAttribute("data-changed") && !blank) applyDevice();', source)
         self.assertIn(
-            'form.querySelector("input:not([type=hidden]), select, textarea")', source)
-        # …and confirm the render feeds it correctly: a field-bearing pick shows
-        # editable parameter fields (so the gate skips it), while un-fitting shows
-        # none (so the gate commits it).
+            "input:not([type=hidden]):not([type=checkbox]):not([type=radio]), textarea",
+            source)
+        # …and confirm the render feeds it: a serial weather head defaults its
+        # port to empty, so its pick renders a blank field the gate stops on,
+        # while un-fitting renders no parameter fields at all, so nothing stops it.
         from gsu.devices import registry
         serial = next(d for d in registry.by_slot("weather")
                       if d.id != "simulated-weather")
         _, field_bearing = self.request("GET", f"/devices?slot=weather&type={serial.id}")
-        self.assertIn("name='p_", field_bearing)
+        self.assertIn("name='p_port' list='ports-weather' value=''", field_bearing)
         _, unfit = self.request("GET", "/devices?slot=weather&type=")
         self.assertNotIn("name='p_", unfit)
 

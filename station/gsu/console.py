@@ -3227,16 +3227,24 @@ class Console:
       // fetch like every other change.
       form.addEventListener("submit", function (e) { e.preventDefault(); applyDevice(); });
       form.addEventListener("change", applyDevice);
-      // Auto-commit a freshly-picked device ONLY when it has nothing to fill in
-      // — un-fitting a slot, or a device with no parameters. A field-bearing
-      // device (a camera, a serial receiver) must NOT commit on the bare pick:
-      // that POSTs blank fields, and _set_device replaces the slot's params
-      // wholesale, so a stored address and password are wiped and a running
-      // camera stream is torn down before a single character is typed. Merely
-      // selecting a type to compare it must lose nothing. For those, the field
-      // edits above are what commit — deliberately, once something is entered.
-      var editable = form.querySelector("input:not([type=hidden]), select, textarea");
-      if (form.hasAttribute("data-changed") && !editable) applyDevice();
+      // Auto-commit a freshly-picked device when nothing it needs is left blank:
+      // an un-fit slot, a param-less device, or one whose defaults are already
+      // complete — the demo sources, a GPIO relay, anything ready to run as
+      // rendered. Only a device left with an EMPTY field — a network camera with
+      // no address, a serial device with no port — waits for that field, and the
+      // edit that fills it is what commits (the `change` listener above). This is
+      // safe on a bare pick: a re-pick of the same device is not `data-changed`,
+      // and a fresh pick has no stored params to overwrite, so it can neither
+      // wipe a working config nor post a half-filled one. Checkboxes, radios and
+      // selects always carry a value, so only a text/number/textarea can be
+      // blank — which is exactly "the operator still has to type something".
+      var blank = false;
+      var fields = form.querySelectorAll(
+        "input:not([type=hidden]):not([type=checkbox]):not([type=radio]), textarea");
+      for (var fi = 0; fi < fields.length; fi++) {
+        if (!fields[fi].value.trim()) { blank = true; break; }
+      }
+      if (form.hasAttribute("data-changed") && !blank) applyDevice();
     })(deviceForms[d]);
   }
   // The live camera, through Media Source Extensions.
