@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, api } from "../api";
 import type { Capability, Me, Member, OrganizationDetail } from "../types";
+import { SettingsStation } from "./SettingsStation";
 
 /**
  * Members, their roles, and what each may do at each station.
@@ -42,17 +43,24 @@ const LABELS: Record<string, string> = {
 
 export function SettingsOrganization({
   me,
-  onStationCreated,
+  stationId,
+  onStationsChanged,
 }: {
   me: Me;
-  /** A station was just created here. Naming it is all this page does; the
-   *  operator is then taken to it on the Stations tab to finish setup. */
-  onStationCreated: (stationId: string) => void;
+  /** The station the console is watching, used as the initial selection when the
+   *  operator opens the Stations section. */
+  stationId: string | null;
+  /** Called after any station is added, configured or deleted, so the console's
+   *  own station list stays in step with what changed here. */
+  onStationsChanged: () => void;
 }) {
   const [org, setOrg] = useState<OrganizationDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  // Members and stations are two jobs, and the station picker below is a sticky
+  // bar that would fight the members grid if they shared one scroll. Kept apart.
+  const [section, setSection] = useState<"people" | "stations">("people");
 
   const load = useCallback(async () => {
     try {
@@ -91,6 +99,40 @@ export function SettingsOrganization({
 
   return (
     <div className="settings-sections">
+      <div className="org-subtabs" role="tablist" aria-label="Organisation sections">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={section === "people"}
+          className={`org-subtab${section === "people" ? " active" : ""}`}
+          onClick={() => setSection("people")}
+        >
+          People
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={section === "stations"}
+          className={`org-subtab${section === "stations" ? " active" : ""}`}
+          onClick={() => setSection("stations")}
+        >
+          Stations
+        </button>
+      </div>
+
+      {section === "stations" && (
+        <SettingsStation
+          initialStationId={stationId}
+          onSaved={() => {
+            // The console's list and this page's own grant grid both name every
+            // station, so both are refreshed when one is added or removed here.
+            onStationsChanged();
+            void load();
+          }}
+        />
+      )}
+
+      {section === "people" && (
       <section className="settings-section">
         <h3>{org.name}</h3>
 
@@ -107,7 +149,6 @@ export function SettingsOrganization({
         </label>
 
         <InviteMember roles={org.roles} onInvited={load} />
-        <AddStation onCreated={onStationCreated} />
 
         <div className="member-layout">
           <ul className="member-list">
@@ -150,6 +191,7 @@ export function SettingsOrganization({
         </div>
         {error && <p className="settings-error">{error}</p>}
       </section>
+      )}
     </div>
   );
 }
@@ -488,125 +530,3 @@ function InviteMember({
   );
 }
 
-/**
- * Create a station — name only.
- *
- * Naming is the whole job here. Everything else about a station (its position,
- * its enrolment code) belongs on that station's own page, so on create the
- * operator is taken straight there rather than filling a longer form in a modal.
- * The timezone is taken from the browser, which is right far more often than UTC
- * and is editable on the station's configuration form afterwards.
- */
-function AddStation({
-  onCreated,
-}: {
-  onCreated: (stationId: string) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [name, setName] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  // Escape closes only this modal, not the settings dialog behind it. The
-  // capture phase runs before the settings' own window-level Escape handler, and
-  // stopping the event there keeps one press from closing both.
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopImmediatePropagation();
-        setOpen(false);
-      }
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [open]);
-
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    setSaving(true);
-    setError(null);
-    try {
-      const station = await api.createStation({
-        name: name.trim(),
-        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
-        latitude: null,
-        longitude: null,
-      });
-      setOpen(false);
-      setName("");
-      onCreated(station.id);
-    } catch (err) {
-      setError(
-        err instanceof ApiError ? err.message : "Could not create the station.",
-      );
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div className="settings-actions">
-      <button
-        type="button"
-        className="btn primary"
-        onClick={() => {
-          setName("");
-          setError(null);
-          setOpen(true);
-        }}
-      >
-        Add station
-      </button>
-
-      {open && (
-        <div className="modal-scrim" onClick={() => setOpen(false)}>
-          <div
-            className="modal-card"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Add station"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h3>New station</h3>
-            <form onSubmit={submit}>
-              <label className="field">
-                <span>Name</span>
-                <input
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder="Kaikoura Ridge"
-                  maxLength={255}
-                  autoFocus
-                  required
-                />
-              </label>
-              <p className="settings-note">
-                The record belongs to your organisation — the hardware does not
-                have to exist yet. You will be taken to it to set its position and
-                issue an enrolment code.
-              </p>
-              <div className="settings-actions">
-                <button
-                  type="submit"
-                  className="btn primary"
-                  disabled={saving || !name.trim()}
-                >
-                  {saving ? "Creating…" : "Create station"}
-                </button>
-                <button
-                  type="button"
-                  className="btn ghost"
-                  onClick={() => setOpen(false)}
-                >
-                  Cancel
-                </button>
-                {error && <span className="settings-error">{error}</span>}
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}

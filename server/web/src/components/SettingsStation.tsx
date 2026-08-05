@@ -4,25 +4,19 @@ import type { StationConfig, StationSummary } from "../types";
 import { SettingsEnrolment } from "./SettingsEnrolment";
 
 /**
- * Everything about one station: pick it, configure it, enrol it.
+ * Every station in the organisation: add one, pick it, configure it, enrol it.
  *
- * The selector is deliberately independent of the console's station switcher.
- * Configuring a site is an administrative job you do for whichever station
- * needs it, not for whichever one you happen to be watching.
- *
- * Creating a station lives on the Organisation tab, not here: a new record has
- * no telemetry and nothing to configure until it exists, so the flow is to name
- * it there and be brought straight to this tab, selected, to finish setup.
+ * Lives under the Organisation tab, because a station record is an org-wide
+ * thing rather than a property of whoever happens to be watching one. The
+ * selector is deliberately independent of the console's station switcher:
+ * configuring a site is an administrative job you do for whichever station
+ * needs it, not for the one in front of you.
  */
 export function SettingsStation({
   initialStationId,
-  canCreate,
   onSaved,
 }: {
   initialStationId: string | null;
-  /** Only whether to point an empty pane at where stations are created. The
-   *  create action itself is on the Organisation tab. */
-  canCreate: boolean;
   onSaved: () => void;
 }) {
   const [stations, setStations] = useState<StationSummary[] | null>(null);
@@ -81,6 +75,14 @@ export function SettingsStation({
             ))}
           </select>
         </label>
+        <AddStation
+          onCreated={async (id) => {
+            // Refresh the list and select the new record in place, so the
+            // operator lands on it ready to set position and issue a code.
+            await loadStations(id);
+            onSaved();
+          }}
+        />
       </div>
 
       {station ? (
@@ -106,13 +108,131 @@ export function SettingsStation({
           />
         </>
       ) : (
-        <p className="settings-note">
-          {canCreate
-            ? "No stations yet. Add one from the Organisation tab to get started."
-            : "No stations available to configure."}
-        </p>
+        <p className="settings-note">No stations yet. Add one to get started.</p>
       )}
     </div>
+  );
+}
+
+/**
+ * Create a station — name only.
+ *
+ * Naming is the whole job. Everything else (position, enrolment code) belongs on
+ * the station's own configuration below, so on create the picker simply selects
+ * the new record in place. The timezone is taken from the browser — right far
+ * more often than UTC — and stays editable on the configuration form afterwards.
+ */
+function AddStation({
+  onCreated,
+}: {
+  onCreated: (stationId: string) => void | Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Escape closes only this modal, not the settings dialog behind it. The
+  // capture phase runs before the settings' own window-level Escape handler, and
+  // stopping the event there keeps one press from closing both.
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopImmediatePropagation();
+        setOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [open]);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setSaving(true);
+    setError(null);
+    try {
+      const station = await api.createStation({
+        name: name.trim(),
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+        latitude: null,
+        longitude: null,
+      });
+      setOpen(false);
+      setName("");
+      await onCreated(station.id);
+    } catch (err) {
+      setError(
+        err instanceof ApiError ? err.message : "Could not create the station.",
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <>
+      <button
+        type="button"
+        className="btn primary"
+        onClick={() => {
+          setName("");
+          setError(null);
+          setOpen(true);
+        }}
+      >
+        Add station
+      </button>
+
+      {open && (
+        <div className="modal-scrim" onClick={() => setOpen(false)}>
+          <div
+            className="modal-card"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Add station"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3>New station</h3>
+            <form onSubmit={submit}>
+              <label className="field">
+                <span>Name</span>
+                <input
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="Kaikoura Ridge"
+                  maxLength={255}
+                  autoFocus
+                  required
+                />
+              </label>
+              <p className="settings-note">
+                The record belongs to your organisation — the hardware does not
+                have to exist yet. It opens below, ready for its position and an
+                enrolment code.
+              </p>
+              <div className="settings-actions">
+                <button
+                  type="submit"
+                  className="btn primary"
+                  disabled={saving || !name.trim()}
+                >
+                  {saving ? "Creating…" : "Create station"}
+                </button>
+                <button
+                  type="button"
+                  className="btn ghost"
+                  onClick={() => setOpen(false)}
+                >
+                  Cancel
+                </button>
+                {error && <span className="settings-error">{error}</span>}
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 

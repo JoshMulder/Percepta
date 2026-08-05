@@ -2662,6 +2662,32 @@ body {
 .station-picker .field select { background: var(--panel); }
 /* The label heads the bar rather than captioning a field, so it is not dimmed. */
 .station-picker .field > span { color: var(--text); font-weight: 600; }
+/* Add sits at the far right of the bar: choosing a station and creating one are
+   two actions, and the gap between them says so. */
+.station-picker .btn { flex: 0 0 auto; margin-left: auto; }
+
+/* The Organisation pane splits into People and Stations — a quiet segmented
+   control inside the one pane, not another vertical nav down the side. */
+.org-subtabs {
+  display: flex;
+  gap: 6px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 4px;
+}
+.org-subtab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  font: inherit;
+  font-weight: 600;
+  padding: 8px 6px;
+  margin-bottom: -1px;
+  cursor: pointer;
+}
+.org-subtab:hover { color: var(--text); }
+.org-subtab.active { color: var(--text); border-bottom-color: var(--brand); }
+.org-subtab:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; border-radius: 4px; }
 
 /* A small dialog over the settings dialog — naming a new station. Fixed, so it
    centres on the viewport rather than inside the scrolling pane, and above the

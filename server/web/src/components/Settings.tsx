@@ -5,7 +5,6 @@ import { SettingsDisplay } from "./SettingsDisplay";
 import { SettingsOrganization } from "./SettingsOrganization";
 import { SettingsPlatform } from "./SettingsPlatform";
 import { SettingsRadio } from "./SettingsRadio";
-import { SettingsStation } from "./SettingsStation";
 
 /**
  * The settings overlay.
@@ -23,7 +22,7 @@ import { SettingsStation } from "./SettingsStation";
  * unpleasant to use. Different job, different rules.
  */
 
-type Tab = "account" | "display" | "radio" | "station" | "organization" | "platform";
+type Tab = "account" | "display" | "radio" | "organization" | "platform";
 
 export function Settings({
   me,
@@ -52,10 +51,6 @@ export function Settings({
   // disabled tab advertises a capability the user does not have and invites
   // them to ask why; an absent one says nothing.
   const isAdmin = me.roles.includes("admin");
-  // An admin can configure every station in the org, so the tab is offered even
-  // when the console happens to be looking at one they have not been granted
-  // explicitly. For everyone else it follows the station in front of them.
-  const canConfigure = isAdmin || capabilities.includes("config.write");
 
   // Radio needs only radio.listen: the meter and the squelch belong to whoever
   // is listening, not to whoever administers the site. Gain and correction
@@ -68,7 +63,6 @@ export function Settings({
     // gated by no capability.
     { id: "display", label: "Map" },
     ...(canRadio ? [{ id: "radio" as Tab, label: "Radio" }] : []),
-    ...(canConfigure ? [{ id: "station" as Tab, label: "Stations" }] : []),
     ...(isAdmin ? [{ id: "organization" as Tab, label: "Organisation" }] : []),
     // Only while the active org IS the platform org. A platform admin working
     // inside a customer's organisation does not get this.
@@ -76,20 +70,6 @@ export function Settings({
   ];
 
   const [tab, setTab] = useState<Tab>("account");
-
-  // Set when a station is created from the Organisation tab: it switches to the
-  // Stations tab and selects the new record, so the operator lands on it to
-  // finish setup (position, enrolment) instead of hunting for it in the picker.
-  // It persists for the rest of this settings session and resets when the dialog
-  // is closed and reopened.
-  const [stationFocus, setStationFocus] = useState<string | null>(null);
-
-  function goToStation(id: string) {
-    setStationFocus(id);
-    setTab("station");
-    // Keep the console's own station list (behind the dialog) in step too.
-    onStationsChanged();
-  }
 
   // Escape closes, as it does for the alerts drawer.
   useEffect(() => {
@@ -160,18 +140,12 @@ export function Settings({
                 stationName={stationName}
               />
             )}
-            {tab === "station" && (
-              <SettingsStation
-                // Remounts when a freshly created station is focused, so its
-                // picker opens on that station rather than the console's.
-                key={stationFocus ?? "console"}
-                initialStationId={stationFocus ?? stationId}
-                canCreate={isAdmin}
-                onSaved={onStationsChanged}
-              />
-            )}
             {tab === "organization" && (
-              <SettingsOrganization me={me} onStationCreated={goToStation} />
+              <SettingsOrganization
+                me={me}
+                stationId={stationId}
+                onStationsChanged={onStationsChanged}
+              />
             )}
             {tab === "platform" && <SettingsPlatform />}
           </div>
