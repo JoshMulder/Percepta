@@ -51,7 +51,6 @@ FROM ${BASE} AS builder
 
 ARG WHISPER_REF
 ARG RTLSDR_REF
-ARG WHISPER_MODELS
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
@@ -95,6 +94,9 @@ RUN git clone --depth 1 --branch "${WHISPER_REF}" \
  && cp "${whisper_bin}" /usr/local/bin/whisper-cli
 
 # The model ladder, pinned by name; the files are content-stable at these URLs.
+# WHISPER_MODELS is declared here, below the whisper build, on purpose: changing
+# the ladder then re-runs only this download and never rebuilds whisper.cpp above.
+ARG WHISPER_MODELS
 RUN mkdir -p /opt/models \
  && for m in ${WHISPER_MODELS}; do \
       curl -fSL -o "/opt/models/ggml-$m.bin" \
