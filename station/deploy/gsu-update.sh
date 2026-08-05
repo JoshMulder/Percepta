@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+#
+# The station updater. Re-homes DECISIONS.md item 39's mechanism onto Docker
+# Compose and adds what item 48 decided: it pulls a SIGNED image from a private
+# registry and verifies the signature before running it.
+#
+# WHERE THIS RUNS (item 48, and the choice confirmed at build time)
+# ----------------------------------------------------------------
+# In its own small container — the `updater` service in docker-compose.yml — with
+# the docker socket, the compose files and the handoff directory mounted. NOT in
+# the agent container (which has no socket, drops every capability and is
+# read-only, so it cannot replace itself — and must not, or the signature check
+# and the gate below would be decorative). A separate updater keeps the host
+# Docker-only: nothing is installed on the box, and the updater ships as an image
+# like everything else. It recreates the AGENT service, never itself.
+#
+# WHAT IT DOES, IN ORDER
+# ----------------------
+#   1. Read the target the agent recorded (image, sha256 digest, tag).
+#   2. Skip if already on that digest, or if it was rejected before (unless
+#      --force): a bad image must not be re-pulled every cycle.
+#   3. Log in to the registry, pull the pinned digest. `docker pull` is atomic at
+#      the image level, so a dropped link cannot leave a half-built image.
+#   4. VERIFY THE SIGNATURE (cosign, keyless) before running it. The pin proves
+#      the bytes did not change; the signature proves we built them. A failed
+#      verification is recorded and NOT deployed.
+#   5. Recreate the agent service on the new ref (docker compose up -d gsu).
+#   6. Gate on it PUBLISHING within the window — up, uplink up, and its published
+#      counter rising. Read over the agent's own loopback via `docker exec`, the
+#      auth-exempt path the update gate is allowed (console setup_access). A
+#      container that starts and publishes nothing is the failure a plain
+#      "did it start?" check misses.
+#   7. On any gate failure, roll back to the previous ref (already on disk, no
+#      network needed) and gate that too, so "the rollback worked" is a fact. If
+#      the OLD image also fails to gate, say so specifically — not an update
+#      fault, and sending someone after the update wastes the trip.
+#
+# NOT VERIFIED. No Docker/cosign here to run it against. The branching follows
+# item 39's (stub-tested to 21 scenarios, and even then never drove a real
+# container); the cosign flags, the Compose recreate, the docker-exec gate and
+# the registry login are new. Run `--status`, then once by hand, on the first
+# box before --watch is trusted. Lines marked VERIFY are the ones to watch.
+set -euo pipefail
+
+# --- configuration (from the updater service's environment) ---------------
+COMPOSE_DIR="${GSU_COMPOSE_DIR:-/workspace}"          # holds docker-compose.yml + .env
+ENV_FILE="${GSU_ENV_FILE:-${COMPOSE_DIR}/.env}"
+HANDOFF="${GSU_UPDATE_HANDOFF:-/handoff}"             # shared with the agent
+STATE="${GSU_UPDATE_STATE:-/var/lib/updater}"        # updater-only: rejects, previous ref
+IMAGE="${GSU_IMAGE:-ghcr.io/joshmulder/percepta-gsu}"
+AGENT_CONTAINER="${GSU_AGENT_CONTAINER:-percepta-gsu}"
+AGENT_SERVICE="${GSU_AGENT_SERVICE:-gsu}"
+COSIGN_IDENTITY_REGEXP="${GSU_COSIGN_IDENTITY:-^https://github.com/JoshMulder/Percepta/.github/workflows/release.yml@refs/tags/v.*}"
+COSIGN_ISSUER="${GSU_COSIGN_ISSUER:-https://token.actions.githubusercontent.com}"
+GATE_SECONDS="${GSU_UPDATE_GATE_S:-180}"
+POLL_SECONDS="${GSU_UPDATE_POLL_S:-30}"
+REGISTRY="${IMAGE%%/*}"
+
+REQUEST="${HANDOFF}/update-request.json"
+STATUS="${HANDOFF}/update-status.json"
+REJECTS="${STATE}/rejected-digests"
+PREVIOUS="${STATE}/previous-ref"
+
+log() { printf '%s gsu-update: %s\n' "$(date -u +%FT%TZ)" "$*"; }
+die() { log "ERROR: $*"; return 1; }
+mkdir -p "${STATE}"
+
+# The marker is written by us (update.py), one flat JSON object, so a targeted
+# sed reads a field without dragging a JSON parser into the updater image.
+json_field() { sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$1" | head -1; }
+
+running_ref() { docker inspect --format '{{.Config.Image}}' "${AGENT_CONTAINER}" 2>/dev/null || true; }
+
+# Read the agent's /status.json over its OWN loopback (auth-exempt for the update
+# gate) by exec-ing curl-less Python that already ships in the agent image.
+read_status() {
+    docker exec "${AGENT_CONTAINER}" python3 -c \
+"import urllib.request,sys;sys.stdout.write(urllib.request.urlopen('http://127.0.0.1:8088/status.json',timeout=5).read().decode())" \
+        2>/dev/null || true
+}
+
+set_env_ref() {  # rewrite GSU_IMAGE_REF in .env atomically
+    local ref="$1" tmp; tmp="$(mktemp)"
+    if [ -f "${ENV_FILE}" ] && grep -q '^GSU_IMAGE_REF=' "${ENV_FILE}"; then
+        sed "s#^GSU_IMAGE_REF=.*#GSU_IMAGE_REF=${ref}#" "${ENV_FILE}" >"${tmp}"
+    else
+        { [ -f "${ENV_FILE}" ] && cat "${ENV_FILE}"; echo "GSU_IMAGE_REF=${ref}"; } >"${tmp}"
+    fi
+    cat "${tmp}" >"${ENV_FILE}"; rm -f "${tmp}"   # in place: .env is a bind mount
+}
+
+write_status() {  # the agent reports last_result/last_version in telemetry
+    mkdir -p "${HANDOFF}"
+    printf '{"last_result":"%s","last_version":"%s","at":"%s"}\n' \
+        "$1" "$2" "$(date -u +%FT%TZ)" >"${STATUS}.tmp" && mv "${STATUS}.tmp" "${STATUS}"
+}
+
+recreate() { ( cd "${COMPOSE_DIR}" && docker compose up -d --no-build "${AGENT_SERVICE}" ); } # VERIFY
+
+# The publish-gate: up, uplink up, and the published counter rising across two
+# reads inside the window — the one condition a "did it start?" check cannot fake.
+gate() {
+    local deadline=$((SECONDS + GATE_SECONDS)) first="" now pub
+    while [ "${SECONDS}" -lt "${deadline}" ]; do
+        now="$(read_status)"
+        if printf '%s' "${now}" | grep -q '"link"[[:space:]]*:[[:space:]]*true'; then
+            pub="$(printf '%s' "${now}" | sed -n 's/.*"published"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' | head -1)"
+            if [ -z "${first}" ]; then first="${pub:-0}"
+            elif [ -n "${pub}" ] && [ "${pub}" -gt "${first}" ]; then return 0; fi
+        fi
+        sleep 10
+    done
+    return 1
+}
+
+reconcile() {
+    local force="${1:-}"
+    [ -f "${REQUEST}" ] || { log "no update requested; nothing to do."; return 0; }
+    local digest tag req_image target label current
+    digest="$(json_field "${REQUEST}" digest)"
+    tag="$(json_field "${REQUEST}" tag)"
+    req_image="$(json_field "${REQUEST}" image)"
+    [ -n "${digest}" ] || { log "request has no digest; ignoring."; return 0; }
+    [ "${req_image:-${IMAGE}}" = "${IMAGE}" ] || log "WARNING: request image ${req_image} != configured ${IMAGE}; using configured."
+    target="${IMAGE}@${digest}"
+    label="${tag:-${digest:0:16}}"
+
+    current="$(running_ref)"
+    if [ "${current}" = "${target}" ] && [ -z "${force}" ]; then return 0; fi
+    if [ -z "${force}" ] && [ -f "${REJECTS}" ] && grep -qxF "${digest}" "${REJECTS}"; then
+        log "${label} was rejected before; skipping (--force overrides)."; return 0
+    fi
+
+    log "updating to ${label} (${target})"
+    echo "${current}" >"${PREVIOUS}"
+
+    if [ -n "${GSU_REGISTRY_TOKEN:-}" ]; then
+        printf '%s' "${GSU_REGISTRY_TOKEN}" | docker login "${REGISTRY}" \
+            -u "${GSU_REGISTRY_USER:-x}" --password-stdin >/dev/null 2>&1 \
+            || log "WARNING: docker login failed; relying on any existing credentials."
+    fi
+    if ! docker pull "${target}"; then
+        log "pull failed; leaving the running container untouched."; return 0
+    fi
+
+    if ! cosign verify \
+            --certificate-identity-regexp "${COSIGN_IDENTITY_REGEXP}" \
+            --certificate-oidc-issuer "${COSIGN_ISSUER}" \
+            "${target}" >/dev/null 2>&1; then   # VERIFY: keyless flags vs release.yml
+        log "SIGNATURE VERIFICATION FAILED for ${label}. Refusing to run it."
+        echo "${digest}" >>"${REJECTS}"; write_status "signature_rejected" "${label}"; return 1
+    fi
+    log "signature verified."
+
+    set_env_ref "${target}"; recreate
+    if gate; then
+        log "updated to ${label} and publishing."
+        write_status "updated" "${label}"; rm -f "${REQUEST}"; return 0
+    fi
+
+    log "new image did not come up publishing within ${GATE_SECONDS}s; rolling back."
+    echo "${digest}" >>"${REJECTS}"
+    local prev; prev="$(cat "${PREVIOUS}" 2>/dev/null || true)"
+    [ -n "${prev}" ] || { write_status "rollback_impossible" "${label}"; die "no previous image to roll back to; the site needs attention."; return 2; }
+    set_env_ref "${prev}"; recreate
+    if gate; then
+        log "rolled back to ${prev} and publishing."
+        write_status "rolled_back" "${label}"; rm -f "${REQUEST}"; return 1
+    fi
+    write_status "rollback_failed" "${label}"
+    die "the ROLLBACK also failed to publish — not an update fault; the site needs attention."; return 2
+}
+
+case "${1:-once}" in
+    --status)
+        log "image ${IMAGE}"; log "running: $(running_ref)"
+        log "request: $( [ -f "${REQUEST}" ] && cat "${REQUEST}" || echo none )"
+        log "last status: $( [ -f "${STATUS}" ] && cat "${STATUS}" || echo none )"
+        ;;
+    --watch)
+        log "watching ${REQUEST} every ${POLL_SECONDS}s."
+        while true; do reconcile "" || true; sleep "${POLL_SECONDS}"; done
+        ;;
+    --force) reconcile 1 ;;
+    *) reconcile "" ;;
+esac

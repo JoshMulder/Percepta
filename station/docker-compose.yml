@@ -8,9 +8,11 @@
 # holds the things nobody types — the Dockerfile, the udev rule, the reference
 # inventory.
 #
-# Updating is `git pull` and `docker compose up -d --build`. There is no
-# updater daemon and no image registry: the source of truth is the checkout,
-# and a rollback is `git checkout` of a tag that is already on the disk.
+# Two update paths now (DECISIONS.md item 48), chosen by GSU_IMAGE_REF in .env:
+# a local `docker compose up -d --build` from this checkout, or — deployed — a
+# signed image pulled from a registry by the host-side updater
+# (deploy/gsu-update.sh, installed by deploy/install-updater.sh). The old "no
+# updater daemon, no registry" note is superseded.
 #
 # ---------------------------------------------------------------------------
 # DEVICE ACCESS IS DELIBERATELY BROAD, AND THAT IS A DECISION
@@ -58,11 +60,17 @@ services:
       context: .
       dockerfile: deploy/Dockerfile
 
-    # Built from this checkout, never pulled. There is no registry in this
-    # deployment: `git pull && docker compose up -d --build` is the update, and
-    # the checkout is the thing that gets rolled back if it goes wrong.
-    image: percepta/gsu:local
-    pull_policy: never
+    # Chosen by GSU_IMAGE_REF in .env (item 48):
+    #   * Set to a signed registry digest — ghcr.io/<owner>/percepta-gsu@sha256:… —
+    #     is the deployed path. The host-side updater pulls and verifies it,
+    #     rewrites this key and recreates; `build:` above goes unused.
+    #   * Unset is the local path: `docker compose up --build` builds from this
+    #     checkout and tags it percepta/gsu:local, exactly as before.
+    image: ${GSU_IMAGE_REF:-percepta/gsu:local}
+    # The updater pulls (and verifies) explicitly before `up`, so compose never
+    # needs to: `missing` lets a fresh box pull on first `up` and otherwise runs
+    # what is already local.
+    pull_policy: missing
     container_name: percepta-gsu
 
     # Restart for ever. Same reasoning as the systemd unit: on a site hours
@@ -110,6 +118,10 @@ services:
       # at all without a password hash — so the password, not the interface,
       # is what protects it.
       GSU_SETUP_HOST: 0.0.0.0
+      # Where the agent writes a system.update request for the host-side updater
+      # — the container path of the handoff bind mount below. The host side is
+      # watched by gsu-update.path (item 48).
+      GSU_UPDATE_DIR: /var/lib/percepta-gsu-update
 
     volumes:
       # State: credential, pinned broker CA, device inventory, events,
@@ -162,6 +174,13 @@ services:
       # Read-only because the agent reads the clock and never sets it, which is
       # the same line ProtectClock=yes draws on the systemd path.
       - /run/systemd/timesync:/run/systemd/timesync:ro
+      # The update handoff (item 48): the agent writes an update request here and
+      # the updater container reads it and writes its status back. A named volume
+      # shared between the two containers — no host directory, no ownership dance:
+      # the image creates this path owned by the agent's uid, so a fresh volume
+      # inherits it. Both are containers, so nothing reaches into Docker's volume
+      # path from the host (which is what item 48 cautioned against).
+      - gsu-update:/var/lib/percepta-gsu-update
 
     # Visibility is not permission — the device cgroup still has to allow each
     # major, or every open() returns EPERM against a node that is plainly
@@ -254,5 +273,58 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # The host-side updater, as a sibling container (item 48). Built locally and
+  # trusted; it pulls, verifies and recreates the AGENT — never itself. It holds
+  # the docker socket, which is root-equivalent on the host: that is the deal for
+  # keeping the host Docker-only, and it is one small container whose only job is
+  # updates. Behind the `updater` profile, so a box that updates by hand
+  # (`docker compose up -d`) runs nothing extra; opt in with
+  # `docker compose --profile updater up -d`.
+  updater:
+    profiles: ["updater"]
+    build:
+      context: .
+      dockerfile: deploy/updater.Dockerfile
+    image: percepta/gsu-updater:local
+    container_name: percepta-updater
+    restart: unless-stopped
+    init: true
+    environment:
+      GSU_IMAGE: ${GSU_IMAGE:-ghcr.io/joshmulder/percepta-gsu}
+      GSU_COMPOSE_DIR: /workspace
+      GSU_ENV_FILE: /workspace/.env
+      GSU_UPDATE_HANDOFF: /handoff
+      GSU_UPDATE_STATE: /var/lib/updater
+      GSU_AGENT_CONTAINER: percepta-gsu
+      GSU_AGENT_SERVICE: gsu
+      GSU_COSIGN_IDENTITY: ${GSU_COSIGN_IDENTITY:-^https://github.com/JoshMulder/Percepta/.github/workflows/release.yml@refs/tags/v.*}
+      GSU_COSIGN_ISSUER: ${GSU_COSIGN_ISSUER:-https://token.actions.githubusercontent.com}
+      # A read-only registry pull token, from .env. Empty means the image is
+      # public or docker is already logged in on the box.
+      GSU_REGISTRY_USER: ${GSU_REGISTRY_USER:-}
+      GSU_REGISTRY_TOKEN: ${GSU_REGISTRY_TOKEN:-}
+      GSU_UPDATE_GATE_S: ${GSU_UPDATE_GATE_S:-180}
+      GSU_UPDATE_POLL_S: ${GSU_UPDATE_POLL_S:-30}
+    volumes:
+      # The docker socket: how it recreates the agent. Root-equivalent on the
+      # host, accepted for this one container (see the note above).
+      - /var/run/docker.sock:/var/run/docker.sock
+      # The compose file and .env, read-write: the updater rewrites GSU_IMAGE_REF
+      # and runs `docker compose up -d gsu` from here.
+      - .:/workspace
+      # The shared handoff volume: reads the agent's request, writes status back.
+      - gsu-update:/handoff
+      # Updater-only bookkeeping: rejected digests and the rollback ref.
+      - updater-state:/var/lib/updater
+    mem_limit: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
   gsu-state:
+  updater-state:
+  # The agent<->updater handoff (item 48): the request and the status file.
+  gsu-update:

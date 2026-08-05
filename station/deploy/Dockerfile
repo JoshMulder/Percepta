@@ -164,9 +164,10 @@ RUN ldconfig
 # docker-compose.yml, which is where the numbers can be checked against the box.
 RUN groupadd --system --gid 10001 gsu \
  && useradd --system --uid 10001 --gid gsu --no-create-home --shell /usr/sbin/nologin gsu \
- && mkdir -p /var/lib/percepta-gsu \
- && chown gsu:gsu /var/lib/percepta-gsu \
- && chmod 0700 /var/lib/percepta-gsu
+ && mkdir -p /var/lib/percepta-gsu /var/lib/percepta-gsu-update \
+ && chown gsu:gsu /var/lib/percepta-gsu /var/lib/percepta-gsu-update \
+ && chmod 0700 /var/lib/percepta-gsu \
+ && chmod 0770 /var/lib/percepta-gsu-update
 
 WORKDIR /opt/percepta/station
 

@@ -254,9 +254,12 @@ class AgentConfig:
     @property
     def update_dir(self) -> Path:
         """Where a `system.update` request is written for the host-side updater
-        to pick up. Under the state directory, which is always writable; the host
-        slice decides how it reads it (DECISIONS.md item 48)."""
-        return self.home / "update"
+        to pick up. GSU_UPDATE_DIR points it at a bind-mounted handoff directory
+        the host can read directly (DECISIONS.md item 48); unset, it falls back
+        under the state directory, which is always writable but only reachable by
+        the host through Docker's volume path."""
+        override = _env("GSU_UPDATE_DIR")
+        return Path(override) if override else self.home / "update"
 
     @property
     def lock_path(self) -> Path:

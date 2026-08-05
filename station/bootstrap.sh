@@ -19,10 +19,12 @@
 #
 #     git pull && docker compose up -d --build
 #
-# There is no updater daemon, no image registry and no rollback tooling: the
-# checkout is the source of truth, and going back is `git checkout` of a tag
-# already on the disk. On a link that may be the reason you are rolling back,
-# not needing to download anything is the point.
+# That is the local path, and the source of truth is the checkout. For remote
+# updates — a signed image pulled and verified by the `updater` sibling container
+# — opt in with `docker compose --profile updater up -d` and set the registry and
+# signing keys in .env (deploy/gsu.env.example). See DECISIONS.md item 48. This
+# script still installs nothing on the host: the updater is just another
+# container.
 #
 # Running this again after changing your mind is the supported way to change
 # your mind: it reads the existing `.env` for its defaults and rewrites it.
@@ -325,7 +327,8 @@ Running.
   Setup page      http://<this box>/      (port 80, on the site LAN. The
                   password you just set is what protects it)
   Logs            docker compose logs -f
-  Update          git pull && docker compose up -d --build
+  Update          local:  git pull && docker compose up -d --build
+                  remote: docker compose --profile updater up -d   (item 48)
 
 The enrolment token comes from the platform, is single-use and short-lived.
 Until this station is enrolled it senses, records and alerts locally and
