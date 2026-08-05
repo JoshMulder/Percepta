@@ -81,7 +81,7 @@ OPTIONAL_KINDS = {"health", "events"}
 COMMAND_TIMEOUT = 8.0
 
 #: What this harness checks against.
-CONTRACT_VERSION = "2.0"
+CONTRACT_VERSION = "2.1"
 
 #: Relay stream codes, per transport.md. A station may publish the first three
 #: and only receive on the fourth.

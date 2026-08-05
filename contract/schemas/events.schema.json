@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://percepta/contract/v2.0/events.schema.json",
-  "contractVersion": "2.0",
+  "$id": "https://percepta/contract/v2.1/events.schema.json",
+  "contractVersion": "2.1",
   "title": "Ground station events",
   "description": "One batch of events - stream `e` on the relay (transport.md).\n\n**This is the one channel that is a ledger rather than a stream, and every rule elsewhere in this contract inverts here.** Telemetry is current state and may be dropped, because a newer frame replaces it in a second. An event has no newer version: a transmission recorded at 03:12, a proximity alert, a credential renewal that failed, a floodlight that drew no current. Losing it loses the fact.\n\nThat is why the station buffers events through an outage and telemetry is discarded, and why this channel is acknowledged when nothing else is. A station keeps every unacknowledged event on local storage - across reboots - and re-sends until the platform says it has them.\n\nDelivery is **at-least-once**, never exactly-once: an acknowledgement can be lost after the platform has stored a batch, in which case the station sends it again. Consumers deduplicate on `id`, which is why `id` is required and must be globally unique.",
   "type": "object",

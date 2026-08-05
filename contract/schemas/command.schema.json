@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://percepta/contract/v2.0/command.schema.json",
-  "contractVersion": "2.0",
+  "$id": "https://percepta/contract/v2.1/command.schema.json",
+  "contractVersion": "2.1",
   "title": "Platform command to a ground station",
   "description": "One command - stream `c` on the relay, platform to station (transport.md). A command is a request, never a guarantee: the platform confirms nothing itself and waits to see the effect in the station's own telemetry. Every command below therefore has a field in a telemetry payload that reports its result - if you add a command, add that field too. Unknown commands must be ignored, not rejected: an older station and a newer platform have to coexist.\n\nThe leased commands (radio.audio, video.start) share one shape: the platform repeats the command while the demand exists, a repeat is a renewal rather than a second start, and the lease expiring is the stop signal. Silence has to be the off switch because most consumers never say goodbye - a closed laptop, a dropped link, a crashed platform - and every one of those must stop a station transmitting to nobody on a metered link.",
   "type": "object",
@@ -264,6 +264,39 @@
       "required": [
         "kind",
         "on"
+      ]
+    },
+    {
+      "type": "object",
+      "description": "Update the station to a specific image. Added in 2.1, additive, and like every command ignored by a station that does not know it. The station does NOT update itself: it records this target, and the host-side updater outside its sandbox pulls the pinned digest, verifies its signature, recreates the container, gates on it publishing and rolls back on failure (station DECISIONS.md item 48). Progress is reported as the station's running and desired version in health telemetry, not confirmed here. `digest` is the pin and is required; `tag` is a human label; a station may refuse a malformed target.",
+      "properties": {
+        "kind": {
+          "const": "system.update"
+        },
+        "image": {
+          "type": "string",
+          "maxLength": 400,
+          "description": "The image repository to pull from (a registry path). Handed to the host updater unchanged."
+        },
+        "tag": {
+          "type": "string",
+          "maxLength": 200,
+          "description": "A human-readable version label for the target, echoed back as the desired version. Advisory: the digest is what is pulled and verified."
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "The immutable content digest to pull and run. Required: it is the pin that makes the update tamper-evident, and the signature is checked against it on the box."
+        },
+        "force": {
+          "type": "boolean",
+          "description": "Re-apply a target the station previously rejected. Off by default, so a bad image is not re-pulled every cycle."
+        }
+      },
+      "required": [
+        "kind",
+        "image",
+        "digest"
       ]
     }
   ]

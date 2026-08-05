@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://percepta/contract/v2.0/telemetry.schema.json",
-  "contractVersion": "2.0",
+  "$id": "https://percepta/contract/v2.1/telemetry.schema.json",
+  "contractVersion": "2.1",
   "title": "Ground station telemetry",
   "description": "One object per telemetry frame - stream `t` on the relay (transport.md). Discriminated by `kind`. Unknown fields are ignored by the platform, and unknown kinds are dropped rather than erroring - so a new sensor can be added station-side before the platform renders it.\n\nEvery stream shares the availability fields in $defs/availability: a payload may carry `available: false` to declare that the station has no source for that stream, and its usual fields are then not required, because there is nothing to put in them.",
   "type": "object",

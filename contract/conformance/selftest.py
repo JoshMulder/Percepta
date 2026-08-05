@@ -41,7 +41,7 @@ HERE = Path(__file__).resolve().parent
 SCHEMAS = HERE.parent / "schemas"
 
 #: What the schemas and the harness must all agree they are.
-CONTRACT_VERSION = "2.0"
+CONTRACT_VERSION = "2.1"
 
 
 def check_schemas() -> list[str]:

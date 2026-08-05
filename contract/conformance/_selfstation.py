@@ -242,7 +242,7 @@ def main():
         if int(t) % 30 == 0:
             cadence = {"adsb": 86400.0} if lying else {
                 "adsb": 1.0, "weather": 35.0 if slow else 5.0}
-            frames.append(("t", {"kind": "health", "contract_version": "2.0",
+            frames.append(("t", {"kind": "health", "contract_version": "2.1",
                                  "status": "ok", "uptime_s": round(t, 1),
                                  "cadence": cadence}))
         # audio: both gates, unless told to misbehave

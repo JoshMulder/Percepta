@@ -324,7 +324,7 @@ class CommandTests(unittest.TestCase):
         self.router = CommandRouter(
             build_handlers(
                 self.agent.radio, self.agent.light, self.agent._apply_config,
-                self.agent.stream,
+                self.agent.stream, updates=self.agent.updates,
             ),
         )
 

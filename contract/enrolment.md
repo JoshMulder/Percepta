@@ -254,7 +254,7 @@ technician on site.
                                      // health.config_version. Two copies of
                                      // one number is the thing §7 forbids for
                                      // position, and it applies here too.
-  "contract_version": "2.0"          // which version of this contract the
+  "contract_version": "2.1"          // which version of this contract the
                                      // platform speaks. Stated so a station
                                      // learns it at the one moment both sides
                                      // are talking, and can say plainly that

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://percepta/contract/v2.0/audio.schema.json",
-  "contractVersion": "2.0",
+  "$id": "https://percepta/contract/v2.1/audio.schema.json",
+  "contractVersion": "2.1",
   "title": "Ground station audio",
   "description": "One object per audio frame - stream `a` on the relay (transport.md).\n\nOpus, because this is the platform's largest single consumer and the link is metered. Uncompressed 24 kHz 16-bit mono is 384 kbit/s, and base64 inside a JSON envelope made it ~512; Opus at 16-24 kbit/s is transparent for voice and reaches the same console for roughly a twelfth of the bandwidth at the batch size suggested below - a twentieth only at 16 kbit/s and the maximum batch, which costs two seconds of latency on a push-to-talk channel. That saving is the whole reason this stream is shaped the way it is, and it is why the format is fixed here rather than left to a station.\n\nPublished ONLY when both gates are open: the squelch is open, AND the platform has asked within a live `radio.audio` lease. A station nobody has asked sends nothing at all. See contract/transport.md.",
   "type": "object",
