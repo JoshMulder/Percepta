@@ -61,6 +61,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       git ca-certificates curl cmake build-essential pkg-config \
       libusb-1.0-0-dev \
+      gfortran \
  && rm -rf /var/lib/apt/lists/*
 
 # The rtl-sdr-blog fork — installs librtlsdr.so.* into /usr/local/lib. No udev
@@ -108,6 +109,23 @@ RUN mkdir -p /opt/models \
         "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-$m.bin" \
       || { echo "failed to fetch ggml-$m.bin"; exit 1; }; \
     done
+
+# The numpy wheel, built here so the slim runtime can install it without a
+# toolchain of its own. On amd64/arm64 this just downloads the prebuilt wheel
+# into /wheels; on 32-bit arm (armv7/armv6), where PyPI publishes none, it is
+# *compiled* here — build-essential is already present above — into a wheel the
+# runtime then installs offline. Capped below 1.26 on 32-bit arm so the build
+# takes numpy's classic distutils path with its bundled lapack_lite, rather than
+# bootstrapping the heavier meson/ninja toolchain that is slow and brittle to
+# compile on a 32-bit Pi; the radio needs numpy's FFT and array arithmetic,
+# neither of which wants an external BLAS. This step is minutes on a 32-bit box
+# and wants RAM — the cost of an architecture with no wheels.
+ARG TARGETARCH
+RUN if [ "${TARGETARCH}" = "arm" ]; then \
+      pip wheel --no-cache-dir "numpy>=1.24,<1.26" -w /wheels; \
+    else \
+      pip wheel --no-cache-dir --only-binary=:all: "numpy>=1.24" -w /wheels; \
+    fi
 
 # =========================================================================
 # Runtime: the slim base, plus only the shared libraries the built artefacts
@@ -178,17 +196,16 @@ WORKDIR /opt/percepta/station
 # time. From pip, NOT apt's python3-numpy: this base's interpreter lives in
 # /usr/local and never reads the distribution's dist-packages.
 #
-# `--only-binary=:all:` is load-bearing, not tidiness. This runtime stage has no
-# C toolchain — cc/gcc live only in the builder — so numpy has to arrive as a
-# prebuilt wheel. Without the flag, pip downloads an *sdist* for any version that
-# lacks a wheel for this box and tries to compile it, which fails with "Unknown
-# compiler(s)" — exactly what a fresh numpy release with no amd64/arm64 cp311
-# wheel yet did here. The flag makes pip choose the newest version that *does*
-# have a matching wheel, and on a genuinely unsupported arch it fails fast with
-# "no matching distribution" rather than a five-minute doomed build. amd64 and
-# arm64 both have wheels; nothing else is a target.
+# Installed from the wheel the builder produced, never over the network: this
+# slim runtime has no C toolchain, so it cannot compile an sdist — and on 32-bit
+# arm, where PyPI has no wheel, an sdist is all pip could otherwise find. The
+# builder downloaded the wheel (amd64/arm64) or compiled one (armv7); here it is
+# just a local install. --no-index so a wheel is the only thing that can satisfy
+# it — a miss fails loudly rather than reaching for a source build.
 COPY requirements.txt ./
-RUN pip install --no-cache-dir --only-binary=:all: "numpy>=1.24"
+COPY --from=builder /wheels /wheels
+RUN pip install --no-cache-dir --no-index --find-links=/wheels numpy \
+ && rm -rf /wheels
 
 # Docs before code, so the last layer in the image is the one that changes most
 # often: a code-only update then ships one small layer and nothing else. Demo
