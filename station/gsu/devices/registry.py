@@ -166,9 +166,7 @@ REGISTRY: tuple[DeviceType, ...] = (
         notes="Emits ADSB_VEHICLE. Position, altitude, heading, velocity, "
               "callsign, squawk and vertical velocity each carry a validity "
               "flag, which the driver honours: an unflagged value is published "
-              "as null, never as zero. altitude_corrected_m is the station's "
-              "own barometer applied to a pressure altitude, off unless "
-              "site configuration switches it on.",
+              "as null, never as zero.",
     ),
     DeviceType(
         id="rtlsdr-dump1090",

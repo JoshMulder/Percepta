@@ -134,8 +134,8 @@ export interface Aircraft {
   longitude: number | null;
   /* The unit is in the name, and was not until contract 2.0. Every other
      measured value carried its unit and the contact object was the exception:
-     `altitude` (metres) sat beside `altitude_corrected_m`, and `speed` (knots)
-     beside `vertical_speed` (metres per second). Aviation convention is feet,
+     `altitude` was bare metres, and `speed` (knots) sat beside
+     `vertical_speed` (metres per second). Aviation convention is feet,
      so an unsuffixed altitude was a 3.28x error waiting to happen in the
      highest-volume payload here. */
   altitude_m: number | null;
@@ -158,12 +158,6 @@ export interface Aircraft {
    *  Null when the receiver did not say, which is why `altitude_m` alone
    *  cannot be labelled. */
   altitude_type?: string | null;
-  /** The pressure altitude re-referenced to the station's own barometer, when
-   *  that correction is switched on and possible. Carried *beside*
-   *  `altitude_m`,
-   *  never instead of it: what the receiver said and what it means locally are
-   *  two facts, and a panel that shows only one cannot show its working. */
-  altitude_corrected_m?: number | null;
   /** Metres per second, positive climbing. */
   vertical_speed_ms?: number | null;
   /** `ADSB_EMITTER_TYPE` as reported, unmapped — naming it is this console's

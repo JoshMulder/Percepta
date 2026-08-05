@@ -54,7 +54,6 @@ function contact(overrides: Partial<Aircraft> = {}): Aircraft {
     bearing_deg: 130.5,
     alert: false,
     altitude_type: "pressure",
-    altitude_corrected_m: null,
     vertical_speed_ms: 1.6,
     emitter_type: 2,
     squawk: 5235,
@@ -143,26 +142,6 @@ describe("altitude, which is what the panel is for", () => {
     show({ altitude_m: 3500 });
     expect(text()).toContain("3500 m");
     expect(text()).not.toContain("11483 ft");
-  });
-});
-
-describe("the corrected altitude", () => {
-  it("appears beside the reported one, never instead of it", () => {
-    // What the receiver said and what it means against this station's
-    // barometer are two facts. A panel showing only the second cannot show its
-    // working, and the second is the one derived from another sensor.
-    show({ altitude_m: 3500, altitude_corrected_m: 3472 });
-    expect(text()).toContain("3500 m");
-    expect(text()).toContain("3472 m");
-    expect(text()).toMatch(/barometer/i);
-  });
-
-  it("is absent entirely when the correction is off", () => {
-    // Not an empty row: an empty row invites the reading that it was tried and
-    // failed, when in fact it was never switched on.
-    show({ altitude_corrected_m: null });
-    expect(rowLabels()).not.toContain("Corrected");
-    expect(text()).not.toMatch(/barometer/i);
   });
 });
 

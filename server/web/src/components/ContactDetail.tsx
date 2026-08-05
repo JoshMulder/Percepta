@@ -58,7 +58,6 @@ export function ContactDetail({
     icao,
     callsign,
     altitude_m: altitude,
-    altitude_corrected_m,
     vertical_speed_ms: vertical_speed,
     speed_kt: speed,
     track_deg: track,
@@ -143,18 +142,6 @@ export function ContactDetail({
       </div>
 
       <div className="contact-rows">
-        {/* Beside the reported altitude, never instead of it: what the receiver
-            said and what it means against this station's barometer are two
-            facts, and showing only the second hides the working. Absent
-            entirely when the correction is off, rather than shown empty — an
-            empty row invites the reading that it failed. */}
-        {altitude_corrected_m !== null && altitude_corrected_m !== undefined && (
-          <Row label="Corrected" wide>
-            {formatAltitude(altitude_corrected_m, altitudeUnit)}
-            <span className="contact-note"> against this station's barometer</span>
-          </Row>
-        )}
-
         <Row label="Vertical">
           {vertical_speed === null || vertical_speed === undefined ? (
             <Absent />

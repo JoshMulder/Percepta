@@ -215,8 +215,7 @@ function StationConfigForm({
             coordinates are "settled at commissioning and frozen with the
             enrolment" and has no field for either. So each side pointed at
             the other and there was nowhere at all to say where a station is —
-            which left the ADS-B altitude correction permanently off and every
-            bearing computed from nothing.
+            which left every bearing computed from nothing.
 
             This is that place. The API has always accepted these before
             enrolment and refused them after (409), for the owner's reason: a
@@ -225,9 +224,9 @@ function StationConfigForm({
             rather than discovering it from an error.
 
             Elevation sits with the coordinates because it is part of the same
-            fact: the barometric correction is computed from it, and a
-            correction referenced to the wrong height is out by that height on
-            every aircraft. */}
+            fact. It is stored and reported but not currently used by any
+            calculation — the ADS-B altitude correction that once used it has
+            been removed. */}
         <label className="field">
           <span>Latitude</span>
           <input
@@ -276,7 +275,7 @@ function StationConfigForm({
             {config.enrolled
               ? "Settled at enrolment. Re-enrol the station to move it."
               : config.elevation_m === null
-                ? "Without it the ADS-B altitude correction will not run."
+                ? "Optional. Stored with the position but not currently used."
                 : "Carried to the box in its enrolment response."}
           </span>
         </label>

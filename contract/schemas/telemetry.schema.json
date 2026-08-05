@@ -195,15 +195,6 @@
           ],
           "description": "ADSB_ALTITUDE_TYPE. `pressure` is referenced to 1013.25 hPa, which is what most transponders send; `geometric` is GNSS height. Null when the receiver did not say."
         },
-        "altitude_corrected_m": {
-          "type": [
-            "number",
-            "null"
-          ],
-          "description": "The pressure altitude re-referenced to the station's own measured barometer, in metres. Present only when altitude_type is `pressure` and the station has a working barometric sensor; null otherwise. Never a substitute for `altitude_m` - both travel, so the console can show what was received and what it means locally.",
-          "minimum": -1000,
-          "maximum": 100000
-        },
         "vertical_speed_ms": {
           "type": [
             "number",
@@ -867,7 +858,7 @@
               "type": "number",
               "minimum": -500,
               "maximum": 9000,
-              "description": "Metres. Part of the position and stored with it. Optional - a station that cannot measure its height omits it, and omitting is not retracting, so the stored value stands. The ADS-B barometric correction is its consumer and refuses without one rather than assuming sea level."
+              "description": "Metres. Part of the position and stored with it. Optional - a station that cannot measure its height omits it, and omitting is not retracting, so the stored value stands. Recorded and reported but not currently used by any calculation."
             },
             "source": {
               "type": "string",

@@ -231,10 +231,9 @@ technician on site.
     "timezone": "Pacific/Auckland",
     "latitude": -42.4004,
     "longitude": 173.68,
-    "elevation_m": 310,              // part of the position. The station's
-                                     // barometric altitude correction is
-                                     // computed from this and refuses without
-                                     // it rather than assuming sea level.
+    "elevation_m": 310,              // part of the position; stored and carried
+                                     // but not currently used by any
+                                     // calculation on the station.
     "organization": "Coastal Aero",  // which tenant this box now belongs to,
                                      // echoed back so the person at the box
                                      // can see they enrolled it into the

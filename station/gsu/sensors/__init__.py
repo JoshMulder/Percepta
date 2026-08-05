@@ -76,13 +76,10 @@ class Aircraft:
     speed: float | None = None
     alert: bool = False
 
-    #: `pressure` | `geometric` | None, and the pressure altitude re-referenced
-    #: to the station's own barometer when that is switched on and possible.
-    #: The corrected value is carried *beside* `altitude`, never instead of it:
-    #: what the receiver said and what it means locally are two facts, and a
-    #: console that cannot show both cannot show its working.
+    #: `pressure` | `geometric` | None — how the receiver referenced the
+    #: altitude above. Passed through untouched; the console reads it to label
+    #: what `altitude` means.
     altitude_type: str | None = None
-    altitude_corrected_m: float | None = None
 
     #: Metres per second, positive climbing.
     vertical_speed: float | None = None
@@ -127,10 +124,6 @@ class Aircraft:
             "bearing_deg": round(self.bearing % 360, 1),
             "alert": self.alert,
             "altitude_type": self.altitude_type,
-            "altitude_corrected_m": (
-                None if self.altitude_corrected_m is None
-                else round(self.altitude_corrected_m)
-            ),
             "vertical_speed_ms": (
                 None if self.vertical_speed is None else round(self.vertical_speed, 1)
             ),

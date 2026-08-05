@@ -56,9 +56,8 @@ class TestPosition:
 
     The console showed it read-only and pointed at the station's own setup
     page; that page says coordinates are settled at commissioning and offers no
-    field for them. Each side deferred to the other, so the fact went unset —
-    and the ADS-B barometric correction, whose only input it is, could never
-    run.
+    field for them. Each side deferred to the other, so the fact went unset,
+    with nowhere at all to record where a station is.
     """
 
     def test_it_can_be_set_before_enrolment(self, client, station):

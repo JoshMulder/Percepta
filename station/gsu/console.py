@@ -1136,30 +1136,9 @@ class Console:
                 "its own is not a position."
             )
 
-        # An unchecked checkbox sends nothing at all, so its absence from a
-        # submission of *this* form is a real "off". That only holds because
-        # the input is inside this form and always rendered.
-        correction = bool(form.get("adsb_baro_correction"))
-        # What the elevation will be after this save: the value just entered, or
-        # whatever the enrolment carried if the field was left empty. Checked
-        # against that rather than the field alone, so leaving the field blank
-        # on a station the platform gave an elevation still lets the correction
-        # run. Refused rather than accepted-and-idle: a switch ticked while
-        # nothing is computed is how somebody comes to trust a number that was
-        # never produced.
-        enrolment = getattr(self.agent, "enrolment", None)
-        enrolled_elevation = getattr(getattr(enrolment, "site", None),
-                                     "elevation_m", None)
-        if correction and elevation is None and enrolled_elevation is None:
-            raise ValueError(
-                "Correcting altitudes needs an elevation. Enter one above, or "
-                "leave the correction off."
-            )
-
         # Through the agent's own setter, which parses nothing (already done
-        # here) but stores and acts on all four together — see set_location.
-        self.agent.set_location(
-            latitude, longitude, elevation, baro_correction=correction)
+        # here) but stores and acts on all three together — see set_location.
+        self.agent.set_location(latitude, longitude, elevation)
         self.message = ("good", "Saved.")
 
     def _set_radio(self, form: dict) -> None:
@@ -2033,17 +2012,15 @@ class Console:
         config, which `effective_position` already prefers over anything the
         platform issued.
 
-        The three coordinates and the altitude-correction switch are one form:
-        the correction is computed from the elevation and refuses without it, so
-        editing them apart would let somebody tick a correction whose input is
-        on another screen.
+        Latitude, longitude and elevation are one form. Elevation is recorded
+        and reported to the platform but drives nothing on the box — the ADS-B
+        altitude correction that once used it has been removed.
 
         The platform's own words for the coordinates it issued are shown beside
         the fields, unedited, so an installer can check the box against the site
         they are standing at rather than against a bare pair of decimals.
         """
         position = state.get("position") or {}
-        station = position.get("station") or {}
 
         def field(name: str, label: str, value, placeholder: str,
                   step: str, lo: str, hi: str) -> str:
@@ -2067,15 +2044,6 @@ class Console:
                          "172.53194", "any", "-180", "180"))
         out.append(field("elevation_m", "Elevation (m)", position.get("elevation_m"),
                          "metres above sea level", "any", "-500", "100000"))
-        checked = " checked" if station.get("adsb_baro_correction") else ""
-        out.append(
-            "<div class=field><label for='adsb_baro_correction'>"
-            "Correct altitudes</label>"
-            "<input type=checkbox id='adsb_baro_correction' "
-            f"name='adsb_baro_correction' value='1'{checked}>"
-            "<span class=muted>Uses this station's barometer and the elevation "
-            "above.</span></div>"
-        )
         out.append("<div class=field><button type=submit>Save</button></div></form>")
 
         # What the platform issued, for comparison only. Named as the platform's

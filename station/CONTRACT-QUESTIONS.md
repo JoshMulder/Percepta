@@ -1170,9 +1170,9 @@ is a second and independent statement about the altitude alongside
 the setup page's datastream line, and stops there — the contract has no field
 for it.
 
-It is not obviously worth one. `altitude_type: "pressure"` is what the
-correction is gated on, per the schema's own wording, and that is the right
-gate. But it is the single datapoint the receiver provides that the station
+It is not obviously worth one. `altitude_type` already says whether the
+altitude is pressure or geometric, which is the distinction a consumer acts on.
+But `baro_valid` is the single datapoint the receiver provides that the station
 still drops on the floor, and "all datapoints provided" was the instruction, so
 it is recorded here rather than silently discarded.
 
@@ -1190,17 +1190,5 @@ and its description says "using QNH reference". That is a misnomer in the
 message definition. ADS-B airborne position messages carry barometric altitude
 against the **standard 1013.25 hPa datum** (DO-260B), not against a local QNH.
 The schema's own wording — *"`pressure` is referenced to 1013.25 hPa"* — is the
-correct one, and the station's correction works from 1013.25 accordingly.
-Anyone reading the MAVLink XML and concluding the altitude is already
-QNH-referenced would conclude there is nothing to correct.
-
-### And one field the receiver does not provide at all
-
-`altitude_corrected_m` is not a receiver datapoint. It is computed on the
-station from the Airmar's barometer and the station's configured elevation
-(`gsu/devices/altitude.py`), is off unless site configuration switches it on,
-and is null whenever the station cannot compute it honestly — no barometer, a
-reading older than five minutes, an unset elevation, or an altitude that is
-already geometric. Which of those applies is reported in the health frame as
-`adsb_altitude_correction`, because a null on every contact otherwise has four
-indistinguishable causes.
+correct one. Anyone reading the MAVLink XML and concluding the altitude is
+already QNH-referenced would be reading the wrong datum into it.

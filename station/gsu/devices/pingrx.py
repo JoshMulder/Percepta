@@ -49,7 +49,6 @@ from collections import deque
 
 from ..sensors import Aircraft, Device, bearing_to
 from . import mavlink
-from .altitude import BarometricReference
 from .serialio import ByteSource
 
 log = logging.getLogger("gsu.adsb")
@@ -74,7 +73,6 @@ class PingRxAdsb:
         alert_altitude_m: float = 1500.0,
         port: str = "",
         label: str = "uAvionix ping RX Pro",
-        altitude_reference: BarometricReference | None = None,
     ) -> None:
         self.source = source
         self.lat = latitude
@@ -83,11 +81,6 @@ class PingRxAdsb:
         self.alert_altitude_m = alert_altitude_m
         self.port = port
         self.label = label
-        # The station's barometer, if the agent has one to lend. Held rather
-        # than reached for: the weather slot can be rebuilt or disappear
-        # underneath this driver, and a receiver must not care. Absent, or
-        # switched off in site configuration, every corrected altitude is null.
-        self.altitude_reference = altitude_reference or BarometricReference()
         self._parser = mavlink.MavlinkParser()
         self._vehicles: dict[str, tuple[mavlink.AdsbVehicle, float]] = {}
         self._last_frame: float | None = None
@@ -194,9 +187,6 @@ class PingRxAdsb:
                     # untouched. Each is either what the receiver said or None
                     # because it said nothing; none of it is defaulted here.
                     altitude_type=vehicle.altitude_type,
-                    altitude_corrected_m=self.altitude_reference.correct(
-                        vehicle.altitude_m, vehicle.altitude_type
-                    ),
                     vertical_speed=vehicle.vertical_speed_ms,
                     emitter_type=vehicle.emitter_type,
                     squawk=vehicle.squawk,
@@ -519,14 +509,12 @@ class SimulatedPingRx(PingRxAdsb):
         longitude: float = 172.6,
         alert_range_km: float = 12.0,
         alert_altitude_m: float = 1500.0,
-        altitude_reference: BarometricReference | None = None,
     ) -> None:
         source = _SimulatedPingSource(latitude, longitude)
         super().__init__(
             source, latitude=latitude, longitude=longitude,
             alert_range_km=alert_range_km, alert_altitude_m=alert_altitude_m,
             label="simulated ADS-B receiver (MAVLink)",
-            altitude_reference=altitude_reference,
         )
         self._source = source
 

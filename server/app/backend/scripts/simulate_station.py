@@ -172,11 +172,6 @@ class Contact:
             # station and feed it from the alerting path, not the display.
             "alert": self.range_km < 12 and self.altitude < 1500,
             "altitude_type": self.altitude_type,
-            # Never corrected here. The correction is a station computing one
-            # sensor's data against another's, and a simulator inventing a
-            # plausible corrected altitude would put a number in front of an
-            # operator that no barometer ever produced.
-            "altitude_corrected_m": None,
             "vertical_speed_ms": self.vertical_speed,
             "emitter_type": self.emitter_type,
             "squawk": self.squawk,

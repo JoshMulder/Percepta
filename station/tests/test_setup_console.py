@@ -1320,22 +1320,11 @@ class ServedPageTests(unittest.TestCase):
         self.assertIn("name=longitude", body)
 
     def test_the_elevation_is_a_field(self):
-        # It is part of the position, and it drives the barometric correction,
-        # so it is set here with the coordinates rather than issued and frozen.
+        # It is part of the position, so it is set here with the coordinates
+        # rather than issued and frozen.
         _, _, body = self.page("/connection")
         self.assertIn("Elevation", body)
         self.assertIn("name=elevation_m", body)
-
-    def test_the_correction_cannot_be_switched_on_without_one(self):
-        # Refused rather than accepted-and-idle. The elevation it needs is now a
-        # field on this same form, so the message points there.
-        token, csrf, _ = self.page("/connection")
-        self.request("POST", "/location",
-                     f"adsb_baro_correction=1&csrf={csrf}", {"Cookie": token})
-        self.assertFalse(self.agent.site.adsb_baro_correction)
-        _, body = self.request("GET", "/connection", None, {"Cookie": token})
-        self.assertIn("msg bad", body)
-        self.assertIn("elevation", body.lower())
 
     def test_the_location_post_lands_back_on_connection(self):
         token, csrf, _ = self.page("/connection")
@@ -1380,7 +1369,6 @@ class ServedPageTests(unittest.TestCase):
         self.assertNotIn("class=modal", body)
         card = body.split("<h2>Where this box is</h2>", 1)[1]
         self.assertIn("name=elevation_m", card)
-        self.assertIn("name='adsb_baro_correction'", card)
 
     def test_the_connection_page_carries_no_script_at_all(self):
         # The only script this page ever had closed the dialog on Escape. No
@@ -1403,23 +1391,23 @@ class ServedPageTests(unittest.TestCase):
 
     def test_a_refused_save_says_why_on_the_page(self):
         # No dialog to reopen, so the reason goes where every other refusal on
-        # this page goes.
-        # The one refusal left on this form: switching the correction on when
-        # the station has no elevation to compute it against.
+        # this page goes. The refusal left on this form: a lone coordinate,
+        # which is half a position rather than a position.
         token, csrf, _ = self.page("/connection")
         self.request("POST", "/location",
-                     f"adsb_baro_correction=1&csrf={csrf}", {"Cookie": token})
+                     f"latitude=-42.4&longitude=&elevation_m=&csrf={csrf}",
+                     {"Cookie": token})
         _, body = self.request("GET", "/connection", None, {"Cookie": token})
         self.assertEqual(body.count("msg bad"), 1, "said twice is said wrong")
-        self.assertIn("elevation", body.lower())
+        self.assertIn("latitude", body.lower())
 
     def test_the_local_settings_use_the_shared_field_grid(self):
         _, _, body = self.page("/connection")
         # Bounded to this card: the sections below it have fields of their own.
         card = body.split("<h2>Where this box is</h2>", 1)[1].split("<h2>", 1)[0]
-        # Latitude, longitude, elevation, the correction checkbox, and the save
-        # row — all in the shared .field grid.
-        self.assertEqual(card.count("<div class=field>"), 5)
+        # Latitude, longitude, elevation, and the save row — all in the shared
+        # .field grid.
+        self.assertEqual(card.count("<div class=field>"), 4)
         self.assertNotIn("grid-template-columns", card)
         self.assertIn("--label-w:9.5rem", body)
 
@@ -1950,115 +1938,6 @@ class HonestVerdictTests(unittest.TestCase):
         self.assertNotIn('("Camera held by", holds, "warn" if holder else "ok")',
                          self.source)
 
-
-class BarometricCorrectionSettingTests(unittest.TestCase):
-    """The altitude correction, switched on where its input is typed.
-
-    It re-references reported pressure altitudes to this station's own
-    barometer and is computed from the site elevation, so the setup page edits
-    the two together rather than putting the switch a screen away from the
-    number it depends on.
-    """
-
-    def setUp(self):
-        self.directory = tempfile.TemporaryDirectory()
-        self.addCleanup(self.directory.cleanup)
-        self.agent = Agent(AgentConfig(
-            home=Path(self.directory.name), setup_enabled=False,
-            single_instance=False, demo=True))
-        self.addCleanup(self.agent.shutdown)
-        self.console = Console(self.agent)
-
-    def submit(self, **fields):
-        return self.console._set_location(
-            {name: [value] for name, value in fields.items()}
-        )
-
-    def with_elevation(self, metres):
-        """Elevation arrives with the enrolment now, not from this page."""
-        from datetime import UTC, timedelta
-        from gsu.credentials import Enrolment
-        now = datetime.now(UTC)
-        self.agent.enrolment = Enrolment.from_response({
-            "station_id": "11111111-2222-3333-4444-555555555555",
-            "credential": {
-                "type": "bearer", "secret": "s",
-                "expires_at": (now + timedelta(hours=48)).isoformat(),
-                "renew_after": (now + timedelta(hours=24)).isoformat(),
-            },
-            "broker": {
-                "url": "redis://broker:6379/0", "username": "gsu:x",
-                "telemetry_topic": "gsu/x/telemetry", "audio_topic": "gsu/x/audio",
-                "command_topic": "cmd/gsu/x",
-            },
-            "station": {
-                "name": "Test", "timezone": "Pacific/Auckland",
-                "latitude": -42.4, "longitude": 173.68, "elevation_m": metres,
-            },
-            "config_version": 1,
-        })
-
-    def test_it_is_off_until_somebody_turns_it_on(self):
-        # It applies one sensor's reading to another sensor's data. That is a
-        # decision an operator makes, never a default.
-        self.assertFalse(self.agent.site.adsb_baro_correction)
-
-    def test_ticking_it_with_an_elevation_switches_it_on(self):
-        self.with_elevation(120.0)
-        self.submit(adsb_baro_correction="1")
-        self.assertTrue(self.agent.site.adsb_baro_correction)
-        self.assertEqual(self.agent.effective_elevation_m(), 120.0)
-
-    def test_ticking_it_without_an_elevation_is_refused_not_accepted_idle(self):
-        # A checkbox that stays ticked while nothing happens is how somebody
-        # comes to trust a number that was never computed. The elevation it
-        # needs is now a field on this same form, so the message points there.
-        with self.assertRaises(ValueError) as caught:
-            self.submit(adsb_baro_correction="1")
-        self.assertIn("elevation", str(caught.exception).lower())
-        self.assertFalse(self.agent.site.adsb_baro_correction)
-
-    def test_an_unticked_box_turns_it_off(self):
-        # An unchecked checkbox sends nothing, and on this form that absence is
-        # a real "off" because the input is always rendered inside it.
-        self.with_elevation(120.0)
-        self.submit(adsb_baro_correction="1")
-        self.submit()
-        self.assertFalse(self.agent.site.adsb_baro_correction)
-
-    def test_it_cannot_be_left_on_by_a_station_with_no_elevation(self):
-        # There is no "clear the location" here any more — the position is the
-        # enrolment's. What must not happen is a switch left claiming a
-        # correction a box cannot compute.
-        self.with_elevation(120.0)
-        self.submit(adsb_baro_correction="1")
-        self.assertTrue(self.agent.site.adsb_baro_correction)
-        self.agent.enrolment = None
-        with self.assertRaises(ValueError):
-            self.submit(adsb_baro_correction="1")
-
-    def test_a_caller_that_does_not_mention_it_does_not_change_it(self):
-        # The switch also arrives by config.set from the platform. Saving a
-        # coordinate must not silently undo that.
-        self.agent.site.adsb_baro_correction = True
-        self.agent.set_location(-42.4004, 173.68, 120.0)
-        self.assertTrue(self.agent.site.adsb_baro_correction)
-
-    def test_it_survives_a_reload_of_the_site_file(self):
-        self.with_elevation(120.0)
-        self.submit(adsb_baro_correction="1")
-        from gsu.config import SiteConfig
-        reloaded = SiteConfig.load(self.agent.config.site_config_path)
-        self.assertTrue(reloaded.adsb_baro_correction)
-
-    def test_the_checkbox_is_rendered_inside_the_location_form(self):
-        # The "absence means off" reading in _set_location is only sound while
-        # the input is inside this form and always present.
-        state = {"position": self.agent.position_state()}
-        markup = self.console._section_location(state, "tok")
-        form = markup[markup.index("<form"):markup.index("</form>")]
-        self.assertIn("name='adsb_baro_correction'", form)
-        self.assertIn("type=checkbox", form)
 
 class DeviceStateVocabularyTests(unittest.TestCase):
     """Three states on the setup page, an owner requirement.

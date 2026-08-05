@@ -257,9 +257,7 @@ def _adsb(agent, seconds: float, out: str | None) -> int:
     null here is either a validity flag the transmitting aircraft left clear or
     a field this station cannot source, and the difference is what somebody
     standing next to the hardware needs to see. So it prints the payload
-    verbatim rather than a tidied summary, and states the correction's status
-    alongside — a null `altitude_corrected_m` on every line has four possible
-    causes and only one of them is about the aircraft.
+    verbatim rather than a tidied summary.
     """
     import json
 
@@ -274,30 +272,16 @@ def _adsb(agent, seconds: float, out: str | None) -> int:
     deadline = time.monotonic() + max(1.0, seconds)
     contacts: list = []
     while time.monotonic() < deadline:
-        # The whole tick, not just the receiver: the barometer reaches the
-        # correction through the weather slot, and polling the receiver alone
-        # would report the correction as idle on a station where it works.
-        agent.step(1.0, weather_due=True)
+        # Step the whole tick, so the receiver is exercised exactly as it is in
+        # service rather than through a bespoke read path.
+        agent.step(1.0)
         contacts = agent.adsb.poll(1.0) or contacts
         time.sleep(0.5)
 
     # Everything below is reported *after* listening. A receiver that has been
     # constructed and not yet read from reports itself absent, and a header
     # printed up front would say so on a station that is working perfectly.
-    print(f"\n{agent.adsb.describe().detail}")
-    correction = agent.baro.state()
-    print(
-        "  altitude correction: "
-        + ("active" if correction["active"]
-           else f"idle — {correction['reason']}")
-    )
-    if correction["active"]:
-        print(
-            f"    {correction['station_pressure_hpa']} hPa measured at "
-            f"{correction['station_elevation_m']} m -> "
-            f"{correction['sea_level_pressure_hpa']} hPa at sea level"
-        )
-    print()
+    print(f"\n{agent.adsb.describe().detail}\n")
 
     payloads = [contact.to_payload() for contact in contacts]
     for payload in payloads:

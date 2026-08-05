@@ -140,8 +140,8 @@ class PayloadTests(unittest.TestCase):
         """The unit is in the name, which it was not until 2.0.
 
         Every other measured value in the contract carried its unit and the
-        contact object was the exception — `altitude` (metres) sat beside
-        `altitude_corrected_m`, and `speed` (knots) beside `vertical_speed`
+        contact object was the exception — `altitude` was bare metres, and
+        `speed` (knots) sat beside `vertical_speed`
         (metres per second). Aviation convention is feet, so an unsuffixed
         `altitude` was a 3.28x error waiting to happen in the highest-volume
         payload in the system.
@@ -538,146 +538,6 @@ class InventoryTests(unittest.TestCase):
             self.assertIn(device.connection, registry.CONNECTIONS)
             if device.slot != "camera":
                 self.assertTrue(device.provides, f"{device.id} declares no capabilities")
-
-
-class AltitudeCorrectionWiringTests(unittest.TestCase):
-    """The barometer reaching the ADS-B stream, at the level where the two
-    devices are actually joined together.
-
-    `test_adsb_altitude.py` covers the arithmetic and the refusals. What is
-    only testable here is the wiring: that the pressure the console is shown is
-    the pressure the correction used, that switching it on at runtime takes
-    effect without a rebuild, and that health says why when it is idle.
-    """
-
-    def setUp(self):
-        self._dir = tempfile.TemporaryDirectory()
-        self.agent = agent_in(self._dir.name)
-        self.agent._publish = lambda topic, payload: True
-
-    def tearDown(self):
-        self.agent.shutdown()
-        self._dir.cleanup()
-
-    def _run(self, ticks: int = 6) -> None:
-        for index in range(ticks):
-            self.agent.step(1.0, weather_due=index % 2 == 0)
-
-    def test_off_by_default_and_health_stays_quiet_about_it(self):
-        self.assertFalse(self.agent.site.adsb_baro_correction)
-        self._run()
-        state = self.agent.health_payload()["adsb_altitude_correction"]
-        self.assertFalse(state["enabled"])
-        self.assertFalse(state["active"])
-        ids = {c["id"] for c in self.agent.health.to_list()}
-        self.assertNotIn(
-            "adsb.altitude_correction", ids,
-            "a setting nobody switched on is not a condition",
-        )
-
-    def test_switching_it_on_at_runtime_corrects_without_a_rebuild(self):
-        self.agent.site.apply(
-            {"adsb_baro_correction": True, "elevation_m": 120.0}, version=4
-        )
-        self._run()
-        state = self.agent.health_payload()["adsb_altitude_correction"]
-        self.assertTrue(state["active"], state["reason"])
-        # The station's own barometer, and the sea-level figure derived from
-        # it. If these were the same number the reduction has been dropped.
-        self.assertIsNotNone(state["station_pressure_hpa"])
-        self.assertNotEqual(
-            state["station_pressure_hpa"], state["sea_level_pressure_hpa"]
-        )
-
-        contacts = self.agent.adsb.poll(1.0)
-        corrected = [
-            c for c in contacts
-            if c.altitude_type == "pressure" and c.altitude_corrected_m is not None
-        ]
-        self.assertTrue(corrected, "nothing was corrected")
-        for contact in corrected:
-            # Both travel. The correction is a second reading of the same
-            # aircraft, never a replacement for what the receiver said.
-            self.assertIsNotNone(contact.altitude)
-            self.assertNotEqual(contact.altitude, contact.altitude_corrected_m)
-
-    def test_the_pressure_used_is_the_pressure_published(self):
-        self.agent.site.apply(
-            {"adsb_baro_correction": True, "elevation_m": 0.0}, version=4
-        )
-        sent: list[dict] = []
-        self.agent._publish = lambda topic, payload: sent.append(payload) or True
-        self._run()
-        weather = [p for p in sent if p.get("kind") == "weather"][-1]
-        state = self.agent.health_payload()["adsb_altitude_correction"]
-        # At zero elevation the reduction is the identity, so the two figures
-        # must agree exactly - which is the cheapest way to prove there is not
-        # a second, separately-read barometer behind the correction.
-        self.assertEqual(state["station_pressure_hpa"], weather["pressure_hpa"])
-        self.assertEqual(state["sea_level_pressure_hpa"], weather["pressure_hpa"])
-
-    def test_on_without_an_elevation_is_reported_rather_than_guessed(self):
-        self.agent.site.apply({"adsb_baro_correction": True}, version=4)
-        self.assertIsNone(self.agent.site.elevation_m)
-        self._run()
-        payload = self.agent.health_payload()
-        state = payload["adsb_altitude_correction"]
-        self.assertTrue(state["enabled"])
-        self.assertFalse(state["active"])
-        self.assertIn("elevation", state["reason"])
-        condition = next(
-            c for c in payload["conditions"] if c["id"] == "adsb.altitude_correction"
-        )
-        # Informational, not a warning: the station is doing its job and one
-        # optional refinement is unavailable. `Health.SUMMARY` maps info to ok,
-        # so a setting cannot degrade a station.
-        self.assertEqual(condition["severity"], "info")
-        # Asked of the mapping rather than of `payload["status"]`, which is
-        # every condition at once. On a developer machine that includes
-        # `clock.unsynchronised`, raised from whatever is or is not
-        # disciplining the host clock and cached process-wide for a minute by
-        # `clock.discipline` — so a single probe decided the whole suite and
-        # this test failed about one run in eight over a clock it says nothing
-        # about. What it means is that *this* condition cannot degrade a
-        # station, and that is what it now asserts.
-        self.assertEqual(Health.SUMMARY[condition["severity"]], "ok")
-
-        contacts = self.agent.adsb.poll(1.0)
-        self.assertTrue(contacts)
-        self.assertTrue(all(c.altitude_corrected_m is None for c in contacts))
-
-    def test_losing_the_weather_station_stops_the_correction(self):
-        self.agent.site.apply(
-            {"adsb_baro_correction": True, "elevation_m": 120.0}, version=4
-        )
-        self._run()
-        self.assertTrue(self.agent.health_payload()["adsb_altitude_correction"]["active"])
-
-        self.agent.inventory.set_device("weather", "")
-        self.agent.build_devices()
-        self._run()
-        state = self.agent.health_payload()["adsb_altitude_correction"]
-        self.assertFalse(
-            state["active"],
-            "a departed weather head must not leave its last pressure behind",
-        )
-        self.assertIn("no barometric reading", state["reason"])
-
-    def test_the_correction_never_moves_the_proximity_alert(self):
-        # Alerting is the one thing the station must still get right with the
-        # platform unreachable; hanging it on a second sensor would mean a dead
-        # barometer quietly shifts the threshold.
-        self.agent.site.apply(
-            {"adsb_baro_correction": True, "elevation_m": 120.0}, version=4
-        )
-        self._run()
-        for contact in self.agent.adsb.poll(1.0):
-            expected = (
-                contact.range_km < self.agent.site.alert_range_km
-                and contact.altitude is not None
-                and contact.altitude < self.agent.site.alert_altitude_m
-            )
-            self.assertIs(contact.alert, expected)
 
 
 class ReattachTests(unittest.TestCase):

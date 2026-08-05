@@ -124,9 +124,8 @@ class StationOut(BaseModel):
     timezone: str
     latitude: float | None
     longitude: float | None
-    #: Metres. Part of the position, settled and frozen with it. The station's
-    #: ADS-B barometric correction is computed from this and refuses without
-    #: it rather than assuming sea level.
+    #: Metres. Part of the position, settled and frozen with it. Carried to the
+    #: station and stored, but not currently used by any calculation there.
     elevation_m: float | None = None
     #: Which tenant this box now belongs to, echoed back so the person standing
     #: at it can confirm they enrolled it into the right one. Enrolment is done

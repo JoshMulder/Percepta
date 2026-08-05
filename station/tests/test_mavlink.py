@@ -162,7 +162,7 @@ class FlagsAreNotZeroesTests(unittest.TestCase):
         contact = driver.poll(1.0)[0].to_payload()
         for name in (
             "callsign", "altitude_m", "track_deg", "speed_kt", "squawk",
-            "vertical_speed_ms", "altitude_type", "altitude_corrected_m",
+            "vertical_speed_ms", "altitude_type",
             "on_ground",
         ):
             self.assertIsNone(contact[name], f"{name} was published as {contact[name]!r}")
