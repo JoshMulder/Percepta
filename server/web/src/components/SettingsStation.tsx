@@ -1,16 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, api } from "../api";
 import type { StationConfig, StationSummary } from "../types";
-import { NewStationEnrolment, SettingsEnrolment } from "./SettingsEnrolment";
+import { SettingsEnrolment } from "./SettingsEnrolment";
 
 /**
  * Everything about one station: pick it, configure it, enrol it.
  *
  * The selector is deliberately independent of the console's station switcher.
  * Configuring a site is an administrative job you do for whichever station
- * needs it, not for whichever one you happen to be watching — and a new record
- * created here has no telemetry to look at yet, so following the console's
- * selection would mean it could never be configured at all.
+ * needs it, not for whichever one you happen to be watching.
+ *
+ * Creating a station lives on the Organisation tab, not here: a new record has
+ * no telemetry and nothing to configure until it exists, so the flow is to name
+ * it there and be brought straight to this tab, selected, to finish setup.
  */
 export function SettingsStation({
   initialStationId,
@@ -18,12 +20,13 @@ export function SettingsStation({
   onSaved,
 }: {
   initialStationId: string | null;
+  /** Only whether to point an empty pane at where stations are created. The
+   *  create action itself is on the Organisation tab. */
   canCreate: boolean;
   onSaved: () => void;
 }) {
   const [stations, setStations] = useState<StationSummary[] | null>(null);
   const [selected, setSelected] = useState<string | null>(initialStationId);
-  const [adding, setAdding] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
   // Bumped whenever the enrolment section changes a credential, so the Delete
   // section re-asks whether it should be showing. The two are siblings reading
@@ -67,11 +70,7 @@ export function SettingsStation({
           <span>Station</span>
           <select
             value={selected ?? ""}
-            onChange={(e) => {
-              setSelected(e.target.value);
-              setAdding(false);
-            }}
-            disabled={adding}
+            onChange={(e) => setSelected(e.target.value)}
           >
             {stations.length === 0 && <option value="">No stations yet</option>}
             {stations.map((s) => (
@@ -82,31 +81,9 @@ export function SettingsStation({
             ))}
           </select>
         </label>
-        {canCreate && (
-          <button
-            type="button"
-            className={`btn ${adding ? "ghost" : "primary"}`}
-            onClick={() => setAdding((a) => !a)}
-          >
-            {adding ? "Cancel" : "Add new"}
-          </button>
-        )}
       </div>
 
-      {adding ? (
-        <NewStation
-          onCancel={() => setAdding(false)}
-          // Refreshed at creation rather than when the page is left, so the new
-          // station is in the list and selected from that moment. Leaving it
-          // until "Done" meant backing out of the code step lost sight of a
-          // station that had already been created.
-          onCreated={async (created) => {
-            await loadStations(created.id);
-            onSaved();
-          }}
-          onDone={() => setAdding(false)}
-        />
-      ) : station ? (
+      {station ? (
         <>
           <StationConfigForm
             key={station.id}
@@ -131,124 +108,11 @@ export function SettingsStation({
       ) : (
         <p className="settings-note">
           {canCreate
-            ? "No stations yet. Add one to get started."
+            ? "No stations yet. Add one from the Organisation tab to get started."
             : "No stations available to configure."}
         </p>
       )}
     </div>
-  );
-}
-
-function NewStation({
-  onCreated,
-  onCancel,
-  onDone,
-}: {
-  /** Called as soon as the record exists, so the list behind this page is
-   *  correct even if the code step is abandoned. */
-  onCreated: (station: StationSummary) => void | Promise<void>;
-  onCancel: () => void;
-  onDone: () => void;
-}) {
-  const [created, setCreated] = useState<StationSummary | null>(null);
-  const [name, setName] = useState("");
-  const [timezone, setTimezone] = useState(
-    // The browser knows where the person creating it is, which is right far more
-    // often than "UTC" is. It stays editable because a remote site frequently is
-    // not in the same zone as whoever is setting it up.
-    Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
-  );
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    setSaving(true);
-    setError(null);
-    try {
-      // The record exists from here on. We stay on this page rather than
-      // returning to the list, because handing the installer a code is the next
-      // thing that happens and making them go and find the station to do it is
-      // a step that exists for no reason.
-      const station = await api.createStation({
-        name: name.trim(),
-        timezone,
-        latitude: null,
-        longitude: null,
-      });
-      setCreated(station);
-      await onCreated(station);
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not create the station.");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  if (created) {
-    return (
-      <div className="settings-sections">
-        <section className="settings-section">
-          <h3>{created.name} created</h3>
-          <p className="settings-note">
-            Issue a code below if there is a box ready to enrol. There is no
-            hurry — the station's own page keeps offering one until it has
-            connected, and a code only lasts 24 hours, so issuing it before
-            somebody is standing in front of the hardware wastes it.
-          </p>
-        </section>
-
-        <NewStationEnrolment stationId={created.id} />
-
-        <div className="settings-actions">
-          <button type="button" className="btn primary" onClick={onDone}>
-            Done
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <section className="settings-section">
-      <h3>New station</h3>
-      <form onSubmit={submit}>
-        <label className="field">
-          <span>Name</span>
-          <input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="Kaikoura Ridge"
-            maxLength={255}
-            autoFocus
-            required
-          />
-        </label>
-        <label className="field">
-          <span>Timezone</span>
-          <input
-            value={timezone}
-            onChange={(e) => setTimezone(e.target.value)}
-            placeholder="Pacific/Auckland"
-            required
-          />
-        </label>
-        <p className="settings-note">
-          The record belongs to your organisation and can be granted to users and
-          configured straight away — the hardware does not have to exist yet.
-          Position is set once the site is known, or reported by the station.
-        </p>
-        <div className="settings-actions">
-          <button type="submit" className="btn primary" disabled={saving || !name.trim()}>
-            {saving ? "Creating…" : "Create station"}
-          </button>
-          <button type="button" className="btn ghost" onClick={onCancel}>
-            Cancel
-          </button>
-          {error && <span className="settings-error">{error}</span>}
-        </div>
-      </form>
-    </section>
   );
 }
 

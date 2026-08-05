@@ -2631,32 +2631,66 @@ body {
   .settings-tab.active { border-left-color: transparent; border-bottom-color: var(--brand); }
 }
 
-/* The station selector sits above the panes it drives, with Add new beside it
-   rather than below — creating a station and choosing one are the same
-   decision at the same moment. */
+/* The station selector sits above the panes it drives. It is the mode the whole
+   pane is in — which station you are editing — not the first field of the form,
+   so it reads as a control bar over the sections rather than the top of them: a
+   distinct fill, a brand accent below it (the same brand rule the active tab
+   uses), and a shadow that lifts it off the content scrolling beneath. */
 .station-picker {
   display: flex;
   align-items: flex-end;
   gap: 12px;
-  border-bottom: 1px solid var(--line);
+  background: var(--panel-2);
+  border-bottom: 2px solid var(--brand);
+  box-shadow: 0 8px 16px -12px rgba(0, 0, 0, 0.6);
   /* Held at the top while the pane scrolls: which station you are editing is
      the one thing that must never be off screen while you edit it. The negative
-     margins pull the background out over the pane's own padding, so content
-     scrolls under it rather than appearing in the gap at the edges. */
+     margins pull the bar out over the pane's own padding, so content scrolls
+     under it rather than appearing in the gap at the edges. */
   position: sticky;
   /* -20px, not 0, because `top` aligns the *margin* box and the margin above is
      -20px. At top:0 the row locked 20px down the pane and content scrolled
      through the strip above it - measured at y=210 against a pane top of 190. */
   top: -20px;
   z-index: 2;
-  background: var(--panel);
-  margin: -20px -24px 0;
-  padding: 20px 24px 16px;
+  margin: -20px -24px 22px;
+  padding: 18px 24px 16px;
 }
 .station-picker .field { margin-bottom: 0; flex: 0 1 340px; }
-/* Pushed to the far right rather than sitting against the selector: creating a
-   station is a different action from choosing one, and the gap says so. */
-.station-picker .btn { flex: 0 0 auto; margin-left: auto; }
+/* --panel, not the inherited --panel-2: the select would otherwise be the same
+   shade as the bar it sits in. On --panel it reads as a control on the bar. */
+.station-picker .field select { background: var(--panel); }
+/* The label heads the bar rather than captioning a field, so it is not dimmed. */
+.station-picker .field > span { color: var(--text); font-weight: 600; }
+
+/* A small dialog over the settings dialog — naming a new station. Fixed, so it
+   centres on the viewport rather than inside the scrolling pane, and above the
+   settings dialog's own z-index (2000). Its form reuses the .settings-pane field
+   and action styles, since it renders inside that pane. */
+.modal-scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(3, 6, 9, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2100;
+  padding: 24px;
+}
+.modal-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  width: min(420px, 100%);
+  padding: 20px 22px 22px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+  color: var(--text);
+}
+.modal-card h3 {
+  margin: 0 0 14px;
+  font-size: 15px;
+  font-weight: 600;
+}
 
 /* Platform tables are text, not checkboxes, so they read left-aligned. */
 .org-table td { text-align: left; }

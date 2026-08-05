@@ -205,10 +205,9 @@ export function SettingsEnrolment({
 /**
  * The "issue a code" step on its own.
  *
- * Used in two places — the new-station page and an unenrolled station's page —
- * so it takes the status it should render rather than fetching its own. Where
- * there is already a status on screen, two fetches could disagree, and the
- * disagreement would be about whether a code is outstanding.
+ * Rendered by an unenrolled station's page. It takes the status it should render
+ * rather than fetching its own: the pane above already has one, and two fetches
+ * could disagree about whether a code is outstanding.
  */
 export function EnrolmentCode({
   stationId,
@@ -249,9 +248,8 @@ export function EnrolmentCode({
       {issued ? (
         <div className="token-reveal">
           <p className="settings-note">
-            Give this to whoever is installing the box. <strong>It is shown
-            once.</strong> We keep only a hash of it and cannot show it again —
-            if it is lost, issue another.
+            This is <strong>only shown once</strong> — if it is lost, issue
+            another.
           </p>
           {/* The code, and nothing folded into it.
 
@@ -283,23 +281,9 @@ export function EnrolmentCode({
             </button>
           </div>
           <p className="settings-note">
-            Type it into the box's setup page, or{" "}
-            <code>docker compose run --rm gsu enrol --token …</code>
-          </p>
-          <p className="settings-note">
             Expires {when(issued.expires_at)}
             {relative(issued.expires_at)}.
           </p>
-          <button
-            type="button"
-            className="btn ghost"
-            onClick={() => {
-              setIssued(null);
-              setCopied(false);
-            }}
-          >
-            Done
-          </button>
         </div>
       ) : (
         <>
@@ -349,32 +333,4 @@ export function EnrolmentCode({
       {error && <p className="settings-error">{error}</p>}
     </section>
   );
-}
-
-/**
- * The code step for a station that has just been created.
- *
- * Loads its own status, because on the new-station page there is nothing else
- * on screen that has one.
- */
-export function NewStationEnrolment({ stationId }: { stationId: string }) {
-  const [status, setStatus] = useState<EnrolmentStatus | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    try {
-      setStatus(await api.enrolmentStatus(stationId));
-      setError(null);
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not load enrolment.");
-    }
-  }, [stationId]);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  if (error && !status) return <p className="settings-error">{error}</p>;
-  if (!status) return <p className="settings-note">Loading…</p>;
-  return <EnrolmentCode stationId={stationId} status={status} onChanged={load} />;
 }

@@ -156,8 +156,11 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
   const [alertsOpen, setAlertsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   // A rename in settings has to reach the header without a reload. `me` is a
-  // prop, so the new name is held here and overlays it.
+  // prop, so the new name is held here and overlays it. It also has to reach the
+  // settings dialog itself — `meWithName` below carries it in, or reopening
+  // settings would re-read the stale name off the original prop.
   const [displayName, setDisplayName] = useState(me.display_name);
+  const meWithName = { ...me, display_name: displayName };
   const [seenAlerts, setSeenAlerts] = useState(0);
   const [lightPending, setLightPending] = useState(false);
 
@@ -1033,7 +1036,7 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
         {alertsDrawer}
       {settingsOpen && (
         <Settings
-          me={me}
+          me={meWithName}
           stationId={stationId}
           stationName={stations.find((s) => s.id === stationId)?.name ?? null}
           radio={radio}
@@ -1147,7 +1150,7 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
           scale of everything else simply by existing. */}
       {settingsOpen && (
         <Settings
-          me={me}
+          me={meWithName}
           stationId={stationId}
           stationName={stations.find((s) => s.id === stationId)?.name ?? null}
           radio={radio}
