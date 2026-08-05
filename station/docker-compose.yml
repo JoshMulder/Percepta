@@ -59,6 +59,12 @@ services:
       # here, which is what the image is built from.
       context: .
       dockerfile: deploy/Dockerfile
+      args:
+        # Set GSU_TRANSCRIBE=0 in .env to build a station without the on-box
+        # transcription tooling (whisper.cpp + the model ladder) — a much smaller
+        # image and a far shorter build on a constrained box, at the cost of no
+        # airband transcription. Default on.
+        GSU_TRANSCRIBE: ${GSU_TRANSCRIBE:-1}
 
     # Chosen by GSU_IMAGE_REF in .env (item 48):
     #   * Set to a signed registry digest — ghcr.io/<owner>/percepta-gsu@sha256:… —

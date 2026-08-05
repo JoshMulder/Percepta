@@ -43,6 +43,14 @@ ARG RTLSDR_REF=master
 ARG WHISPER_MODELS="small.en base.en"
 ARG WHISPER_MODEL=small.en
 
+# Build the on-box transcription tooling — whisper.cpp plus the model ladder —
+# into the image, or skip it entirely. Set to 0 for a constrained box (a 32-bit
+# Pi, say) where the whisper compile and the ~600 MB of models are more than the
+# board is worth spending on. With it off the image ships no whisper-cli and no
+# models; the station reports transcription "not installed" and the rest runs
+# unchanged.
+ARG GSU_TRANSCRIBE=1
+
 # The station software version, stamped into the image so the box reports what it
 # is running and the remote updater can compare against a target. CI passes the
 # release tag; a local build leaves it "dev".
@@ -61,7 +69,6 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       git ca-certificates curl cmake build-essential pkg-config \
       libusb-1.0-0-dev \
-      gfortran \
  && rm -rf /var/lib/apt/lists/*
 
 # The rtl-sdr-blog fork — installs librtlsdr.so.* into /usr/local/lib. No udev
@@ -86,46 +93,56 @@ RUN git clone --depth 1 --branch "${RTLSDR_REF}" \
 # test caught an exit 1 with the reason on stdout. Rather than track the name,
 # take the LARGEST `whisper*cli` the build produced — the real one is megabytes
 # of static whisper/ggml, the stub is a few kilobytes of printf. It lands at
-# whisper-cli regardless, which is what GSU_WHISPER_BIN points at.
-RUN git clone --depth 1 --branch "${WHISPER_REF}" \
-      https://github.com/ggerganov/whisper.cpp.git /tmp/whisper \
- && cmake -S /tmp/whisper -B /tmp/whisper/build \
-      -DCMAKE_BUILD_TYPE=Release \
-      -DBUILD_SHARED_LIBS=OFF \
- && cmake --build /tmp/whisper/build --config Release -j "$(nproc)" \
- && whisper_bin="$(find /tmp/whisper/build -type f -name 'whisper*cli' \
-      -printf '%s\t%p\n' | sort -rn | head -1 | cut -f2)" \
- && test -n "${whisper_bin}" && test "$(stat -c%s "${whisper_bin}")" -gt 1000000 \
-      || { echo "no real whisper-cli built (only a deprecation stub?)"; exit 1; } \
- && cp "${whisper_bin}" /usr/local/bin/whisper-cli
+# /opt/whisper-bin/whisper-cli, which the runtime copies and GSU_WHISPER_BIN
+# points at.
+#
+# The whole build is behind GSU_TRANSCRIBE. When it is off, the directory is
+# still created (empty) so the runtime's COPY is never conditional — Docker
+# cannot skip a COPY — and the station simply finds no whisper-cli.
+ARG GSU_TRANSCRIBE
+RUN mkdir -p /opt/whisper-bin \
+ && if [ "${GSU_TRANSCRIBE}" = "1" ]; then \
+      ( git clone --depth 1 --branch "${WHISPER_REF}" \
+          https://github.com/ggerganov/whisper.cpp.git /tmp/whisper \
+        && cmake -S /tmp/whisper -B /tmp/whisper/build \
+             -DCMAKE_BUILD_TYPE=Release \
+             -DBUILD_SHARED_LIBS=OFF \
+        && cmake --build /tmp/whisper/build --config Release -j "$(nproc)" \
+        && whisper_bin="$(find /tmp/whisper/build -type f -name 'whisper*cli' \
+             -printf '%s\t%p\n' | sort -rn | head -1 | cut -f2)" \
+        && test -n "${whisper_bin}" \
+        && test "$(stat -c%s "${whisper_bin}")" -gt 1000000 \
+        && cp "${whisper_bin}" /opt/whisper-bin/whisper-cli ) \
+      || { echo "no real whisper-cli built (only a deprecation stub?)"; exit 1; } ; \
+    else \
+      echo "GSU_TRANSCRIBE=${GSU_TRANSCRIBE}: skipping the whisper.cpp build"; \
+    fi
 
 # The model ladder, pinned by name; the files are content-stable at these URLs.
 # WHISPER_MODELS is declared here, below the whisper build, on purpose: changing
 # the ladder then re-runs only this download and never rebuilds whisper.cpp above.
 ARG WHISPER_MODELS
 RUN mkdir -p /opt/models \
- && for m in ${WHISPER_MODELS}; do \
-      curl -fSL -o "/opt/models/ggml-$m.bin" \
-        "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-$m.bin" \
-      || { echo "failed to fetch ggml-$m.bin"; exit 1; }; \
-    done
-
-# The numpy wheel, built here so the slim runtime can install it without a
-# toolchain of its own. On amd64/arm64 this just downloads the prebuilt wheel
-# into /wheels; on 32-bit arm (armv7/armv6), where PyPI publishes none, it is
-# *compiled* here — build-essential is already present above — into a wheel the
-# runtime then installs offline. Capped below 1.26 on 32-bit arm so the build
-# takes numpy's classic distutils path with its bundled lapack_lite, rather than
-# bootstrapping the heavier meson/ninja toolchain that is slow and brittle to
-# compile on a 32-bit Pi; the radio needs numpy's FFT and array arithmetic,
-# neither of which wants an external BLAS. This step is minutes on a 32-bit box
-# and wants RAM — the cost of an architecture with no wheels.
-ARG TARGETARCH
-RUN if [ "${TARGETARCH}" = "arm" ]; then \
-      pip wheel --no-cache-dir "numpy>=1.24,<1.26" -w /wheels; \
+ && if [ "${GSU_TRANSCRIBE}" = "1" ]; then \
+      for m in ${WHISPER_MODELS}; do \
+        curl -fSL -o "/opt/models/ggml-$m.bin" \
+          "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-$m.bin" \
+        || { echo "failed to fetch ggml-$m.bin"; exit 1; }; \
+      done ; \
     else \
-      pip wheel --no-cache-dir --only-binary=:all: "numpy>=1.24" -w /wheels; \
+      echo "GSU_TRANSCRIBE=${GSU_TRANSCRIBE}: skipping the model download"; \
     fi
+
+# The numpy wheel, collected here so the slim runtime installs it offline with
+# no toolchain of its own. `--only-binary=:all:` forbids a source build; the
+# piwheels index supplies the 32-bit arm (armv7) wheels that PyPI does not,
+# while amd64/arm64 still come from PyPI (piwheels serves only arm). Prebuilt
+# either way — no compiling on the box, which on a 32-bit Pi was minutes and ran
+# it out of memory. A miss on any arch fails loudly here rather than falling back
+# to a compile the runtime could not finish anyway.
+RUN pip wheel --no-cache-dir --only-binary=:all: \
+      --extra-index-url https://www.piwheels.org/simple \
+      "numpy>=1.24" -w /wheels
 
 # =========================================================================
 # Runtime: the slim base, plus only the shared libraries the built artefacts
@@ -148,7 +165,7 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     GSU_HOME=/var/lib/percepta-gsu \
-    GSU_WHISPER_BIN=whisper-cli \
+    GSU_WHISPER_BIN=/opt/percepta/bin/whisper-cli \
     GSU_WHISPER_MODEL=/opt/percepta/models/ggml-${WHISPER_MODEL}.bin \
     GSU_VERSION=${GSU_VERSION}
 
@@ -172,7 +189,9 @@ RUN apt-get update \
 # `ldconfig` so the loader finds librtlsdr.so.0 in /usr/local/lib, which is where
 # the station's ctypes `CDLL("librtlsdr.so.0")` looks it up by soname.
 COPY --from=builder /usr/local/lib/librtlsdr.so* /usr/local/lib/
-COPY --from=builder /usr/local/bin/whisper-cli /usr/local/bin/whisper-cli
+# A directory, not the file: it holds whisper-cli when transcription is built in
+# and is empty when GSU_TRANSCRIBE=0, so this COPY never has to be conditional.
+COPY --from=builder /opt/whisper-bin/ /opt/percepta/bin/
 COPY --from=builder /opt/models/ /opt/percepta/models/
 RUN ldconfig
 
@@ -196,12 +215,19 @@ WORKDIR /opt/percepta/station
 # time. From pip, NOT apt's python3-numpy: this base's interpreter lives in
 # /usr/local and never reads the distribution's dist-packages.
 #
-# Installed from the wheel the builder produced, never over the network: this
-# slim runtime has no C toolchain, so it cannot compile an sdist — and on 32-bit
-# arm, where PyPI has no wheel, an sdist is all pip could otherwise find. The
-# builder downloaded the wheel (amd64/arm64) or compiled one (armv7); here it is
-# just a local install. --no-index so a wheel is the only thing that can satisfy
-# it — a miss fails loudly rather than reaching for a source build.
+# Installed from the wheel the builder collected, never over the network: this
+# slim runtime has no C toolchain, so it must not be handed an sdist to compile.
+# --no-index makes a local wheel the only thing that can satisfy it, so a miss
+# fails loudly rather than reaching for a source build.
+#
+# The 32-bit-arm wheel comes from piwheels and links the system OpenBLAS, so that
+# is installed here — arm only, since the amd64/arm64 wheels bundle their own.
+ARG TARGETARCH
+RUN if [ "${TARGETARCH}" = "arm" ]; then \
+      apt-get update \
+      && apt-get install -y --no-install-recommends libopenblas0-pthread libgfortran5 \
+      && rm -rf /var/lib/apt/lists/*; \
+    fi
 COPY requirements.txt ./
 COPY --from=builder /wheels /wheels
 RUN pip install --no-cache-dir --no-index --find-links=/wheels numpy \

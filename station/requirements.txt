@@ -34,11 +34,12 @@ jsonschema>=4.0    # tests
 #
 # The cost, honestly
 #
-# On amd64 and arm64 — the only architectures this ships to — PyPI publishes
-# manylinux wheels and `pip install numpy` takes seconds. The long note that
-# used to be here about armv7, piwheels and a BLAS toolchain went with the Pi
-# 2B: 32-bit ARM was the only target where this compiled from source, and it
-# was the reason the station carried a second deployment path at all.
+# On amd64 and arm64 PyPI publishes manylinux wheels and `pip install numpy`
+# takes seconds. 32-bit arm (armv7) has no PyPI wheel, so the Docker image pulls
+# one from piwheels instead (deploy/Dockerfile), which links the system OpenBLAS
+# the image then installs — still a prebuilt wheel, no compiling on the box. A
+# from-source build on a 32-bit Pi is minutes and can run it out of memory,
+# which is exactly why the image does not do it.
 #
 # Why that does not spoil the property this file exists to protect
 #
