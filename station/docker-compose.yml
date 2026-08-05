@@ -67,10 +67,15 @@ services:
     #   * Unset is the local path: `docker compose up --build` builds from this
     #     checkout and tags it percepta/gsu:local, exactly as before.
     image: ${GSU_IMAGE_REF:-percepta/gsu:local}
-    # The updater pulls (and verifies) explicitly before `up`, so compose never
-    # needs to: `missing` lets a fresh box pull on first `up` and otherwise runs
-    # what is already local.
-    pull_policy: missing
+    # No pull_policy on purpose. With a `build:` section present, compose treats
+    # this name as the build *output* — it builds the image when absent and never
+    # reaches for a registry, which is what both paths want. The local path builds
+    # percepta/gsu:local from this checkout; the deployed path has the updater pull
+    # and verify the signed digest itself (deploy/gsu-update.sh) before recreating
+    # with `--no-build`, so compose still has nothing to fetch. An explicit
+    # `pull_policy: missing` was tried and backfired: it made a fresh local build
+    # first try to *pull* percepta/gsu:local from Docker Hub and print "pull access
+    # denied ... repository does not exist" before falling through to the build.
     container_name: percepta-gsu
 
     # Restart for ever. Same reasoning as the systemd unit: on a site hours

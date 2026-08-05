@@ -35,6 +35,15 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 ENV_FILE=".env"
 
+# Show the build. The image compiles whisper.cpp and bakes the transcription
+# models — many minutes on a Pi — and compose's default progress folds each long
+# RUN into a single spinner line, so the slow parts read as a hung terminal.
+# `plain` streams the actual step output (apt, the git clones, cmake, the model
+# download), which is the feedback somebody watching a fresh box needs. Exported
+# so every build this script triggers honours it: the password-hashing `run`
+# that builds first, and the `up --build` at the end.
+export BUILDKIT_PROGRESS=plain
+
 die() { printf '\n%s\n' "$*" >&2; exit 1; }
 
 command -v docker >/dev/null 2>&1 \
@@ -191,7 +200,8 @@ ask GSU_SITE_NAME "A name for this site (shown on the local setup page)" "ground
 # The setup page needs a password, and the station is right to insist.
 #
 # It binds 0.0.0.0 *inside the container* — the container's network namespace
-# is the boundary, and compose publishes the port to the host's loopback only.
+# is the boundary, and compose publishes that port on the site LAN
+# (GSU_SETUP_BIND, default 0.0.0.0:80).
 # But the agent cannot see that from inside, so it applies the rule it can
 # check: an unauthenticated form must never be offered on a routable
 # interface. Without a password it demotes itself to the container's own
@@ -219,8 +229,9 @@ ask GSU_SITE_NAME "A name for this site (shown on the local setup page)" "ground
 
 if [ -z "${GSU_SETUP_PASSWORD_HASH:-}" ]; then
   echo
-  echo "The setup page needs a password. It is published to this host's"
-  echo "loopback only, so reaching it remotely still needs an SSH tunnel."
+  echo "The setup page needs a password before it will be served. With one set"
+  echo "it is reachable on the site LAN at http://<this box>/ (port 80); without"
+  echo "one the agent refuses to offer it on the network at all."
   echo "At least 10 characters. Ctrl-C to give up."
 
   # **Asked again rather than aborted.**
