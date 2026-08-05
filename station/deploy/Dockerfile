@@ -176,10 +176,19 @@ WORKDIR /opt/percepta/station
 # numpy is the radio's other half — the receiver refuses to start without it,
 # because 240 000 samples a second is not something CPython can filter in real
 # time. From pip, NOT apt's python3-numpy: this base's interpreter lives in
-# /usr/local and never reads the distribution's dist-packages. On arm64 and
-# amd64 this is a wheel and nothing compiles.
+# /usr/local and never reads the distribution's dist-packages.
+#
+# `--only-binary=:all:` is load-bearing, not tidiness. This runtime stage has no
+# C toolchain — cc/gcc live only in the builder — so numpy has to arrive as a
+# prebuilt wheel. Without the flag, pip downloads an *sdist* for any version that
+# lacks a wheel for this box and tries to compile it, which fails with "Unknown
+# compiler(s)" — exactly what a fresh numpy release with no amd64/arm64 cp311
+# wheel yet did here. The flag makes pip choose the newest version that *does*
+# have a matching wheel, and on a genuinely unsupported arch it fails fast with
+# "no matching distribution" rather than a five-minute doomed build. amd64 and
+# arm64 both have wheels; nothing else is a target.
 COPY requirements.txt ./
-RUN pip install --no-cache-dir "numpy>=1.24"
+RUN pip install --no-cache-dir --only-binary=:all: "numpy>=1.24"
 
 # Docs before code, so the last layer in the image is the one that changes most
 # often: a code-only update then ships one small layer and nothing else. Demo
