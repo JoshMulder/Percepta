@@ -83,6 +83,11 @@ _ADDED_COLUMNS = (
 #: nobody can open.
 MAX_SEGMENT_SECONDS = 120.0
 
+#: The event kind airband transcripts are stored under (see agent
+#: `_record_transcript`). Named here so the clear action and the retention prune
+#: agree with the writer on exactly what a transcript is.
+TRANSCRIPT_KIND = "radio.transmission"
+
 
 @dataclass(frozen=True)
 class Event:
@@ -248,6 +253,18 @@ class LocalStore:
             )
             self._db.commit()
 
+    def clear_transcripts(self) -> int:
+        """Delete every airband transcript from the store, now, and return how
+        many went. The seq counter is left untouched — it lives in its own table
+        and is never rewound — so deleting rows cannot make the station reuse a
+        sequence number, which is the one thing `contract/transport.md` forbids
+        (see the note on the counters table above)."""
+        with self._lock:
+            cursor = self._db.execute(
+                "DELETE FROM events WHERE kind = ?", (TRANSCRIPT_KIND,))
+            self._db.commit()
+        return int(cursor.rowcount or 0)
+
     @staticmethod
     def _row(row) -> Event:
         return Event(
@@ -297,13 +314,25 @@ class LocalStore:
 
     # --- retention ------------------------------------------------------
 
-    def prune(self, audio_hours: float, audio_mb: float, event_days: float) -> None:
-        cutoff = datetime.now(UTC) - timedelta(days=event_days)
+    def prune(self, audio_hours: float, audio_mb: float, event_days: float,
+              transcript_days: float = 30.0) -> None:
+        now = datetime.now(UTC)
         with self._lock:
             self._db.execute(
                 "DELETE FROM events WHERE at < ? AND synced_at IS NOT NULL",
-                (cutoff.isoformat(),),
+                ((now - timedelta(days=event_days)).isoformat(),),
             )
+            # Transcripts have no sync channel (see the module docstring), so the
+            # synced-only rule above never reaches them and they would grow
+            # without bound. Being local by nature, they are pruned by age alone
+            # — synced or not. A retention of zero means keep them until cleared
+            # by hand, so it prunes nothing.
+            if transcript_days > 0:
+                self._db.execute(
+                    "DELETE FROM events WHERE kind = ? AND at < ?",
+                    (TRANSCRIPT_KIND,
+                     (now - timedelta(days=transcript_days)).isoformat()),
+                )
             self._db.commit()
 
         files = sorted(

@@ -473,6 +473,27 @@ class ServedPageTests(unittest.TestCase):
         self.assertEqual(self.agent.radio.auto_margin_db, 12.0)
         self.assertEqual(self.agent.radio.hang_seconds, 0.3)
 
+    def test_the_radio_apply_sets_the_transcript_retention(self):
+        self.agent.inventory.set_device("radio", "simulated-airband", {}, None)
+        self.agent.build_devices()
+        token, csrf, _ = self.page("/devices?slot=radio")
+        self.request(
+            "POST", "/radio",
+            f"type_id=simulated-airband&transcript_days=7&csrf={csrf}",
+            {"Cookie": token},
+        )
+        self.assertEqual(self.agent.site.transcript_retention_days, 7.0)
+
+    def test_clearing_transcripts_deletes_only_transcripts(self):
+        from gsu.store import TRANSCRIPT_KIND
+        self.agent.store.record_event(TRANSCRIPT_KIND, "info", "roger")
+        self.agent.store.record_event("aircraft.alert", "warning", "traffic")
+        token, csrf, _ = self.page("/devices?slot=radio")
+        self.request("POST", "/transcripts", f"csrf={csrf}", {"Cookie": token})
+        kinds = [event.kind for event in self.agent.store.recent_events(50)]
+        self.assertNotIn(TRANSCRIPT_KIND, kinds)
+        self.assertIn("aircraft.alert", kinds)
+
     def test_the_radio_apply_is_instant_over_fetch_without_a_reload(self):
         # The instant-apply path: a control change posts with ajax=1 and gets a
         # small JSON answer, not the 303 the no-script fallback gets — so the
@@ -2323,6 +2344,14 @@ class DevicePickerTests(unittest.TestCase):
         panel = self._radio_panel()
         self.assertIn("name=auto_margin", panel)
         self.assertIn("name=hang_s", panel)
+
+    def test_the_transcript_retention_control_is_offered(self):
+        self.assertIn("transcript_days", self._radio_panel())
+
+    def test_the_events_section_offers_a_clear_transcripts_button(self):
+        events = self.console._section_events(self.agent.snapshot(), "tok")
+        self.assertIn("action='/transcripts'", events)
+        self.assertIn("Clear transcripts", events)
 
     def test_the_squelch_controls_match_the_dashboard(self):
         # The platform's signal indicator, verbatim: a threshold-or-AUTO pair

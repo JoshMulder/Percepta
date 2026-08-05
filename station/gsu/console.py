@@ -626,6 +626,7 @@ POST_HOME = {
     "/device": "/devices",
     "/enrol": "/connection",
     "/location": "/connection",
+    "/transcripts": "/",
     "/logout": "/",
 }
 
@@ -1013,6 +1014,8 @@ class Console:
                 self._set_location(form)
             elif path == "/radio":
                 self._set_radio(form)
+            elif path == "/transcripts":
+                self._clear_transcripts()
             elif path == "/reset":
                 self._reset(form)
             else:  # /logout
@@ -1280,8 +1283,21 @@ class Console:
                     raise ValueError(f"{hang!r} is not a hang time in seconds.")
 
         self.agent.site.radio_transcribe = bool(form.get("radio_transcribe"))
+        keep = (form.get("transcript_days") or [""])[0].strip()
+        if keep:
+            try:
+                self.agent.site.transcript_retention_days = max(0.0, float(keep))
+            except ValueError:
+                raise ValueError(f"{keep!r} is not a number of days.")
         self.agent.site.save(self.agent.config.site_config_path)
         self.message = ("good", "Saved.")
+
+    def _clear_transcripts(self) -> None:
+        """Delete the airband transcripts kept on the box, on an explicit click
+        from the events section — separate from the radio form so it is never an
+        accident of tuning."""
+        count = self.agent.store.clear_transcripts()
+        self.message = ("good", f"Cleared {count} transcript(s).")
 
     def _reset(self, form: dict) -> None:
         """Return the box to how it shipped.
@@ -1762,7 +1778,7 @@ class Console:
             if nonce:
                 out.append(self._devices_script(nonce))
         elif page == "/logging":
-            out.append(self._section_events(state))
+            out.append(self._section_events(state, csrf))
         else:
             out.append(self._page_summary(state))
         out.append("</main>")
@@ -2831,6 +2847,8 @@ class Console:
             # None here and slipped through.
             station = (state.get("position") or {}).get("station") or {}
             transcribe_on = " checked" if station.get("radio_transcribe") else ""
+            keep_days = station.get("transcript_retention_days")
+            keep_days = int(keep_days) if isinstance(keep_days, (int, float)) else 30
             note = (
                 "Logs what is heard on the airband, on the box, with whisper.cpp."
                 if station.get("transcribe_installed")
@@ -2843,6 +2861,11 @@ class Console:
                 "<input type=checkbox id='radio_transcribe' "
                 f"name='radio_transcribe' value='1'{transcribe_on}>"
                 f"<span class=muted>{note}</span></div>"
+                "<div class=field><label for='transcript_days'>Keep transcripts "
+                "(days)</label><input type=number id='transcript_days' "
+                f"name='transcript_days' min=0 step=1 value='{keep_days}'>"
+                "<span class=muted>How long transcripts are kept on the box; "
+                "0 keeps them until cleared by hand.</span></div>"
                 # The button is the no-script fallback: with the nonce'd script
                 # running, each control applies the moment it changes and this is
                 # hidden, its .field given over to a status line the fetch writes.
@@ -3633,7 +3656,7 @@ class Console:
 """
         return f"<script nonce='{nonce}'>{script}</script>"
 
-    def _section_events(self, state: dict) -> str:
+    def _section_events(self, state: dict, csrf: str) -> str:
         """Read straight off the store rather than the snapshot: the snapshot
         carries fifteen events because it also goes over the wire in
         status.json, and this page is the one place the longer history is
@@ -3663,6 +3686,13 @@ class Console:
             f"<div class=muted>{storage['recordings']} audio recording(s), "
             f"{storage['recordings_mb']} MB; {storage['events']} events stored, "
             f"{storage['events_pending']} not yet sent to the platform.</div>"
+        )
+        out.append(
+            "<form method=post action='/transcripts' class=field>"
+            + self._csrf_field(csrf) +
+            "<button type=submit>Clear transcripts</button>"
+            "<span class=muted>Deletes the airband transcripts kept on the box. "
+            "Other events are untouched.</span></form>"
         )
         out.append("</div>")
         return "".join(out)

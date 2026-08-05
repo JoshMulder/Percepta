@@ -391,6 +391,12 @@ class SiteConfig:
     audio_retention_hours: float = 24.0
     audio_retention_mb: float = 200.0
     event_retention_days: float = 30.0
+    #: How long airband transcripts are kept on the box, in days. Separate from
+    #: `event_retention_days`: transcripts have no sync channel, so they are
+    #: pruned by age alone (see `store.prune`), and an operator may want a
+    #: different horizon for "what was said" than for the rest of the log. Zero
+    #: keeps them until cleared by hand from the setup page.
+    transcript_retention_days: float = 30.0
 
     #: Cadence, from contract/transport.md. A site may need to differ.
     weather_period_s: float = 5.0

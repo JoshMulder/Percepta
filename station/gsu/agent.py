@@ -42,7 +42,7 @@ from .health import Health
 from .radio.audio import AUDIO_RATE
 from .radio.receiver import RadioController
 from .radio.transcribe import Transcriber
-from .store import LocalStore
+from .store import LocalStore, TRANSCRIPT_KIND
 from .stream import StreamSession
 from .transport import (
     AUDIO, CONTRACT_VERSION, EVENTS, TELEMETRY,
@@ -461,6 +461,7 @@ class Agent:
                 # the two together.
                 "adsb_baro_correction": self.site.adsb_baro_correction,
                 "radio_transcribe": self.site.radio_transcribe,
+                "transcript_retention_days": self.site.transcript_retention_days,
                 # So the setup page can show "installed / switched off" apart
                 # from "not installed", and why.
                 "transcribe_installed": self.transcriber.installed,
@@ -1097,6 +1098,7 @@ class Agent:
                         self.site.audio_retention_hours,
                         self.site.audio_retention_mb,
                         self.site.event_retention_days,
+                        self.site.transcript_retention_days,
                     )
                 if (
                     started - self._last_discovery > REDISCOVER_SECONDS
@@ -1337,7 +1339,7 @@ class Agent:
         its own.
         """
         self.store.record_event(
-            "radio.transmission",
+            TRANSCRIPT_KIND,
             "info",
             f"{freq_hz / 1e6:.3f} MHz, {duration_s:.0f}s: {text}",
         )
