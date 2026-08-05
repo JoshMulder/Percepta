@@ -73,6 +73,11 @@ place that knows the broker is Redis; swapping it is one class and a URL scheme.
 
 ### 5. Software update path (§9.5) — **partly answered, and the rest is now urgent**
 
+**Carried forward to item 48**, which re-establishes the updater for the
+container era (item 35 dropped it), decides signing — the headline open item
+below — and adds a platform-commanded trigger. Governance (who publishes, how a
+release is approved, staging) is recorded there as still open.
+
 **A mechanism now exists** (item 39): pull on a jittered timer, apply, prove the
 new image publishes, and roll back to the image already on disk if it does not.
 That was built because the owner's constraint — *"once these stations are
@@ -1145,3 +1150,100 @@ relay gets the same thing free by knowing when its own socket closes.
 platform** — a customer's SCADA, another vendor's tooling — MQTT's standardness
 becomes worth the second broker, and adopting it then is much more expensive
 than adopting it now. That is the condition that would reverse this.
+
+## 48. Remote update, container era: signed registry images, commanded by the platform, over the pull that already works
+
+Item 39 built a remote updater — pull a digest-pinned image on a jittered timer,
+gate it on the new container actually *publishing*, roll back to the image
+already on disk if it does not — and item 40 proved it costs nothing on the link.
+Item 35 then moved deployment from systemd to Docker Compose built from the local
+checkout, and in doing so **dropped the updater**: `docker-compose.yml` and
+`bootstrap.sh` now say plainly "no updater daemon, no image registry," and the
+update is `git pull && docker compose up -d --build` by hand over SSH. Item 5
+called finishing this "now urgent" and named what was still owed. This is the
+answer, for the container era.
+
+**The shape.** CI builds a versioned, multi-arch image and pushes it to a
+registry. The platform names a target in a command over the broker. The agent —
+which cannot update itself, and must not be able to — writes the target into a
+handoff file on a shared volume. A host-side updater, root, *outside* the
+container, reconciles it: pull the pinned digest, **verify its signature**,
+`up -d`, run item 39's publish-gate, roll back on failure. It is item 39's
+mechanism re-homed from systemd onto Compose, plus the two things item 5 said
+were still missing: a trigger the platform controls, and provenance.
+
+**The sandbox is why the updater is not in the container, and that has not
+changed.** The agent has no docker socket, `cap_drop: ALL`, `read_only`,
+`no-new-privileges` (item 35c). A container that could recreate itself could
+replace itself with anything, which makes the signature check and the gate
+decorative — item 39 said this for systemd; a container sharpens it. So the agent
+only *requests*, the same shape as the `setup-open` marker the host touches to
+reopen the console window, and the host does the privileged work. The handoff is
+a bind-mounted directory, not a reach into Docker's volume path, so neither side
+depends on the other's internals; and a container that cannot start can still be
+rolled back by something that is still running.
+
+**Signing, which item 5 left open and is the point of this pass.** A digest pin
+makes the image immutable; it does not say who built it. Anyone who can write to
+the registry, or stand in for it, can publish a station update — remote code
+execution on every box in the fleet. So the updater **verifies a signature
+(cosign) before it runs a pulled image**, against a public key baked onto the
+box. Two rules item 5 set, kept here: the signing key is **not** the enrolment
+trust root — a compromise of one must not be a compromise of both — and it is not
+the broker credential either. Pin and signature are belt and braces: the pin
+stops the bytes changing under a name, the signature stops an attacker choosing
+the name.
+
+**Trigger: the platform commands it, over the channel that already exists.** Item
+40 showed the pull is 0.02% of the telemetry budget, so bandwidth was never the
+case for a push — *latency* is (up to ~8 h from release to a box having it),
+which item 40 handed to `CONTRACT-QUESTIONS` item 11 as a contract change rather
+than something to invent. This is that change: a `system.update` command in
+**contract 2.1**, carrying the target tag and digest. An old station ignores a
+command it does not know — the "station is older than the platform" path is
+forward-compatible already — so shipping the command breaks nothing in the field.
+
+**Keep the pull as the floor — recommended, and the one thing here to confirm.**
+The command is the low-latency trigger; item 39's jittered timer is the resilient
+floor under it. The broker can be down for exactly the reason an update is wanted
+— a bad release wedged the uplink — and a station reachable *only* by command is
+one that cannot be rescued when the command path is the thing that broke. The
+pull already exists, is tested to 21 scenarios, and costs ~24 KB/day. Dropping it
+to have a single control path trades the cheapest resilience on the box for
+tidiness. The owner picked "command" over "both"; this record recommends
+**both** — command for speed, pull for rescue — and flags it for that decision.
+
+**Backwards compatibility, and why rollback rests on it.** The command is
+optional and additive (2.1); config stays additive-only (SiteConfig is versioned
+and tolerant of fields it does not know). The load-bearing case is rollback: a
+box that rolls back drops to the *previous* contract version, so **the platform
+must speak N-1 as well as N through any rollout**. That is not politeness — a
+rolled-back station the platform can no longer talk to is a bricked station with
+extra steps.
+
+**Still open — governance, not mechanism (item 5's other two).** Who may publish
+a release and how one is approved: nothing technical yet stops a half-finished
+build reaching the tag every station follows, and the signing key turns "who
+holds it" into the same question with higher stakes. And staging: updating one
+station, watching it, then the fleet — item 39's jitter staggers by accident, a
+command lets it be staged on purpose, but the *policy* is a process nobody owns.
+Key custody and the release/approval pipeline are prerequisites to turning this
+on, not details to settle afterwards.
+
+**Build order.** The station + host slice lives in this repo and is testable
+here: the `system.update` command handler and version reporting; the host
+updater, re-homed from item 39's `gsu-update.sh` onto Compose with `cosign
+verify` added; `bootstrap.sh` to install it and `docker-compose.yml` to pull a
+signed, pinned image from the registry instead of building locally. The registry,
+the CI multi-arch build with signing, and the platform half (sending the command,
+tracking desired-vs-running per station, N-1 support, the staged-rollout UI) are
+their own tracks, and the platform half is another repo.
+
+**Not decided here — needs the owner or the platform team:** the registry and the
+box's scoped pull credential; the signing key's custody and rotation; the
+publish/approve pipeline; the staging policy; and the pull-floor question above.
+
+**Not verified:** none of this has run yet. Item 39's decision logic is tested
+against a stubbed Docker; the `cosign verify` step, the broker-command path, and
+the Compose re-homing are new and unexercised. First box gets it by hand,
+`--status` then once for real, before any timer or command is let near it.
