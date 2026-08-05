@@ -94,6 +94,14 @@ class DeviceType:
     notes: str = ""
 
 
+#: The recommended fixed tuner gain for airband. A mid-table step: high enough
+#: to lift signals clear of the 8-bit ADC floor, low enough to stay out of the
+#: R828D's overload region on strong transmitters. The console marks the nearest
+#: available step "(Default)" and falls back to it. Site-dependent in the end
+#: (antenna and local noise decide), so a starting point rather than a truth.
+AIRBAND_DEFAULT_GAIN_DB = 29.7
+
+
 #: Serial parameters, with the baud that device actually ships at.
 #:
 #: The port default is **empty on purpose**. A default of `/dev/ttyUSB0` is a
@@ -211,7 +219,7 @@ REGISTRY: tuple[DeviceType, ...] = (
         driver="gsu.radio.rtlsdr:RtlSdrFrontEnd",
         resource="rtlsdr",
         parameters=(
-            Parameter("gain", "Tuner gain (dB)", "number", 37.2,
+            Parameter("gain", "Tuner gain (dB)", "number", AIRBAND_DEFAULT_GAIN_DB,
                       help="Fixed, not auto: the tuner's AGC desenses near "
                            "strong transmitters badly enough that a stronger "
                            "signal can read lower, and every squelch threshold "

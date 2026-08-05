@@ -1412,20 +1412,28 @@ class Agent:
                 int(telemetry.get("freq_hz", 0)),
             )
 
-        if audio is None:
-            return None
-        # Recorded whether or not it can be sent, and whether or not anybody
-        # is listening. A transmission during an outage is not simply gone,
-        # and neither is one nobody happened to have a console open for.
-        # From `last_pcm`, not from the payload: the wire carries Opus and a
-        # local recording is PCM. A WAV on disk can be opened by anything,
-        # which is the whole point of keeping one, and decoding the frame we
-        # just encoded to get back to where we started would be absurd.
+        # Recorded whether or not it can be sent, whether or not anybody is
+        # listening, and whether or not there is an Opus encoder at all. A
+        # transmission during an outage is not simply gone; one nobody had a
+        # console open for is not gone; and one this box cannot encode is not
+        # gone either — the recording is PCM and needs no codec, so it must not
+        # hang on the audio payload existing. A box without libopus produces no
+        # payload (audio is None) but still hears, squelches and records; gating
+        # this on the payload silently made recording depend on the codec, which
+        # is the one thing it was written to be independent of. So it keys off
+        # `last_pcm`, set whenever the gate is open, not off `audio`. From
+        # `last_pcm` and not the wire payload for the other half of the reason
+        # too: the wire carries Opus, a WAV on disk can be opened by anything,
+        # and decoding the frame we just encoded to get back to where we started
+        # would be absurd.
         if self.radio.last_pcm:
             self.store.write_audio(
                 self.radio.last_pcm, AUDIO_RATE,
                 label=f"{self.radio.freq_hz // 1000}kHz",
             )
+
+        if audio is None:
+            return None
         # Published only while somebody is listening. 24 kHz of 16-bit mono is
         # 384 kbit/s, and base64 in a JSON envelope makes it 512 — the largest
         # thing this station sends, and it used to go up on every over whether
@@ -2059,6 +2067,8 @@ class Agent:
                 "monitor": self.radio.monitor if self.radio else False,
                 "auto": self.radio.auto_squelch if self.radio else False,
                 "threshold_db": round(self.radio.last_threshold_db, 1) if self.radio else None,
+                "auto_margin_db": round(self.radio.auto_margin_db, 1) if self.radio else None,
+                "hang_s": round(self.radio.hang_seconds, 2) if self.radio else None,
                 # The signal meter and the stepped gain control on the setup
                 # page's radio tab — the same numbers the platform panel shows.
                 "rssi_db": round(self.radio.rssi_db, 1) if self.radio else None,

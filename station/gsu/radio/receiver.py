@@ -203,6 +203,12 @@ class RadioController:
         #: An absolute dBFS threshold the operator set. None means AUTO has
         #: never been left, so there is nothing frozen to fall back to.
         self.manual_threshold_db: float | None = None
+        #: How far above the measured floor AUTO holds the gate, in dB. Live so a
+        #: noisy site can widen the margin without a redeploy.
+        self.auto_margin_db = dsp.AUTO_SQUELCH_MARGIN_DB
+        #: How long the gate lingers after a signal drops, in seconds. Live so an
+        #: operator can shorten a tail that runs on after an over.
+        self.hang_seconds = HANG_SECONDS
         self.monitor = False
         #: When a held-open gate releases itself. See MONITOR_MAX_S.
         self._monitor_until = 0.0
@@ -274,6 +280,8 @@ class RadioController:
         self.auto_squelch = bool(state.get("auto_squelch", self.auto_squelch))
         threshold = state.get("manual_threshold_db")
         self.manual_threshold_db = None if threshold is None else float(threshold)
+        self.auto_margin_db = float(state.get("auto_margin_db", self.auto_margin_db))
+        self.hang_seconds = float(state.get("hang_seconds", self.hang_seconds))
         # The step managed gain had settled on, so it restarts near it rather
         # than sweeping up from the middle again on every boot.
         stored_managed = state.get("managed_gain")
@@ -290,6 +298,8 @@ class RadioController:
             "ppm": self.ppm,
             "auto_squelch": self.auto_squelch,
             "manual_threshold_db": self.manual_threshold_db,
+            "auto_margin_db": self.auto_margin_db,
+            "hang_seconds": self.hang_seconds,
             "managed_gain": self._managed_gain,
         }
         try:
@@ -326,6 +336,19 @@ class RadioController:
             # Freeze where AUTO had it.
             self.manual_threshold_db = self.last_threshold_db
         self.auto_squelch = want
+        self._save()
+
+    def set_auto_margin(self, db: float) -> None:
+        """How far above the floor AUTO holds the gate. Clamped: below ~3 dB the
+        gate chatters on noise, above ~25 it starts missing weak traffic."""
+        self.auto_margin_db = max(3.0, min(25.0, float(db)))
+        self._save()
+
+    def set_hang(self, seconds: float) -> None:
+        """How long the gate lingers after a signal drops. Zero clips the last
+        word off gapped speech; a few seconds holds the gate — and the uplink —
+        open well past the over."""
+        self.hang_seconds = max(0.0, min(5.0, float(seconds)))
         self._save()
 
     def set_monitor(self, on: bool) -> None:
@@ -512,14 +535,14 @@ class RadioController:
         self._manage_gain(block.clip_fraction, block.peak_dbfs)
 
         if self.auto_squelch or self.manual_threshold_db is None:
-            threshold = dsp.auto_threshold_db(self._floor_db)
+            threshold = dsp.auto_threshold_db(self._floor_db, self.auto_margin_db)
         else:
             threshold = self.manual_threshold_db
         self.last_threshold_db = threshold
 
         above = self._rssi_db > threshold
         if above:
-            self._hang = HANG_SECONDS
+            self._hang = self.hang_seconds
         elif self._hang > 0:
             self._hang = max(0.0, self._hang - dt)
         self._open = bool(above or self._hang > 0 or self.monitor)

@@ -1522,6 +1522,7 @@ class RadioAudioLatencyTests(unittest.TestCase):
 
         class Counting:
             freq_hz = 121_500_000
+            last_pcm = b""
 
             def tick(self, dt):
                 reads.append(dt)
@@ -1547,6 +1548,7 @@ class RadioAudioLatencyTests(unittest.TestCase):
     def test_the_sweep_publishes_the_newest_reading_the_pump_left(self):
         class Counting:
             freq_hz = 121_500_000
+            last_pcm = b""
 
             def __init__(self):
                 self.n = 0
@@ -1582,6 +1584,7 @@ class RadioAudioLatencyTests(unittest.TestCase):
         """
         class Gated:
             freq_hz = 121_500_000
+            last_pcm = b""
 
             def __init__(self):
                 self.open = False
@@ -1660,6 +1663,7 @@ class RadioAudioLatencyTests(unittest.TestCase):
         """
         class Radio:
             freq_hz = 121_500_000
+            last_pcm = b""
             spectrum = None
 
             def tick(self, dt):

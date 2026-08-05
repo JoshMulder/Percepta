@@ -1266,6 +1266,18 @@ class Console:
                 else:
                     radio.set_auto_squelch(False)
             radio.set_monitor(bool(form.get("monitor")))
+            margin = (form.get("auto_margin") or [""])[0].strip()
+            if margin:
+                try:
+                    radio.set_auto_margin(float(margin))
+                except ValueError:
+                    raise ValueError(f"{margin!r} is not a squelch margin in dB.")
+            hang = (form.get("hang_s") or [""])[0].strip()
+            if hang:
+                try:
+                    radio.set_hang(float(hang))
+                except ValueError:
+                    raise ValueError(f"{hang!r} is not a hang time in seconds.")
 
         self.agent.site.radio_transcribe = bool(form.get("radio_transcribe"))
         self.agent.site.save(self.agent.config.site_config_path)
@@ -2655,11 +2667,12 @@ class Console:
             )
             # Gain, in the tuner's own steps — the same discrete list the platform
             # offers, read from the device so a value the tuner cannot honour
-            # cannot be picked. AUTO hands it to the tuner's own AGC (which
-            # desenses on a strong carrier); Managed lets the box hold the highest
-            # fixed step that does not overload; the airband default is a plain
-            # fixed gain (see the receiver's docstring). The managed step it has
-            # settled on is shown beside the select, refreshed by the poll.
+            # cannot be picked. Fixed steps only: "auto" (the tuner's own AGC)
+            # floats the level so the noise floor and the squelch both lose their
+            # meaning, and the software "managed" mode over-gains into overload on
+            # quiet airband — both broke the squelch this receiver is built
+            # around, so neither is offered. A legacy box still on managed keeps
+            # showing the settled step in the note beside the select.
             gains = rs.get("gains") or []
             current_gain = rs.get("gain")
             managed_db = rs.get("managed_gain_db")
@@ -2668,25 +2681,32 @@ class Console:
                 if current_gain == "managed" and isinstance(managed_db, (int, float))
                 else ""
             )
+            # The recommended step: the nearest one to the registry default. It
+            # is marked "(Default)" and, when the stored gain is not one of the
+            # tuner's steps — a station carried over from auto/managed, or a value
+            # the tuner cannot honour — it is also what the select falls back to,
+            # so Apply can never submit the first option (0 dB, deaf).
+            default_step = (
+                min(gains, key=lambda s: abs(float(s) - registry.AIRBAND_DEFAULT_GAIN_DB))
+                if gains else None
+            )
+            selected_step = next(
+                (s for s in gains if isinstance(current_gain, (int, float))
+                 and abs(float(current_gain) - float(s)) < 0.05),
+                default_step,
+            )
             out.append("<div class=field><label for=gain>Tuner gain (dB)</label>"
                        "<select id=gain name=gain>")
-            out.append(
-                "<option value=auto"
-                + (" selected" if current_gain == "auto" else "")
-                + ">AUTO</option>"
-            )
-            out.append(
-                "<option value=managed"
-                + (" selected" if current_gain == "managed" else "")
-                + ">Managed</option>"
-            )
             for step in gains:
-                sel = (
-                    " selected"
-                    if isinstance(current_gain, (int, float))
-                    and abs(float(current_gain) - float(step)) < 0.05 else ""
-                )
-                out.append(f"<option value='{step}'{sel}>{float(step):.1f}</option>")
+                sel = (" selected" if selected_step is not None
+                       and abs(float(step) - float(selected_step)) < 0.05 else "")
+                is_default = (default_step is not None
+                              and abs(float(step) - float(default_step)) < 0.05)
+                # A native <option> cannot colour only the suffix, so the whole
+                # default line is greyed (and Safari may ignore even that).
+                style = " style='color:#8a8a8a'" if is_default else ""
+                label = f"{float(step):.1f}" + (" (Default)" if is_default else "")
+                out.append(f"<option value='{step}'{sel}{style}>{label}</option>")
             out.append(
                 f"</select><span id=gain-managed class=muted>{managed_note}</span>"
                 "</div>"
@@ -2736,6 +2756,29 @@ class Console:
                 + (" checked" if rs.get("auto") else "")
                 + "><span class=muted>Tracks the noise floor. Unticking freezes "
                 "the threshold where it is.</span></div>"
+            )
+            # Auto squelch margin — how far above the floor AUTO opens — live, so
+            # a noisy site can widen it without a redeploy.
+            margin = rs.get("auto_margin_db")
+            margin_val = margin if isinstance(margin, (int, float)) else 8.0
+            out.append(
+                "<div class=field><label for=auto_margin>Auto squelch margin (dB)"
+                "</label><input type=number id=auto_margin name=auto_margin "
+                f"min=3 max=25 step=1 value='{margin_val:.0f}'>"
+                "<span class=muted>How far above the noise floor AUTO opens the "
+                "gate. Higher rejects noise; lower catches weaker signals.</span>"
+                "</div>"
+            )
+            # Squelch hang — how long the gate stays open after a signal drops.
+            hang = rs.get("hang_s")
+            hang_val = hang if isinstance(hang, (int, float)) else 0.6
+            out.append(
+                "<div class=field><label for=hang_s>Squelch hang (s)</label>"
+                f"<input type=number id=hang_s name=hang_s min=0 max=5 step=0.1 "
+                f"value='{hang_val:.1f}'>"
+                "<span class=muted>How long the gate stays open after a signal "
+                "drops, so a gap mid-over does not clip it into fragments. Lower "
+                "closes sooner.</span></div>"
             )
             out.append(
                 "<div class=field><label for='monitor'>Hold gate open</label>"

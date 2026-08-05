@@ -459,6 +459,20 @@ class ServedPageTests(unittest.TestCase):
         )
         self.assertTrue(self.agent.radio.auto_squelch)
 
+    def test_the_radio_apply_sets_the_auto_margin_and_hang(self):
+        # The auto-squelch margin and the gate hang are live operate commands on
+        # the same Apply, clamped in the controller but passed through here.
+        self.agent.inventory.set_device("radio", "simulated-airband", {}, None)
+        self.agent.build_devices()
+        token, csrf, _ = self.page("/devices?slot=radio")
+        self.request(
+            "POST", "/radio",
+            f"type_id=simulated-airband&auto_margin=12&hang_s=0.3&csrf={csrf}",
+            {"Cookie": token},
+        )
+        self.assertEqual(self.agent.radio.auto_margin_db, 12.0)
+        self.assertEqual(self.agent.radio.hang_seconds, 0.3)
+
     def test_the_radio_apply_is_instant_over_fetch_without_a_reload(self):
         # The instant-apply path: a control change posts with ajax=1 and gets a
         # small JSON answer, not the 303 the no-script fallback gets — so the
@@ -2291,15 +2305,24 @@ class DevicePickerTests(unittest.TestCase):
         gains = self.agent.snapshot()["radio"]["gains"]
         self.assertTrue(gains)
         for step in gains:
-            self.assertIn(f">{float(step):.1f}</option>", panel)
+            self.assertIn(f">{float(step):.1f}", panel)
 
-    def test_the_gain_offers_auto_and_managed_alongside_the_steps(self):
-        # AUTO is the tuner's own AGC; Managed is the software one that holds a
-        # fixed step. Both sit above the discrete gains in the same select.
+    def test_the_gain_dropdown_is_fixed_steps_only_with_a_marked_default(self):
+        # auto and managed were retired from the picker: the tuner's own AGC
+        # floats the level and the software "managed" mode over-gains into
+        # overload, and both break the absolute-dBFS squelch. Only fixed steps
+        # are offered, and the recommended step is marked "(Default)".
         panel = self._radio_panel()
-        self.assertIn("<option value=auto", panel)
-        self.assertIn("<option value=managed", panel)
-        self.assertIn("id=gain-managed", panel)
+        self.assertNotIn("<option value=auto", panel)
+        self.assertNotIn("<option value=managed", panel)
+        self.assertIn("(Default)", panel)
+
+    def test_the_squelch_margin_and_hang_controls_are_offered(self):
+        # Two live squelch tunables on the radio panel: how far above the floor
+        # AUTO opens, and how long the gate lingers after a signal drops.
+        panel = self._radio_panel()
+        self.assertIn("name=auto_margin", panel)
+        self.assertIn("name=hang_s", panel)
 
     def test_the_squelch_controls_match_the_dashboard(self):
         # The platform's signal indicator, verbatim: a threshold-or-AUTO pair
