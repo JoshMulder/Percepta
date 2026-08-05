@@ -92,9 +92,9 @@ RUN git clone --depth 1 --branch "${RTLSDR_REF}" \
 # picked that stub, and transcription came up installed-but-silent: the self
 # test caught an exit 1 with the reason on stdout. Rather than track the name,
 # take the LARGEST `whisper*cli` the build produced — the real one is megabytes
-# of static whisper/ggml, the stub is a few kilobytes of printf. It lands at
-# /opt/whisper-bin/whisper-cli, which the runtime copies and GSU_WHISPER_BIN
-# points at.
+# of static whisper/ggml, the stub is a few kilobytes of printf. It lands in
+# /opt/whisper-bin/, which the runtime copies into /usr/local/bin (on PATH, where
+# GSU_WHISPER_BIN=whisper-cli finds it, exactly as before the build switch).
 #
 # The whole build is behind GSU_TRANSCRIBE. When it is off, the directory is
 # still created (empty) so the runtime's COPY is never conditional — Docker
@@ -165,7 +165,7 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     GSU_HOME=/var/lib/percepta-gsu \
-    GSU_WHISPER_BIN=/opt/percepta/bin/whisper-cli \
+    GSU_WHISPER_BIN=whisper-cli \
     GSU_WHISPER_MODEL=/opt/percepta/models/ggml-${WHISPER_MODEL}.bin \
     GSU_VERSION=${GSU_VERSION}
 
@@ -189,9 +189,13 @@ RUN apt-get update \
 # `ldconfig` so the loader finds librtlsdr.so.0 in /usr/local/lib, which is where
 # the station's ctypes `CDLL("librtlsdr.so.0")` looks it up by soname.
 COPY --from=builder /usr/local/lib/librtlsdr.so* /usr/local/lib/
-# A directory, not the file: it holds whisper-cli when transcription is built in
-# and is empty when GSU_TRANSCRIBE=0, so this COPY never has to be conditional.
-COPY --from=builder /opt/whisper-bin/ /opt/percepta/bin/
+# The directory's *contents*, not a named file: /opt/whisper-bin holds whisper-cli
+# when transcription is built in and is empty when GSU_TRANSCRIBE=0, so this COPY
+# is never conditional (Docker cannot skip one). It lands whisper-cli in
+# /usr/local/bin — on PATH, exactly where it was before the build switch existed,
+# so the runtime is unchanged for a station that builds transcription in; when
+# off, nothing is copied and the station reports it "not installed".
+COPY --from=builder /opt/whisper-bin/ /usr/local/bin/
 COPY --from=builder /opt/models/ /opt/percepta/models/
 RUN ldconfig
 
