@@ -18,12 +18,14 @@
 #     initialise the RTL-SDR Blog V4's R828D tuner — the V4 needs this fork — so
 #     the image carries it instead of the apt package. A V3 works on either.
 #
-#   * whisper.cpp and a model, for on-box airband transcription. Built static so
-#     one self-contained `whisper-cli` binary drops into the runtime, and the
-#     ~150 MB model is baked in. Both are ~150 MB and a few minutes of compile on
-#     a Pi; that is the deliberate cost of the feature working out of the box.
-#     Transcription is still OFF by default — the setup page's radio tab is the
-#     switch, and it only lights up because these files are present.
+#   * whisper.cpp and a ladder of models, for on-box airband transcription. Built
+#     static so one self-contained `whisper-cli` binary drops into the runtime,
+#     and the models are baked in. WHISPER_MODELS is the ladder (small.en +
+#     base.en by default, ~600 MB together); the station benchmarks them at
+#     start-up and keeps the largest this board can keep up with, stepping down to
+#     a smaller one — or off — on a slow box (see radio/transcribe.py). Transcription
+#     is still OFF by default — the setup page's radio tab is the switch, and it
+#     only lights up because these files are present.
 #
 # The versions are ARGs so a build can pin them; the defaults track upstream's
 # default branch. Pinning to a release for a reproducible image is the follow-up
@@ -36,7 +38,10 @@
 ARG BASE=python:3.11-slim-bookworm@sha256:b18992999dbe963a45a8a4da40ac2b1975be1a776d939d098c647482bcad5cba
 ARG WHISPER_REF=master
 ARG RTLSDR_REF=master
-ARG WHISPER_MODEL=base.en
+# The ladder baked into the image, and the preferred ceiling the env points at.
+# The station picks the largest of the ladder it can run; WHISPER_MODEL caps it.
+ARG WHISPER_MODELS="small.en base.en"
+ARG WHISPER_MODEL=small.en
 
 # =========================================================================
 # Builder: the rtl-sdr-blog driver, whisper.cpp, and the model. Discarded —
@@ -46,7 +51,7 @@ FROM ${BASE} AS builder
 
 ARG WHISPER_REF
 ARG RTLSDR_REF
-ARG WHISPER_MODEL
+ARG WHISPER_MODELS
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
@@ -89,10 +94,13 @@ RUN git clone --depth 1 --branch "${WHISPER_REF}" \
       || { echo "no real whisper-cli built (only a deprecation stub?)"; exit 1; } \
  && cp "${whisper_bin}" /usr/local/bin/whisper-cli
 
-# The model, pinned by name; the file is content-stable at this URL.
+# The model ladder, pinned by name; the files are content-stable at these URLs.
 RUN mkdir -p /opt/models \
- && curl -fSL -o "/opt/models/ggml-${WHISPER_MODEL}.bin" \
-      "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-${WHISPER_MODEL}.bin"
+ && for m in ${WHISPER_MODELS}; do \
+      curl -fSL -o "/opt/models/ggml-$m.bin" \
+        "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-$m.bin" \
+      || { echo "failed to fetch ggml-$m.bin"; exit 1; }; \
+    done
 
 # =========================================================================
 # Runtime: the slim base, plus only the shared libraries the built artefacts
@@ -133,13 +141,12 @@ RUN apt-get update \
       libgomp1 \
  && rm -rf /var/lib/apt/lists/*
 
-# The driver, the transcriber and the model, out of the builder. `ldconfig` so
-# the loader finds librtlsdr.so.0 in /usr/local/lib, which is where the station's
-# ctypes `CDLL("librtlsdr.so.0")` looks it up by soname.
+# The driver, the transcriber and the model ladder, out of the builder.
+# `ldconfig` so the loader finds librtlsdr.so.0 in /usr/local/lib, which is where
+# the station's ctypes `CDLL("librtlsdr.so.0")` looks it up by soname.
 COPY --from=builder /usr/local/lib/librtlsdr.so* /usr/local/lib/
 COPY --from=builder /usr/local/bin/whisper-cli /usr/local/bin/whisper-cli
-COPY --from=builder /opt/models/ggml-${WHISPER_MODEL}.bin \
-                    /opt/percepta/models/ggml-${WHISPER_MODEL}.bin
+COPY --from=builder /opt/models/ /opt/percepta/models/
 RUN ldconfig
 
 # A fixed uid/gid so a bind-mounted state directory has predictable ownership on

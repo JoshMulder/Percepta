@@ -130,6 +130,7 @@ class Agent:
             self._record_transcript,
             binary=config.radio_whisper_bin,
             model=config.radio_whisper_model,
+            prompt=config.radio_whisper_prompt,
             # The env override or the site toggle; the site one is the setup
             # page's switch and is re-read live in `_pump_radio`.
             enabled=config.radio_transcribe or self.site.radio_transcribe,

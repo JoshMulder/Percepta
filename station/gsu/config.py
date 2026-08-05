@@ -114,6 +114,11 @@ class AgentConfig:
     #: than an error — the station image ships both when the feature is wanted.
     radio_whisper_bin: str = "whisper-cli"
     radio_whisper_model: str | None = None
+    #: An initial prompt biasing whisper toward what this channel carries. Empty
+    #: uses the built-in aviation vocabulary (`transcribe.AVIATION_PROMPT`); set
+    #: GSU_WHISPER_PROMPT to add local aerodrome names and based-aircraft
+    #: registrations a general model will otherwise not get right.
+    radio_whisper_prompt: str = ""
 
     # --- trust (gsu/tls.py), which is two roots and not one ---------------
     #: The **broker's** CA. Normally delivered by the enrolment response as
@@ -183,6 +188,7 @@ class AgentConfig:
             not in ("0", "false", "no", ""),
             radio_whisper_bin=_env("GSU_WHISPER_BIN", "whisper-cli"),
             radio_whisper_model=_env("GSU_WHISPER_MODEL"),
+            radio_whisper_prompt=_env("GSU_WHISPER_PROMPT", ""),
             stream_sink=_env("GSU_STREAM_SINK"),
             encoder=_env("GSU_ENCODER", "auto"),
             media_url=_env("GSU_MEDIA_URL"),

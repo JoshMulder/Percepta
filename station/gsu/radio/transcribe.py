@@ -19,11 +19,13 @@ from __future__ import annotations
 
 import array
 import logging
+import math
 import queue
 import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import wave
 from dataclasses import dataclass
 from datetime import datetime
@@ -57,6 +59,47 @@ TRANSCRIBE_TIMEOUT_S = 120
 #: `on_text(freq_hz, started_at, duration_s, text)`.
 OnText = Callable[[int, datetime, float, str], None]
 
+#: The initial prompt handed to whisper, biasing it toward what airband actually
+#: carries: ICAO phraseology, the phonetic alphabet, and clipped strings of
+#: numbers and callsigns. whisper conditions on this as though it were speech
+#: already heard, so the right words come out ahead of their near-homophones when
+#: the audio is marginal — which, on a noisy AM channel, is most of the time. It
+#: does not teach the model new words; it weights the ones it already knows.
+#:
+#: Overridable per site (GSU_WHISPER_PROMPT) to add local aerodrome names and
+#: based-aircraft registrations, which no general model will otherwise get right.
+#: Kept short on purpose: whisper only reads the last ~224 tokens of it.
+AVIATION_PROMPT = (
+    "Air traffic control radio, ICAO phraseology and the phonetic alphabet: "
+    "Alpha Bravo Charlie Delta Echo Foxtrot Golf Hotel India Juliett Kilo Lima "
+    "Mike November Oscar Papa Quebec Romeo Sierra Tango Uniform Victor Whiskey "
+    "Xray Yankee Zulu. Cleared for takeoff, cleared to land, line up and wait, "
+    "hold short, taxi to holding point, runway, wind, QNH, altimeter, squawk, "
+    "flight level, climb, descend, maintain, heading, contact tower, roger, "
+    "wilco, affirm, negative, standby, traffic, final, base leg, downwind."
+)
+
+#: How the models rank by capability, parsed from the ggml filename
+#: (ggml-small.en.bin -> "small" -> 3). Larger is more accurate and slower; the
+#: selector prefers the largest that runs inside the budget below.
+_MODEL_RANK = {"tiny": 1, "base": 2, "small": 3, "medium": 4, "large": 5}
+
+#: The longest a single decode window may take, on this box, for a model to be
+#: kept. whisper works in 30 s windows and an over is almost always one, so this
+#: bounds how far behind a busy channel can put transcription: at the budget the
+#: model runs a full window in real time, with headroom for the niced scheduling.
+#: A board too slow for even the smallest installed model turns transcription off.
+#: A first cut — the honest number is a bench on the actual board, and the
+#: selector logs what it measured either way.
+MAX_WINDOW_PROCESS_S = 25.0
+
+
+def _model_rank(model_path: str) -> int:
+    """Capability rank from a ggml model filename; 0 if unrecognised."""
+    stem = Path(model_path).name.removeprefix("ggml-")
+    key = stem.split(".")[0].split("-")[0]  # small.en -> small; large-v3 -> large
+    return _MODEL_RANK.get(key, 0)
+
 
 @dataclass
 class _Over:
@@ -75,11 +118,16 @@ class Transcriber:
         *,
         binary: str = "whisper-cli",
         model: str | None = None,
+        prompt: str = "",
         enabled: bool = False,
     ) -> None:
         self._on_text = on_text
         self._binary = binary
         self._model = model
+        #: The initial prompt biasing whisper toward airband vocabulary. A
+        #: configured one wins; otherwise the built-in aviation phraseology,
+        #: because a station with transcription on is one listening to aircraft.
+        self._prompt = prompt or AVIATION_PROMPT
         self._queue: "queue.Queue[_Over]" = queue.Queue(maxsize=QUEUE_MAX)
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -91,12 +139,16 @@ class Transcriber:
         #: The live switch, from the site config (or the env override). Set by
         #: the agent each tick so the setup-page toggle takes effect at once.
         self.enabled = bool(enabled)
+        #: Set false when start-up benchmarking finds no installed model runs
+        #: fast enough on this board — see `_select_model`. Optimistic until then.
+        self._capable = True
 
     @property
     def available(self) -> bool:
         """Whether an over should actually be transcribed right now: the tools
-        are installed and the operator has it switched on."""
-        return self.installed and self.enabled
+        are installed, the operator has it switched on, and this board was found
+        fast enough to keep up (see `_select_model`)."""
+        return self.installed and self.enabled and self._capable
 
     def _probe(self) -> tuple[bool, str]:
         """Are the binary and model both present? A reason if not, for the setup
@@ -150,7 +202,9 @@ class Transcriber:
                 pass
 
     def _run(self) -> None:
-        self._self_test()
+        self._select_model()
+        if not self._capable:
+            return  # nothing installed runs fast enough; _select_model said so
         while not self._stop.is_set():
             try:
                 over = self._queue.get(timeout=0.5)
@@ -169,40 +223,95 @@ class Transcriber:
             except Exception:  # noqa: BLE001
                 log.exception("Recording a transcript failed; continuing.")
 
-    def _self_test(self) -> None:
-        """Prove the pipeline works before a transmission has to.
+    def _select_model(self) -> None:
+        """Pick the largest installed model this board can keep up with — or turn
+        transcription off. Runs once at start-up, in the worker thread.
 
-        On a remote box nobody can key up a radio to check transcription, and
-        `_probe` only looks for the files — not that whisper.cpp actually runs
-        against them. So the worker runs it once on a second of silence at
-        start-up and logs the result: a broken binary, a model it cannot load or
-        a flag this build does not take becomes one clear log line rather than a
-        channel that transcribes nothing for no visible reason. Skipped when
-        there is no model to test against, which `start()` has already reported.
+        `_probe` only checks the files are present; it cannot know whether this
+        particular board can run them in time. A Pi 5 keeps up with `small.en`; a
+        Pi 2B falls hopelessly behind it and belongs on `base.en` or `tiny.en`,
+        or off. So this benchmarks the candidates — every ggml model the image
+        baked, largest first, capped at the configured one — by decoding a window
+        on each, and keeps the first inside `MAX_WINDOW_PROCESS_S`. If even the
+        smallest is too slow, transcription turns itself off with one clear log
+        line rather than silently falling further and further behind. It also
+        subsumes the old start-up self-test: a model that benchmarks has run.
         """
-        if not self._model or not Path(self._model).exists():
-            return
+        candidates = self._candidate_models()
+        if not candidates:
+            return  # no model at all — start() already reported it
+        for model in candidates:
+            name = Path(model).name
+            elapsed, error = self._benchmark(model)
+            if error:
+                log.warning("Airband transcription: %s did not run (%s); trying "
+                            "a smaller model.", name, error)
+                continue
+            if elapsed is not None and elapsed <= MAX_WINDOW_PROCESS_S:
+                self._model = model
+                log.info("Airband transcription: using %s — a decode window took "
+                         "%.1fs here, inside the %.0fs budget.",
+                         name, elapsed, MAX_WINDOW_PROCESS_S)
+                return
+            log.warning("Airband transcription: %s is too slow on this board "
+                        "(%.1fs for a window, budget %.0fs); trying a smaller "
+                        "model.", name, elapsed or 0.0, MAX_WINDOW_PROCESS_S)
+        self._capable = False
+        log.error("Airband transcription off: no installed model runs fast enough "
+                  "on this board. Overs are still recorded, just not transcribed.")
+
+    def _candidate_models(self) -> list[str]:
+        """The models to weigh, largest first, capped at the configured one.
+
+        Every `ggml-*.bin` beside the configured model — the ladder the image
+        baked — no larger than what was asked for. Capping there makes
+        GSU_WHISPER_MODEL the ceiling: the selector may step down from it on a
+        slow board, never up past it. The configured model is always included,
+        even if its name does not rank (a custom one), so it is at least tried.
+        """
+        if not self._model:
+            return []
+        cap = _model_rank(self._model)
+        found: list[tuple[int, str]] = []
+        for path in Path(self._model).parent.glob("ggml-*.bin"):
+            rank = _model_rank(str(path))
+            if rank and (cap == 0 or rank <= cap):
+                found.append((rank, str(path)))
+        if not any(path == self._model for _, path in found):
+            found.append((cap, self._model))
+        found.sort(key=lambda ranked: ranked[0], reverse=True)
+        return [path for _, path in found]
+
+    def _benchmark(self, model: str) -> tuple[float | None, str]:
+        """Decode one second of silence and time it: (elapsed_s, error).
+
+        A second of silence is padded to a full 30 s window by whisper, so this
+        measures one window's decode — the cost of a typical over — without
+        needing anyone to key up a radio. Returns the error whisper gave instead
+        of a time on any failure, so `_select_model` can step past a broken model.
+        """
         try:
             with tempfile.TemporaryDirectory() as directory:
-                wav_path = Path(directory) / "selftest.wav"
+                wav_path = Path(directory) / "bench.wav"
                 with wave.open(str(wav_path), "wb") as handle:
                     handle.setnchannels(1)
                     handle.setsampwidth(2)
                     handle.setframerate(WHISPER_RATE)
                     handle.writeframes(b"\x00\x00" * WHISPER_RATE)  # 1 s of silence
-                _, error = whisper_transcribe(self._binary, self._model, wav_path)
-        except Exception as exc:  # noqa: BLE001 - a self-test must never crash the worker
-            log.warning("Airband transcription self-test could not run: %s.", exc)
-            return
-        if error:
-            log.warning(
-                "Airband transcription self-test FAILED — %s. Transmissions will "
-                "be recorded but not transcribed until this is fixed.", error)
-        else:
-            log.info("Airband transcription self-test passed; whisper.cpp is working.")
+                start = time.monotonic()
+                _, error = whisper_transcribe(
+                    self._binary, model, wav_path, self._prompt)
+        except Exception as exc:  # noqa: BLE001 - benchmarking must never crash the worker
+            return None, str(exc)
+        return (None, error) if error else (time.monotonic() - start, "")
 
     def _transcribe(self, over: _Over) -> str:
-        pcm = resample_to_whisper(over.pcm, over.rate)
+        # Band-pass the transcription copy to the voice band, always and
+        # independently of the receiver's own voice filter: the audio going up
+        # the link and to the recording is whatever the operator set, but whisper
+        # always wants speech with the carrier rumble and the out-of-band hiss
+        # taken off.
+        pcm = bandpass_voice(resample_to_whisper(over.pcm, over.rate))
         with tempfile.TemporaryDirectory() as directory:
             wav_path = Path(directory) / "over.wav"
             with wave.open(str(wav_path), "wb") as handle:
@@ -210,7 +319,7 @@ class Transcriber:
                 handle.setsampwidth(2)
                 handle.setframerate(WHISPER_RATE)
                 handle.writeframes(pcm)
-            return run_whisper(self._binary, self._model or "", wav_path)
+            return run_whisper(self._binary, self._model or "", wav_path, self._prompt)
 
     def shutdown(self) -> None:
         self._stop.set()
@@ -252,17 +361,73 @@ def resample_to_whisper(pcm: bytes, rate: int) -> bytes:
     return out.tobytes()
 
 
-def run_whisper(binary: str, model: str, wav_path: Path) -> str:
+def _biquad(samples: list[float], b0: float, b1: float, b2: float,
+            a1: float, a2: float) -> list[float]:
+    """One Direct-Form-I biquad section over a float sample list."""
+    out = [0.0] * len(samples)
+    x1 = x2 = y1 = y2 = 0.0
+    for i, x in enumerate(samples):
+        y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
+        x2, x1 = x1, x
+        y2, y1 = y1, y
+        out[i] = y
+    return out
+
+
+def bandpass_voice(
+    pcm: bytes, rate: int = WHISPER_RATE, low_hz: float = 300.0, high_hz: float = 3400.0
+) -> bytes:
+    """The comms voice band (~300-3400 Hz) of 16-bit mono PCM, in stdlib.
+
+    A transcription-only stage: it runs on the copy handed to whisper, never on
+    the audio the listeners and the recording get, so a site can listen full-band
+    while whisper still sees speech with the carrier rumble below and the channel
+    hiss above taken off — the two things a general model trips on hardest. Two
+    2nd-order Butterworth sections (high-pass then low-pass, RBJ cookbook): 12
+    dB/octave skirts for a few multiplies a sample, on an over the model is about
+    to spend seconds on. No numpy, keeping this file's no-heavy-deps promise.
+    """
+    if not pcm:
+        return pcm
+    src = array.array("h")
+    src.frombytes(pcm)
+    if len(src) < 4:
+        return pcm
+    high_hz = min(high_hz, rate / 2.0 * 0.99)
+
+    def _section(data: list[float], f0: float, highpass: bool) -> list[float]:
+        w0 = 2.0 * math.pi * f0 / rate
+        cos_w0, sin_w0 = math.cos(w0), math.sin(w0)
+        alpha = sin_w0 / (2.0 * 0.7071067811865476)  # Butterworth Q = 1/sqrt(2)
+        a0 = 1.0 + alpha
+        if highpass:
+            b0, b1, b2 = (1 + cos_w0) / 2, -(1 + cos_w0), (1 + cos_w0) / 2
+        else:
+            b0, b1, b2 = (1 - cos_w0) / 2, 1 - cos_w0, (1 - cos_w0) / 2
+        return _biquad(data, b0 / a0, b1 / a0, b2 / a0,
+                       (-2 * cos_w0) / a0, (1 - alpha) / a0)
+
+    xs = _section([float(v) for v in src], low_hz, True)
+    xs = _section(xs, high_hz, False)
+    out = array.array("h", bytes(2 * len(xs)))
+    for i, value in enumerate(xs):
+        out[i] = max(-32768, min(32767, int(value)))
+    return out.tobytes()
+
+
+def run_whisper(binary: str, model: str, wav_path: Path, prompt: str = "") -> str:
     """The transcript for a WAV, or empty on any failure. Logs *why* on a
     failure — that this used to swallow was the reason a broken model or a wrong
     flag looked exactly like a quiet channel from the outside."""
-    text, error = whisper_transcribe(binary, model, wav_path)
+    text, error = whisper_transcribe(binary, model, wav_path, prompt)
     if error:
         log.warning("Airband transcription failed: %s", error)
     return text
 
 
-def whisper_transcribe(binary: str, model: str, wav_path: Path) -> tuple[str, str]:
+def whisper_transcribe(
+    binary: str, model: str, wav_path: Path, prompt: str = ""
+) -> tuple[str, str]:
     """Run whisper.cpp over a WAV. Returns (transcript, error): the error is a
     human string on any failure — a missing binary, a non-zero exit carrying
     whisper's own stderr, a timeout, an output file that was never written — and
@@ -278,6 +443,11 @@ def whisper_transcribe(binary: str, model: str, wav_path: Path) -> tuple[str, st
         "-otxt",
         "-of", str(output),
     ]
+    if prompt:
+        # whisper's initial prompt: it conditions on this as though it were text
+        # already spoken, so the vocabulary in it wins over near-homophones when
+        # the audio is marginal. One argument — subprocess takes a list, no shell.
+        command += ["--prompt", prompt]
     if shutil.which("nice"):
         command = ["nice", "-n", str(NICE)] + command
     try:

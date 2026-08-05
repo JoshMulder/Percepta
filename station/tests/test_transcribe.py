@@ -7,6 +7,7 @@ model, which only a real Pi can exercise.
 """
 
 import array
+import math
 import tempfile
 import time
 import unittest
@@ -54,6 +55,42 @@ class ResampleTests(unittest.TestCase):
         out = array.array("h")
         out.frombytes(transcribe.resample_to_whisper(ramp.tobytes(), 24_000))
         self.assertTrue(all(out[i] <= out[i + 1] for i in range(len(out) - 1)))
+
+
+class BandpassTests(unittest.TestCase):
+    """The transcription-only voice band-pass: it passes speech and cuts the
+    rumble and out-of-band hiss whisper trips on, on the copy handed to the
+    model — never the audio the listeners and the recording get."""
+
+    def _tone(self, hz, rate=WHISPER_RATE, secs=0.3, amp=10000):
+        n = int(rate * secs)
+        s = array.array("h", [
+            int(amp * math.sin(2 * math.pi * hz * i / rate)) for i in range(n)
+        ])
+        return s.tobytes()
+
+    def _rms(self, pcm):
+        s = array.array("h")
+        s.frombytes(pcm)
+        return (sum(v * v for v in s) / len(s)) ** 0.5 if s else 0.0
+
+    def test_passes_the_voice_band(self):
+        raw = self._tone(1000)
+        self.assertGreater(
+            self._rms(transcribe.bandpass_voice(raw)), 0.6 * self._rms(raw))
+
+    def test_cuts_the_hiss_above_the_band(self):
+        raw = self._tone(6000)
+        self.assertLess(
+            self._rms(transcribe.bandpass_voice(raw)), 0.5 * self._rms(raw))
+
+    def test_cuts_the_rumble_below_the_band(self):
+        raw = self._tone(120)
+        self.assertLess(
+            self._rms(transcribe.bandpass_voice(raw)), 0.5 * self._rms(raw))
+
+    def test_empty_pcm_is_unchanged(self):
+        self.assertEqual(transcribe.bandpass_voice(b""), b"")
 
 
 class WhisperInputRateTests(unittest.TestCase):
@@ -156,11 +193,96 @@ class WhisperFailureTests(unittest.TestCase):
         self.assertEqual(error, "")
 
 
-class SelfTestTests(unittest.TestCase):
-    def test_it_logs_a_broken_whisper_at_start_up(self):
-        # A model that exists (this file) so the self-test runs, and a subprocess
-        # that fails — the box must say so at start-up, not transcribe nothing in
-        # silence until someone keys up a radio to find out.
+class PromptTests(unittest.TestCase):
+    """The initial prompt is how airband vocabulary is fed to a general model."""
+
+    def _command_for(self, prompt):
+        seen = {}
+
+        def fake(command, **_):
+            seen["cmd"] = list(command)
+            out = command[command.index("-of") + 1]
+            Path(out + ".txt").write_text("roger\n")
+            return mock.Mock(returncode=0, stderr=b"")
+
+        with tempfile.TemporaryDirectory() as directory:
+            wav = Path(directory) / "over.wav"
+            wav.write_bytes(b"")
+            with mock.patch.object(transcribe.subprocess, "run", side_effect=fake), \
+                    mock.patch.object(transcribe.shutil, "which", return_value=None):
+                transcribe.whisper_transcribe("whisper-cli", "m", wav, prompt)
+        return seen["cmd"]
+
+    def test_a_prompt_is_passed_to_whisper(self):
+        cmd = self._command_for("Aviation. Alpha Bravo Charlie.")
+        self.assertIn("--prompt", cmd)
+        self.assertEqual(cmd[cmd.index("--prompt") + 1], "Aviation. Alpha Bravo Charlie.")
+
+    def test_no_prompt_flag_when_empty(self):
+        self.assertNotIn("--prompt", self._command_for(""))
+
+    def test_the_transcriber_defaults_to_the_aviation_vocabulary(self):
+        # No prompt configured falls back to the built-in aviation phraseology,
+        # which is what carries the phonetic alphabet and clearances a general
+        # model would otherwise mishear against the channel noise.
+        t = Transcriber(lambda *a: None)
+        self.assertEqual(t._prompt, transcribe.AVIATION_PROMPT)
+        self.assertIn("phonetic alphabet", t._prompt.lower())
+
+    def test_a_configured_prompt_overrides_the_default(self):
+        t = Transcriber(lambda *a: None, prompt="Only this.")
+        self.assertEqual(t._prompt, "Only this.")
+
+
+class ModelSelectionTests(unittest.TestCase):
+    """Start-up benchmarking keeps the largest installed model this board can run
+    inside the budget, capped at the configured one — or turns transcription off.
+    _benchmark is stubbed so the selection logic is tested without a real model;
+    the side_effect reads the model path as its last argument, so it works whether
+    or not the patched method is called bound."""
+
+    def _select(self, names, configured, benchmark):
+        with tempfile.TemporaryDirectory() as directory:
+            for name in names:
+                (Path(directory) / name).write_bytes(b"x")
+            t = Transcriber(lambda *a: None, enabled=True,
+                            model=str(Path(directory) / configured))
+            t.installed = True
+            with mock.patch.object(Transcriber, "_benchmark", side_effect=benchmark):
+                t._select_model()
+            return t
+
+    def test_picks_the_largest_model_within_budget(self):
+        # small is too slow here, base fits — base wins.
+        times = {"ggml-small.en.bin": (40.0, ""), "ggml-base.en.bin": (10.0, "")}
+        t = self._select(["ggml-small.en.bin", "ggml-base.en.bin"],
+                         "ggml-small.en.bin", lambda *a: times[Path(a[-1]).name])
+        self.assertTrue(t._capable)
+        self.assertEqual(Path(t._model).name, "ggml-base.en.bin")
+
+    def test_caps_at_the_configured_model(self):
+        # small is present and would fit, but base is configured — the ceiling.
+        t = self._select(["ggml-small.en.bin", "ggml-base.en.bin"],
+                         "ggml-base.en.bin", lambda *a: (5.0, ""))
+        self.assertEqual(Path(t._model).name, "ggml-base.en.bin")
+
+    def test_a_broken_model_steps_down_to_a_working_one(self):
+        outcomes = {"ggml-small.en.bin": (None, "failed to load model"),
+                    "ggml-base.en.bin": (8.0, "")}
+        t = self._select(["ggml-small.en.bin", "ggml-base.en.bin"],
+                         "ggml-small.en.bin", lambda *a: outcomes[Path(a[-1]).name])
+        self.assertTrue(t._capable)
+        self.assertEqual(Path(t._model).name, "ggml-base.en.bin")
+
+    def test_turns_transcription_off_when_nothing_is_fast_enough(self):
+        t = self._select(["ggml-base.en.bin"], "ggml-base.en.bin",
+                         lambda *a: (999.0, ""))
+        self.assertFalse(t._capable)
+        self.assertFalse(t.available)
+
+    def test_a_broken_model_with_no_fallback_turns_off_and_says_so(self):
+        # Real _benchmark path (subprocess mocked): a model that will not run and
+        # nothing smaller beside it turns transcription off with a clear line.
         t = Transcriber(lambda *a: None, enabled=True, model=__file__)
         t.installed = True
         with mock.patch.object(
@@ -168,17 +290,19 @@ class SelfTestTests(unittest.TestCase):
             return_value=mock.Mock(returncode=1, stderr=b"error: bad model"),
         ):
             with self.assertLogs("gsu.radio", level="WARNING") as logs:
-                t._self_test()
-        self.assertTrue(any("self-test FAILED" in line for line in logs.output))
+                t._select_model()
+        self.assertFalse(t._capable)
+        self.assertTrue(any("transcription off" in line.lower() for line in logs.output))
 
-    def test_it_is_skipped_when_there_is_no_model(self):
-        # No model to test against — start() already said unavailable, so the
-        # self-test must not run whisper (nor log a failure) here.
+    def test_no_model_is_skipped(self):
+        # No model configured — start() already said unavailable, so selection
+        # must not run whisper here.
         t = Transcriber(lambda *a: None, enabled=True, model=None)
         t.installed = True
         with mock.patch.object(transcribe.subprocess, "run") as run:
-            t._self_test()
+            t._select_model()
         run.assert_not_called()
+        self.assertTrue(t._capable)
 
 
 class AvailabilityTests(unittest.TestCase):
