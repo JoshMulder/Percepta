@@ -43,6 +43,11 @@ ARG RTLSDR_REF=master
 ARG WHISPER_MODELS="small.en base.en"
 ARG WHISPER_MODEL=small.en
 
+# The station software version, stamped into the image so the box reports what it
+# is running and the remote updater can compare against a target. CI passes the
+# release tag; a local build leaves it "dev".
+ARG GSU_VERSION=dev
+
 # =========================================================================
 # Builder: the rtl-sdr-blog driver, whisper.cpp, and the model. Discarded —
 # none of its build tools reach the runtime image.
@@ -111,6 +116,7 @@ RUN mkdir -p /opt/models \
 FROM ${BASE}
 
 ARG WHISPER_MODEL
+ARG GSU_VERSION
 
 # PYTHONDONTWRITEBYTECODE: no .pyc files. The container's writable layer sits on
 # whatever storage the box has, and at a remote site that is the most likely
@@ -125,7 +131,8 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     GSU_HOME=/var/lib/percepta-gsu \
     GSU_WHISPER_BIN=whisper-cli \
-    GSU_WHISPER_MODEL=/opt/percepta/models/ggml-${WHISPER_MODEL}.bin
+    GSU_WHISPER_MODEL=/opt/percepta/models/ggml-${WHISPER_MODEL}.bin \
+    GSU_VERSION=${GSU_VERSION}
 
 # ffmpeg is the whole of the network-camera path (one frame per snapshot, a
 # copy-codec remux for the live stream). libopus0 is the airband codec, bound

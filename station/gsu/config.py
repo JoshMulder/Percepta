@@ -36,6 +36,10 @@ class AgentConfig:
     """Process-level settings. Read once; changing them means a restart."""
 
     home: Path = DEFAULT_HOME
+    #: The station software version, baked into the image at build time
+    #: (GSU_VERSION) and reported so an operator — and the remote updater — can
+    #: see what a box is on. "dev" for a local checkout that set nothing.
+    version: str = "dev"
 
     #: Where /api/enrol lives. Only ever used for enrolment, renewal and status;
     #: no telemetry path goes near it.
@@ -170,6 +174,7 @@ class AgentConfig:
     def from_env(cls) -> AgentConfig:
         return cls(
             home=Path(_env("GSU_HOME", str(DEFAULT_HOME))),
+            version=_env("GSU_VERSION", "dev"),
             platform_url=_env("GSU_PLATFORM_URL", "http://localhost:8000"),
             broker_url=_env("GSU_BROKER_URL"),
             enrol_token=_env("GSU_ENROL_TOKEN"),
@@ -245,6 +250,13 @@ class AgentConfig:
     @property
     def recordings_dir(self) -> Path:
         return self.home / "recordings"
+
+    @property
+    def update_dir(self) -> Path:
+        """Where a `system.update` request is written for the host-side updater
+        to pick up. Under the state directory, which is always writable; the host
+        slice decides how it reads it (DECISIONS.md item 48)."""
+        return self.home / "update"
 
     @property
     def lock_path(self) -> Path:

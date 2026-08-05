@@ -75,7 +75,7 @@ class CommandRouter:
         return True
 
 def build_handlers(radio, light, on_config, stream=None,
-                   events=None) -> dict[str, Handler]:
+                   events=None, updates=None) -> dict[str, Handler]:
     """Wire the contract's commands to the things that carry them out.
 
     Every entry here has a matching field in a telemetry payload — that pairing
@@ -161,6 +161,18 @@ def build_handlers(radio, light, on_config, stream=None,
         # Reported as light.on only once the hardware has actually done it.
         return f"requested {'on' if payload['on'] else 'off'}"
 
+    def system_update(payload: dict) -> str:
+        """`system.update`: record the target image the platform named, for the
+        host-side updater to reconcile. The station never updates itself
+        (DECISIONS.md item 48) — this only writes the request down, and reports
+        progress through the running/desired version fields."""
+        return updates.request(
+            image=str(payload.get("image", "")),
+            tag=str(payload.get("tag", "")),
+            digest=str(payload.get("digest", "")),
+            force=bool(payload.get("force", False)),
+        )
+
     handlers: dict[str, Handler] = {"events.ack": events_ack}
     if radio is not None:
         handlers.update({
@@ -203,6 +215,12 @@ def build_handlers(radio, light, on_config, stream=None,
         # platform holds no site policy of its own (`contract/enrolment.md`
         # §7). Handled so a station is ready the day that changes.
         handlers["config.set"] = on_config
+
+    if updates is not None:
+        # Recorded, never executed here: the host-side updater outside the
+        # sandbox does the privileged work (DECISIONS.md item 48). Registered
+        # only when an updater coordinator exists, like the device handlers.
+        handlers["system.update"] = system_update
 
     # radio.transmit is deliberately absent. It is ungrantable on the platform
     # and must not exist here until the fail-released design in

@@ -43,6 +43,7 @@ from .radio.audio import AUDIO_RATE
 from .radio.receiver import RadioController
 from .radio.transcribe import Transcriber
 from .store import LocalStore, TRANSCRIPT_KIND
+from .update import UpdateCoordinator
 from .stream import StreamSession
 from .transport import (
     AUDIO, CONTRACT_VERSION, EVENTS, TELEMETRY,
@@ -123,6 +124,7 @@ class Agent:
         self.health = Health()
         self.site = SiteConfig.load(config.site_config_path)
         self.store = LocalStore(config.store_path, config.recordings_dir)
+        self.updates = UpdateCoordinator(config.version, config.update_dir)
         # Airband transcription, off unless configured and the binary and model
         # are both present. Reads captured overs on a low-priority thread; live
         # audio always wins. See gsu/radio/transcribe.py.
@@ -669,7 +671,7 @@ class Agent:
         if self.router is not None:
             self.router.handlers = build_handlers(
                 self.radio, self.light, self._apply_config,
-                getattr(self, "stream", None),
+                getattr(self, "stream", None), updates=self.updates,
             )
 
         self._report_capabilities()
@@ -837,7 +839,7 @@ class Agent:
                 self.events = EventSender(self.store, self.transport.publish)
             handlers = build_handlers(
                 self.radio, self.light, self._apply_config, self.stream,
-                self.events,
+                self.events, updates=self.updates,
             )
             self.router = CommandRouter(handlers)
             if self.transport is not None:
@@ -2057,6 +2059,8 @@ class Agent:
             "station": self.enrolment.site.name if self.enrolment else None,
             "station_id": self.enrolment.station_id if self.enrolment else None,
             "contract_version": CONTRACT_VERSION,
+            "version": self.config.version,
+            "update": self.updates.state(),
             "broker": redact_url(self.config.broker_url or self.enrolment.broker.url)
             if self.enrolment else None,
             "platform": self.config.platform_url,
