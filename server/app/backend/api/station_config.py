@@ -25,6 +25,7 @@ from backend.auth.identity import Identity
 from backend.database.dependencies import get_db
 from backend.database.models.ground_station import GroundStation
 from backend.database.models.station_credential import StationCredential
+from backend.realtime.bus import publish_roster_sync
 from backend.services import enrolment
 from backend.services import geocode
 from backend.services.audit import record
@@ -235,6 +236,10 @@ def update_config(
             ip_address=request.client.host if request.client else None,
             detail={"changed": changed},
         )
+    # A rename changes what the switcher shows, so every console re-pulls the
+    # list. Only on a name change — position and zoom are not in the roster.
+    if "name" in changed:
+        publish_roster_sync(identity.organization_id)
     return result
 
 
@@ -340,4 +345,6 @@ def delete_station(
         detail={"name": name, "enrolled": False},
     )
     log.info("Station %s (%s) deleted before enrolment.", name, station_id)
+    # The station is gone from every console's switcher at once, not on reload.
+    publish_roster_sync(identity.organization_id)
     return Response(status_code=204)

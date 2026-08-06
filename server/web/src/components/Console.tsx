@@ -149,6 +149,9 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
    *  left, which is the entire bug this guards. */
   const selectedRef = useRef<string | null>(null);
   selectedRef.current = stationId;
+  // A stable handle to `reconcile` (defined below), so the socket callback —
+  // which is deliberately dependency-free — can pull the list on a roster event.
+  const reconcileRef = useRef<() => void>(() => {});
   const [detail, setDetail] = useState<StationDetail | null>(null);
   const [mapConfig, setMapConfig] = useState<MapConfig | null>(null);
   const [mainView, setMainView] = useState<"adsb" | "video">("adsb");
@@ -222,6 +225,13 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
   }, []);
 
   const handleMessage = useCallback((message: ServerMessage) => {
+    // The org's station roster changed elsewhere — one created, deleted or
+    // renamed. Re-pull the list so it appears (or vanishes, or renames) at once
+    // rather than on the next slow reconcile. Nothing station-specific.
+    if (message.type === "roster") {
+      reconcileRef.current();
+      return;
+    }
     // Station up/down is org-wide: it arrives on the status stream for every
     // station this user can see, and both the alerts drawer and the station
     // list's connection state track all of them, not only the one on screen — so
@@ -477,6 +487,7 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
       })
       .catch(() => {});
   }, []);
+  reconcileRef.current = reconcile;
 
   // A station save can change what the map is built from — the min and max zoom,
   // the position — and those used to wait for a page reload because the config

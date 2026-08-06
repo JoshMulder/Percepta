@@ -13,6 +13,7 @@ from backend.auth.identity import Identity
 from backend.database.dependencies import get_db
 from backend.database.models.device import Device
 from backend.database.models.ground_station import GroundStation
+from backend.realtime.bus import publish_roster_sync
 from backend.services.audit import record
 
 router = APIRouter(prefix="/api/stations", tags=["stations"])
@@ -194,6 +195,9 @@ def create_station(
         ip_address=request.client.host if request.client else None,
         detail={"name": summary.name, "timezone": summary.timezone},
     )
+    # Every console in the org learns of the new station at once, rather than on
+    # its next slow list reconcile — a fresh enrolment shows up live.
+    publish_roster_sync(identity.organization_id)
     return summary
 
 

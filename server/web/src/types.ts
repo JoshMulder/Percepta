@@ -77,6 +77,10 @@ export type ServerMessage =
   | { type: "unsubscribed"; stream: StreamName }
   | { type: "event"; stream: StreamName; station_id: string; payload: EventPayload }
   | { type: "status"; station_id: string; payload: StatusPayload }
+  // The org's station roster changed — one was created, deleted or renamed. Sent
+  // to every console in the org (it carries no station data; the console answers
+  // by re-fetching the authorised list) so a new station appears at once.
+  | { type: "roster" }
   | { type: "station_revoked"; reason: string }
   | { type: "revoked"; reason: string }
   | { type: "error"; code: string; message: string }

@@ -132,6 +132,22 @@ def publish_sync(channel: str, payload: dict[str, Any]) -> bool:
         return False
 
 
+def publish_roster_sync(organization_id) -> bool:
+    """Nudge every console in the org to re-pull its station list, because a
+    station was just created, deleted or renamed.
+
+    On the org status channel, but a `roster` type rather than `status`: `status`
+    is filtered per recipient by which stations they may see, and a station that
+    has only just been created is in nobody's snapshot yet — so the very event we
+    want would be dropped. `roster` is contentless (it carries no station data),
+    and each console answers it by re-fetching the list through the authorised
+    endpoint, so fanning it out org-wide leaks nothing. Fire-and-forget, like
+    every other sync publish here."""
+    from backend.realtime.groups import status_group
+
+    return publish_sync(status_group(organization_id), {"type": "roster", "payload": {}})
+
+
 class RedisBus:
     """The receiving half: one pubsub connection, one reader task per worker."""
 
