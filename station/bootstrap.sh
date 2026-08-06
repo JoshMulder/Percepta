@@ -304,6 +304,9 @@ cat > "$ENV_FILE" <<EOF
 GSU_PLATFORM_URL=$GSU_PLATFORM_URL
 GSU_SITE_NAME=$GSU_SITE_NAME
 GSU_SETUP_PASSWORD_HASH=$GSU_SETUP_PASSWORD_HASH
+# On-box airband transcription (whisper.cpp). Off by default; set 1 to enable,
+# or use the setup page's switch. See deploy/gsu.env.example.
+GSU_RADIO_TRANSCRIBE=${GSU_RADIO_TRANSCRIBE:-0}
 EOF
 
 printf '\nWrote %s.\n\n' "$ENV_FILE"
