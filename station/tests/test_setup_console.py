@@ -750,6 +750,38 @@ class ServedPageTests(unittest.TestCase):
         self.assertIn(">relay</option>", body)
         self.assertIn(">current</option>", body)
 
+    def test_the_gain_field_is_disabled_until_a_tuner_is_bound(self):
+        # A tuner's gain steps are read from the live device, so before a
+        # Receiver is assigned there are none. The field must say so, not render
+        # an empty dropdown that reads as broken — the symptom this fixes.
+        real = self.agent.snapshot
+
+        def no_gains():
+            state = real()
+            state["radio"] = {**(state.get("radio") or {}), "gains": []}
+            return state
+
+        with mock.patch.object(self.agent, "snapshot", no_gains):
+            _, body = self.request("GET", "/devices?slot=radio")
+        self.assertIn("id=gain name=gain disabled", body)
+        self.assertIn("assign a Receiver", body)
+        self.assertNotIn("<option value='0.0'", body)
+
+    def test_the_gain_field_lists_the_tuner_steps_once_bound(self):
+        real = self.agent.snapshot
+        steps = [0.0, 15.7, 29.7, 49.6]
+
+        def with_gains():
+            state = real()
+            state["radio"] = {**(state.get("radio") or {}), "gains": steps, "gain": 29.7}
+            return state
+
+        with mock.patch.object(self.agent, "snapshot", with_gains):
+            _, body = self.request("GET", "/devices?slot=radio")
+        self.assertNotIn("name=gain disabled", body)
+        for step in steps:
+            self.assertIn(f"<option value='{step}'", body)
+
     # --- the camera preview ---
 
     def test_the_camera_tab_offers_the_live_stream(self):

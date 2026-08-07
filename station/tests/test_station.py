@@ -1812,6 +1812,44 @@ class RelayTransportTests(unittest.TestCase):
         self.assertFalse(relay.publish("gsu/x/telemetry", {"bad": object()}))
         self.assertEqual(relay.dropped, 1)
 
+    def _drive_run(self, relay, hold_seconds, rounds=4):
+        """Run the reconnect loop with a fake clock: each connect 'opens', stays
+        up `hold_seconds`, then closes. Returns the backoff waits observed."""
+        from unittest import mock
+        from gsu.transport import relay as relay_mod
+
+        clock = [0.0]
+        waits: list[float] = []
+        relay._connect = lambda: True
+        relay._hold = lambda: clock.__setitem__(0, clock[0] + hold_seconds)
+
+        def wait(seconds):
+            waits.append(seconds)
+            clock[0] += seconds
+            if len(waits) >= rounds:
+                relay._stop.set()
+            return relay._stop.is_set()
+
+        with mock.patch.object(relay_mod.time, "monotonic", lambda: clock[0]), \
+                mock.patch.object(relay_mod.random, "random", lambda: 0.5), \
+                mock.patch.object(relay._stop, "wait", wait):
+            relay._run()
+        return waits
+
+    def test_a_connection_dropped_at_once_keeps_the_backoff_climbing(self):
+        # The bug this prevents: a platform that accepts the socket and closes
+        # it again immediately (its own Redis down, say) reset the backoff on
+        # every attempt, turning a fault into a hot ~1s reconnect loop. A
+        # sub-HEALTHY_CONNECTION_S open is a soft failure, so the backoff climbs.
+        waits = self._drive_run(self.transport(), hold_seconds=0.1)
+        self.assertEqual(waits, [1.0, 2.0, 4.0, 8.0])
+
+    def test_a_connection_that_stays_up_resets_the_backoff(self):
+        # A genuinely healthy link that later blips must come back fast, so a
+        # connection outlasting HEALTHY_CONNECTION_S resets the backoff to min.
+        waits = self._drive_run(self.transport(), hold_seconds=20.0)
+        self.assertEqual(waits, [1.0, 1.0, 1.0, 1.0])
+
     def test_an_oversized_frame_is_dropped_before_it_is_sent(self):
         # A megabyte is a bug upstream, and finding it as a stalled socket is
         # worse than finding it as a log line.

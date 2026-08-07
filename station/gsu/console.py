@@ -2679,22 +2679,36 @@ class Console:
                  and abs(float(current_gain) - float(s)) < 0.05),
                 default_step,
             )
-            out.append("<div class=field><label for=gain>Tuner gain (dB)</label>"
-                       "<select id=gain name=gain>")
-            for step in gains:
-                sel = (" selected" if selected_step is not None
-                       and abs(float(step) - float(selected_step)) < 0.05 else "")
-                is_default = (default_step is not None
-                              and abs(float(step) - float(default_step)) < 0.05)
-                # A native <option> cannot colour only the suffix, so the whole
-                # default line is greyed (and Safari may ignore even that).
-                style = " style='color:#8a8a8a'" if is_default else ""
-                label = f"{float(step):.1f}" + (" (Default)" if is_default else "")
-                out.append(f"<option value='{step}'{sel}{style}>{label}</option>")
             out.append(
-                f"</select><span id=gain-managed class=muted>{managed_note}</span>"
-                "</div>"
+                "<div class=field><label for=gain>Tuner gain (dB)</label>"
             )
+            if not gains:
+                # No tuner is bound yet — the radio is not built until a Receiver
+                # is assigned — so there is no step list to read from the device.
+                # A disabled field naming the reason, rather than an empty
+                # dropdown that reads as broken (the steps appear on Apply).
+                out.append(
+                    "<select id=gain name=gain disabled>"
+                    "<option>— assign a Receiver first —</option></select>"
+                    "<span class=muted>Gain steps are read from the tuner: pick a "
+                    "Receiver above and Apply to see them.</span></div>"
+                )
+            else:
+                out.append("<select id=gain name=gain>")
+                for step in gains:
+                    sel = (" selected" if selected_step is not None
+                           and abs(float(step) - float(selected_step)) < 0.05 else "")
+                    is_default = (default_step is not None
+                                  and abs(float(step) - float(default_step)) < 0.05)
+                    # A native <option> cannot colour only the suffix, so the
+                    # whole default line is greyed (Safari may ignore even that).
+                    style = " style='color:#8a8a8a'" if is_default else ""
+                    label = f"{float(step):.1f}" + (" (Default)" if is_default else "")
+                    out.append(f"<option value='{step}'{sel}{style}>{label}</option>")
+                out.append(
+                    f"</select><span id=gain-managed class=muted>{managed_note}</span>"
+                    "</div>"
+                )
             # Squelch and the signal it gates, as one indicator — the platform's
             # settings panel verbatim: a readout, then a meter whose fill is the
             # in-channel signal, a hairline at the noise floor, and the squelch

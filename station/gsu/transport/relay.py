@@ -54,6 +54,15 @@ log = logging.getLogger("gsu.transport")
 BACKOFF_MIN_S = 1.0
 BACKOFF_MAX_S = 300.0
 
+#: A connection must stay up at least this long to count as healthy — only then
+#: does a reconnect reset the backoff. A platform that accepts the socket and
+#: closes it again at once (its own Redis down, say) would otherwise reset the
+#: backoff on every attempt, turning the fault into a hot ~1s reconnect loop
+#: that hammers a platform already in trouble. A shorter-lived open is a soft
+#: failure and lets the backoff keep climbing to the cap, exactly like an
+#: outright failed connect.
+HEALTHY_CONNECTION_S = 10.0
+
 #: A frame bigger than this is not sent. The platform enforces the same cap by
 #: closing the socket (1009), and discovering it that way costs a reconnect and
 #: takes telemetry and commands down with it, so it is cheaper to notice here.
@@ -229,9 +238,15 @@ class RelayTransport(Transport):
         backoff = BACKOFF_MIN_S
         while not self._stop.is_set():
             if self._connect():
-                backoff = BACKOFF_MIN_S
+                opened_at = time.monotonic()
                 self._hold()
                 self._ready.clear()
+                # Only a connection that STAYED up resets the backoff. One that
+                # the platform accepts and drops again at once (see
+                # HEALTHY_CONNECTION_S) is a soft failure: leave the backoff
+                # climbing rather than resetting it into a hot reconnect loop.
+                if time.monotonic() - opened_at >= HEALTHY_CONNECTION_S:
+                    backoff = BACKOFF_MIN_S
                 if not self._stop.is_set():
                     log.info("Relay closed; reconnecting.")
             wait = min(backoff, BACKOFF_MAX_S) * (0.5 + random.random())
