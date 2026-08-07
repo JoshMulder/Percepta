@@ -1254,6 +1254,46 @@ class OnDemandTests(AgentFixture):
         self.agent.step(1.0)
         self.assertEqual(self.agent.stream.state, "streaming")
 
+    def test_a_stall_teardown_does_not_block_the_sensing_loop(self):
+        # The measured bug: the stall stop() ran on the sensing loop and did not
+        # return until the wedged encoder was signalled, waited for and reaped —
+        # a second or more — and the radio's audio sub-tick shares that loop, so
+        # the airband dropped out every time the camera wedged. A stall must
+        # detach the session at once and reap the encoder off-thread.
+        from gsu.stream import STALL_LIMIT_S
+
+        reaped = threading.Event()
+
+        class _SlowStop(_InstantSource):
+            def __init__(self):
+                self.running = True
+
+            def stop(self):
+                time.sleep(2.0)     # a wedged ffmpeg being killed and reaped
+                self.running = False
+                reaped.set()
+
+        slow = _SlowStop()
+        self.agent.stream._build_source = lambda settings: slow
+        self.agent.stream.start({"lease_s": 300})
+        self.assertEqual(self.agent.stream.state, "streaming")
+        self.agent.stream._last_frame_at = time.monotonic() - STALL_LIMIT_S - 1
+
+        started = time.monotonic()
+        self.agent.step(1.0)                       # drives the stall tick
+        elapsed = time.monotonic() - started
+
+        # The sensing tick returned promptly — it did not wait on source.stop().
+        self.assertLess(elapsed, 1.0,
+                        "the stall teardown blocked the sensing loop")
+        # The console still sees the stream go unavailable at once.
+        self.assertEqual(self.agent.stream.state, "unavailable")
+        self.assertIn("stalled", self.agent.stream.reason)
+        # And the encoder is still reaped — just off the sensing thread.
+        self.assertTrue(reaped.wait(3.0), "the encoder was never reaped")
+        self.agent.stream._await_teardown(1.0)
+        self.assertFalse(slow.running)
+
     def test_the_commands_are_dispatched_and_reported(self):
         start = self.handler("video.start")
         stop = self.handler("video.stop")

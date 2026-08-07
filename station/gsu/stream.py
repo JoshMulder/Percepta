@@ -34,6 +34,7 @@ every health frame. A `video.start` that silently did nothing is visible.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 
 from . import clock
@@ -151,6 +152,11 @@ class StreamSession:
         #: `video.stop` — the last local viewer leaving has to end it, or the
         #: camera stays busy until a lease nobody is holding runs out.
         self._local_only = False
+        #: The worker reaping a stopped session's encoder, when the stop came
+        #: from the sensing loop. `tick()` runs on that loop and must not block
+        #: on a wedged ffmpeg dying — see `_stop_detached`. Held so a clean
+        #: shutdown (and the tests) can wait for the reaping to finish.
+        self._teardown_thread: threading.Thread | None = None
 
     # --- what the platform asks for -------------------------------------
 
@@ -454,7 +460,56 @@ class StreamSession:
 
     def stop(self, reason: str = "stopped by the platform") -> str:
         """`video.stop`, and every other way this ends. Safe to call at any
-        time, including when nothing is running."""
+        time, including when nothing is running.
+
+        The teardown is synchronous here: the encoder is dead and waited for by
+        the time this returns. That is what a `video.stop` command, a clean
+        shutdown, and the tests all want. The one caller that cannot afford to
+        wait is `tick()`, on the sensing loop — it uses `_stop_detached`.
+        """
+        detached = self._detach(reason)
+        if detached is None:
+            return "not streaming"
+        source, uplink, token, sentence = detached
+        self._reap(source, uplink, token)
+        return sentence
+
+    def _stop_detached(self, reason: str) -> None:
+        """`stop`, with the encoder teardown moved onto a worker thread.
+
+        **This is the fix for a camera fault taking airband audio down with
+        it.** `tick()` runs on the sensing loop — the same thread the radio's
+        audio sub-tick runs on — and it is the only thread that stops a stream
+        that was *not* told to stop (a stall, an expired lease, the ceiling).
+        But `source.stop()` does not return until a possibly-wedged ffmpeg has
+        been signalled, waited for and reaped, which on a stalled RTSP feed is a
+        second or more; `uplink.close()` can block on a dead socket too. Run
+        inline, that second is a second the SDR's block buffer overflows and the
+        console's audio drains — measured, on a real box, as the radio dropping
+        out every ~130s exactly when the camera wedged. The session is detached
+        synchronously, so the console still sees the stream go unavailable at
+        once; only the reaping waits, and it waits off this thread.
+        """
+        detached = self._detach(reason)
+        if detached is None:
+            return
+        source, uplink, token, _ = detached
+        self._teardown_thread = threading.Thread(
+            target=self._reap, args=(source, uplink, token),
+            name="stream-teardown", daemon=True,
+        )
+        self._teardown_thread.start()
+
+    def _detach(self, reason: str):
+        """End the session and hand back what has to be torn down.
+
+        Everything here is quick: flip the state, take the source and uplink off
+        `self` so a concurrent `start()` builds fresh ones rather than racing
+        these, and record the stop. The slow part — killing the encoder — is
+        `_reap`, which the caller runs where it can afford to. Returns
+        `(source, uplink, sensor token, sentence)`, or None if nothing was
+        streaming.
+        """
         self.viewers = 0
         self.expires_at = None
         self._local_only = False
@@ -465,23 +520,15 @@ class StreamSession:
             # `video.stop` arriving afterwards is the one thing that will ever
             # tidy up after it.
             self._release_sensor()
-            return "not streaming"
+            return None
         source, self.source = self.source, None
         uplink, self.uplink = self.uplink, None
+        # Captured, not left on self for `_reap` to read: a `start()` arriving
+        # between here and the reaper running may set a new token, and the
+        # reaper must release the one *this* session held, not that one.
+        token, self._sensor_token = self._sensor_token, None
         self.muxer = None
         self._session_open = False
-        if source is not None:
-            source.stop()
-        # After source.stop(), never before: stop() does not return until the
-        # encoder process is dead and waited for, and giving the sensor back
-        # while `rpicam-vid` still had it would hand the next reader a camera
-        # the lease says is free and the kernel says is not.
-        self._release_sensor()
-        if uplink is not None:
-            # Closed here, not left open between sessions: an idle socket to the
-            # platform is a thing somebody has to reason about, and this one
-            # carries a credential.
-            uplink.close()
         elapsed = time.monotonic() - (self.started_at or time.monotonic())
         self.state = "idle"
         self.stopped_reason = reason
@@ -494,7 +541,39 @@ class StreamSession:
             f"Live stream stopped after {elapsed:.0f}s, {self.bytes_out / 1e6:.1f} MB: "
             f"{reason}.",
         )
-        return f"stopped after {elapsed:.0f}s, {self.frames} frames"
+        return (source, uplink, token,
+                f"stopped after {elapsed:.0f}s, {self.frames} frames")
+
+    def _reap(self, source, uplink, token: str | None) -> None:
+        """Kill the encoder, give the sensor back, close the uplink.
+
+        The sensor is released after `source.stop()`, never before: handing the
+        camera on while `rpicam-vid` still had it would give the next reader a
+        device the lease says is free and the kernel says is not. The uplink is
+        closed last, and closed rather than left open between sessions — an idle
+        socket to the platform is a thing somebody has to reason about, and this
+        one carries a credential. Runs on the caller's thread for `stop()`, and
+        on a worker for `_stop_detached()`.
+        """
+        try:
+            if source is not None:
+                source.stop()
+            if token is not None:
+                self.agent.sensor_lease.release(token)
+            if uplink is not None:
+                uplink.close()
+        except Exception:  # noqa: BLE001 - the session is already gone
+            log.exception("Stream teardown failed.")
+
+    def _await_teardown(self, timeout: float | None = None) -> None:
+        """Wait for a detached teardown to finish reaping the encoder.
+
+        For a clean shutdown, and for tests that need the encoder actually dead
+        before they assert on it. A no-op when the last stop was synchronous.
+        """
+        thread = self._teardown_thread
+        if thread is not None:
+            thread.join(timeout)
 
     def tick(self) -> None:
         """Called from the sensing loop. This is the fail-closed half.
@@ -522,15 +601,21 @@ class StreamSession:
                 self.state = "unavailable"
                 self._starting_at = None
                 # The sensor above all: a stream stuck holding it locks out
-                # every later attempt at a camera nothing is using.
+                # every later attempt at a camera nothing is using. Released
+                # inline — it is a non-blocking notify — so the camera frees at
+                # once. Closing the uplink can block on a half-open socket,
+                # though, and this runs on the sensing loop the radio's audio
+                # shares, so it goes off-thread the same way a stall teardown
+                # does. See `_stop_detached`.
                 self._release_sensor()
-                if self.uplink is not None:
-                    try:
-                        self.uplink.close()
-                    except Exception:  # noqa: BLE001 - already giving up
-                        pass
-                    self.uplink = None
+                uplink, self.uplink = self.uplink, None
                 self.source = None
+                if uplink is not None:
+                    self._teardown_thread = threading.Thread(
+                        target=self._reap, args=(None, uplink, None),
+                        name="stream-teardown", daemon=True,
+                    )
+                    self._teardown_thread.start()
             return
         if self.state != "streaming":
             return
@@ -540,19 +625,19 @@ class StreamSession:
             reason, self._codec_mismatch = self._codec_mismatch, ""
             self.reason = reason
             log.error("%s", reason)
-            self.stop(reason)
+            self._stop_detached(reason)
             self.state = "unavailable"
             return
         now = time.monotonic()
         if self.expires_at is not None and now > self.expires_at:
-            self.stop(
+            self._stop_detached(
                 "the platform stopped renewing the lease — nobody is watching, "
                 "or the link is down"
             )
             return
         ceiling = float(self.agent.site.stream_max_minutes or 0) * 60
         if ceiling and self.started_at and now - self.started_at > ceiling:
-            self.stop(f"the {ceiling / 60:.0f} minute ceiling was reached")
+            self._stop_detached(f"the {ceiling / 60:.0f} minute ceiling was reached")
             return
         # A source that is alive but has stopped delivering frames — the frozen-
         # picture case `source.running` cannot see (see STALL_LIMIT_S). Measured
@@ -567,12 +652,12 @@ class StreamSession:
                 f"platform reconnects and the source is rebuilt."
             )
             log.error("%s", self.reason)
-            self.stop(self.reason)
+            self._stop_detached(self.reason)
             self.state = "unavailable"
             return
         if self.source is not None and not self.source.running:
             self.reason = self.source.reason or "the encoder exited"
-            self.stop(self.reason)
+            self._stop_detached(self.reason)
             self.state = "unavailable"
 
     # --- ownership --------------------------------------------------------
