@@ -117,11 +117,14 @@ async def broker(websocket: WebSocket) -> None:
     with PrivilegedSessionLocal() as db:
         found = enrolment.authenticate(db, secret=secret)
         if found is None:
-            # A well-formed bearer that matches no live credential: the header
-            # survived, so this is a stale/revoked secret on the box, not a
-            # stripped header. Distinguished from the case above on purpose.
-            log.warning("Broker 4401 for %s: bearer credential not recognised.",
-                        websocket.client)
+            # A well-formed bearer that matches no live credential. Either a
+            # stale/revoked secret on the box, or a token a proxy substituted for
+            # the station's — `jwt_shaped` tells those apart, since a station
+            # secret is not a JWT and Cloudflare Access tokens are.
+            log.warning(
+                "Broker 4401 for %s: bearer not recognised (len=%d jwt_shaped=%s).",
+                websocket.client, len(secret), secret.startswith("eyJ"),
+            )
             await websocket.close(code=4401)
             return
         station, credential = found
