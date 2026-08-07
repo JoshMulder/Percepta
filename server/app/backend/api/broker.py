@@ -100,12 +100,28 @@ async def broker(websocket: WebSocket) -> None:
     await websocket.accept()
 
     if not secret:
+        # Log why, rather than a silent 4401. A broker upgrade with no bearer
+        # credential means either the client sent none or something between it
+        # and here stripped the Authorization header on the WebSocket upgrade —
+        # very different fixes, and both otherwise look like an unexplained flap.
+        log.warning(
+            "Broker 4401 for %s: no bearer credential (authorization header %s).",
+            websocket.client,
+            "absent"
+            if websocket.headers.get("authorization") is None
+            else "present but not 'Bearer …'",
+        )
         await websocket.close(code=4401)
         return
 
     with PrivilegedSessionLocal() as db:
         found = enrolment.authenticate(db, secret=secret)
         if found is None:
+            # A well-formed bearer that matches no live credential: the header
+            # survived, so this is a stale/revoked secret on the box, not a
+            # stripped header. Distinguished from the case above on purpose.
+            log.warning("Broker 4401 for %s: bearer credential not recognised.",
+                        websocket.client)
             await websocket.close(code=4401)
             return
         station, credential = found
