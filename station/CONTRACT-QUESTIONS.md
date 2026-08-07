@@ -1192,3 +1192,79 @@ against the **standard 1013.25 hPa datum** (DO-260B), not against a local QNH.
 The schema's own wording — *"`pressure` is referenced to 1013.25 hPa"* — is the
 correct one. Anyone reading the MAVLink XML and concluding the altitude is
 already QNH-referenced would be reading the wrong datum into it.
+
+## 20. The platform cannot see which software version a station is running, or whether an update landed
+
+**Where** `schemas/telemetry.schema.json` `$defs/health`; `schemas/command.schema.json`
+`system.update`.
+
+**This is the field DECISIONS item 49 identified.** `command.schema.json`'s
+`system.update` already promises that update progress is *"reported as the
+station's running and desired version in health telemetry"* — but `$defs/health`
+defines no such field, so the promise had nothing behind it. The only version in
+`health` is `agent_version`, a build-time constant, and `config_version`, which
+is the site-config generation, not the software. A platform watching a fleet
+would see `agent_version` sit unchanged across every release and could not tell
+an update that landed from one that rolled back. The station half is now built
+and shipped; what follows is the specification the platform side is owed.
+
+### What the station now sends
+
+`software`, on the health cadence, sourced from the same `UpdateCoordinator`
+state the box shows on its local `/status.json`:
+
+```jsonc
+{
+  "kind": "health",
+  // …
+  "software": {
+    "running_version": "v1.4.2",         // always present; the release the box
+                                         // is actually on (GSU_VERSION). "dev"
+                                         // on an unversioned local build.
+    "desired_version": "v1.4.3",         // present only while an update is in
+                                         // flight and differs from running — the
+                                         // target the platform last commanded.
+    "update_last_result": "rolled_back", // the host updater's outcome, a free
+                                         // string it writes: e.g. "updated",
+                                         // "rolled_back", "signature_rejected",
+                                         // "rollback_failed". Treat an
+                                         // unrecognised value as opaque.
+    "update_last_version": "v1.4.3",     // which target that result was for
+    "update_at": "2026-08-07T12:00:00Z"  // when the updater wrote it
+  }
+}
+```
+
+`running_version` is always there; everything else appears only once there is an
+update to describe. A box that has never been updated reports just what it is on.
+
+### What the platform must do
+
+1. **Display `software.running_version` as the version the box is on**, in place
+   of `agent_version` — which stays a build string and does not track releases.
+   This is the field the update UI (item 48's platform half) reads to show
+   desired-vs-running per station.
+2. **Treat `desired_version` present-and-differing as "update in progress"**, and
+   `update_last_result` + `update_at` as the landed-or-rolled-back signal. That
+   is the progress `system.update`'s own description already promises; this is
+   what makes it true. Add `software` to the schema and fix the command's prose
+   in the same commit, so the two stop contradicting each other.
+3. **Do not read this as the revoked-vs-offline answer.** A revoked box cannot
+   publish at all, so `software` stops arriving the moment the broker refuses it
+   — indistinguishable from a power cut. Telling revoked from offline is a
+   platform-side join the platform already has the inputs for — it is the party
+   that revoked the credential — and needs nothing from the station. It is not
+   solved here; the station's own `credential.revoked` condition (raised now, see
+   DECISIONS item 49) is a local truth the box can only surface while it still
+   has an uplink.
+
+### Why this is on the wire before it is in the schema
+
+`$defs/health` sets no `additionalProperties: false`, and its own description
+asks for precisely this: unknown fields there *"are expected rather than
+tolerated: a station that learns to report something new must not have to wait
+for the platform."* A health frame carrying `software` was validated against
+`telemetry.schema.json` as it stands and passes — checked, not assumed. Adding
+`software` to `properties` (a minor bump) documents a field that already
+conforms and resolves the `system.update` ↔ `health` contradiction in the same
+commit; nothing has to land on both sides at once.

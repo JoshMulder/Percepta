@@ -264,6 +264,21 @@ class HealthPayloadTests(unittest.TestCase):
         errors = sorted(TELEMETRY.iter_errors(payload), key=str)
         self.assertFalse(errors, f"{note}: {[e.message for e in errors]}")
 
+    def test_health_carries_the_running_software_version(self):
+        # DECISIONS item 49: the platform reads the release the box is on from
+        # here, not from agent_version (a build constant). Sourced from the
+        # UpdateCoordinator, and valid against the schema because $defs/health is
+        # deliberately permissive. running_version is always present; the
+        # in-flight fields appear only once there is an update to describe.
+        payload = self.agent.health_payload()
+        self.assert_valid(payload, "software block")
+        self.assertIn("software", payload)
+        self.assertEqual(
+            payload["software"]["running_version"], self.agent.config.version
+        )
+        self.assertNotIn("desired_version", payload["software"])
+        self.assertNotIn("update_last_result", payload["software"])
+
     def test_valid_when_not_enrolled(self):
         # No credential at all: `expires_at` must be omitted, never null.
         payload = self.agent.health_payload()

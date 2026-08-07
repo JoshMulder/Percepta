@@ -1832,9 +1832,9 @@ class Agent:
         ones it was told to expect, **which telemetry streams have no source at
         all**, and whether the credential is renewing.
 
-        `security`, `clock` and `resources` are not in the schema yet. The
-        schema allows additional properties, so they are valid rather than
-        merely tolerated — they are proposed properly in CONTRACT-QUESTIONS.
+        `security`, `clock`, `resources` and `software` are not in the schema
+        yet. The schema allows additional properties, so they are valid rather
+        than merely tolerated — they are proposed properly in CONTRACT-QUESTIONS.
         """
         # Re-evaluated here rather than only at build time: a device that was
         # absent at boot and has since started talking must stop being reported
@@ -1906,6 +1906,17 @@ class Agent:
             # what a given camera and setting cost is for the box to say — see
             # gsu/video.py and HARDWARE.md §8.
             "video": self.video_state(),
+            # The running software version, and — while a remote update is in
+            # flight — the desired version and the host updater's last result.
+            # DECISIONS item 49: without this the platform watches `agent_version`
+            # (a build constant) sit unchanged across every release and can see
+            # neither an update landing nor a rollback, nor tell a revoked box
+            # from an offline one. Sourced from gsu/update.py's UpdateCoordinator
+            # — the same state the local /status.json shows. Not yet named in
+            # `$defs/health`; valid because that object is deliberately
+            # permissive, and proposed in CONTRACT-QUESTIONS for the platform to
+            # formalise and consume.
+            "software": self.updates.state(),
             "uptime_s": round(time.monotonic() - self._started, 1),
         }
         # Renewal health, and only when there is a credential to have any. The
