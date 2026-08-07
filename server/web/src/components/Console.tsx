@@ -64,6 +64,12 @@ const COMPACT = "(max-width: 56rem), (max-height: 34rem)";
  *  station's own cadence. */
 const STALE_AFTER_PUBLISHES = 3;
 
+/** How long a station may be silent on the broker's status stream before the
+ *  console paints it offline. Absorbs a ~1-2 s uplink flap so a blip does not
+ *  fault every panel and tear the video stream down; an explicit "online"
+ *  cancels it and recovery stays instant. */
+const STATION_OFFLINE_GRACE_MS = 5000;
+
 /** Fallback cadences in seconds, from `contract/transport.md`.
  *
  *  Used only until a health frame arrives — the station reports what it is
@@ -191,6 +197,17 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
   >({});
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const alertSeq = useRef(0);
+  // Pending "paint this station offline" timers, keyed by station id, so a
+  // brief uplink flap does not flip the station (and every panel gated on it)
+  // offline the instant it blips. See STATION_OFFLINE_GRACE_MS.
+  const offlineTimers = useRef<Map<string, number>>(new Map());
+  useEffect(() => {
+    const timers = offlineTimers.current;
+    return () => {
+      timers.forEach((t) => window.clearTimeout(t));
+      timers.clear();
+    };
+  }, []);
   // The message handler is memoised without audio in its deps, so it reads the
   // player through a ref rather than tearing down the socket handler whenever
   // the audio context is rebuilt.
@@ -243,35 +260,67 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
     if (message.type === "status") {
       const payload = message.payload as StatusPayload;
       if (!payload.alarm && payload.online === undefined) return;
-      if (payload.online !== undefined) {
-        const nowOnline = payload.online as boolean;
-        // Trust the event over the list's last-seen-derived `online`: it is
-        // instant, and unlike last-seen it does not keep a just-disconnected
-        // station "online" through the 120 s grace. Patch both the switcher's
-        // list entry and the watched station's detail — the latter gates the
-        // video pane — so a connect shows as connected and unlocks data at once.
-        setStations((prev) =>
-          prev.map((s) =>
-            s.id === message.station_id ? { ...s, online: nowOnline } : s,
-          ),
+      const stationId = message.station_id;
+      const timers = offlineTimers.current;
+      const pushAlert = (
+        text: string,
+        severity: "info" | "warning" | "critical",
+      ) => {
+        alertSeq.current += 1;
+        setAlerts((prev) =>
+          [
+            { id: alertSeq.current, stationId, message: text, severity, at: new Date() },
+            ...prev,
+          ].slice(0, 40),
         );
-        if (message.station_id === selectedRef.current) {
-          setDetail((d) => (d ? { ...d, online: nowOnline } : d));
+      };
+      // Patch both the switcher's list entry and the watched station's detail —
+      // the latter gates the video pane — so a connect unlocks data at once.
+      const applyOnline = (online: boolean) => {
+        setStations((prev) =>
+          prev.map((s) => (s.id === stationId ? { ...s, online } : s)),
+        );
+        if (stationId === selectedRef.current) {
+          setDetail((d) => (d ? { ...d, online } : d));
+        }
+      };
+
+      if (payload.online !== undefined) {
+        // Any status for this station cancels a pending offline, either way.
+        const pending = timers.get(stationId);
+        if (pending !== undefined) {
+          window.clearTimeout(pending);
+          timers.delete(stationId);
+        }
+        if (payload.online) {
+          applyOnline(true); // recovery is instant
+          if (!payload.alarm) pushAlert("Back online", payload.severity ?? "info");
+        } else {
+          // Debounce offline. The broker's "went offline" is instant and, unlike
+          // the list's 120 s last-seen grace, flips at once — so a ~1-2 s uplink
+          // flap paints the station offline, faults every panel gated on
+          // `online`, and tears the video stream down, then undoes it a second
+          // later. Hold it for the grace window; a flap shorter than that leaves
+          // neither the offline state nor a "Went offline" alert behind.
+          timers.set(
+            stationId,
+            window.setTimeout(() => {
+              timers.delete(stationId);
+              applyOnline(false);
+              if (!payload.alarm) {
+                pushAlert("Went offline", payload.severity ?? "warning");
+              }
+            }, STATION_OFFLINE_GRACE_MS),
+          );
         }
       }
-      alertSeq.current += 1;
-      setAlerts((prev) =>
-        [
-          {
-            id: alertSeq.current,
-            stationId: message.station_id,
-            message: payload.alarm ?? (payload.online ? "Back online" : "Went offline"),
-            severity: payload.severity ?? (payload.online ? "info" : "warning"),
-            at: new Date(),
-          },
-          ...prev,
-        ].slice(0, 40),
-      );
+
+      // An alarm is its own event and always immediate; the online/offline note
+      // is handled with its state above so the drawer never says a station is
+      // offline while its dot is still green.
+      if (payload.alarm) {
+        pushAlert(payload.alarm, payload.severity ?? "warning");
+      }
       return;
     }
     // Frames for the station being left are still in flight when a switch

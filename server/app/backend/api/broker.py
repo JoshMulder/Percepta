@@ -121,23 +121,34 @@ async def broker(websocket: WebSocket) -> None:
 
     client = aioredis.Redis.from_url(settings.redis_url)
     pubsub = client.pubsub()
-    await pubsub.subscribe(command_channel(station_id),
-                           _supersede_channel(station_id))
-    pump = asyncio.create_task(
-        _pump_down(websocket, pubsub, station_id, connection))
-    # Authentication happens once, when the socket opens. Without this a
-    # revoked station keeps publishing until something else drops its
-    # connection — which on a healthy link is never.
-    revoked = asyncio.create_task(enrolment.close_when_revoked(
-        credential_id, station_id, lambda: websocket.close(code=4401),
-    ))
-    # Announce last, so an older socket is displaced only once this one is
-    # actually able to receive what it is taking over.
-    await client.publish(_supersede_channel(station_id),
-                         json.dumps({"connection": str(connection)}))
-
+    pump = None
+    revoked = None
     refused = 0
     try:
+        # The Redis setup is inside the guard on purpose. If the broker's Redis
+        # is unreachable or refuses auth, the subscribe or the supersede publish
+        # raises — and an UNCAUGHT exception here (it used to sit above the try)
+        # tears the socket down with no close code at all. The box then sees "no
+        # reason given", reconnects, and hot-loops, and the finally below never
+        # runs so the station is never even announced offline. Inside the guard
+        # it becomes a coded close and a logged fault, the same as any other
+        # failure on this socket — which is what makes a Redis outage diagnosable
+        # instead of a silent fleet-wide flap.
+        await pubsub.subscribe(command_channel(station_id),
+                               _supersede_channel(station_id))
+        pump = asyncio.create_task(
+            _pump_down(websocket, pubsub, station_id, connection))
+        # Authentication happens once, when the socket opens. Without this a
+        # revoked station keeps publishing until something else drops its
+        # connection — which on a healthy link is never.
+        revoked = asyncio.create_task(enrolment.close_when_revoked(
+            credential_id, station_id, lambda: websocket.close(code=4401),
+        ))
+        # Announce last, so an older socket is displaced only once this one is
+        # actually able to receive what it is taking over.
+        await client.publish(_supersede_channel(station_id),
+                             json.dumps({"connection": str(connection)}))
+
         while True:
             raw = await websocket.receive_text()
             if len(raw) > MAX_FRAME_BYTES:
@@ -176,10 +187,18 @@ async def broker(websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         pass
     except Exception:  # noqa: BLE001 - one station must not take the worker down
+        # Covers the Redis-setup failures now guarded above as well as a
+        # mid-stream drop. Close with a code so the box backs off rather than
+        # hot-looping on a codeless drop; 1013 ("try again later") is exactly
+        # what a transient platform-side fault is.
         log.exception("Broker relay failed for station %s.", station_id)
+        with contextlib.suppress(Exception):
+            await websocket.close(code=1013)
     finally:
-        pump.cancel()
-        revoked.cancel()
+        if pump is not None:
+            pump.cancel()
+        if revoked is not None:
+            revoked.cancel()
         with contextlib.suppress(Exception):
             await pubsub.unsubscribe(command_channel(station_id),
                                      _supersede_channel(station_id))

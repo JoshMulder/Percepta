@@ -75,6 +75,30 @@ function VideoPanelInner({
   const surfaceRef = useRef<HTMLDivElement>(null);
   const showingLive = streamState === "playing";
 
+  // Hold a reassuring "waiting for video" for a few seconds when a stream that
+  // WAS live drops, instead of falling straight to the empty state — a ~1-2s
+  // uplink flap otherwise reads as "No video stream attached" the instant it
+  // blips. The stream hook already reconnects forever; this only softens the
+  // message. A first-ever connect (never live) keeps the empty state.
+  const [reconnecting, setReconnecting] = useState(false);
+  const wasLive = useRef(false);
+  useEffect(() => {
+    if (streamState === "playing") {
+      wasLive.current = true;
+      setReconnecting(false);
+      return;
+    }
+    if (streamState === "connecting" && wasLive.current) {
+      setReconnecting(true);
+      const timer = window.setTimeout(() => setReconnecting(false), 6000);
+      return () => window.clearTimeout(timer);
+    }
+    if (streamState === "idle" || streamState === "unavailable") {
+      wasLive.current = false;
+      setReconnecting(false);
+    }
+  }, [streamState]);
+
   // Adopt the shared element into whichever surface is currently on screen.
   useEffect(() => {
     const surface = surfaceRef.current;
@@ -115,6 +139,13 @@ function VideoPanelInner({
           <div className="video-live">
             <span className="video-live-dot" />
             live
+          </div>
+        ) : reconnecting ? (
+          // A stream that was live and briefly dropped — hold this over the
+          // grace window rather than declaring the stream gone on a flap.
+          <div className="video-live">
+            <span className="video-live-dot" />
+            waiting for video…
           </div>
         ) : (
           <div className="video-idle">
