@@ -644,6 +644,138 @@ class CredentialTests(unittest.TestCase):
             self.assertEqual(conditions["credential.revoked"].severity, "critical")
             self.assertTrue(renewer.revoked)
 
+    def test_a_relay_refusal_forces_a_renewal_even_when_not_due(self):
+        """A 4401 on the relay means the credential was refused. When it is not
+        yet due for renewal the timer never fires, so `renew_now` must force the
+        attempt — the only thing that turns a silent 4401 reconnect loop into a
+        revocation the operator can see."""
+        from gsu.enrolment import EnrolmentError
+
+        class Rejecting:
+            def __init__(self):
+                self.calls = 0
+
+            def renew(self, secret):
+                self.calls += 1
+                raise EnrolmentError("The platform refused: 401.", status=401)
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = CredentialStore(Path(directory) / "credential.json")
+            # renew_after 24h out: due_for_renewal is False, so only a forced
+            # attempt can fire.
+            enrolment = Enrolment.from_response(self.response(hours=48, renew_hours=24))
+            health = Health()
+            client = Rejecting()
+            renewer = Renewer(client, store, enrolment, health, poll_seconds=0.01)
+
+            renewer.tick()  # not due, not forced: the credential is left alone
+            self.assertEqual(client.calls, 0)
+
+            renewer.renew_now()
+            renewer.tick()  # forced: attempts, and discovers the revocation
+            self.assertEqual(client.calls, 1)
+            self.assertTrue(renewer.revoked)
+            self.assertIn("credential.revoked", {c.id for c in health.active()})
+
+    def test_a_forced_renewal_that_succeeds_recovers(self):
+        """A 4401 can also mean the credential expired while the box was offline
+        and is inside the renewal grace. The forced attempt then succeeds, the
+        new credential is stored, and `on_renewed` fires so the agent reconnects."""
+
+        class Succeeding:
+            def __init__(self, result):
+                self.calls = 0
+                self.result = result
+
+            def renew(self, secret):
+                self.calls += 1
+                return self.result
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = CredentialStore(Path(directory) / "credential.json")
+            enrolment = Enrolment.from_response(self.response(hours=48, renew_hours=24))
+            health = Health()
+            seen = []
+            fresh = Enrolment.from_response(
+                self.response(secret="renewed", hours=48, renew_hours=24)
+            )
+            client = Succeeding(fresh)
+            renewer = Renewer(
+                client, store, enrolment, health,
+                on_renewed=seen.append, poll_seconds=0.01,
+            )
+
+            renewer.renew_now()
+            renewer.tick()
+            self.assertEqual(client.calls, 1)
+            self.assertFalse(renewer.revoked)
+            self.assertEqual(store.load().credential.secret, "renewed")
+            self.assertEqual(len(seen), 1)
+
+    def test_a_sustained_refusal_does_not_storm_renew(self):
+        """A revoked box gets a 4401 on every reconnect, and each one pokes the
+        renewer. The backoff throttle must coalesce them: after one attempt, a
+        second refusal inside the same window makes no further /renew call."""
+        from gsu.enrolment import EnrolmentError
+
+        class Rejecting:
+            def __init__(self):
+                self.calls = 0
+
+            def renew(self, secret):
+                self.calls += 1
+                raise EnrolmentError("The platform refused: 403.", status=403)
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = CredentialStore(Path(directory) / "credential.json")
+            enrolment = Enrolment.from_response(self.response(hours=48, renew_hours=24))
+            health = Health()
+            client = Rejecting()
+            renewer = Renewer(client, store, enrolment, health, poll_seconds=0.01)
+
+            renewer.renew_now()
+            renewer.tick()  # attempts; pushes _next_attempt out by the max backoff
+            renewer.renew_now()
+            renewer.tick()  # inside the window: throttled, no attempt
+            self.assertEqual(client.calls, 1)
+
+    def test_the_agent_hands_a_relay_refusal_to_the_renewer(self):
+        """The seam between the relay (sets credential_refused on 4401) and the
+        renewer (renew_now): the agent must consume the flag and poke the
+        renewer, exactly once, then clear it."""
+        import threading
+
+        from gsu.agent import Agent
+
+        class FakeTransport:
+            def __init__(self):
+                self.credential_refused = threading.Event()
+
+        class FakeRenewer:
+            def __init__(self):
+                self.pokes = 0
+
+            def renew_now(self):
+                self.pokes += 1
+
+        holder = types.SimpleNamespace(
+            transport=FakeTransport(), renewer=FakeRenewer()
+        )
+
+        # Nothing pending: no poke.
+        Agent._pump_credential_refusal(holder)
+        self.assertEqual(holder.renewer.pokes, 0)
+
+        # A refusal: consumed once and cleared.
+        holder.transport.credential_refused.set()
+        Agent._pump_credential_refusal(holder)
+        self.assertEqual(holder.renewer.pokes, 1)
+        self.assertFalse(holder.transport.credential_refused.is_set())
+
+        # Already cleared: not poked again.
+        Agent._pump_credential_refusal(holder)
+        self.assertEqual(holder.renewer.pokes, 1)
+
     def test_a_renewal_naming_another_station_is_refused(self):
         first = Enrolment.from_response(self.response())
         other = self.response()

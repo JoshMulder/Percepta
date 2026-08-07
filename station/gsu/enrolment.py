@@ -296,6 +296,13 @@ class Renewer:
         self._next_attempt = clock.now()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        #: Set when the relay reports a 4401 (credential refused). Forces the
+        #: next tick to attempt /renew regardless of the renew-after time, which
+        #: is the only way to tell a revocation from an expiry-while-offline.
+        self._refused = threading.Event()
+        #: Wakes the poll loop early so a refusal is acted on at once rather than
+        #: sat on until the next poll interval.
+        self._wake = threading.Event()
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, name="gsu-renewer", daemon=True)
@@ -303,11 +310,31 @@ class Renewer:
 
     def stop(self) -> None:
         self._stop.set()
+        self._wake.set()
         if self._thread:
             self._thread.join(timeout=2.0)
 
+    def renew_now(self) -> None:
+        """Force a renewal attempt now, regardless of the renew-after time.
+
+        The relay saw the credential refused (4401): either a revocation or an
+        expiry that slipped past while the box was offline. Only trying /renew
+        tells them apart — a rejected credential lands in the 401/403 branch of
+        `tick` and raises `credential.revoked`; an expired one renews and the
+        agent reconnects. Repeated refusals are throttled by `_next_attempt`, so
+        this cannot storm /renew.
+        """
+        self._refused.set()
+        self._wake.set()
+
     def _run(self) -> None:
-        while not self._stop.wait(self.poll_seconds):
+        while not self._stop.is_set():
+            # Wake on a refusal (renew_now) or when the poll interval elapses,
+            # whichever comes first, so a 4401 is not sat on for a whole poll.
+            self._wake.wait(self.poll_seconds)
+            self._wake.clear()
+            if self._stop.is_set():
+                break
             try:
                 self.tick()
             except Exception:  # noqa: BLE001 - a renewer that dies is an outage
@@ -328,10 +355,19 @@ class Renewer:
         self.health.clear("clock.implausible")
 
         remaining = credential.seconds_remaining(at)
-        if not credential.due_for_renewal(at):
+        # A relay 4401 forces an attempt even when renewal is not yet due: that
+        # is how a revocation of a still-fresh credential is discovered instead
+        # of reconnect-looping in silence. The backoff throttle below still
+        # applies, so a sustained refusal is one attempt per window, not a storm.
+        forced = self._refused.is_set()
+        if not forced and not credential.due_for_renewal(at):
             return
         if at < self._next_attempt:
             return
+        # Committing to an attempt; consume the request so a later 4401 re-arms
+        # it rather than this one firing twice. Left set on a throttled return
+        # above, so it still fires once the backoff window elapses.
+        self._refused.clear()
 
         try:
             renewed = self.client.renew(credential.secret)

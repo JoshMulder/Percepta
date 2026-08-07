@@ -941,6 +941,21 @@ class Agent:
             f"Credential renewed; expires {enrolment.credential.expires_at.isoformat()}.",
         )
 
+    def _pump_credential_refusal(self) -> None:
+        """Turn a relay 4401 into a forced renewal attempt.
+
+        The relay flags `credential_refused` when the platform closes 4401; the
+        renewer is the only thing that can tell a revocation (raise the alarm)
+        from an expiry-while-offline (renew and reconnect). Without this hand-off
+        the box reconnect-loops on 4401 for ever, unable to tell a revoked
+        credential from a bad network. Separated from `run` so it is testable.
+        """
+        refused = getattr(self.transport, "credential_refused", None)
+        if refused is not None and refused.is_set():
+            refused.clear()
+            if self.renewer is not None:
+                self.renewer.renew_now()
+
     # --- commands -------------------------------------------------------
 
     def _on_command(self, payload: dict) -> None:
@@ -1068,6 +1083,7 @@ class Agent:
                     # uplink is exactly the case a technician fixes by
                     # re-enrolling, which brings a new CA with it.
                     self.reload_credential_if_changed()
+                self._pump_credential_refusal()
                 # Absolute schedule rather than sleep(tick): a slow tick must
                 # not make the cadence drift away from 1 Hz for ever.
                 next_tick += tick
