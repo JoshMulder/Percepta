@@ -174,6 +174,13 @@ class RtlSdrFrontEnd:
         self._demodulated_last_tick = False
         self._blocks = 0
         self._underruns = 0
+        # Diagnostic: IQ actually drained from the dongle vs what the tick clock
+        # asked for. A ratio near 1.0 with underruns means transient jitter (a
+        # prebuffer would smooth it); a ratio below 1.0 means a *sustained*
+        # shortfall — a slow dongle or USB contention — which no buffer can
+        # invent samples to cover, and which the slow-dongle test models.
+        self._iq_delivered = 0
+        self._iq_expected = 0.0
         self._last_spectrum: list[float] | None = None
 
     # --- reporting --------------------------------------------------------
@@ -228,6 +235,11 @@ class RtlSdrFrontEnd:
                 f" — {device.dropped_blocks} block(s) dropped, "
                 f"{self._underruns} audio underrun(s)"
             )
+            if self._iq_expected > 0:
+                detail += (
+                    f", SDR delivery "
+                    f"{100.0 * self._iq_delivered / self._iq_expected:.0f}%"
+                )
         elif self._reason:
             detail += f" — {self._reason}"
         return Device(
@@ -292,6 +304,8 @@ class RtlSdrFrontEnd:
             return self._dead_block(seconds)
 
         samples = device.drain()
+        self._iq_delivered += int(samples.size)
+        self._iq_expected += SAMPLE_RATE * seconds
         if samples.size < N_FFT:
             # The stream has not delivered a full snapshot yet — normal for the
             # first tick after opening, and not a failure. Repeat the last
