@@ -542,33 +542,46 @@ class RtlDevice:
                 time.sleep(0.05)
                 continue
             failures = 0
-            samples = to_complex(
-                np.frombuffer(buffer, dtype=np.uint8, count=read.value)
-            )
+            # Bank the RAW bytes — a memcpy of a few microseconds — and defer
+            # the uint8->complex64 conversion to drain() on the consumer thread.
+            # On a slow host that conversion used to run in the gap between one
+            # read_sync and the next, with no USB transfer in flight, and the
+            # dongle's small FIFO overflowed into it: a couple percent of samples
+            # lost, straight into audio underruns. A copy keeps the gap to a
+            # memcpy; the arithmetic happens where there is budget for it (the
+            # demod runs at ~10x real time). See drain().
+            raw = np.frombuffer(buffer, dtype=np.uint8, count=read.value).copy()
             with self._buffer_lock:
                 if len(self._buffer) == self._buffer.maxlen:
                     # deque drops the oldest for us; count it so the front end
                     # can report a tick loop that is not keeping up rather than
                     # letting the audio quietly fall behind.
                     self.dropped_blocks += 1
-                self._buffer.append(samples)
+                self._buffer.append(raw)
 
     def drain(self) -> np.ndarray:
-        """Everything buffered since the last call, oldest first."""
+        """Everything buffered since the last call, oldest first, as complex64.
+
+        The reader banks raw ADC bytes; the uint8->complex64 conversion happens
+        here, off the read loop, so the loop never stalls the USB pipe long
+        enough to drop samples into the gap. See `_reader`.
+        """
         with self._buffer_lock:
             blocks = list(self._buffer)
             self._buffer.clear()
         if not blocks:
             return np.zeros(0, dtype=np.complex64)
-        return np.concatenate(blocks)
+        return to_complex(np.concatenate(blocks))
 
     def flush(self) -> None:
         with self._buffer_lock:
             self._buffer.clear()
 
     def buffered_samples(self) -> int:
+        # Blocks are raw ADC bytes now (two per complex sample), converted only
+        # in drain(); report complex-sample counts so callers still see IQ.
         with self._buffer_lock:
-            return sum(block.size for block in self._buffer)
+            return sum(block.size for block in self._buffer) // 2
 
     # --- plumbing ---------------------------------------------------------
 
