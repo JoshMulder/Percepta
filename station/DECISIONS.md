@@ -1247,3 +1247,72 @@ publish/approve pipeline; the staging policy; and the pull-floor question above.
 against a stubbed Docker; the `cosign verify` step, the broker-command path, and
 the Compose re-homing are new and unexercised. First box gets it by hand,
 `--status` then once for real, before any timer or command is let near it.
+
+## 49. A revoked box learns it from 4401; the platform still cannot tell revoked from offline, or which version is running
+
+**Decided, and done (commit `d50a9b2`).** DECISIONS-2.0 item 3 fixed the platform
+end of the revocation signal: a refused credential completes the WebSocket
+handshake and then closes 4401, so a station can tell "your credential was
+refused" from an ordinary link fault. This is the receiving end, which was
+missing. `RelayTransport` set a `credential_refused` event on a 4401 close and
+nothing read it, and the `Renewer` only calls `/renew` inside the credential's
+renew-after window. So an admin revoking a box whose credential was *not* near
+expiry produced a silent reconnect loop on the 300-second backoff for ever, with
+no health condition raised — the exact failure item 3's grace was meant to
+prevent, one layer up. The agent now hands a 4401 to the `Renewer` (`renew_now`),
+which forces one `/renew` regardless of the renew-after time. That attempt
+already discriminates: a 401/403 raises `credential.revoked` (critical) and sets
+`revoked`; an expiry-within-grace renews and reconnects. The existing
+`_next_attempt` backoff throttles a sustained refusal to one attempt per window,
+so it cannot storm `/renew`. No contract or transport change — the wire already
+carried everything; only a station-local signal was going nowhere.
+
+*Alternatives:* have the relay drive the renew itself, or give the `Renewer` a
+handle on the transport. Rejected for the reason the two are kept apart in the
+first place (`gsu/enrolment.py`: the renewer "deliberately does not touch the
+transport... reconnecting is the agent's business") — the agent is the one place
+that already owns both, so it is the one place the signal is wired.
+
+**Still open — and shared with the update path.** The station now *knows* it has
+been revoked; the platform still cannot *see* it. A revoked box cannot publish,
+so on the console a revoked station and a powered-off one are indistinguishable.
+The same blind spot defeats item 48: `command.schema.json`'s `system.update` says
+progress is "reported as the station's running and desired version in health
+telemetry", but the `health` object in `telemetry.schema.json` defines no
+`version`, `running_version`, `desired_version`, or update-status field at all.
+It carries `agent_version` — the compile-time constant `AGENT_VERSION` ("0.1.0")
+— and `config_version`, which is the site-config generation, not the software.
+So the platform would watch `agent_version` sit unchanged across every release,
+and can observe an update landing or rolling back no more than it can observe a
+revocation. Both wants are the *same* additive change: a small, honest
+software-state block in `health` — running version, and while an update is in
+flight the desired version and last result — which a revoked-but-still-booting
+box surfaces locally and a healthy box publishes. That is a minor (2.x) contract
+bump under `contract/README.md`'s rules, raised with the platform side; it is not
+invented here because the reporting shape is the platform's to consume, and
+because widening a frozen schema to make one's own code compile is exactly the
+move README says to stop and raise instead.
+
+**Three concrete defects found mapping this, to fix before the update path is trusted:**
+
+- `command.schema.json`'s `system.update` promises health-telemetry progress that
+  `telemetry.schema.json` does not define — a contract that contradicts itself.
+  Fix it in the same minor bump as the software-state block above, or delete the
+  sentence; today it is a promise nothing keeps.
+- `release.yml` lowercases the repository owner for the image path
+  (`ghcr.io/joshmulder/...`) but the cosign signer identity it must be verified
+  against is mixed-case (`.../JoshMulder/Percepta/...` in `deploy/gsu-update.sh`).
+  OIDC certificate identities are case-sensitive, so the first real `v*` tag may
+  sign under an identity the box's `cosign verify` regexp does not match. Confirm
+  the recorded identity against the regexp on that first tag — release.yml's own
+  header already flags this.
+- `docker-compose.yml` refers to the signed image being "installed by
+  deploy/install-updater.sh", which does not exist; `bootstrap.sh` installs
+  nothing and documents `docker compose --profile updater up -d` instead. Doc
+  drift — delete the reference.
+
+*What would change the answer:* the software-state block is the one piece with a
+real cost — it widens the frozen contract, so it waits on the platform team
+agreeing the shape rather than the station adding a field unilaterally. The
+revocation-visibility half rides entirely on it; there is no separate mechanism
+to design.
