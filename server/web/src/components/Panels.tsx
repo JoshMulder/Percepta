@@ -1,6 +1,7 @@
 import { memo, useEffect, useRef, useState } from "react";
 import type { Capability, LightPayload, PowerPayload } from "../types";
 import { DemoCamera } from "./DemoCamera";
+import { Popout } from "./Popout";
 import { PowerFlow } from "./PowerFlow";
 import { IconChart } from "./Icons";
 import type { StreamState } from "../useVideoStream";
@@ -229,18 +230,8 @@ function PowerPanelInner({
       <PowerFlow power={power} />
 
       {detailOpen && (
-        <div
-          className="power-detail-scrim"
-          onClick={() => setDetailOpen(false)}
-          role="presentation"
-        >
-          <div
-            className="power-detail"
-            role="dialog"
-            aria-label="Battery history"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="power-detail-head">
+        <Popout onClose={() => setDetailOpen(false)} label="Battery history">
+          <div className="power-detail-head">
               <h4>
                 Battery level
                 {power && (
@@ -285,8 +276,7 @@ function PowerPanelInner({
                 load and solar always, the grid and generator where fitted. */}
             <h5 className="power-detail-sub">Power flow</h5>
             <PowerFlowHistory samples={history} loading={historyLoading} />
-          </div>
-        </div>
+        </Popout>
       )}
     </div>
   );

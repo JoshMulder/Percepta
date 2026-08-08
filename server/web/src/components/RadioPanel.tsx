@@ -5,6 +5,7 @@ import { api } from "../api";
 import type { Capability, RadioPayload } from "../types";
 import { IconSpeaker, IconTranscript } from "./Icons";
 import { NotPermitted } from "./Panels";
+import { Popout } from "./Popout";
 
 interface Transcript {
   t: string;
@@ -606,18 +607,12 @@ function RadioPanelInner({
       </button>
 
       {transcriptsOpen && (
-        <div
-          className="power-detail-scrim"
-          onClick={() => setTranscriptsOpen(false)}
-          role="presentation"
+        <Popout
+          onClose={() => setTranscriptsOpen(false)}
+          label="Transcription history"
+          className="transcript-detail"
         >
-          <div
-            className="power-detail transcript-detail"
-            role="dialog"
-            aria-label="Transcription history"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="power-detail-head">
+          <div className="power-detail-head">
               <h4>Previous Transmissions</h4>
               <button
                 type="button"
@@ -657,8 +652,7 @@ function RadioPanelInner({
                 ))
               )}
             </div>
-          </div>
-        </div>
+        </Popout>
       )}
     </div>
   );

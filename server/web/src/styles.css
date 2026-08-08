@@ -808,7 +808,7 @@ body {
 .weather-row svg {
   display: block;
   width: 100%;
-  height: 3.4rem;
+  height: 4.4rem;
   background: #060a0e;
   border: 1px solid var(--line);
   border-radius: var(--s1);
@@ -1085,7 +1085,7 @@ body {
 /* A little wider than the power popout it shares a shell with — airband chatter
    runs long and wrapping it every few words is hard to read. */
 .transcript-detail {
-  width: min(64rem, calc(100vw - 3rem));
+  width: min(76rem, calc(100vw - 3rem));
 }
 .transcript-list {
   display: flex;
@@ -1702,7 +1702,7 @@ body {
 .battery-chart svg {
   display: block;
   width: 100%;
-  height: 8.5rem;
+  height: 11.5rem;
   background: #060a0e;
   border: 1px solid var(--line);
   border-radius: var(--s1);
@@ -1749,7 +1749,7 @@ body {
 .load-chart svg {
   display: block;
   width: 100%;
-  height: 8.5rem;
+  height: 11.5rem;
   background: #060a0e;
   border: 1px solid var(--line);
   border-radius: var(--s1);
@@ -3516,7 +3516,12 @@ body {
   place-items: center;
 }
 .power-detail {
-  width: min(54rem, calc(100vw - 3rem));
+  width: min(66rem, calc(100vw - 3rem));
+  /* The charts inside are taller now, so on a short laptop screen the stack can
+     exceed the viewport. Cap the box and let it scroll rather than run off the
+     top and bottom edges where the ends of the traces would be unreachable. */
+  max-height: calc(100vh - 3rem);
+  overflow-y: auto;
   padding: 1rem 1.1rem 1.2rem;
   border: 1px solid var(--line);
   border-radius: 0.5rem;

@@ -2,6 +2,7 @@ import { memo, useState } from "react";
 import { SOC_WINDOWS, type SocWindowKey } from "./BatteryChart";
 import { IconChart, SKY_LABEL, SkyIcon } from "./Icons";
 import { NoSource } from "./PanelState";
+import { Popout } from "./Popout";
 import { WeatherHistory, type WeatherSample } from "./WeatherChart";
 import type { WeatherPayload } from "../types";
 
@@ -237,18 +238,8 @@ function WeatherPanelInner({
       </dl>
 
       {detailOpen && (
-        <div
-          className="power-detail-scrim"
-          onClick={() => setDetailOpen(false)}
-          role="presentation"
-        >
-          <div
-            className="power-detail"
-            role="dialog"
-            aria-label="Weather history"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="power-detail-head">
+        <Popout onClose={() => setDetailOpen(false)} label="Weather history">
+          <div className="power-detail-head">
               <h4>Weather</h4>
               <div className="window-switch" role="group" aria-label="Chart period">
                 {SOC_WINDOWS.map((w) => (
@@ -272,8 +263,7 @@ function WeatherPanelInner({
               </button>
             </div>
             <WeatherHistory samples={history} loading={historyLoading} />
-          </div>
-        </div>
+        </Popout>
       )}
     </div>
   );
