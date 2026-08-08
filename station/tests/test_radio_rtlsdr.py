@@ -203,25 +203,6 @@ class FrontEndTests(unittest.TestCase):
             front_end._underruns, 0, "a short block should be counted, not hidden"
         )
 
-    def test_jitter_that_averages_real_time_is_absorbed_not_chopped(self):
-        """The dongle hands over ~34 ms USB blocks against a 125 ms tick, so a
-        sub-tick drains an uneven amount that averages a full tick. Before the
-        pre-roll cushion each short tick was padded to length with silence,
-        eight times a second — the chop. The cushion must absorb it: a stream
-        that is real time *on average* produces no underruns once primed."""
-        front_end = self.make()
-        open_now(front_end)
-        # Alternating short/long blocks, mean exactly one 125 ms tick.
-        pattern = [0.085, 0.165, 0.100, 0.150, 0.125]
-        for i in range(40):
-            self.dongles[0].seconds_per_drain = pattern[i % len(pattern)]
-            front_end.read(0.125)
-            self.assertEqual(len(front_end.demodulate(3_000)), 3_000)
-        self.assertEqual(
-            front_end._underruns, 0,
-            "jitter that averages real time must be absorbed, not padded",
-        )
-
     def test_audio_before_anything_has_been_read_is_silence(self):
         front_end = self.make()
         self.assertEqual(front_end.demodulate(24_000), [0.0] * 24_000)

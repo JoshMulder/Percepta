@@ -109,23 +109,6 @@ FAILURES_BEFORE_FAILED = 3
 #: the current over, not a complete one — `contract/transport.md`.
 MAX_PENDING_AUDIO_S = 0.5
 
-#: Cushion built at the start of each over before audio is played out, so the
-#: dongle's block-granularity jitter is absorbed instead of padded into the
-#: stream as silence.
-#:
-#: The dongle delivers ~34 ms USB blocks against a ~125 ms audio tick, so any
-#: given tick drains three or four of them — 102 ms or 136 ms, never exactly
-#: 125. Every short tick was padded to length with silence, eight times a
-#: second, which is the chop: the demo receiver, whose audio is already
-#: real time, plays clean through the same path because it never trips this.
-#: A standing cushion lets a short tick draw from held-over audio instead of
-#: inserting silence; it is seeded here rather than left to build from surplus,
-#: which it never could — one early dip cleared `_pending` and it never
-#: recovered. A *sustained* shortfall (a slow dongle, USB contention) still
-#: drains the cushion and underruns, so it is reported, not hidden. Costs one
-#: over's worth of start-up latency, which on a monitoring console is nothing.
-PREROLL_AUDIO_S = 0.1
-
 
 class RtlSdrFrontEnd:
     """An RTL2832U tuned to the airband, receiving only."""
@@ -188,7 +171,6 @@ class RtlSdrFrontEnd:
 
         self._samples = None           # this tick's IQ, awaiting demodulation
         self._pending = None           # audio carried over between ticks
-        self._primed = False           # has this over's pre-roll cushion filled?
         self._demodulated_last_tick = False
         self._blocks = 0
         self._underruns = 0
@@ -413,11 +395,6 @@ class RtlSdrFrontEnd:
                 # The gate was shut last tick, so the filter holds samples from
                 # before the gap and the AGC holds a carrier that has gone.
                 demod.reset()
-                # A new over: rebuild the pre-roll cushion from scratch and drop
-                # any tail from the last one, which is stale audio from before
-                # the gap and must not lead off the new transmission.
-                self._primed = False
-                self._pending = None
             audio = demod.process(self._samples, fade_in=fade_in)
         except Exception as exc:  # noqa: BLE001 - reported, never raised
             log.exception("Demodulation failed.")
@@ -433,23 +410,7 @@ class RtlSdrFrontEnd:
         numpy_module = self._am.np
         if self._pending is not None and self._pending.size:
             audio = numpy_module.concatenate([self._pending, audio])
-        limit = int(MAX_PENDING_AUDIO_S * AUDIO_RATE)
-        # Pre-roll: hold audio back at the start of an over until a small cushion
-        # exists, playing silence for that brief moment. Once primed, a short
-        # tick draws from the cushion instead of being padded with silence — see
-        # PREROLL_AUDIO_S. Skipped for the whole-second ticks the tests drive
-        # (a second already dwarfs the cushion), so it only shapes the sub-tick
-        # stream the sensing loop actually publishes.
-        if not self._primed:
-            if audio.size < wanted + int(PREROLL_AUDIO_S * AUDIO_RATE):
-                self._pending = audio if audio.size <= limit else audio[-limit:]
-                self._demodulated_last_tick = True
-                return [0.0] * wanted
-            self._primed = True
         if audio.size < wanted:
-            # The cushion is dry and the block is genuinely short — a sustained
-            # shortfall, not jitter the cushion could have absorbed. Count it and
-            # pad, so a slow dongle is reported rather than hidden.
             self._underruns += 1
             block = numpy_module.zeros(wanted, dtype=audio.dtype)
             block[: audio.size] = audio
@@ -457,6 +418,7 @@ class RtlSdrFrontEnd:
         else:
             block = audio[:wanted]
             tail = audio[wanted:]
+            limit = int(MAX_PENDING_AUDIO_S * AUDIO_RATE)
             self._pending = tail[-limit:] if tail.size > limit else tail
         self._demodulated_last_tick = True
         return block.tolist()
