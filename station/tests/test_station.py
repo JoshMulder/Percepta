@@ -422,6 +422,70 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(router.applied, 0)
 
 
+class CommandQueueTests(unittest.TestCase):
+    """Commands arrive on the relay's reader thread but must not run there.
+
+    Device work belongs to the sensing thread — a retune racing demodulate()
+    corrupts the front end's filter state — and slow video work belongs to a
+    worker, so a start that spends seconds probing the camera cannot stall the
+    socket or the audio sub-tick. These check the *routing*, not the handlers.
+    """
+
+    class _RecordingRouter:
+        def __init__(self):
+            self.dispatched: list[dict] = []
+
+        def dispatch(self, payload):
+            self.dispatched.append(payload)
+            return True
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.agent = agent_in(self._dir.name)
+        self.agent.router = self._RecordingRouter()
+
+    def tearDown(self):
+        self.agent.shutdown()
+        self._dir.cleanup()
+
+    def test_a_command_is_queued_not_run_on_the_reader_thread(self):
+        self.agent._on_command({"kind": "radio.tune", "freq_hz": 119_500_000})
+        self.assertEqual(self.agent.router.dispatched, [],
+                         "the reader thread must enqueue, not dispatch")
+        self.assertEqual(self.agent._tick_commands.qsize(), 1)
+
+    def test_a_device_command_is_applied_when_the_sensing_thread_drains(self):
+        self.agent._on_command({"kind": "radio.gain", "gain": 30.0})
+        self.agent._drain_commands()
+        self.assertEqual([p["kind"] for p in self.agent.router.dispatched],
+                         ["radio.gain"])
+        self.assertTrue(self.agent._tick_commands.empty())
+
+    def test_a_slow_command_bypasses_the_sensing_thread_lane(self):
+        self.agent._on_command({"kind": "video.start", "viewers": 1})
+        self.assertEqual(self.agent._slow_commands.qsize(), 1)
+        self.assertTrue(self.agent._tick_commands.empty())
+        # The sensing-thread drain must not touch it — running a ~15 s stream
+        # start there is the audio-blocking freeze this split exists to avoid.
+        self.agent._drain_commands()
+        self.assertEqual(self.agent.router.dispatched, [])
+        self.assertEqual(self.agent._slow_commands.qsize(), 1)
+
+    def test_the_worker_thread_drains_the_slow_lane(self):
+        import threading
+        import time as _time
+        self.agent._on_command({"kind": "video.stop"})
+        worker = threading.Thread(target=self.agent._run_command_worker, daemon=True)
+        worker.start()
+        deadline = _time.monotonic() + 2.0
+        while _time.monotonic() < deadline and not self.agent.router.dispatched:
+            _time.sleep(0.01)
+        self.agent._stop.set()
+        worker.join(timeout=2.0)
+        self.assertEqual([p["kind"] for p in self.agent.router.dispatched],
+                         ["video.stop"])
+
+
 class InventoryTests(unittest.TestCase):
     def setUp(self):
         self._dir = tempfile.TemporaryDirectory()

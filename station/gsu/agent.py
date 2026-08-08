@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import queue
 import signal
 import threading
 import time
@@ -62,6 +63,17 @@ HARDWARE = {
 }
 
 PRUNE_EVERY_SECONDS = 300.0
+
+#: Command kinds that run off the sensing thread, on a serial worker. They are
+#: slow — a stream start probes the camera (up to ~15 s) and a stop reaps ffmpeg
+#: — so running them inline on the sensing loop would stall the 125 ms audio
+#: sub-tick, the same class of freeze the video-teardown fix removed. They do
+#: not touch the radio front end, so they need no serialisation with the sensing
+#: loop, only to be off the reader thread (a slow one must not stall the socket)
+#: and serial among themselves (a start and a stop must not race one another).
+#: Every other command runs on the sensing thread, where the front end has one
+#: owner. See `_on_command`, `_drain_commands`, `_run_command_worker`.
+SLOW_COMMANDS = frozenset({"video.start", "video.stop"})
 
 #: How a stream with no source is described to an operator. Short, in their
 #: terms, and never a parser's business — the structured version of the same
@@ -224,6 +236,16 @@ class Agent:
         self._attach_lock = threading.Lock()
         self._stop = threading.Event()
         self._lock_handle = None
+        #: Commands arrive on the relay's reader thread but must not run there.
+        #: A radio retune racing the sensing thread's demodulate() corrupts the
+        #: filter state, and a slow handler blocks the socket into a self-
+        #: inflicted reconnect. So the reader only enqueues (`_on_command`):
+        #: device commands drain on the sensing thread (`_drain_commands`, which
+        #: gives the front end one owner), and slow ones on a worker thread
+        #: (`_run_command_worker`). See SLOW_COMMANDS.
+        self._tick_commands: queue.Queue[dict] = queue.Queue()
+        self._slow_commands: queue.Queue[dict] = queue.Queue()
+        self._command_worker: threading.Thread | None = None
 
         # Alert edge state. Alerts are edge-triggered because an operator wants
         # to know that something happened, not to be told 3600 times an hour
@@ -959,8 +981,57 @@ class Agent:
     # --- commands -------------------------------------------------------
 
     def _on_command(self, payload: dict) -> None:
-        if self.router is not None:
+        """Queue a command from the relay's reader thread; never run it here.
+
+        Dispatching inline would run device work on the socket's reader thread —
+        a radio retune racing the sensing loop's demodulate(), and a slow stream
+        start stalling pongs into a reconnect. So this only enqueues and returns:
+        slow, non-racing commands to the worker; everything else to the sensing
+        loop, which owns the front end. See `_drain_commands` / `_run_command_worker`.
+        """
+        if self.router is None:
+            return
+        if str(payload.get("kind", "")) in SLOW_COMMANDS:
+            self._slow_commands.put(payload)
+        else:
+            self._tick_commands.put(payload)
+
+    def _drain_commands(self) -> None:
+        """Apply queued device commands on the sensing thread.
+
+        The reason the queue exists: radio.tune/gain/ppm mutate the front end's
+        demodulator and buffers, and applying them on the reader thread while the
+        sensing thread is inside demodulate() corrupts the filter state. Drained
+        here they run on the one thread that reads the front end. Fast by
+        construction — a hardware control transfer and a flush — so it never
+        holds the loop up. Called at the top of every tick and audio sub-tick.
+        """
+        if self.router is None:
+            return
+        while True:
+            try:
+                payload = self._tick_commands.get_nowait()
+            except queue.Empty:
+                return
             self.router.dispatch(payload)
+
+    def _run_command_worker(self) -> None:
+        """Drain slow commands (video start/stop) off the sensing thread.
+
+        Serial, so a start and a stop cannot race on the one StreamSession, and
+        off the reader thread so a start that spends 15 s probing the camera
+        cannot stall the socket. It never touches the radio front end, so it
+        needs no lock against the sensing loop — StreamSession already handles
+        the worker-vs-tick concurrency exactly as it did when these ran on the
+        reader thread (see stream.py).
+        """
+        while not self._stop.is_set():
+            try:
+                payload = self._slow_commands.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if self.router is not None:
+                self.router.dispatch(payload)
 
 
     def _apply_config(self, payload: dict) -> str:
@@ -1028,6 +1099,13 @@ class Agent:
         log.info("Station agent %s running at %.1f Hz.", AGENT_VERSION, 1 / tick)
         # A no-op unless transcription is available; safe to call unconditionally.
         self.transcriber.start()
+
+        # Commands run off the socket's reader thread: this worker takes the slow
+        # ones (video start/stop) and the sensing loop drains the rest. See
+        # _on_command / _run_command_worker.
+        self._command_worker = threading.Thread(
+            target=self._run_command_worker, name="gsu-commands", daemon=True)
+        self._command_worker.start()
 
         try:
             while not self._stop.is_set():
@@ -1141,6 +1219,9 @@ class Agent:
     def step(self, dt: float, weather_due: bool = False, health_due: bool = False) -> None:
         """One tick. Sensing first, publishing last, and no step in between
         cares whether the link is up."""
+        # Apply any queued device commands before this tick senses, so a retune
+        # or gain change lands on the front end on the one thread that reads it.
+        self._drain_commands()
         light_load = getattr(self.light, "load_w", 0.0) if self.light else 0.0
 
         reading = None
@@ -1444,6 +1525,10 @@ class Agent:
             now = time.monotonic()
             elapsed, last = now - last, now
             self._audio_clock = last
+            # Apply queued device commands before this sub-tick reads the front
+            # end, so a retune/gain change is serialised with demodulate() on the
+            # one thread that owns the receiver rather than racing it.
+            self._drain_commands()
             # While a console is watching the spectrum, push it out between
             # sweeps too — throttled to SPECTRUM_TICK_S so it rides roughly
             # every other audio sub-tick rather than all eight a second. Bounded
@@ -2139,6 +2224,14 @@ class Agent:
         # otherwise be mid-capture on a device being shut underneath them. The
         # stream first — a `rpicam-vid` left running holds the sensor, and the
         # next start fails with a device-busy that reads like broken hardware.
+        # Stop the command worker first. _stop is already set on the normal path;
+        # set it here too so a direct shutdown() (the tests) stops it as well. It
+        # sits between commands almost always, and is a daemon regardless, so an
+        # in-flight stream start cannot hold shutdown up.
+        self._stop.set()
+        worker, self._command_worker = self._command_worker, None
+        if worker is not None:
+            worker.join(timeout=2.0)
         self.stream.stop("the station is shutting down")
         self.video.stop()
         self.transcriber.shutdown()
