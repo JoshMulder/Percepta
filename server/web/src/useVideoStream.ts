@@ -132,14 +132,38 @@ export function useVideoStream(
       }
     };
 
-    /** Keep close to live. A stalled tab accumulates buffered video and would
-     *  otherwise resume minutes behind, which on a security camera is worse
-     *  than a gap: it looks current and is not. */
+    /** Keep the playhead on playable video and close to live.
+     *
+     *  Two ways it ends up on neither:
+     *
+     *  It fell behind. A stalled tab accumulates buffered video and would
+     *  otherwise resume minutes behind, which on a security camera is worse than
+     *  a gap: it looks current and is not.
+     *
+     *  It landed outside the buffer entirely. A stream is joined at whatever
+     *  media time the encoder is at — which for a station that keeps its encoder
+     *  warm between viewers is large and arbitrary — and the element's initial
+     *  currentTime can land just short of the first buffered sample (measured:
+     *  playhead 93.4 against a buffer starting 93.8). The old rule only seeked
+     *  when the buffer was >4 s AHEAD of the playhead, so a playhead sitting a
+     *  fraction of a second BEHIND the buffer's start was never rescued — it
+     *  stalled at readyState 1 until the buffer happened to grow past
+     *  currentTime + 4, which was ten-plus seconds of black on every attach.
+     *  The same trap catches a playhead left stranded PAST the buffer when an
+     *  encoder session restarts and resets the timeline beneath it.
+     *
+     *  So: any time the playhead is outside the buffered span, or too far behind
+     *  its live end, jump it to just behind live. `Math.max` keeps the target
+     *  inside a buffer shorter than half a second rather than seeking off it.
+     */
     const catchUp = () => {
       const el = video.current;
       if (!el || !el.buffered.length) return;
+      const start = el.buffered.start(0);
       const end = el.buffered.end(el.buffered.length - 1);
-      if (end - el.currentTime > 4) el.currentTime = end - 0.5;
+      if (el.currentTime < start || el.currentTime > end || end - el.currentTime > 4) {
+        el.currentTime = Math.max(start, end - 0.5);
+      }
     };
 
     /** Unwind one connection's media pipeline so the next starts clean. A new
