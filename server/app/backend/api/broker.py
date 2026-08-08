@@ -77,6 +77,25 @@ def _supersede_channel(station_id: uuid.UUID) -> str:
     return f"supersede/gsu/{station_id}"
 
 
+async def _refuse(websocket: WebSocket, reason: str) -> None:
+    """Refuse a station's credential: an in-band frame, then the 4401 close.
+
+    The in-band frame is the load-bearing half. A 4401 *close code* does not
+    survive every proxy — Cloudflare strips it — so a station behind one never
+    learns the close meant "credential refused" and hot-loops reconnecting every
+    backoff instead of taking the recovery path (renew once, come back). An
+    application-level text frame rides the same accepted socket and does survive,
+    so the station sets `credential_refused` from it (see the relay's
+    `_on_message`). The 4401 close still goes out — for direct connections that
+    preserve it, and as the standard record on the wire.
+    """
+    with contextlib.suppress(Exception):
+        await websocket.send_text(
+            json.dumps({"type": "unauthorized", "reason": reason}))
+    with contextlib.suppress(Exception):
+        await websocket.close(code=4401)
+
+
 @router.websocket("/broker")
 async def broker(websocket: WebSocket) -> None:
     """A station's telemetry up and its commands down, on one socket."""
@@ -111,7 +130,7 @@ async def broker(websocket: WebSocket) -> None:
             if websocket.headers.get("authorization") is None
             else "present but not 'Bearer …'",
         )
-        await websocket.close(code=4401)
+        await _refuse(websocket, "no bearer credential")
         return
 
     with PrivilegedSessionLocal() as db:
@@ -125,7 +144,7 @@ async def broker(websocket: WebSocket) -> None:
                 "Broker 4401 for %s: bearer not recognised (len=%d jwt_shaped=%s).",
                 websocket.client, len(secret), secret.startswith("eyJ"),
             )
-            await websocket.close(code=4401)
+            await _refuse(websocket, "credential not recognised")
             return
         station, credential = found
         station_id = station.id
@@ -160,8 +179,11 @@ async def broker(websocket: WebSocket) -> None:
         # Authentication happens once, when the socket opens. Without this a
         # revoked station keeps publishing until something else drops its
         # connection — which on a healthy link is never.
+        async def _revoke() -> None:
+            await _refuse(websocket, "credential revoked")
+
         revoked = asyncio.create_task(enrolment.close_when_revoked(
-            credential_id, station_id, lambda: websocket.close(code=4401),
+            credential_id, station_id, _revoke,
         ))
         # Announce last, so an older socket is displaced only once this one is
         # actually able to receive what it is taking over.

@@ -217,6 +217,20 @@ class RelayTransport(Transport):
             self._refusals[stream] = reason
             return
 
+        if message.get("type") == "unauthorized":
+            # The credential is refused, told to us in-band. This is the same
+            # signal as a 4401 close (see the connect handler below), sent as a
+            # frame because a 4401 *close code* does not survive every proxy —
+            # Cloudflare strips it, and without this the station never learns the
+            # close was an auth refusal and hot-loops reconnecting instead of
+            # renewing. Recovery is identical: set the flag and the agent renews
+            # once and comes back. See broker.py `_refuse`.
+            reason = str(message.get("reason", "unauthorized"))
+            log.warning(
+                "The platform refused this station's credential: %s", reason)
+            self.credential_refused.set()
+            return
+
         if message.get("stream") != "c":
             return
         payload = message.get("payload")
