@@ -835,10 +835,20 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
   // One stream for the console, not one per panel: `enabled` must not change
   // when the panel moves between slots, or the swap tears the pipeline down
   // exactly as remounting used to.
+  //
+  // Attempt as soon as the capability and a station id are known, rather than
+  // waiting for the station-detail fetch to confirm `online`. That wait is dead
+  // time before the socket even opens, and on a reload it is what pushes the
+  // reconnect past the encoder's warm-linger window into a full cold start. So
+  // the gate is optimistic — attempt unless detail has loaded and positively
+  // says the station is offline (`?? true`, not `?? false`). A station that is
+  // genuinely down is bounded by the hook's own ten-silent-connections stop, so
+  // withholding the attempt buys nothing but latency for every station that is
+  // up, which is nearly all of them.
   const streamState = useVideoStream(
     videoElRef,
     stationId,
-    Boolean(canVideo && (detail?.online ?? false)),
+    Boolean(canVideo && stationId && (detail?.online ?? true)),
   );
 
   const renderVideo = (small: boolean) =>

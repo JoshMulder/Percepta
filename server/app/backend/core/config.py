@@ -119,13 +119,19 @@ class Settings(BaseSettings):
     # that return instant). This is bandwidth spent while nobody is watching -
     # the exact thing on-demand video exists to avoid - so it is deliberately
     # short, and 0 disables it entirely for a deployment that wants the strict
-    # posture. At ~3 Mbit/s a 10 s window is a few megabytes of metered link per
+    # posture. At ~3 Mbit/s an 18 s window is a few megabytes of metered link per
     # session-end. Keep it well under the lease window the station runs on
     # (LEASE_SECONDS minus RENEW_SECONDS, ~20 s): the platform stops renewing the
     # instant the last viewer leaves, so a linger longer than that lets the lease
     # expire mid-window and the stream stops early — harmless, but not the effect
     # asked for.
-    stream_linger_seconds: int = 8
+    #
+    # Sized at 18 (up from 8): a reload does not get back to the connect step
+    # instantly — bundle, boot, auth — and at 8 s that round trip routinely
+    # landed just past the window, so the reload cold-started the encoder anyway,
+    # which is the whole thing this was meant to spare it. 18 covers a realistic
+    # reload while staying under the ~20 s lease bound above.
+    stream_linger_seconds: int = 18
 
     # Cross-worker fan-out and immediate revocation over Redis. Turning this off
     # confines fan-out to a single process, so WEB_CONCURRENCY must then be 1 or
