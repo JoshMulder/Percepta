@@ -32,15 +32,10 @@
 // prebuffer, and the discarded audio was a gap eight times a second, which is
 // speech that cuts in and out constantly rather than an occasional click.
 //
-// 600 ms, raised from 300 ms after measuring a real box. The old number
-// assumed delivery jittered by about a burst interval; it does not. The
-// station's audio sub-tick shares a thread with the ~1 Hz sensing sweep, and on
-// a Pi 2B that sweep stalls audio production for several hundred ms each second,
-// so frames arrive clumped into roughly per-second bursts. Under a 300 ms lead
-// the ring was seen sawtoothing 0↔500 ms and underrunning 1–2×/s; 600 ms covers
-// the gap. Same value and reasoning as `BURST_LEAD_S` in `useAudio.ts`, the
-// scheduled player's half of this.
-const BURST_LEAD_S = 0.6;
+// 300 ms is about two and a half burst intervals. Same number and same
+// reasoning as `BURST_LEAD_S` in `useAudio.ts`, which is the scheduled
+// player's half of this and was fixed first.
+const BURST_LEAD_S = 0.3;
 
 class PcmPlayer extends AudioWorkletProcessor {
   constructor() {

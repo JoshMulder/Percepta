@@ -13,18 +13,11 @@ export type AudioState = "off" | "blocked" | "playing" | "unsupported";
  * whatever jitter the link adds — otherwise the queue drains between bursts
  * and every underrun costs an audible gap.
  *
- * **600 ms, raised from 300 ms after measuring a real box.** 300 ms assumed
- * delivery jittered by about a burst interval. It does not: the station's audio
- * sub-tick shares a thread with the ~1 Hz sensing sweep — every sensor read,
- * the telemetry batch, the health pass — and on a constrained box (a Pi 2B) that
- * sweep stalls audio production for several hundred ms each second, so frames
- * arrive clumped into roughly per-second bursts with a gap behind each. The ring
- * was seen sawtoothing 0↔500 ms under a 300 ms lead and underrunning 1–2×/s;
- * 600 ms covers that gap. It is pure latency, and it does not matter here: this
- * is a monitoring console, not a duplex radio, and being half a second behind is
- * imperceptible next to speech that stutters.
+ * 300 ms is about two and a half bursts. It is pure latency, and it does not
+ * matter here: this is a monitoring console, not a duplex radio, and being a
+ * third of a second behind is imperceptible next to speech that stutters.
  */
-const BURST_LEAD_S = 0.6;
+const BURST_LEAD_S = 0.3;
 
 /**
  * Airband audio playback.
