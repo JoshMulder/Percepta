@@ -21,7 +21,7 @@ real-time clock. Two of the three things I would spend money on are cheap.
 | Camera | Pi camera on the CSI ribbon |
 | Weather | Airmar 110WX via USB-UART, NMEA 0183 |
 | Airband | One RTL2838 (RTL2832U + R820T2) |
-| ADS-B | uAvionix ping RX Pro over MAVLink on a USB-UART — **not yet connected** |
+| ADS-B | uAvionix ping RX Pro over MAVLink on a USB-UART — **connected; decoding ADS-B on real hardware** |
 
 ---
 
@@ -245,7 +245,7 @@ cannot be told apart from an identical one.** The console says so and suggests
 | Stream | On this hardware |
 |---|---|
 | airband audio + radio telemetry | yes, with the SDR sample rate turned down |
-| ADS-B | yes, **once the ping RX Pro is connected** — nothing today |
+| ADS-B | yes — the ping RX Pro decodes ADS-B on the UART, **proven on real hardware** |
 | weather | partly: wind, temperature, pressure. **No humidity unless the RH module is fitted, and no rainfall, visibility or sky at all** |
 | power | no device specified yet |
 | camera, snapshots | yes — MJPEG on the video channel, 640×480 at 2 fps by default. §6b has what it costs |

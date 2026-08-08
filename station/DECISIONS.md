@@ -123,11 +123,11 @@ mechanism is safe against a bad build; it is not safe against a hostile one.
 4. **Everything ships simulated, and says so.** Default inventory is all
    simulated devices, each reporting `simulated: true`. Nothing ever silently
    substitutes a simulation for hardware that did not answer.
-5. **Drivers written but not exercised against hardware**: the Airmar NMEA
-   decoder and the MAVLink/ping RX decoder are complete and unit-tested against
-   synthetic and hand-worked data; the serial layer under them (`serialio.py`,
-   termios 8N1) has never spoken to a real UART. First thing to check on a real
-   box.
+5. **Serial drivers, hardware status**: the MAVLink/ping RX decoder (ADS-B) is
+   **proven on real hardware — ADS-B decodes in the field**, so the serial layer
+   under it (`serialio.py`, termios 8N1) has spoken to a real UART. The Airmar
+   NMEA decoder is complete and unit-tested against synthetic and hand-worked
+   data but is still to be confirmed decoding a live sensor.
 6. **Drivers deliberately not written**: RTL-SDR airband, dump1090, the Victron
    charge controller, the GPIO relay, both cameras. They are selectable in the
    registry and report "supported as a selection, no driver in this build". A
