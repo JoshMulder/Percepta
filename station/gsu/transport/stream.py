@@ -523,7 +523,8 @@ class TeeUplink(StreamUplink):
     name = "tee"
 
     def __init__(self, primary: StreamUplink,
-                 require_primary: bool = True) -> None:
+                 require_primary: bool = True,
+                 open_primary_on_open: bool = True) -> None:
         super().__init__()
         self.primary = primary
         #: Whether the platform's uplink failing to open fails the session.
@@ -535,6 +536,13 @@ class TeeUplink(StreamUplink):
         #: talking to the platform — a local preview that requires a working
         #: uplink is a preview that is missing whenever it is wanted.
         self.require_primary = require_primary
+        #: Whether `open()` connects the platform uplink at all. True for every
+        #: stream somebody is watching — the platform, or the setup page, which
+        #: also feeds the platform when it can reach it. False for a warm start:
+        #: the encoder runs for the local cache and no platform socket is opened
+        #: until a `video.start` asks for one, which is what keeps a warm stream
+        #: off the metered link entirely.
+        self._open_primary_on_open = open_primary_on_open
         self.primary_open = False
         self._viewers: set[LocalViewer] = set()
         self._lock = threading.Lock()
@@ -546,6 +554,14 @@ class TeeUplink(StreamUplink):
         #: worst a lost edge can cost is one fragment, because the next one is
         #: thirty milliseconds behind it.
         self._reopen_wanted = False
+        #: The mirror of `_reopen_wanted`: set by `close_primary` on whatever
+        #: thread handled the stop, acted on by `_apply_primary_close` on the
+        #: encoder's. Closing lives on the encoder thread for the same two
+        #: reasons opening does — a half-dead socket close can block, and doing
+        #: both on one thread serialises them, so a `video.start` hard behind a
+        #: `video.stop` cannot have its fresh socket closed by a teardown still
+        #: in flight.
+        self._close_wanted = False
         #: Minus infinity rather than zero so the first attempt is never the
         #: one the rate limit swallows: `time.monotonic()` has no defined
         #: epoch, and on a platform where it starts near zero a plain 0.0 would
@@ -588,6 +604,14 @@ class TeeUplink(StreamUplink):
     # --- the uplink itself ----------------------------------------------
 
     def open(self) -> bool:
+        if not self._open_primary_on_open:
+            # A warm start opens no platform socket: the encoder runs for the
+            # local cache and the uplink stays closed until a viewer asks for
+            # it, which is the whole point of keeping warm without spending the
+            # link. `open_primary` (on a later video.start) makes the connection.
+            self.primary_open = False
+            self.reason = "kept warm; the platform is not attached"
+            return True
         self.primary_open = self.primary.open()
         if self.primary_open:
             return True
@@ -633,6 +657,41 @@ class TeeUplink(StreamUplink):
                        or "the platform's uplink is down; reconnecting")
         return False
 
+    def close_primary(self) -> None:
+        """Let the platform go, but keep the encoder feeding local viewers.
+
+        The mirror of `open_primary`, called for the same situations in reverse:
+        a `video.stop`, or an expired lease, on a station that is keeping its
+        encoder warm between viewers. The credential-carrying socket is not left
+        idle — it is closed — but the close is deferred to `_apply_primary_close`
+        on the encoder thread, because this may run on the sensing loop and a
+        half-dead socket close can block it. Flags only here; no socket is
+        touched, so this never blocks whoever called it.
+        """
+        self._reopen_wanted = False
+        self._close_wanted = True
+        self.primary_open = False
+        # Back to the setup-page posture: an encoder running with no platform
+        # uplink is not the expensive mistake while it is deliberately warm, and
+        # `send` must not read a closed primary as a dropped frame.
+        self.require_primary = False
+        self.reason = "kept warm; the platform is not attached"
+
+    def _apply_primary_close(self) -> None:
+        """Close the platform's socket, on the encoder's thread. See close_primary.
+
+        Runs before `_reopen_if_wanted` in `begin`/`send`, so that a close and a
+        reopen queued back to back happen in that order on one thread: the old
+        socket is gone before a new one is made, and neither races the other.
+        """
+        if not self._close_wanted:
+            return
+        self._close_wanted = False
+        try:
+            self.primary.close()
+        except Exception:  # noqa: BLE001 - the session is warm, not broken
+            log.exception("Closing the platform uplink for a warm stream failed.")
+
     def _reopen_if_wanted(self, *, resend_init: bool) -> None:
         """Connect the platform's uplink, on the encoder's thread.
 
@@ -674,6 +733,7 @@ class TeeUplink(StreamUplink):
     def begin(self, codec: str, init_segment: bytes) -> bool:
         # A new encoder session is about to hand over a segment of its own, so
         # re-sending the held one on the way in would only be a duplicate.
+        self._apply_primary_close()
         self._reopen_if_wanted(resend_init=False)
         with self._lock:
             self._codec, self._init = codec, init_segment
@@ -685,6 +745,7 @@ class TeeUplink(StreamUplink):
         return self.primary.begin(codec, init_segment)
 
     def send(self, fragment: bytes, keyframe: bool) -> bool:
+        self._apply_primary_close()
         self._reopen_if_wanted(resend_init=True)
         with self._lock:
             viewers = list(self._viewers)
@@ -701,9 +762,11 @@ class TeeUplink(StreamUplink):
 
     def close(self) -> None:
         # Before anything else: a session being torn down must not have a
-        # reconnect arranged behind it. A late fragment from an encoder still
-        # winding down would otherwise reopen the socket that was just closed.
+        # reconnect — or a deferred close — arranged behind it. A late fragment
+        # from an encoder still winding down would otherwise reopen the socket
+        # that was just closed, or close one a new session had opened.
         self._reopen_wanted = False
+        self._close_wanted = False
         with self._lock:
             viewers, self._viewers = list(self._viewers), set()
             self._init = None

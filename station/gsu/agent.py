@@ -1142,6 +1142,10 @@ class Agent:
                         self.site.event_retention_days,
                         self.site.transcript_retention_days,
                     )
+                # Before the rediscovery/rebuild decision: keep the encoder warm
+                # where configured, and — when a camera change is owed — get it
+                # to let the sensor go so the rebuild below can run.
+                self._maintain_warm_stream()
                 if (
                     started - self._last_discovery > REDISCOVER_SECONDS
                     and self._anything_missing()
@@ -1181,9 +1185,47 @@ class Agent:
 
         "starting" counts: the encoder is about to take the sensor, and a
         rebuild dispatched in that window kills the stream at birth.
+
+        An in-flight teardown counts too. A detached stop flips the state to
+        idle at once but reaps the encoder — and releases the sensor — on a
+        worker thread; rebuilding the camera into that window hands the next
+        reader a device the kernel still says is busy. This matters more now the
+        keep-warm loop yields the camera by a detached stop, but it was always
+        the honest answer for the lease-expiry path too.
         """
         stream = getattr(self, "stream", None)
-        return stream is not None and stream.state in ("streaming", "starting")
+        if stream is None:
+            return False
+        if stream.state in ("streaming", "starting"):
+            return True
+        teardown = getattr(stream, "_teardown_thread", None)
+        return bool(teardown is not None and teardown.is_alive())
+
+    def _maintain_warm_stream(self) -> None:
+        """Keep the live encoder warm between viewers, where the box is set to.
+
+        Runs on the sensing loop. A warm encoder holds the camera, so it must
+        yield when a deferred camera change is waiting on the sensor — otherwise
+        the change never lands. It yields only when the platform is not actually
+        watching; an active viewer defers the change exactly as it did before
+        keep-warm existed.
+        """
+        stream = getattr(self, "stream", None)
+        if stream is None or not stream.keeps_warm():
+            return
+        if self._camera_rebuild_owed:
+            # A configuration change is waiting for the sensor. Let it have it;
+            # the warm start below brings the encoder back once the rebuild has
+            # run and the flag clears.
+            stream.yield_camera_if_warm()
+            return
+        if stream.wants_warm_start():
+            # Onto the slow-command worker, never inline: start() can spend
+            # fifteen seconds probing the camera, and this runs on the sensing
+            # loop the radio's audio shares. note_warm_attempt starts the
+            # backoff so ticks in the meantime do not queue a second start.
+            stream.note_warm_attempt()
+            self._slow_commands.put({"kind": "video.start", "_warm": True})
 
     @staticmethod
     def _retire_driver(driver) -> None:

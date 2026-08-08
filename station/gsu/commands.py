@@ -201,7 +201,11 @@ def build_handlers(radio, light, on_config, stream=None,
         return stream.start(payload)
 
     def video_stop(payload: dict) -> str:
-        return stream.stop(str(payload.get("reason") or "stopped by the platform"))
+        # on_platform_stop, not stop: on a box that keeps its encoder warm this
+        # detaches the platform and leaves the encoder running, so the next
+        # video.start re-attaches instantly. Elsewhere it is a full stop.
+        return stream.on_platform_stop(
+            str(payload.get("reason") or "stopped by the platform"))
 
     if stream is not None:
         # Both report their actual effect in `health.video.stream` rather than

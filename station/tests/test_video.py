@@ -21,8 +21,10 @@ image library into an unattended box's dependencies to test something the box
 does not do.
 """
 
+import dataclasses
 import json
 import os
+import queue
 import socket
 import tempfile
 import threading
@@ -1532,6 +1534,145 @@ class CodecMismatchTests(AgentFixture):
             camera.stream_source(self.agent.stream.settings())
         self.assertEqual(asked, [True, True, True],
                          "the stream path reused a cached codec")
+
+
+class KeepWarmTests(AgentFixture):
+    """`GSU_VIDEO_KEEP_WARM`: the encoder is held ready between viewers, so a
+    `video.start` re-attaches the platform in a socket connect rather than a
+    cold ffprobe-and-keyframe start — and without spending the uplink while
+    nobody is watching. Off by default; every assertion here first turns it on.
+    """
+
+    def _enable_warm(self):
+        self.agent.config = dataclasses.replace(
+            self.agent.config, video_keep_warm=True)
+        # A source with no thread or subprocess: these tests are about the
+        # lifecycle — who attaches, who holds the camera, when it stops — not
+        # about the encoder.
+        self.agent.stream._build_source = lambda settings: _InstantSource()
+
+    def handler(self, kind):
+        from gsu.commands import build_handlers
+
+        return build_handlers(None, None, None, self.agent.stream)[kind]
+
+    def test_off_by_default(self):
+        self.assertFalse(self.agent.stream.keeps_warm())
+        self.assertFalse(self.agent.stream.wants_warm_start())
+
+    def test_a_warm_start_runs_the_encoder_with_no_platform_uplink(self):
+        self._enable_warm()
+        self.agent.stream.start({"_warm": True})
+        self.assertEqual(self.agent.stream.state, "streaming")
+        # No viewer and no lease: the keep-warm loop owns it, not the platform.
+        self.assertEqual(self.agent.stream.viewers, 0)
+        self.assertIsNone(self.agent.stream.expires_at)
+        # Nothing opened off-box — the whole point is no uplink while idle.
+        self.assertFalse(self.agent.stream.uplink.primary_open)
+        state = self.agent.health_payload()["video"]["stream"]
+        self.assertEqual(state["state"], "streaming")
+        self.assertTrue(state["keeping_warm"])
+
+    def test_video_start_attaches_the_platform_without_restarting(self):
+        self._enable_warm()
+        self.agent.stream.start({"_warm": True})
+        source = self.agent.stream.source
+        effect = self.agent.stream.start({"viewers": 1, "lease_s": 20})
+        # The same encoder — attached, not cold-started.
+        self.assertIs(self.agent.stream.source, source)
+        self.assertIn("already streaming", effect)
+        self.assertEqual(self.agent.stream.viewers, 1)
+        self.assertGreater(self.agent.stream.expires_at, time.monotonic())
+        # open_primary was asked for; making the connection is the encoder
+        # thread's job, so the flag is what there is to see here.
+        self.assertTrue(self.agent.stream.uplink._reopen_wanted)
+
+    def test_video_stop_keeps_the_encoder_warm(self):
+        self._enable_warm()
+        self.agent.stream.start({"_warm": True})
+        self.agent.stream.start({"viewers": 1, "lease_s": 20})
+        self.handler("video.stop")({"reason": "the last viewer left"})
+        # The platform is let go, but the encoder is still up and warm.
+        self.assertEqual(self.agent.stream.state, "streaming")
+        self.assertIsNone(self.agent.stream.expires_at)
+        self.assertFalse(self.agent.stream.uplink.primary_open)
+        self.assertTrue(
+            self.agent.health_payload()["video"]["stream"]["keeping_warm"])
+
+    def test_an_expired_lease_keeps_the_encoder_warm(self):
+        self._enable_warm()
+        self.agent.stream.start({"_warm": True})
+        self.agent.stream.start({"viewers": 1, "lease_s": 5})
+        self.assertIsNotNone(self.agent.stream.expires_at)
+        self.agent.stream.expires_at = time.monotonic() - 0.1
+        self.agent.stream._last_frame_at = time.monotonic()   # not a stall
+        self.agent.step(1.0)
+        self.assertEqual(self.agent.stream.state, "streaming")
+        self.assertIsNone(self.agent.stream.expires_at)
+        self.assertFalse(self.agent.stream.uplink.primary_open)
+
+    def test_the_ceiling_does_not_apply_to_a_warm_stream(self):
+        self._enable_warm()
+        self.agent.stream.start({"_warm": True})
+        self.agent.site.stream_max_minutes = 1 / 60
+        self.agent.stream.started_at = time.monotonic() - 5
+        self.agent.stream._last_frame_at = time.monotonic()   # not a stall
+        self.agent.step(1.0)
+        self.assertEqual(self.agent.stream.state, "streaming")
+
+    def test_the_loop_enqueues_a_warm_start_when_idle_and_backs_off(self):
+        self._enable_warm()
+        self.assertTrue(self.agent.stream.wants_warm_start())
+        self.agent._maintain_warm_stream()
+        self.assertEqual(self.agent._slow_commands.get_nowait(),
+                         {"kind": "video.start", "_warm": True})
+        # The backoff stops the next tick queuing a second start behind it.
+        self.agent._maintain_warm_stream()
+        with self.assertRaises(queue.Empty):
+            self.agent._slow_commands.get_nowait()
+
+    def test_a_warm_stream_yields_the_camera_for_a_config_change(self):
+        self._enable_warm()
+        self.agent.stream.start({"_warm": True})
+        self.assertEqual(self.agent.stream.state, "streaming")
+        self.agent._camera_rebuild_owed = True
+        self.agent._maintain_warm_stream()
+        # Detached: idle at once, reaped off-thread, the sensor freed for the
+        # swap the change is waiting to make.
+        self.assertEqual(self.agent.stream.state, "idle")
+        self.agent.stream._await_teardown(2.0)
+
+    def test_a_watched_stream_defers_the_config_change(self):
+        self._enable_warm()
+        self.agent.stream.start({"_warm": True})
+        self.agent.stream.uplink.primary_open = True   # a viewer is attached
+        self.agent._camera_rebuild_owed = True
+        self.agent._maintain_warm_stream()
+        self.assertEqual(self.agent.stream.state, "streaming")
+
+    def test_a_stream_holds_the_camera_until_the_teardown_finishes(self):
+        # A detached stop flips to idle at once but reaps — and releases the
+        # sensor — off-thread; a rebuild into that window hits a busy device.
+        reaped = threading.Event()
+
+        class _SlowStop(_InstantSource):
+            def __init__(self):
+                self.running = True
+
+            def stop(self):
+                time.sleep(0.5)
+                self.running = False
+                reaped.set()
+
+        self.agent.stream._build_source = lambda settings: _SlowStop()
+        self.agent.stream.start({"lease_s": 300})
+        self.agent.stream._stop_detached("test")
+        self.assertEqual(self.agent.stream.state, "idle")
+        self.assertTrue(self.agent._stream_holds_camera(),
+                        "released the camera before the reap finished")
+        self.assertTrue(reaped.wait(2.0))
+        self.agent.stream._await_teardown(1.0)
+        self.assertFalse(self.agent._stream_holds_camera())
 
 
 class StreamPacingTests(AgentFixture):

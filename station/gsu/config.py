@@ -164,6 +164,21 @@ class AgentConfig:
     #: `gsu/transport/stream.py` explains what replaces it.
     stream_sink: str | None = None
 
+    #: Keep the live encoder — and the camera it reads — running even when no
+    #: viewer is attached, so a `video.start` re-attaches the platform in a
+    #: socket connect rather than paying the full cold start: an ffprobe against
+    #: the camera, the RTSP open, and the wait for the camera's first keyframe,
+    #: which together are the ~15 seconds a console waits on a page load. The
+    #: uplink stays on-demand — nothing is sent up the metered link while nobody
+    #: is watching — so this buys the latency back without spending the bandwidth
+    #: the on-demand design exists to save. What it costs is a standing encode:
+    #: a remux is cheap, but it is CPU and a little power that never sleeps, and
+    #: it holds the camera slot (so a snapshot preview reads as "in use by the
+    #: live stream" — the setup page's live view still works, through the same
+    #: encoder). Off by default, and meant to be turned on per box where the
+    #: board can afford it — a Pi 5 before a Pi 2B.
+    video_keep_warm: bool = False
+
     #: Refuse to start a second agent for the same station. Two instances
     #: publishing independent worlds onto one channel makes the console flicker
     #: between them, which looks like a platform bug rather than an operator
@@ -195,6 +210,8 @@ class AgentConfig:
             radio_whisper_model=_env("GSU_WHISPER_MODEL"),
             radio_whisper_prompt=_env("GSU_WHISPER_PROMPT", ""),
             stream_sink=_env("GSU_STREAM_SINK"),
+            video_keep_warm=_env("GSU_VIDEO_KEEP_WARM", "0")
+            not in ("0", "false", "no", ""),
             encoder=_env("GSU_ENCODER", "auto"),
             media_url=_env("GSU_MEDIA_URL"),
             single_instance=_env("GSU_SINGLE_INSTANCE", "1") not in ("0", "false"),

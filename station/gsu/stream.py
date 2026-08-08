@@ -107,6 +107,15 @@ STARTING_LIMIT_S = 90.0
 #: frozen picture is caught in seconds rather than sitting there indefinitely.
 STALL_LIMIT_S = 12.0
 
+#: After a *warm* encoder stops itself — a stall, a failed start, or yielding
+#: the camera for a configuration change — how long the keep-warm loop waits
+#: before bringing it back. Long enough that a genuinely broken camera is
+#: retried at a human pace rather than hammered once a second; short enough that
+#: a transient fault heals without anyone. It gates only the restart-after-stop:
+#: a warm stream that runs for hours and then stalls is brought back at once,
+#: and only a second failure inside the window is held off.
+WARM_RETRY_S = 30.0
+
 
 class StreamSession:
     """The one live encoder this station has, and the rules about when it runs."""
@@ -157,6 +166,17 @@ class StreamSession:
         #: on a wedged ffmpeg dying — see `_stop_detached`. Held so a clean
         #: shutdown (and the tests) can wait for the reaping to finish.
         self._teardown_thread: threading.Thread | None = None
+        #: When the keep-warm loop may next (re)start the encoder after it
+        #: stopped on its own. Zero means "no wait". See WARM_RETRY_S.
+        self._warm_retry_at: float = 0.0
+
+    def keeps_warm(self) -> bool:
+        """Whether this box holds the encoder warm between viewers.
+
+        Read live from config rather than cached at construction: a test flips
+        it on an existing session, and it costs nothing to ask.
+        """
+        return bool(getattr(self.agent.config, "video_keep_warm", False))
 
     # --- what the platform asks for -------------------------------------
 
@@ -177,18 +197,27 @@ class StreamSession:
              if key in request),
             None,
         ))
-        self.viewers = max(1, int(request.get("viewers", 1) or 1))
-        self.expires_at = time.monotonic() + lease
+        # A warm start has no viewer — it is the station keeping the encoder up
+        # for itself — so it counts none, where a real or setup-page start
+        # counts at least one.
+        warm = bool(request.get("_warm"))
+        self.viewers = 0 if warm else max(1, int(request.get("viewers", 1) or 1))
+        # A warm session answers to the keep-warm loop, not to a platform lease,
+        # so it carries none: `tick` only stops a stream on an *expired* lease,
+        # and a warm one has nothing to expire. A real `video.start` arriving
+        # later sets a lease here and `tick` governs it from then on.
+        self.expires_at = None if warm else time.monotonic() + lease
         if not request.get("_local"):
             # The platform is watching now, so the session outlives the setup
             # page and ends the way every other stream does.
             self._local_only = False
 
         if self.state == "streaming":
-            # The setup page may have started this before the platform asked.
-            # The encoder is already running and the init segment is held, so
-            # the platform joins without restarting anything.
-            if not request.get("_local") and isinstance(self.uplink, TeeUplink):
+            # The setup page — or the keep-warm loop — may have started this
+            # before the platform asked. The encoder is already running and the
+            # init segment is held, so the platform joins without restarting
+            # anything. A warm or local re-entry attaches no platform uplink.
+            if not (warm or request.get("_local")) and isinstance(self.uplink, TeeUplink):
                 if not self.uplink.open_primary():
                     return (
                         f"already streaming locally, but {self.uplink.reason}"
@@ -225,9 +254,16 @@ class StreamSession:
             # uplink to open. The moment somebody most needs to aim a camera is
             # the moment the box is not talking to the platform, and a local
             # preview that requires a working uplink is missing whenever it is
-            # wanted. A stream the platform asked for still needs it: an
-            # encoder running with nowhere to send is the expensive mistake.
-            require_primary=not (request or {}).get("_local"),
+            # wanted. A warm start is the same: it exists precisely for when
+            # nobody is watching yet, so it must not fail because the platform
+            # is not receiving it. A stream the platform asked for still needs
+            # it: an encoder running with nowhere to send is the expensive mistake.
+            require_primary=not (warm or request.get("_local")),
+            # A warm start opens no platform socket at all: the encoder runs for
+            # the local cache and the uplink waits for a video.start. The setup
+            # page, by contrast, still feeds the platform when it can — only the
+            # failure to reach it is tolerated (require_primary above).
+            open_primary_on_open=not warm,
         )
         self.uplink = uplink
         if not uplink.open():
@@ -575,6 +611,83 @@ class StreamSession:
         if thread is not None:
             thread.join(timeout)
 
+    # --- kept warm between viewers --------------------------------------
+
+    def on_platform_stop(self, reason: str = "stopped by the platform") -> str:
+        """`video.stop`. Keeps the encoder warm where the box is configured to,
+        and stops it otherwise — the command handler need not know which."""
+        if self.keeps_warm():
+            return self.release_primary(reason)
+        return self.stop(reason)
+
+    def release_primary(self, reason: str = "the platform stopped watching") -> str:
+        """Detach the platform but keep the encoder warm.
+
+        The warm-mode answer to `video.stop` and to an expired lease: the
+        platform stops receiving the stream, but the encoder keeps running for
+        the local group-of-pictures cache, so the next `video.start` re-attaches
+        in a socket connect rather than an ffprobe-and-keyframe cold start.
+        Falls back to a full stop when there is nothing to keep warm — not
+        streaming, or no tee to detach from — so a caller can use it without
+        first checking which case it is in.
+        """
+        uplink = self.uplink
+        if self.state != "streaming" or not isinstance(uplink, TeeUplink):
+            return self.stop(reason)
+        self.expires_at = None
+        self.viewers = 0
+        uplink.close_primary()
+        log.info("Platform detached; keeping the encoder warm (%s).", reason)
+        return "the platform was detached; the encoder is kept warm"
+
+    def wants_warm_start(self) -> bool:
+        """Whether the keep-warm loop should bring the encoder up now.
+
+        A read, cheap and side-effect-free, so it is safe on the sensing loop:
+        the *start* itself is not — `start()` can spend fifteen seconds probing
+        the camera — so the caller runs it on the command worker, the same
+        thread `video.start` uses, never on the loop the radio shares. A restart
+        after a self-stop is rate-limited (WARM_RETRY_S): a camera that will not
+        start, or a stream that stalls the moment it does, is retried at a human
+        pace rather than every second.
+        """
+        if not self.keeps_warm() or self.state not in ("idle", "unavailable"):
+            return False
+        if getattr(self.agent, "camera", None) is None:
+            # Nothing to stream. The loop tries again once a camera is
+            # discovered; until then there is nothing to hold warm.
+            return False
+        return time.monotonic() >= self._warm_retry_at
+
+    def note_warm_attempt(self) -> None:
+        """Start the backoff window. Called by the loop when it enqueues a warm
+        start, so the next tick does not enqueue a second one behind it — and so
+        a start that fails, or stalls at once, is not retried faster than
+        WARM_RETRY_S. A start that takes and runs makes this moot: the state is
+        then "streaming" and `wants_warm_start` returns False regardless.
+        """
+        self._warm_retry_at = time.monotonic() + WARM_RETRY_S
+
+    def yield_camera_if_warm(self) -> None:
+        """Give the camera back if the only thing holding it is keep-warm.
+
+        A deferred camera change waits on the sensor, and a warm encoder would
+        hold it for ever. So a warm session the platform is *not* watching stops
+        to release it — detached, off the sensing loop, like any tick-driven
+        stop — and the keep-warm loop brings it back once the change has landed.
+        A session a viewer is actually watching is left alone: the change waits
+        for the viewer to leave, exactly as it did before keep-warm existed.
+        """
+        uplink = self.uplink
+        if self.state != "streaming":
+            return
+        if isinstance(uplink, TeeUplink) and uplink.primary_open:
+            return
+        # Hold off the re-warm so it does not race the rebuild it is making room
+        # for; the loop brings the encoder back once the change has landed.
+        self._warm_retry_at = time.monotonic() + WARM_RETRY_S
+        self._stop_detached("releasing the camera for a configuration change")
+
     def tick(self) -> None:
         """Called from the sensing loop. This is the fail-closed half.
 
@@ -630,13 +743,25 @@ class StreamSession:
             return
         now = time.monotonic()
         if self.expires_at is not None and now > self.expires_at:
-            self._stop_detached(
+            reason = (
                 "the platform stopped renewing the lease — nobody is watching, "
                 "or the link is down"
             )
+            if self.keeps_warm():
+                # Let the platform go, but keep the encoder warm rather than
+                # paying to cold-start it for the next viewer. release_primary
+                # clears expires_at, so this fires once, not every tick.
+                self.release_primary(reason)
+            else:
+                self._stop_detached(reason)
             return
+        # The ceiling is a bandwidth backstop — a stream "somehow" renewed for
+        # this long means nobody is watching it either. A warm stream is renewed
+        # by nobody and watched by nobody on purpose and sends nothing up the
+        # link, so the backstop does not apply to it; the keep-warm loop owns
+        # its lifetime.
         ceiling = float(self.agent.site.stream_max_minutes or 0) * 60
-        if ceiling and self.started_at and now - self.started_at > ceiling:
+        if ceiling and not self.keeps_warm() and self.started_at and now - self.started_at > ceiling:
             self._stop_detached(f"the {ceiling / 60:.0f} minute ceiling was reached")
             return
         # A source that is alive but has stopped delivering frames — the frozen-
@@ -871,8 +996,16 @@ class StreamSession:
         now = time.monotonic()
         elapsed = max(0.001, now - self.started_at) if self.started_at else 0.0
         settings = self.settings()
+        # Streaming for the local cache with no platform attached: the honest
+        # reading of "state: streaming, viewers: 0". Said out loud so a console
+        # cannot read a warm encoder as the platform receiving video.
+        keeping_warm = bool(
+            self.keeps_warm() and self.state == "streaming"
+            and isinstance(self.uplink, TeeUplink) and not self.uplink.primary_open
+        )
         payload = {
             "state": self.state,
+            "keeping_warm": keeping_warm,
             "viewers": self.viewers,
             "since": self.started_clock.isoformat() if (
                 self.started_clock and self.state == "streaming") else None,
