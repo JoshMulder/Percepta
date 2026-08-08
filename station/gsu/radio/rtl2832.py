@@ -53,24 +53,42 @@ receiver is deaf after a restart, power-cycle the dongle before touching ppm.
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import logging
 import threading
-import time
 from collections import deque
 
 import numpy as np
 
 log = logging.getLogger("gsu.radio")
 
+#: The C callback `rtlsdr_read_async` delivers each USB buffer through:
+#: `void cb(unsigned char *buf, uint32_t len, void *ctx)`. Held on the device
+#: (see `__init__`) because a callback the garbage collector reclaims while
+#: librtlsdr still holds its pointer is a segfault.
+_READ_CB = ctypes.CFUNCTYPE(
+    None, ctypes.POINTER(ctypes.c_ubyte), ctypes.c_uint32, ctypes.c_void_p)
+
 #: Tried in order. Debian ships `.so.0`; some builds carry `.so.2`.
 SONAMES = ("librtlsdr.so.0", "librtlsdr.so.2", "librtlsdr.so")
 
-#: Bytes per synchronous read. 16384 bytes is 8192 IQ pairs, ~34 ms at
-#: 240 ksps. It must be a multiple of 512 for the USB transfer, and small
-#: because it bounds how long `close()` waits for the reader to notice it should
-#: stop — see the module docstring on wedging.
+#: Bytes per USB transfer. 16384 bytes is 8192 IQ pairs, ~34 ms at 240 ksps,
+#: and a multiple of 512 as the transfer requires. The reader banks one of these
+#: per `rtlsdr_read_async` callback.
 READ_BYTES = 16384
+
+#: `rtlsdr_read_async` keeps this many transfers submitted to the kernel at
+#: once. **This is the whole reason for the async reader.** With `read_sync` only
+#: one transfer is ever in flight, so the gap between a read returning and the
+#: next being submitted is a window with nothing queued — and on a Pi 2B, whose
+#: single USB controller also carries Ethernet, that window is long enough that
+#: the dongle's FIFO overflows and sheds ~1-2% of samples every second. Audio
+#: pads those losses with silence; it is heard as continuous chop. Fifteen
+#: transfers standing (about half a second) means the kernel keeps filling them
+#: while the callback runs, so no window is ever empty. 15 is librtlsdr's own
+#: default, arrived at for the same reason.
+ASYNC_BUFFERS = 15
 
 #: How much IQ the reader may hold before it starts dropping the oldest.
 #: `contract/transport.md`: favour dropping data over queueing it. A listener
@@ -166,6 +184,12 @@ def _declare(lib: ctypes.CDLL) -> ctypes.CDLL:
     lib.rtlsdr_read_sync.argtypes = [
         void_p, ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_int),
     ]
+    lib.rtlsdr_read_async.restype = ctypes.c_int
+    lib.rtlsdr_read_async.argtypes = [
+        void_p, _READ_CB, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
+    ]
+    lib.rtlsdr_cancel_async.restype = ctypes.c_int
+    lib.rtlsdr_cancel_async.argtypes = [void_p]
     lib.rtlsdr_get_tuner_type.restype = ctypes.c_int
     lib.rtlsdr_get_tuner_type.argtypes = [void_p]
     # The bias tee that powers an antenna LNA down the coax. Present in the
@@ -210,14 +234,26 @@ class RtlDevice:
         self.lib = load_library()
         self._handle = ctypes.c_void_p()
         self._open = False
-        #: One lock over every libusb call. librtlsdr keeps per-device state
-        #: that is not safe against a control transfer landing in the middle of
-        #: a bulk read, and the tick thread retunes while the reader reads.
+        #: Serialises control transfers (tune, gain, ppm) against each other and
+        #: against the async read. librtlsdr keeps per-device state that is not
+        #: safe against a control transfer landing while a bulk transfer is in
+        #: flight — and with the async reader a transfer is *always* in flight —
+        #: so a control op both takes this lock and pauses the stream (see `_io`).
         self._io_lock = threading.Lock()
         self._buffer: deque[np.ndarray] = deque(maxlen=MAX_BUFFERED_BLOCKS)
         self._buffer_lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        #: The C callback, held so it outlives every `rtlsdr_read_async` call.
+        self._read_cb = _READ_CB(self._on_samples)
+        #: The async read/control handshake. A control op sets `_pause_requested`
+        #: and cancels the stream; the reader, once `read_async` returns, sets
+        #: `_reader_paused` and blocks on `_reader_resume` — so the control
+        #: transfer runs with no transfer in flight, then the reader restarts.
+        self._streaming = False
+        self._pause_requested = False
+        self._reader_paused = threading.Event()
+        self._reader_resume = threading.Event()
         self.dropped_blocks = 0
         self.read_error = ""
         self.serial = ""
@@ -392,7 +428,7 @@ class RtlDevice:
                     "Leaving the antenna port unpowered."
                 )
             return
-        with self._io_lock:
+        with self._io():
             self._check(
                 self.lib.rtlsdr_set_bias_tee(self._handle, 1 if want else 0),
                 f"{'enable' if want else 'disable'} the bias tee",
@@ -431,7 +467,7 @@ class RtlDevice:
         tick of a spectrum belonging to somewhere else — and if the old channel
         was busy, would open the gate on a transmission that is not there.
         """
-        with self._io_lock:
+        with self._io():
             self._check(
                 self.lib.rtlsdr_set_center_freq(
                     self._handle, int(freq_hz) + self.offset_hz
@@ -441,7 +477,7 @@ class RtlDevice:
         self.flush()
 
     def set_gain(self, gain: float | str) -> None:
-        with self._io_lock:
+        with self._io():
             if gain == "auto":
                 # Allowed, because the contract allows it and an operator may
                 # want it. Not the default, and it is logged every time: the
@@ -467,13 +503,13 @@ class RtlDevice:
     def applied_gain(self) -> float | None:
         """What the tuner snapped to, which is a step in its table and not
         necessarily what was asked for."""
-        with self._io_lock:
+        with self._io():
             if not self._open:
                 return None
             return int(self.lib.rtlsdr_get_tuner_gain(self._handle)) / 10.0
 
     def set_ppm(self, ppm: int) -> None:
-        with self._io_lock:
+        with self._io():
             result = int(self.lib.rtlsdr_set_freq_correction(self._handle, int(ppm)))
             # -2 is librtlsdr for "that is already the value", which is a
             # success. Treating it as a failure is a classic way to make a
@@ -482,7 +518,7 @@ class RtlDevice:
                 raise RtlError(f"could not set ppm to {ppm} (error {result})")
 
     def centre_freq(self) -> int:
-        with self._io_lock:
+        with self._io():
             if not self._open:
                 return 0
             return int(self.lib.rtlsdr_get_center_freq(self._handle))
@@ -496,6 +532,9 @@ class RtlDevice:
             self._check(self.lib.rtlsdr_reset_buffer(self._handle),
                         "reset the device's USB buffer")
         self._stop.clear()
+        self._pause_requested = False
+        self._reader_paused.clear()
+        self._reader_resume.clear()
         self.read_error = ""
         self._thread = threading.Thread(
             target=self._reader, name="gsu-rtlsdr", daemon=True
@@ -506,9 +545,11 @@ class RtlDevice:
         self._stop.set()
         thread, self._thread = self._thread, None
         if thread is not None:
-            # Generous against a 34 ms read: if this times out something is
-            # badly wrong and closing under it risks the wedge, so it is logged
-            # rather than forced.
+            # Break the blocking read_async so the thread sees _stop, and release
+            # a reader parked mid-pause in case a control op was in flight.
+            with contextlib.suppress(Exception):
+                self.lib.rtlsdr_cancel_async(self._handle)
+            self._reader_resume.set()
             thread.join(timeout=3.0)
             if thread.is_alive():
                 log.error(
@@ -518,46 +559,105 @@ class RtlDevice:
                 )
 
     def _reader(self) -> None:
-        buffer = (ctypes.c_ubyte * READ_BYTES)()
-        read = ctypes.c_int(0)
-        failures = 0
+        """Run `rtlsdr_read_async`, banking each buffer, for the life of the stream.
+
+        read_async blocks here, calling `_on_samples` from this thread for every
+        USB buffer, and returns only when `rtlsdr_cancel_async` is called — by
+        `_on_samples` on a stop or pause, or from another thread by a control op
+        or `stop_stream`. On a pause the reader parks on the resume handshake and
+        re-enters; on stop, or an unexpected return, it exits. The point of the
+        whole thing over `read_sync` is that librtlsdr keeps ASYNC_BUFFERS
+        transfers submitted at once, so nothing is dropped in the gap a single
+        synchronous read leaves between transfers. See ASYNC_BUFFERS and drain().
+        """
         while not self._stop.is_set():
             with self._io_lock:
                 if not self._open:
                     return
-                result = int(self.lib.rtlsdr_read_sync(
-                    self._handle, ctypes.byref(buffer), READ_BYTES, ctypes.byref(read)
-                ))
-            if result < 0 or read.value <= 0:
-                failures += 1
-                if failures >= 3:
-                    self.read_error = (
-                        f"the dongle stopped delivering samples (rtlsdr_read_sync "
-                        f"returned {result}). It runs hot and often refuses to "
-                        "stream after a long session; unplug it, let it cool, "
-                        "and plug it back in."
-                    )
-                    log.error("RTL-SDR reader stopping: %s", self.read_error)
-                    return
-                time.sleep(0.05)
+            self._streaming = True
+            try:
+                result = int(self.lib.rtlsdr_read_async(
+                    self._handle, self._read_cb, None, ASYNC_BUFFERS, READ_BYTES))
+            except Exception as exc:  # noqa: BLE001 - reported via read_error
+                self._streaming = False
+                self.read_error = f"the RTL-SDR read loop crashed: {exc}"
+                log.exception("RTL-SDR reader stopping.")
+                return
+            self._streaming = False
+            if self._stop.is_set():
+                return
+            if self._pause_requested:
+                # A control op cancelled the stream. Tell it the coast is clear,
+                # wait for it to finish its transfer, then loop and restart.
+                self._reader_paused.set()
+                self._reader_resume.wait()
+                self._reader_resume.clear()
                 continue
-            failures = 0
-            # Bank the RAW bytes — a memcpy of a few microseconds — and defer
-            # the uint8->complex64 conversion to drain() on the consumer thread.
-            # On a slow host that conversion used to run in the gap between one
-            # read_sync and the next, with no USB transfer in flight, and the
-            # dongle's small FIFO overflowed into it: a couple percent of samples
-            # lost, straight into audio underruns. A copy keeps the gap to a
-            # memcpy; the arithmetic happens where there is budget for it (the
-            # demod runs at ~10x real time). See drain().
-            raw = np.frombuffer(buffer, dtype=np.uint8, count=read.value).copy()
-            with self._buffer_lock:
-                if len(self._buffer) == self._buffer.maxlen:
-                    # deque drops the oldest for us; count it so the front end
-                    # can report a tick loop that is not keeping up rather than
-                    # letting the audio quietly fall behind.
-                    self.dropped_blocks += 1
-                self._buffer.append(raw)
+            # Returned with neither a stop nor a pause pending: the dongle
+            # stopped of its own accord, which is what a V4 does when it overheats.
+            self.read_error = (
+                f"the dongle stopped delivering samples (rtlsdr_read_async "
+                f"returned {result}). It runs hot and often refuses to stream "
+                "after a long session; unplug it, let it cool, and plug it back in."
+            )
+            log.error("RTL-SDR reader stopping: %s", self.read_error)
+            return
+
+    def _on_samples(self, buf, length: int, _ctx) -> None:
+        """librtlsdr's per-buffer callback, on the reader thread.
+
+        Banks the raw bytes and defers the uint8->complex64 conversion to
+        drain() on the consumer thread. On a stop or pause request it cancels the
+        stream so `_reader` regains control — checked here rather than only in
+        the loop because read_async does not return between buffers on its own.
+        """
+        if self._stop.is_set() or self._pause_requested:
+            with contextlib.suppress(Exception):
+                self.lib.rtlsdr_cancel_async(self._handle)
+            return
+        # Copy out of librtlsdr's buffer, which it reuses the moment this returns.
+        raw = np.ctypeslib.as_array(buf, shape=(length,)).copy()
+        with self._buffer_lock:
+            if len(self._buffer) == self._buffer.maxlen:
+                # deque drops the oldest for us; count it so the front end can
+                # report a tick loop that is not keeping up.
+                self.dropped_blocks += 1
+            self._buffer.append(raw)
+
+    @contextlib.contextmanager
+    def _io(self):
+        """Hold the IO lock and, while streaming, pause the async read for the
+        duration — so a control transfer never overlaps a bulk one."""
+        with self._io_lock:
+            paused = self._pause_stream()
+            try:
+                yield
+            finally:
+                if paused:
+                    self._resume_stream()
+
+    def _pause_stream(self) -> bool:
+        """Cancel the async read so a control transfer can run alone; return
+        whether it actually paused (False when nothing is streaming)."""
+        if self._thread is None or not self._streaming:
+            return False
+        self._reader_paused.clear()
+        self._reader_resume.clear()
+        self._pause_requested = True
+        with contextlib.suppress(Exception):
+            self.lib.rtlsdr_cancel_async(self._handle)
+        if not self._reader_paused.wait(timeout=2.0):
+            # The reader did not park. A control transfer now risks the wedge,
+            # but stalling the tick loop for ever is worse; clear the flag so the
+            # reader is not stranded, log, and go on.
+            log.error("RTL-SDR reader did not pause for a control transfer.")
+            self._pause_requested = False
+            return False
+        return True
+
+    def _resume_stream(self) -> None:
+        self._pause_requested = False
+        self._reader_resume.set()
 
     def drain(self) -> np.ndarray:
         """Everything buffered since the last call, oldest first, as complex64.
