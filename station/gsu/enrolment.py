@@ -189,6 +189,13 @@ class EnrolmentClient:
         request = urllib.request.Request(url, data=data, method=method)
         request.add_header("Content-Type", "application/json")
         request.add_header("Accept", "application/json")
+        # Name ourselves. Left unset, urllib sends "Python-urllib/3.x", which is
+        # on every bot-filter's block list — Cloudflare's Browser Integrity Check
+        # refused enrolment outright on a box reaching the platform through the
+        # tunnel, while the same call over the LAN (no Cloudflare) went straight
+        # through. The video uplink already identifies as this; the enrol path
+        # never did. See relay/media's User-Agent.
+        request.add_header("User-Agent", "percepta-gsu")
         if secret:
             request.add_header("Authorization", f"Bearer {secret}")
         try:
