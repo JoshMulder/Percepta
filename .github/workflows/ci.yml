@@ -59,14 +59,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      # The agent boots with no dependencies. numpy is the one thing worth
-      # adding: without it the ~60 RTL-SDR DSP tests skip, and it is a pip wheel
-      # on amd64 (seconds to install). Everything else a fitted station would
-      # have — ffmpeg for the RTSP remux, libopus for the encoder, librtlsdr for
-      # the driver's ctypes bind — is detected as absent and skipped by the tests
-      # that use it, exactly as on a box with no receiver fitted. So no system
-      # packages here; this matches the known-good local run (numpy + jsonschema,
-      # ~690 tests). (librtlsdr0 isn't even a package on the runner's Ubuntu.)
+      # libopus is REQUIRED, not optional: contract 2.0 made airband audio
+      # Opus-only, so the encode path (radio/opus.py, bound via ctypes) needs
+      # libopus0 — without it the squelch/audio tests fail rather than skip (the
+      # local WSL baseline passed only because WSL carries libopus system-wide).
+      # It is the exact package the server image installs, so the name is known
+      # good — unlike librtlsdr0, which is not a package on the runner at all.
+      # ffmpeg (RTSP remux) and a real dongle are genuinely optional: the tests
+      # that use them detect their absence and skip, as on an unfitted box.
+      - name: Audio codec library
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libopus0
+      # numpy is a pip wheel on amd64 (seconds); without it the ~60 RTL-SDR DSP
+      # tests skip. jsonschema comes from requirements.txt.
       - name: Python packages
         working-directory: station
         run: |
