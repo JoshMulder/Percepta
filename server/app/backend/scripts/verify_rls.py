@@ -48,6 +48,8 @@ ORG_A = uuid.uuid4()
 ORG_B = uuid.uuid4()
 STATION_A = uuid.uuid4()
 STATION_B = uuid.uuid4()
+EVENT_A = uuid.uuid4()
+EVENT_B = uuid.uuid4()
 
 _failures: list[str] = []
 
@@ -83,6 +85,22 @@ def seed() -> None:
                 ),
                 {"id": st_id, "t": now, "org": org_id, "name": name},
             )
+        # One event per org too, to prove station_events isolation (0015). These
+        # need no separate cleanup: ground_stations delete CASCADEs to them.
+        for ev_id, org_id, st_id in (
+            (EVENT_A, ORG_A, STATION_A),
+            (EVENT_B, ORG_B, STATION_B),
+        ):
+            db.execute(
+                text(
+                    "INSERT INTO station_events (id, created_at, updated_at, "
+                    "organization_id, ground_station_id, event_id, seq, at, "
+                    "received_at, type, severity) VALUES (:id, :t, :t, :org, :st, "
+                    ":evid, 1, :t, :t, 'test.proximity', 'info')"
+                ),
+                {"id": ev_id, "t": now, "org": org_id, "st": st_id,
+                 "evid": f"ev-{ev_id.hex[:8]}"},
+            )
         db.commit()
 
 
@@ -103,6 +121,14 @@ def _visible_station_ids(db) -> set[uuid.UUID]:
     rows = db.execute(
         text("SELECT id FROM ground_stations WHERE id IN (:a, :b)"),
         {"a": STATION_A, "b": STATION_B},
+    ).scalars()
+    return set(rows)
+
+
+def _visible_event_ids(db) -> set[uuid.UUID]:
+    rows = db.execute(
+        text("SELECT id FROM station_events WHERE id IN (:a, :b)"),
+        {"a": EVENT_A, "b": EVENT_B},
     ).scalars()
     return set(rows)
 
@@ -168,6 +194,45 @@ def main() -> int:
             set_request_org_context(db, organization_id=ORG_A, bypass=True)
             visible = _visible_station_ids(db)
             check("bypass sees both orgs", {STATION_A, STATION_B} <= visible)
+
+        # 5. station_events -----------------------------------------------
+        # The table 0011 created without a policy and 0015 closed. It holds
+        # airband transcripts and proximity events, so a cross-org leak here is
+        # one tenant reading another's captures — worth its own checks.
+        log.info("\n5. station_events isolation (the table 0015 closed)")
+        with SessionLocal() as db:
+            check(
+                "unscoped events query returns zero rows",
+                _visible_event_ids(db) == set(),
+                f"saw {len(_visible_event_ids(db))} rows",
+            )
+        with SessionLocal() as db:
+            set_request_org_context(db, organization_id=ORG_A, bypass=False)
+            events = _visible_event_ids(db)
+            check("sees its own events", EVENT_A in events)
+            check(
+                "cannot see the other org's events",
+                EVENT_B not in events,
+                "CROSS-TENANT EVENT LEAK",
+            )
+        with SessionLocal() as db:
+            set_request_org_context(db, organization_id=ORG_A, bypass=False)
+            rejected = False
+            try:
+                db.execute(
+                    text(
+                        "INSERT INTO station_events (id, created_at, updated_at, "
+                        "organization_id, ground_station_id, event_id, seq, at, "
+                        "received_at, type, severity) VALUES (:id, now(), now(), "
+                        ":org, :st, 'smuggled', 2, now(), now(), 'x', 'info')"
+                    ),
+                    {"id": uuid.uuid4(), "org": ORG_B, "st": STATION_B},
+                )
+                db.commit()
+            except Exception:
+                rejected = True
+                db.rollback()
+            check("event insert into another org is rejected", rejected, "WRITE LEAK")
     finally:
         cleanup()
 

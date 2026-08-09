@@ -100,7 +100,6 @@ def tile(
     """
     try:
         data = tile_cache.read_cached(style, z, x, y)
-        hit = data is not None
         if data is None and settings.tile_live_fetch:
             data = tile_cache.fetch(_client, style, z, x, y)
     except tile_cache.TileError:
@@ -121,6 +120,12 @@ def tile(
             # A fixed station's tiles do not change. immutable stops
             # revalidation entirely, which matters on a link with real latency.
             "Cache-Control": "public, max-age=604800, immutable",
-            "X-Tile-Cache": "hit" if hit else "miss",
+            # No cache hit/miss header. The tile cache is shared across every
+            # tenant, so "hit" for an out-of-the-way tile told the caller that
+            # some other tenant has a station there and has looked at it — a
+            # cross-tenant location oracle on the one surface built precisely so
+            # opening a map "tells no third party where a customer's site is".
+            # (Response timing still leaks the same bit on a live-fetch miss;
+            # that is a deeper fix, but the free header is not worth handing out.)
         },
     )

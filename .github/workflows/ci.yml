@@ -112,3 +112,31 @@ jobs:
       # only ever passes is what this exists to prevent.
       - name: Self-test
         run: python contract/conformance/selftest.py
+
+  isolation:
+    name: Tenant isolation (RLS + authorization)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The same throwaway stack as the server suite, but with an app-role
+      # password set — which is the whole point. The pytest suite runs as the
+      # schema owner, which bypasses row-level security by design, so the
+      # policies themselves are never exercised there. These verifiers connect
+      # as the NOBYPASSRLS app role instead and prove the policies actually bite:
+      # a query with no org context returns nothing, org A cannot see or write
+      # org B's rows (now including station_events), and platform god-mode still
+      # sees across orgs. This is the highest-blast-radius path — a cross-tenant
+      # leak — so it belongs in the gate, not in a script someone remembers to
+      # run.
+      - name: RLS + authorization verifiers
+        working-directory: server
+        env:
+          REDIS_PASSWORD: ci-unused
+        run: |
+          docker compose --profile tests run --rm \
+            -e APP_DB_PASSWORD=ci-app-secret \
+            tests sh -c '
+              alembic upgrade head &&
+              python -m backend.scripts.ensure_app_role &&
+              python -m backend.scripts.verify_rls &&
+              python -m backend.scripts.verify_authorization'
