@@ -735,6 +735,12 @@ class Agent:
         self.credentials.save(enrolment)
         self.health.clear("enrolment.missing")
         self.health.clear("enrolment.unreadable")
+        # A fresh credential settles a revoked one. Whatever the platform said
+        # about the last credential, this box now holds one the platform just
+        # issued — so re-enrolling is the fix for `credential.revoked`, and
+        # leaving it raised showed "needs attention" on a box that had already
+        # re-enrolled and was publishing again.
+        self.health.clear("credential.revoked")
         self.store.record_event(
             "enrolment.claimed", "info",
             f"Enrolled as {enrolment.site.name} ({enrolment.station_id}).",
