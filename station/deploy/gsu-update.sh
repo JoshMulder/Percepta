@@ -38,8 +38,11 @@
 # NOT VERIFIED. No Docker/cosign here to run it against. The branching follows
 # item 39's (stub-tested to 21 scenarios, and even then never drove a real
 # container); the cosign flags, the Compose recreate, the docker-exec gate and
-# the registry login are new. Run `--status`, then once by hand, on the first
-# box before --watch is trusted. Lines marked VERIFY are the ones to watch.
+# the registry login are new. Run `--check` first — it is side-effect-free and
+# reports both whether this box *can* update (docker, cosign, the compose mount)
+# and exactly what it *would* do with the current request — then `--status`,
+# then once by hand, before --watch is trusted. Lines marked VERIFY are the ones
+# to watch.
 set -euo pipefail
 
 # --- configuration (from the updater service's environment) ---------------
@@ -126,9 +129,27 @@ reconcile() {
     label="${tag:-${digest:0:16}}"
 
     current="$(running_ref)"
-    if [ "${current}" = "${target}" ] && [ -z "${force}" ]; then return 0; fi
+    if [ "${current}" = "${target}" ] && [ -z "${force}" ]; then
+        [ -n "${CHECK:-}" ] && log "already on ${label}; nothing to do."
+        return 0
+    fi
     if [ -z "${force}" ] && [ -f "${REJECTS}" ] && grep -qxF "${digest}" "${REJECTS}"; then
         log "${label} was rejected before; skipping (--force overrides)."; return 0
+    fi
+
+    # --check stops here, before the first side effect (the PREVIOUS write): it
+    # has read the request and made every decision, and now says what it would
+    # do instead of doing it. That is how the pull/verify/recreate/rollback
+    # chain gets exercised on a real box without touching the running container.
+    if [ -n "${CHECK:-}" ]; then
+        log "check: would update ${current:-<none>} -> ${label}"
+        log "  pull     ${target}"
+        log "  verify   signed by ${COSIGN_IDENTITY_REGEXP}"
+        log "           issuer ${COSIGN_ISSUER}"
+        log "  recreate ${AGENT_SERVICE}, then gate on it publishing within ${GATE_SECONDS}s"
+        log "  rollback to ${current:-<none>} and re-gate if that gate fails"
+        log "check: nothing was changed."
+        return 0
     fi
 
     log "updating to ${label} (${target})"
@@ -171,11 +192,45 @@ reconcile() {
     die "the ROLLBACK also failed to publish — not an update fault; the site needs attention."; return 2
 }
 
+# A side-effect-free readiness check: can this box actually carry out an update?
+# The council's worry about this path is that it has never driven a real
+# container; this lets an operator confirm the tools and mounts are in place
+# before the first real update, rather than discovering a gap mid-rollback.
+# Returns non-zero if anything an update needs is missing.
+preflight() {
+    local ok=0
+    if command -v docker >/dev/null 2>&1; then log "  docker: present"
+    else log "  docker: MISSING"; ok=1; fi
+    if docker info >/dev/null 2>&1; then log "  docker daemon: reachable"
+    else log "  docker daemon: NOT reachable (is the socket mounted?)"; ok=1; fi
+    if command -v cosign >/dev/null 2>&1; then log "  cosign: present"
+    else log "  cosign: MISSING - the signature could not be verified, so no update would run"; ok=1; fi
+    if [ -f "${COMPOSE_DIR}/docker-compose.yml" ] || [ -f "${COMPOSE_DIR}/docker-compose.yaml" ]; then
+        log "  compose files: ${COMPOSE_DIR}"
+    else
+        log "  compose files: none under ${COMPOSE_DIR} - recreate would fail"; ok=1
+    fi
+    if [ -f "${ENV_FILE}" ]; then log "  env file: ${ENV_FILE}"
+    else log "  env file: ${ENV_FILE} absent (created on first update)"; fi
+    if docker inspect "${AGENT_CONTAINER}" >/dev/null 2>&1; then
+        log "  agent container ${AGENT_CONTAINER}: present"
+    else
+        log "  agent container ${AGENT_CONTAINER}: not created yet (the publish-gate reads it, so an update needs it running)"
+    fi
+    return "${ok}"
+}
+
 case "${1:-once}" in
     --status)
         log "image ${IMAGE}"; log "running: $(running_ref)"
         log "request: $( [ -f "${REQUEST}" ] && cat "${REQUEST}" || echo none )"
         log "last status: $( [ -f "${STATUS}" ] && cat "${STATUS}" || echo none )"
+        ;;
+    --check)
+        log "preflight for ${IMAGE}:"
+        preflight || log "preflight found problems above; an update would likely fail on this box."
+        log "plan:"
+        CHECK=1 reconcile ""
         ;;
     --watch)
         log "watching ${REQUEST} every ${POLL_SECONDS}s."
