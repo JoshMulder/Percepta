@@ -59,12 +59,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      # The agent boots with no dependencies, but its tests exercise paths that
-      # need the libraries a fitted station would have: numpy for the RTL-SDR
-      # DSP, libopus for the Opus encoder, ffmpeg for the RTSP remux, librtlsdr
-      # for the driver's ctypes bind. Tests that need real hardware still skip.
-      - name: System libraries
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg libopus0 librtlsdr0
+      # The agent boots with no dependencies. numpy is the one thing worth
+      # adding: without it the ~60 RTL-SDR DSP tests skip, and it is a pip wheel
+      # on amd64 (seconds to install). Everything else a fitted station would
+      # have — ffmpeg for the RTSP remux, libopus for the encoder, librtlsdr for
+      # the driver's ctypes bind — is detected as absent and skipped by the tests
+      # that use it, exactly as on a box with no receiver fitted. So no system
+      # packages here; this matches the known-good local run (numpy + jsonschema,
+      # ~690 tests). (librtlsdr0 isn't even a package on the runner's Ubuntu.)
       - name: Python packages
         working-directory: station
         run: |
