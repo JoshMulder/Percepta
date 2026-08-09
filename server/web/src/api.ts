@@ -26,6 +26,20 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Called on any 401, so an expired or revoked session drops the operator to the
+ * login screen once — from wherever they were — instead of each panel degrading
+ * on its own. Without it a stale session was invisible-but-broken: the stations
+ * fetch swallowed its 401 into an empty list ("no stations available") and the
+ * video hook retried its 401 forever (a reconnect every few seconds), so the
+ * console looked like an outage when the fix was simply "sign in again". App
+ * registers it; it maps to showing the login screen.
+ */
+let onUnauthorized: (() => void) | null = null;
+export function setUnauthorizedHandler(handler: (() => void) | null): void {
+  onUnauthorized = handler;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     // Same-origin, so the HttpOnly session cookie rides along and no token ever
@@ -36,6 +50,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
 
   if (!response.ok) {
+    if (response.status === 401) onUnauthorized?.();
     let detail = response.statusText;
     try {
       const body = await response.json();

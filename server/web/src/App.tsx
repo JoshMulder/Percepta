@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api } from "./api";
+import { api, setUnauthorizedHandler } from "./api";
 import { Console } from "./components/Console";
 import { Login } from "./components/Login";
 import { ResetPassword } from "./components/ResetPassword";
@@ -37,6 +37,14 @@ export function App() {
       .then(setMe)
       .catch(() => setMe(null))
       .finally(() => setChecked(true));
+  }, []);
+
+  // Any 401 from anywhere — a session that expired mid-use or was revoked — sends
+  // the operator back to the login screen, once, rather than letting the failing
+  // call degrade the console into a blank or empty page they cannot escape.
+  useEffect(() => {
+    setUnauthorizedHandler(() => setMe(null));
+    return () => setUnauthorizedHandler(null);
   }, []);
 
   if (token) {
