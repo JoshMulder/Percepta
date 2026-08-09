@@ -177,6 +177,12 @@ function AdsbMapInner({
                 `${window.location.origin}/api/stations/${stationId}/tiles/${b.key}/{z}/{x}/{y}.png`,
               ],
               tileSize: 256,
+              // The provider's credit, carried on the source so MapLibre's
+              // attribution control shows it — and shows only the one whose
+              // basemap is currently visible. Esri's terms (like every tile
+              // provider's) require it to be displayed on the map, not buried in
+              // a tooltip, which is all it was before.
+              attribution: b.attribution,
               // Past this MapLibre upscales the deepest tile it has rather than
               // requesting a level that 404s and renders blank.
               maxzoom: b.max_zoom,
@@ -200,7 +206,10 @@ function AdsbMapInner({
       ),
       minZoom: config.min_zoom,
       maxZoom,
-      attributionControl: false,
+      // On, and not compact: the provider's credit is a licence condition, so it
+      // is shown rather than hidden behind an expandable "i". Fed from each
+      // source's `attribution` above; MapLibre displays only the visible one.
+      attributionControl: { compact: false },
       // Locked to the station. Dragging, rotation, pitch and double-click zoom
       // are all off, so it cannot drift off centre by any route.
       dragPan: false,
