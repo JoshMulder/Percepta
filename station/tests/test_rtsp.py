@@ -11,6 +11,7 @@ H.264 through the same reader and muxer the field paths use.
 import os
 import subprocess
 import tempfile
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -416,6 +417,57 @@ class RemuxSourceTests(unittest.TestCase):
         self.assertGreaterEqual(fragments, 7)
         self.assertIsNotNone(muxer.init_segment())
         source.stop()
+
+    def test_a_wedged_consumer_does_not_stall_the_pipe(self):
+        """The drain thread's whole reason to exist: a stalled parse/mux/uplink
+        must not backpressure the encoder's pipe. That backpressure made ffmpeg
+        miss its RTSP keepalive, and the camera dropped the feed every ~2 min on
+        a 2B remuxing 1080p. Wedge the consumer on its first access unit and
+        prove the pipe is read to EOF anyway — without the drain thread the read
+        loop is stuck inside the callback and never reads another byte."""
+        from gsu.camera.h264 import AnnexBReader
+        from gsu.camera.h264_synthetic import SyntheticH264Source
+
+        synthetic = SyntheticH264Source(
+            StreamSettings(width=320, height=240, fps=10, intra_period=5))
+        data = b"".join(synthetic.frame().data for _ in range(8))
+        pieces = [data[i:i + 65536] for i in range(0, len(data), 65536)]
+        drained = threading.Event()
+
+        class _Stdout:
+            def read(self, _n):
+                if pieces:
+                    return pieces.pop(0)
+                drained.set()
+                return b""
+
+        got_unit = threading.Event()
+        release = threading.Event()
+
+        def on_unit(_unit):
+            got_unit.set()
+            release.wait(5.0)          # wedge the consumer on the first unit
+
+        source = self.source()
+        source._on_unit = on_unit
+        source._reader = AnnexBReader(source.nal_rules)
+        source._process = SimpleNamespace(
+            stdout=_Stdout(), stderr=None, poll=lambda: 0,
+            wait=lambda timeout=None: 0, terminate=lambda: None,
+            kill=lambda: None,
+        )
+        source._stop.clear()
+        thread = threading.Thread(target=source._pump, daemon=True)
+        self.addCleanup(thread.join, 2.0)
+        self.addCleanup(source._stop.set)
+        self.addCleanup(release.set)
+        thread.start()
+
+        self.assertTrue(got_unit.wait(3.0),
+                        "the consumer never received an access unit")
+        self.assertTrue(drained.wait(3.0),
+                        "the pipe was not drained while the consumer was wedged")
+        release.set()
 
     def test_a_source_that_dies_says_so_in_its_own_words(self):
         source = self.source()

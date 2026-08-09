@@ -32,6 +32,7 @@ import shutil
 import subprocess
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 
 from .. import clock
@@ -815,6 +816,42 @@ class ProcessEncoder:
         "device or resource busy",
     )
 
+    #: How many 64 KB reads the drain thread may hold ahead of the consumer
+    #: before it drops the oldest. 64 is a few seconds of a real stream — enough
+    #: to ride out a GIL-heavy moment on the sensing thread without the consumer
+    #: noticing — and bounded, so a box too slow for the resolution drops frames
+    #: and resynchronises on a keyframe rather than growing memory without end.
+    DRAIN_MAX_CHUNKS = 64
+
+    def _drain(self, process, chunks: deque[bytes], eof: threading.Event) -> None:
+        """Read the encoder's pipe as fast as the OS delivers it, and nothing
+        else.
+
+        Its own thread, deliberately: `read()` releases the GIL, so this keeps
+        ffmpeg's output pipe drained even while the sensing thread holds the GIL
+        for the radio's DSP. Parsing and muxing on the reading thread could not —
+        it backpressured ffmpeg, which then missed the RTSP keepalive, and the
+        camera dropped the session and stalled the feed every ~2 minutes (a Pi 2B
+        remuxing 1080p was the case that surfaced it). The buffer is bounded and
+        drops its oldest chunk when full, so a consumer that cannot keep up loses
+        frames and resynchronises on the next keyframe rather than wedging the
+        feed — the same trade every other reader on this path already makes.
+        """
+        stdout = getattr(process, "stdout", None)
+        if stdout is None:  # pragma: no cover - defensive
+            eof.set()
+            return
+        try:
+            while not self._stop.is_set():
+                chunk = stdout.read(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        except (OSError, ValueError):  # pragma: no cover - defensive
+            pass
+        finally:
+            eof.set()
+
     def _pump(self) -> None:
         attempts = 0
         while True:
@@ -822,16 +859,32 @@ class ProcessEncoder:
             if process is None or process.stdout is None:  # pragma: no cover - defensive
                 return
             frames_before = self.frames
+            # Drain the pipe on its own thread, decoupled from parse-and-mux, so
+            # that neither a slow mux nor a busy GIL on the sensing thread can
+            # backpressure ffmpeg into missing its RTSP keepalive. See `_drain`.
+            chunks: deque[bytes] = deque(maxlen=self.DRAIN_MAX_CHUNKS)
+            eof = threading.Event()
+            drain = threading.Thread(
+                target=self._drain, args=(process, chunks, eof),
+                name="gsu-h264-drain", daemon=True,
+            )
+            drain.start()
             try:
                 while not self._stop.is_set():
-                    chunk = process.stdout.read(65536)
-                    if not chunk:
-                        break
+                    try:
+                        chunk = chunks.popleft()
+                    except IndexError:
+                        if eof.is_set():
+                            break
+                        eof.wait(0.05)
+                        continue
                     self.bytes_out += len(chunk)
                     for unit in self._reader.feed(chunk):
                         self._deliver(unit)
             except (OSError, ValueError) as exc:  # pragma: no cover - defensive
                 log.warning("Reading from %s stopped: %s", self.tool, exc)
+            finally:
+                drain.join(timeout=1.0)
             for unit in self._reader.flush():
                 self._deliver(unit)
             if self._stop.is_set():
