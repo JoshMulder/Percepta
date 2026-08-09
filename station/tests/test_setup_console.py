@@ -1405,13 +1405,24 @@ class ServedPageTests(unittest.TestCase):
         card = body.split("<h2>Where this box is</h2>", 1)[1]
         self.assertIn("name=elevation_m", card)
 
-    def test_the_connection_page_carries_no_script_at_all(self):
-        # The only script this page ever had closed the dialog on Escape. No
-        # dialog, no script, and so no script-src in its policy — the strongest
-        # form of "this page works with scripts blocked".
+    def test_the_location_map_is_a_nonce_gated_progressive_enhancement(self):
+        # The connection page carries exactly one inline script now — the
+        # location map — admitted by the response's own per-response nonce, and
+        # nothing un-nonced. The map is hidden until that script runs, so a
+        # browser with scripts blocked (or no way to reach the tile server) is
+        # left with the plain latitude/longitude fields, exactly as before.
         response, body = self.request("GET", "/connection")
-        self.assertNotIn("<script", body)
-        self.assertNotIn("script-src", response.getheader("Content-Security-Policy"))
+        csp = response.getheader("Content-Security-Policy") or ""
+        self.assertIn("script-src 'nonce-", csp)
+        nonce = csp.split("'nonce-")[1].split("'")[0]
+        self.assertIn(f"<script nonce='{nonce}'>", body)
+        self.assertEqual(body.count("<script"), 1, "exactly one inline script")
+        self.assertNotIn("<script>", body, "an un-nonced script the CSP would block")
+        # Progressive enhancement: hidden by default, and the fields still stand.
+        self.assertIn("id=locmap hidden", body)
+        self.assertIn("name=latitude", body)
+        # The tiles' one off-box source is named in the policy, nowhere else.
+        self.assertIn("tile.openstreetmap.org", csp)
 
     def test_saving_lands_back_on_connection_and_says_so(self):
         token, csrf, _ = self.page("/connection")

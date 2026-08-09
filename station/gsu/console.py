@@ -151,7 +151,12 @@ def _chunk(handler, data: bytes) -> None:
 FIRST_FRAGMENT_WAIT_S = 12.0
 
 CSP = (
-    "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; "
+    "default-src 'none'; style-src 'unsafe-inline'; "
+    # img-src also names the OpenStreetMap tile CDN, the one off-box image
+    # source, for the location map's tiles. The operator's browser fetches them
+    # straight from OSM; the station never proxies them, which would spend the
+    # metered uplink on map tiles.
+    "img-src 'self' data: https://*.tile.openstreetmap.org; "
     "media-src 'self' blob:; "
     "connect-src 'self'; form-action 'self'; base-uri 'none'; "
     "frame-ancestors 'none'"
@@ -942,14 +947,15 @@ class Console:
                 slot = None
                 chosen = None
                 nonce = None
-                if path == "/devices":
-                    # The one page that carries an inline script. Minted here
-                    # and per response, so the header and the tag can agree
-                    # and nothing injected into rendered content can guess it.
+                if path in ("/devices", "/connection"):
+                    # The pages that carry an inline script. Minted here and per
+                    # response, so the header and the tag can agree and nothing
+                    # injected into rendered content can guess it.
                     #
-                    # Connection dropped off this list when its location
-                    # dialog went inline: no dialog, no Escape handler, no
-                    # script, and so no script-src in its policy at all.
+                    # Connection carries one for the location map — a slippy map
+                    # under the coordinate fields that writes back where the pin
+                    # sits. Without the script, or without the tiles, the map is
+                    # hidden and the fields stand alone exactly as they did.
                     nonce = secrets.token_urlsafe(16)
                 if path == "/devices":
                     # One sub-tab per slot; the query names it and anything
@@ -1749,6 +1755,8 @@ class Console:
             out.append(self._section_platform(state))
             out.append(self._section_security(state))
             out.append(self._section_reset(state, csrf))
+            if nonce:
+                out.append(self._location_script(nonce))
         elif page == "/devices":
             slot = slot if slot in registry.SLOTS else registry.SLOTS[0]
             out.append(self._section_devices(state, csrf, slot, chosen))
@@ -2044,6 +2052,7 @@ class Console:
                          "172.53194", "any", "-180", "180"))
         out.append(field("elevation_m", "Elevation (m)", position.get("elevation_m"),
                          "metres above sea level", "any", "-500", "100000"))
+        out.append(self._location_map())
         out.append("<div class=field><button type=submit>Save</button></div></form>")
 
         # What the platform issued, for comparison only. Named as the platform's
@@ -2057,6 +2066,165 @@ class Console:
             f"{html.escape(where)}</div></div>"
         )
         return "".join(out)
+
+    @staticmethod
+    def _location_map() -> str:
+        """A slippy map under the coordinate fields.
+
+        Progressive enhancement, and hidden until its script runs: a browser
+        with no script — or no way to reach the tile server — is left with the
+        latitude/longitude fields exactly as they were. Tiles are fetched by the
+        operator's browser straight from OpenStreetMap; the station never
+        proxies them, which would spend the metered uplink on map tiles.
+        """
+        return (
+            "<style>"
+            ".locmap{margin:.2rem 0 .5rem}"
+            ".locmap-hint{font-size:.8rem;color:var(--muted);margin:.1rem 0 .35rem}"
+            ".locmap-view{position:relative;width:100%;height:230px;overflow:hidden;"
+            "border:1px solid var(--line);border-radius:.4rem;background:var(--panel);"
+            "touch-action:none;cursor:grab;user-select:none}"
+            ".locmap-view.grabbing{cursor:grabbing}"
+            ".locmap-tiles{position:absolute;inset:0}"
+            ".locmap-tiles img{position:absolute;width:256px;height:256px;pointer-events:none}"
+            ".locmap-pin{position:absolute;left:50%;top:50%;width:26px;height:26px;"
+            "transform:translate(-50%,-100%);pointer-events:none;z-index:3}"
+            ".locmap-pin svg{display:block;filter:drop-shadow(0 1px 2px rgba(0,0,0,.6))}"
+            ".locmap-zoom{position:absolute;right:.5rem;top:.5rem;z-index:4;"
+            "display:flex;flex-direction:column;gap:.3rem}"
+            ".locmap-zoom button{width:2rem;height:2rem;font-size:1.2rem;line-height:1;"
+            "background:rgba(7,11,15,.85);color:var(--text);border:1px solid var(--line);"
+            "border-radius:.3rem;cursor:pointer}"
+            ".locmap-attr{position:absolute;right:0;bottom:0;z-index:4;font-size:10px;"
+            "background:rgba(7,11,15,.7);color:var(--muted);padding:1px 4px;"
+            "border-top-left-radius:.3rem}"
+            ".locmap-attr a{color:var(--muted)}"
+            "</style>"
+            "<div class=locmap id=locmap hidden>"
+            "<div class=locmap-hint>Drag the map so the pin sits on the station, "
+            "or tap a spot — the latitude and longitude above follow the pin.</div>"
+            "<div class=locmap-view id=locmapview>"
+            "<div class=locmap-tiles id=locmaptiles></div>"
+            "<div class=locmap-pin>"
+            "<svg width=26 height=26 viewBox='0 0 24 24'>"
+            "<path fill='#e6484d' stroke='#fff' stroke-width='1.2' "
+            "d='M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z'/>"
+            "<circle cx=12 cy=9 r=2.6 fill='#fff'/></svg></div>"
+            "<div class=locmap-zoom>"
+            "<button type=button id=zin aria-label='Zoom in'>+</button>"
+            "<button type=button id=zout aria-label='Zoom out'>−</button></div>"
+            "<div class=locmap-attr>© <a href='https://www.openstreetmap.org/copyright' "
+            "target=_blank rel=noopener>OpenStreetMap</a></div>"
+            "</div></div>"
+        )
+
+    @staticmethod
+    def _location_script(nonce: str) -> str:
+        """The slippy map's behaviour, admitted by the page's nonce.
+
+        Standard Web Mercator tile math against OpenStreetMap. The pin is fixed
+        at the map's centre — the point being chosen is always the middle — so
+        drag the map under it or tap to drop it, and the latitude/longitude
+        fields follow. It only writes the fields on a real move, so simply
+        opening the page leaves a typed-in coordinate untouched.
+        """
+        script = """
+"use strict";
+(function () {
+  var box = document.getElementById('locmap');
+  var view = document.getElementById('locmapview');
+  var layer = document.getElementById('locmaptiles');
+  var latEl = document.getElementById('latitude');
+  var lonEl = document.getElementById('longitude');
+  if (!box || !view || !layer || !latEl || !lonEl) return;
+  box.hidden = false;
+
+  var TILE = 256, MINZ = 2, MAXZ = 18;
+  function lon2x(lon, z) { return (lon + 180) / 360 * Math.pow(2, z); }
+  function lat2y(lat, z) {
+    var r = lat * Math.PI / 180;
+    return (1 - Math.asinh(Math.tan(r)) / Math.PI) / 2 * Math.pow(2, z);
+  }
+  function x2lon(x, z) { return x / Math.pow(2, z) * 360 - 180; }
+  function y2lat(y, z) {
+    var n = Math.PI - 2 * Math.PI * y / Math.pow(2, z);
+    return 180 / Math.PI * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
+  }
+  function clampLat(v) { return Math.max(-85.0511, Math.min(85.0511, v)); }
+
+  var z = 13;
+  var cx = lon2x(parseFloat(lonEl.value) || 172.5, z);
+  var cy = lat2y(clampLat(parseFloat(latEl.value) || -43.5), z);
+
+  function draw() {
+    var w = view.clientWidth, h = view.clientHeight, n = Math.pow(2, z);
+    var ox = w / 2 - cx * TILE, oy = h / 2 - cy * TILE;
+    var minTX = Math.floor(cx - w / 2 / TILE) - 1, maxTX = Math.floor(cx + w / 2 / TILE) + 1;
+    var minTY = Math.max(0, Math.floor(cy - h / 2 / TILE) - 1);
+    var maxTY = Math.min(n - 1, Math.floor(cy + h / 2 / TILE) + 1);
+    var s = '';
+    for (var ty = minTY; ty <= maxTY; ty++) {
+      for (var tx = minTX; tx <= maxTX; tx++) {
+        var wx = ((tx % n) + n) % n;
+        var sub = 'abc'[((wx + ty) % 3 + 3) % 3];
+        s += '<img alt="" src="https://' + sub + '.tile.openstreetmap.org/' + z + '/' + wx + '/' + ty + '.png"'
+           + ' style="left:' + Math.round(ox + tx * TILE) + 'px;top:' + Math.round(oy + ty * TILE) + 'px">';
+      }
+    }
+    layer.innerHTML = s;
+  }
+  function commit() {
+    latEl.value = clampLat(y2lat(cy, z)).toFixed(5);
+    lonEl.value = x2lon(cx, z).toFixed(5);
+  }
+
+  var dragging = false, moved = 0, lastX = 0, lastY = 0;
+  view.addEventListener('pointerdown', function (e) {
+    dragging = true; moved = 0; lastX = e.clientX; lastY = e.clientY;
+    view.classList.add('grabbing'); view.setPointerCapture(e.pointerId);
+  });
+  view.addEventListener('pointermove', function (e) {
+    if (!dragging) return;
+    var dx = e.clientX - lastX, dy = e.clientY - lastY;
+    lastX = e.clientX; lastY = e.clientY; moved += Math.abs(dx) + Math.abs(dy);
+    cx -= dx / TILE; cy -= dy / TILE; draw();
+  });
+  view.addEventListener('pointerup', function (e) {
+    if (!dragging) return;
+    dragging = false; view.classList.remove('grabbing');
+    if (moved < 6) {
+      var r = view.getBoundingClientRect();
+      cx += (e.clientX - r.left - r.width / 2) / TILE;
+      cy += (e.clientY - r.top - r.height / 2) / TILE;
+      draw();
+    }
+    commit();
+  });
+  view.addEventListener('pointercancel', function () {
+    dragging = false; view.classList.remove('grabbing');
+  });
+
+  function zoom(dz) {
+    var nz = Math.max(MINZ, Math.min(MAXZ, z + dz));
+    if (nz === z) return;
+    var lon = x2lon(cx, z), lat = y2lat(cy, z);
+    z = nz; cx = lon2x(lon, z); cy = lat2y(lat, z); draw();
+  }
+  document.getElementById('zin').addEventListener('click', function () { zoom(1); });
+  document.getElementById('zout').addEventListener('click', function () { zoom(-1); });
+
+  function fromFields() {
+    var lat = parseFloat(latEl.value), lon = parseFloat(lonEl.value);
+    if (isFinite(lat) && isFinite(lon)) { cx = lon2x(lon, z); cy = lat2y(clampLat(lat), z); draw(); }
+  }
+  latEl.addEventListener('change', fromFields);
+  lonEl.addEventListener('change', fromFields);
+
+  window.addEventListener('resize', draw);
+  draw();
+})();
+"""
+        return f"<script nonce='{nonce}'>{script}</script>"
 
     @staticmethod
     def _position_wording(position: dict) -> tuple[str, str]:
