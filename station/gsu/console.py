@@ -1024,8 +1024,12 @@ class Console:
             elif path == "/reset":
                 self._reset(form)
             else:  # /logout
+                # No confirmation message. The redirect lands on the login form,
+                # which is itself the proof you are signed out — and setting one
+                # here only surfaced it on the NEXT login: the login page does
+                # not consume self.message, so "Signed out." survived to greet
+                # whoever signed back in.
                 self.gate.forget_all()
-                self.message = ("good", "Signed out.")
         except Exception as exc:  # noqa: BLE001 - shown to a person
             self.message = ("bad", str(exc))
         if is_ajax:
