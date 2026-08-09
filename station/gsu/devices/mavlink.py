@@ -77,8 +77,9 @@ FLAG_SOURCE_UAT = 32768
 #: MAVLink names entry 0 `PRESSURE_QNH`, which is a misnomer worth knowing
 #: about: ADS-B airborne position messages carry barometric altitude referenced
 #: to the standard 1013.25 hPa datum (DO-260B), not to a local QNH. The
-#: contract calls it `pressure` for that reason, and `devices/altitude.py`
-#: corrects from 1013.25 accordingly.
+#: contract calls it `pressure` for that reason, and the station reports the
+#: datum as received — a local-datum correction was tried and removed, so the
+#: label names the datum rather than implying a precision it does not have.
 ALTITUDE_TYPE_PRESSURE = 0
 ALTITUDE_TYPE_GEOMETRIC = 1
 ALTITUDE_TYPES = {ALTITUDE_TYPE_PRESSURE: "pressure", ALTITUDE_TYPE_GEOMETRIC: "geometric"}

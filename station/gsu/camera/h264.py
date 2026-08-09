@@ -2,9 +2,9 @@
 
 The live stream is H.264 because nothing else fits. A 1080p JPEG is 200-400 kB;
 thirty of those a second is 50-100 Mbit/s, which is not a tuning problem on a
-satellite link, it is the wrong format. The same picture as H.264 is 2-4 Mbit/s.
-`contract/schemas/video.schema.json` says so itself: if this ever needs smooth
-full-rate video, MJPEG should be replaced rather than tuned.
+satellite link, it is the wrong format. The same picture as H.264 is 2-4 Mbit/s —
+which is why the contract carries the live picture as H.264 and keeps MJPEG only
+for the on-demand stills channel.
 
 **The station never encodes H.264 itself.** Its job is to start the encoder,
 read what comes out, and cut it into access units without ever looking inside a

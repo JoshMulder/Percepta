@@ -276,7 +276,7 @@ survived contact with hardware is itself information.
 | TLS to the broker, CA pinning, refusal to downgrade | Verified against a real TLS-only Redis with a per-station ACL, and now in daily use from ARM |
 | The NMEA decoder | **Fed by a real Airmar 110WX**, publishing real weather. MAVLink remains synthetic-only |
 | The serial layer beneath them (`serialio.py`) | **Has opened a real UART** — the Airmar's — and runs it continuously |
-| RTL-SDR airband | No driver. Reports `not supported by this software build` |
+| RTL-SDR airband | **Driver in daily field use** (`radio/rtlsdr.py`, `radio/rtl2832.py`): a real RTL-SDR Blog V4 demodulating airband on the Pi 2B via async bulk reads. The earlier "no driver" status is stale |
 | Pi camera, stills (`camera/picsi.py`) | **Was run against the real ov5647 via picamera2** — that backend has since been removed, and the driver now captures through `rpicam-jpeg`. The subprocess path *has* run on this hardware (it was the fallback all along) but has never been the production path, and the preview's on-demand cadence has not been exercised on a real sensor. **Re-verify on the Pi 2B**; DECISIONS.md item 45 says why the change was made anyway |
 | Pi camera, H.264 (`camera/h264.py`) | **Run against the hardware encoder.** The Pi 2B presents `/dev/video11`; `GSU_ENCODER=auto` chose it; 804 KB of 1080p30 H.264 in a 3-second test |
 | The synthetic camera and its JPEG encoder | Run continuously. Output decoded with libjpeg (Pillow 12.3) and checked pixel for pixel |

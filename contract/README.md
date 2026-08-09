@@ -85,9 +85,11 @@ exercised by anything that is *told* the floor rather than measuring it.
 
 ## Version
 
-**This is contract 2.0.** It is stamped in each schema's `$id` and
+**This is contract 2.1.** It is stamped in each schema's `$id` and
 `contractVersion`, the platform states it at enrolment, and a station declares
-what it speaks in `health.contract_version`.
+what it speaks in `health.contract_version`. 2.1 is 2.0 plus the additive
+`system.update` command — a station that predates it simply ignores it, which is
+exactly the free minor the rule below is designed for.
 
 **Why 2.0 before anything shipped.** A draft 1.0 existed for a few days and
 this supersedes it incompatibly: the relay frame carries a stream code instead

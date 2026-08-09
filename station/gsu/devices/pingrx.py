@@ -32,11 +32,12 @@ time since last contact, the simulated flag and the altitude datum all reached
 defaulted on the way through: a field the receiver's validity flag says is
 absent stays None from the wire to the payload.
 
-**The proximity alert is judged on the reported altitude, not the corrected
-one.** Deliberately: the alert is the one thing the station must still get right
-with the platform unreachable, and hanging it on a second sensor would mean a
-dead barometer quietly moves the threshold. The correction is published for the
-console to show; it does not decide anything here.
+**The proximity alert is judged on the reported barometric altitude.**
+Deliberately: the alert is the one thing the station must still get right with
+the platform unreachable, so it hangs on the one altitude ADS-B always carries
+rather than a second sensor a dead barometer could quietly move the threshold
+with. (A local-datum correction was once tried and has since been removed; the
+station reports the datum as received and derives nothing from it here.)
 """
 
 from __future__ import annotations

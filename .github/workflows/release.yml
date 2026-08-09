@@ -8,10 +8,13 @@
 #   identity: https://github.com/<owner>/<repo>/.github/workflows/release.yml@refs/tags/v*
 #   issuer:   https://token.actions.githubusercontent.com
 #
-# NOT VERIFIED here (no way to run Actions from the dev machine). The action
-# versions and the cosign flags are the standard ones; shake this out on the
-# first real tag, and confirm the recorded signer identity matches the regexp in
-# gsu-update.sh before pointing a station at the result.
+# The signing step is followed by a verify step that runs the EXACT check a
+# station runs (station/deploy/gsu-update.sh) — same identity regexp, same
+# issuer. So a signer-identity mismatch (a lowercased owner, a renamed repo, a
+# reworded workflow path) fails the release here rather than being discovered in
+# the field as a fleet that silently refuses its next update. The two identities
+# must still be kept in lockstep by hand; the verify step is what makes a drift
+# loud instead of silent.
 name: Release station image
 
 on:
@@ -68,3 +71,16 @@ jobs:
         # is this workflow's identity, which is what gsu-update.sh's
         # `cosign verify --certificate-identity-regexp` must match.
         run: cosign sign --yes "${IMAGE}@${{ steps.build.outputs.digest }}"
+
+      - name: Verify the signature exactly as a station will
+        # The fleet accepts an image only if this passes. The regexp and issuer
+        # here are a verbatim mirror of gsu-update.sh's COSIGN_IDENTITY /
+        # COSIGN_ISSUER defaults — change one, change the other. Running the
+        # station's own check at release time turns a signer-identity mismatch
+        # into a failed release, not a fleet that refuses the update it was told
+        # to take.
+        run: |
+          cosign verify \
+            --certificate-identity-regexp '^https://github.com/JoshMulder/Percepta/.github/workflows/release.yml@refs/tags/v.*' \
+            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+            "${IMAGE}@${{ steps.build.outputs.digest }}"
