@@ -18,6 +18,8 @@ import type {
 } from "../types";
 import { isForSelectedStation } from "../telemetryRouting";
 import { useAudio } from "../useAudio";
+import { chime } from "../chime";
+import { isCritical, useDisplayPrefs } from "../displayPrefs";
 import { useFitScale } from "../useFitScale";
 import { useMediaQuery } from "../useMediaQuery";
 import { useSocket } from "../useSocket";
@@ -128,6 +130,11 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
   const [fitReady, setFitReady] = useState(false);
   const fit = useFitScale({ enabled: !compact, ready: fitReady });
   const audio = useAudio(true);
+  const prefs = useDisplayPrefs();
+  // Read inside the stable message handler without making it a dependency: the
+  // operator's own close-and-low thresholds, current as of the last render.
+  const prefsRef = useRef(prefs);
+  prefsRef.current = prefs;
 
   // The console's one and only <video>, created outside React and handed to
   // whichever VideoPanel is on screen. Swapping the map and the camera
@@ -391,9 +398,49 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
       if (declared.available === false) return;
     }
     switch (payload.kind) {
-      case "adsb":
-        setAdsb(message.payload as AdsbPayload);
+      case "adsb": {
+        const a = message.payload as AdsbPayload;
+        setAdsb(a);
+        // Close and low, raised into the drawer and sounded — so an operator not
+        // looking at the map still learns the airspace just got dangerous. The
+        // map already tints these; this is the version that reaches someone who
+        // has the video up or is on another tab. Deduped through the same
+        // raisedConditions set as the health conditions above, under a `prox:`
+        // key so the two never collide: a contact that stays close does not
+        // refill the drawer, and one that clears is forgotten so it alerts again
+        // if it returns. isCritical is the operator's own threshold (Settings).
+        const station = message.station_id;
+        const seen = raisedConditions.current;
+        const critical = (a.aircraft ?? []).filter((c) =>
+          isCritical(c.range_km, c.altitude_m, prefsRef.current),
+        );
+        const fresh = critical.filter((c) => !seen.has(`prox:${station}:${c.icao}`));
+        if (fresh.length > 0) {
+          setAlerts((prev) =>
+            [
+              ...fresh.map((c) => ({
+                id: ++alertSeq.current,
+                stationId: station,
+                message: `Close and low: ${c.callsign?.trim() || c.icao}`,
+                severity: "critical" as const,
+                at: new Date(),
+              })),
+              ...prev,
+            ].slice(0, 40),
+          );
+          for (const c of fresh) seen.add(`prox:${station}:${c.icao}`);
+          chime();
+        }
+        // Forget contacts that are no longer close-and-low, so the same airframe
+        // returning later sounds again rather than being swallowed as seen.
+        const stillCritical = new Set(critical.map((c) => `prox:${station}:${c.icao}`));
+        for (const key of [...seen]) {
+          if (key.startsWith(`prox:${station}:`) && !stillCritical.has(key)) {
+            seen.delete(key);
+          }
+        }
         break;
+      }
       case "weather":
         setWeather(message.payload as WeatherPayload);
         break;
