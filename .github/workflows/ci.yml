@@ -1,0 +1,114 @@
+# The merge gate. Everything here already existed as a runnable suite; what was
+# missing was anything that RAN them on the way in. Until this, the only
+# workflow was release.yml (build + sign a tag), and changes shipped to a fleet
+# that needs a truck roll to fix were "reviewed, not run". Green here is what a
+# merge to main should mean.
+#
+# Four independent jobs, one per suite, so a failure names which half of the
+# system broke rather than one long log to bisect:
+#   server       — the platform's pytest suite, against a throwaway Postgres+Redis
+#   station      — the gsu agent's pytest suite
+#   console      — the React console: TypeScript typecheck + vitest
+#   conformance  — the contract self-test (the harness proving itself, per
+#                  contract/conformance/selftest.py)
+#
+# NOT VERIFIED on a runner yet — same honest caveat release.yml carries: there is
+# no way to run Actions from the dev machine. The commands are exactly the ones
+# the compose file, the Dockerfile and package.json already define, so the first
+# PR is what shakes out a version or a missing system package.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# A new push to the same branch supersedes the last; don't burn runners on a
+# commit nobody is waiting on any more.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  server:
+    name: Server (pytest · Postgres + Redis)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The exact command the compose file documents (server/docker-compose.yaml
+      # §tests). The `tests` service builds the test image, waits on a tmpfs
+      # postgres-test and a redis-test, and runs `pytest -q`; conftest applies
+      # the real alembic migrations first. REDIS_PASSWORD is set only because the
+      # unused `redis` service in the same file interpolates it with `:?` — the
+      # tests never touch it.
+      - name: Platform suite
+        working-directory: server
+        env:
+          REDIS_PASSWORD: ci-unused
+        run: docker compose --profile tests run --rm --build tests
+
+  station:
+    name: Station (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The agent boots with no dependencies, but its tests exercise paths that
+      # need the libraries a fitted station would have: numpy for the RTL-SDR
+      # DSP, libopus for the Opus encoder, ffmpeg for the RTSP remux, librtlsdr
+      # for the driver's ctypes bind. Tests that need real hardware still skip.
+      - name: System libraries
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg libopus0 librtlsdr0
+      - name: Python packages
+        working-directory: station
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt numpy pytest
+      # `python -m pytest`, not bare `pytest`: there is no conftest or installed
+      # package, so the station directory has to be on sys.path for `import gsu`
+      # to resolve, and `-m` is what puts it there.
+      - name: Agent suite
+        working-directory: station
+        run: python -m pytest -q
+
+  console:
+    name: Console (typecheck + vitest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: server/web/package-lock.json
+      - name: Install
+        working-directory: server/web
+        run: npm ci
+      - name: Typecheck
+        working-directory: server/web
+        run: npm run typecheck
+      - name: Unit tests
+        working-directory: server/web
+        run: npm test
+
+  conformance:
+    name: Contract conformance self-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Schema validation dependency
+        run: pip install jsonschema
+      # Runs check_station.py against _selfstation.py once clean and once per
+      # deliberate violation, asserting the verdict each time — a harness that
+      # only ever passes is what this exists to prevent.
+      - name: Self-test
+        run: python contract/conformance/selftest.py
