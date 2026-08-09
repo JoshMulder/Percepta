@@ -2050,10 +2050,14 @@ class PinnedWindowSessionTests(unittest.TestCase):
         # unusable; it was only ever wrong when applied to zero.
         self.assertEqual(self.gate(0.25)._idle_limit_s(), 60.0)
 
-    def test_pinned_open_is_not_unlimited(self):
-        # A browser left open on a bench is still a way in. The pin is about
-        # the socket staying bound, not about never logging in again.
-        self.assertLess(self.gate(0)._idle_limit_s(), 24 * 60 * 60)
+    def test_pinned_open_does_not_expire_the_session(self):
+        # The 30-minute auto-lock was removed at the operator's request, and a
+        # session that quietly expired after half an hour was the other half of
+        # the same lock. Pinned open now holds the session for as long as the
+        # box runs; MAX_SESSIONS still bounds how many exist, and logout still
+        # ends one — the password and the local-only source check are what guard
+        # this page, not a timer.
+        self.assertEqual(self.gate(0)._idle_limit_s(), float("inf"))
 
 
 class SummaryPageTests(unittest.TestCase):
