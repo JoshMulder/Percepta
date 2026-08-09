@@ -1727,10 +1727,17 @@ class Console:
 
         state = self.agent.snapshot()
         csrf = self.gate.csrf_token(session)
+        # The station's name leads the title so a bench with three of these open
+        # in three tabs is told apart at the tab strip, not just inside the page.
+        # Absent until enrolled, where there is no name to lead with.
+        page_label = PAGES.get(page, "Summary")
+        station_name = state.get("station")
+        title = (f"{html.escape(station_name)} — {page_label}"
+                 if station_name else f"Ground station — {page_label}")
         out = [
             "<!doctype html><meta charset=utf-8>",
             "<meta name=viewport content='width=device-width,initial-scale=1'>",
-            f"<title>Ground station — {PAGES.get(page, 'Summary')}</title>",
+            f"<title>{title}</title>",
             f"<link rel=icon href='{LOGO_DATA_URI}'>",
             f"<style>{STYLE}</style>",
             self._nav(page, state, csrf, session),
