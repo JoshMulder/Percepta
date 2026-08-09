@@ -141,8 +141,10 @@ def build_handlers(radio, light, on_config, stream=None,
     def audio_start(payload: dict) -> str:
         """Somebody is listening. Leased, so silence stops it.
 
-        Idempotent: a second listener extends the lease rather than starting
+        Idempotent: a second listener replaces the lease rather than starting
         anything, because there is one receiver and its audio is one stream.
+        Replaces, not extends — a shorter renewal shortens the lease, which is
+        how the platform stops the audio sooner than the last one promised.
         """
         lease = payload.get("lease_seconds")
         radio.want_audio(True, None if lease is None else float(lease))
@@ -194,10 +196,11 @@ def build_handlers(radio, light, on_config, stream=None,
         log.warning("No floodlight fitted: light.set will be ignored and logged.")
 
     def video_start(payload: dict) -> str:
-        # Idempotent by construction: a second viewer extends the lease rather
+        # Idempotent by construction: a second viewer replaces the lease rather
         # than starting a second encoder, because there is one camera and the
         # second `rpicam-vid` fails with a device-busy that reads like broken
-        # hardware. -> health.video.stream.state
+        # hardware. Replaces, not extends: a shorter renewal shortens the lease.
+        # -> health.video.stream.state
         return stream.start(payload)
 
     def video_stop(payload: dict) -> str:

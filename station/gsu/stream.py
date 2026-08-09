@@ -11,8 +11,11 @@ than noticed:
 
 **Idempotent.** Two viewers attaching must not start two encoders — the camera
 is a single device and the second `rpicam-vid` fails with a device-busy that
-reads like broken hardware. `video.start` while streaming extends the lease and
-counts a viewer; it does not restart anything.
+reads like broken hardware. `video.start` while streaming replaces the lease and
+counts a viewer; it does not restart anything. Replaces, never extends: the new
+lease is `now + lease`, so a shorter renewal moves the expiry earlier — which is
+how the platform stops a stream sooner than the last lease promised, per
+`contract/transport.md`.
 
 **Fail closed on silence.** The stream stops unless the platform keeps asking
 for it. A `video.start` carries a lease; when the lease expires the encoder
@@ -223,7 +226,7 @@ class StreamSession:
                         f"already streaming locally, but {self.uplink.reason}"
                     )
             return (
-                f"already streaming; lease extended {lease:.0f}s, "
+                f"already streaming; lease replaced ({lease:.0f}s), "
                 f"{self.viewers} viewer(s)"
             )
 

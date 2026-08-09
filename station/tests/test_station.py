@@ -118,6 +118,22 @@ class PayloadTests(unittest.TestCase):
         for kind in ("adsb", "power", "radio", "light", "weather"):
             self.assertTrue(self.by_kind(kind), f"nothing published for {kind}")
 
+    def test_a_shorter_renewal_shortens_the_audio_lease(self):
+        # transport.md: "a renewal replaces, never extends the remaining lease —
+        # shortening is the only audio off-switch." When the last listener
+        # leaves, the platform stops the uplink by renewing with a short lease;
+        # a max()-style extend here would hold the largest thing this station
+        # sends on the link for the full first lease after everyone had gone.
+        # The lease is `now + window`, so a 10 s renewal after a 300 s one moves
+        # the expiry ~290 s earlier rather than leaving it where it was.
+        radio = self.agent.radio
+        radio.want_audio(True, 300)
+        far = radio._audio_until
+        radio.want_audio(True, 10)
+        near = radio._audio_until
+        self.assertLess(near, far, "the shorter renewal extended the audio lease")
+        self.assertAlmostEqual(far - near, 290.0, delta=2.0)
+
     def test_telemetry_matches_the_schema(self):
         # `health` belongs in this list. It was left out when it was still a
         # kind the platform did not know, and stayed out after it was adopted —

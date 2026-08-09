@@ -1221,6 +1221,20 @@ class OnDemandTests(AgentFixture):
             self.assertAlmostEqual(self.agent.stream.expires_at - time.monotonic(),
                                    45.0, delta=1.0, msg=key)
 
+    def test_a_shorter_renewal_shortens_the_lease_it_does_not_extend_it(self):
+        # The contract (transport.md): a renewal REPLACES the remaining lease, it
+        # never extends it. That is load-bearing, not a nicety — shortening a
+        # lease is how the platform stops a stream sooner than the last renewal
+        # promised. So a short renewal after a long one must move the expiry
+        # EARLIER; a max()-style "extend" here would pin the stream open for the
+        # full 300 s after the platform had already told it to wind down.
+        self.agent.stream.start({"lease_s": 300})
+        far = self.agent.stream.expires_at
+        self.agent.stream.start({"lease_s": 10})
+        near = self.agent.stream.expires_at
+        self.assertLess(near, far, "the shorter renewal extended the lease")
+        self.assertAlmostEqual(near - time.monotonic(), 10.0, delta=1.0)
+
     def test_there_is_a_ceiling_even_if_the_lease_keeps_being_renewed(self):
         self.agent.site.stream_max_minutes = 1 / 60
         self.agent.stream.start({"lease_s": 300})
