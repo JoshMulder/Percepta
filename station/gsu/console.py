@@ -793,11 +793,10 @@ class Console:
             self._raise_condition("setup.demoted", "warning", reason)
         if not self._bind(host):
             return
-        if self.gate.window_minutes <= 0 and not is_loopback_host(host):
-            log.warning(
-                "GSU_SETUP_WINDOW_MINUTES=0: the setup page on %s will stay "
-                "open for as long as this station runs.", host,
-            )
+        # No warning for a pinned-open window: it is the default now, not an
+        # unusual override. A deployment that sets a positive GSU_SETUP_WINDOW_
+        # MINUTES gets the timed close back; the rest stay reachable, guarded by
+        # the password and the local-only source check.
         self._watcher = threading.Thread(
             target=self._watch, name="gsu-console-window", daemon=True
         )

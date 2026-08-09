@@ -77,15 +77,18 @@ class AgentConfig:
     setup_password: str | None = None
 
     #: How long the LAN listener stays up with no authenticated activity, after
-    #: the station is enrolled. While it is *un*enrolled the window does not run
-    #: down: an installer is still working and a box with no credential has
-    #: nothing on it worth reaching. On expiry the socket is closed and rebound
-    #: to loopback, so the port stops answering rather than answering 403.
-    #:
-    #: 0 pins it open. Supported because a bench station is a real thing, and
-    #: refused to be silent about: it is logged as a warning and rendered on the
-    #: page itself.
-    setup_window_minutes: float = 30.0
+    #: the station is enrolled. **0 is the default: the setup page does not
+    #: auto-lock — the listener stays up for as long as the station runs.** The
+    #: other three protections are untouched by this and still stand: a password
+    #: is required from the LAN, a request from outside the local networks is
+    #: refused, and the listener binds loopback-only unless a host and password
+    #: are both set. So pinning it open removes the timed close, not the
+    #: authentication. Set a positive number of minutes to bring the timed window
+    #: back, where on expiry the socket closes and rebinds to loopback rather
+    #: than answering 403 — and while the station is still *un*enrolled the
+    #: window never runs down regardless, because an installer is still working
+    #: and a box with no credential has nothing on it worth reaching.
+    setup_window_minutes: float = 0.0
 
     #: Provision this box as a demo station: every slot starts on its Demo
     #: sensor, so it is a complete working station out of the box with no
@@ -201,7 +204,7 @@ class AgentConfig:
             # file that has been migrated to a hash but still carries the old
             # plain line must not silently keep honouring the old line.
             setup_password=_env("GSU_SETUP_PASSWORD_HASH") or _env("GSU_SETUP_PASSWORD"),
-            setup_window_minutes=float(_env("GSU_SETUP_WINDOW_MINUTES", "30")),
+            setup_window_minutes=float(_env("GSU_SETUP_WINDOW_MINUTES", "0")),
             demo=_env("GSU_DEMO", "0") not in ("0", "false", "no", ""),
             airband_traffic=_env("GSU_AIRBAND_TRAFFIC", "low"),
             radio_transcribe=_env("GSU_RADIO_TRANSCRIBE", "0")
