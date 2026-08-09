@@ -34,6 +34,7 @@ from sqlalchemy.orm import Session
 from backend.auth.dependencies import get_identity
 from backend.auth.identity import Identity
 from backend.auth.password import hash_password
+from backend.core.config import settings
 from backend.database.dependencies import get_db
 from backend.database.models.enums import UserRole
 from backend.database.models.ground_station import GroundStation
@@ -45,6 +46,14 @@ from backend.database.session import (
     privileged_engine,
     set_request_org_context,
 )
+
+# These tests run as the schema owner, with no APP_DB_PASSWORD and no
+# SECRETS_ENCRYPTION_KEY — deliberately (see the module docstring: RLS has its
+# own verifier, and mixing it in here would burden every test with setup for a
+# property it is not checking). verify_secure_config would otherwise refuse to
+# boot the app under TestClient, so this throwaway stack opts into the insecure
+# posture explicitly — exactly what ALLOW_INSECURE=1 is for.
+settings.allow_insecure = True
 
 APP_DIR = Path(__file__).resolve().parent.parent
 

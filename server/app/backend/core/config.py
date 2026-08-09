@@ -28,9 +28,8 @@ class Settings(BaseSettings):
 
     # Least-privilege role the web/API tier uses (NOSUPERUSER, NOBYPASSRLS), so
     # row-level security actually constrains it. When no password is configured
-    # the app falls back to the owner connection and RLS is bypassed - the app
-    # still runs, but start-up warns loudly, because that is not a safe state to
-    # be in outside local development.
+    # the app would fall back to the owner connection and RLS would be bypassed,
+    # so start-up REFUSES unless ALLOW_INSECURE is set — see verify_secure_config.
     #
     # Names match DroneOps (APP_DB_USER / APP_DB_PASSWORD) so the two codebases
     # are configured the same way and nothing has to be re-learned between them.
@@ -55,12 +54,20 @@ class Settings(BaseSettings):
     # session cookie can be sent in clear.
     cookie_secure: bool = False
 
-    # Fernet key for secrets held at rest (TOTP seeds, and device credentials
-    # once enrolment lands). Unset means those columns are stored in plaintext -
-    # the app still boots, but core/crypto.warn_if_unencrypted shouts at startup.
-    # Back this up separately from the database; storing it beside a dump
-    # defeats the control entirely.
+    # Fernet key for secrets held at rest (TOTP seeds, and device credentials).
+    # Unset means those columns would be stored in plaintext, so start-up
+    # REFUSES unless ALLOW_INSECURE is set — see verify_secure_config. Back this
+    # up separately from the database; storing it beside a dump defeats the
+    # control entirely.
     secrets_encryption_key: str | None = None
+
+    # Escape hatch for local development only. The platform refuses to start
+    # without APP_DB_PASSWORD (row-level security bypassed) or
+    # SECRETS_ENCRYPTION_KEY (secrets at rest in plaintext) — see
+    # `verify_secure_config`. Set this to 1 to restore the old
+    # warn-and-continue, for a throwaway database with no real data in it. Never
+    # set it on anything reachable, or holding a real tenant's data.
+    allow_insecure: bool = False
 
     # --- Redis --------------------------------------------------------------
     # Cross-process live fan-out, revocation push, outbound station commands,
@@ -228,7 +235,8 @@ class Settings(BaseSettings):
     @property
     def rls_enabled(self) -> bool:
         """False when the app tier is running as the schema owner, which
-        bypasses row-level security. Start-up warns on this."""
+        bypasses row-level security. Start-up refuses this unless ALLOW_INSECURE
+        — see verify_secure_config."""
         return bool(self.app_db_password)
 
 
@@ -268,4 +276,45 @@ def verify_signing_key() -> None:
         "be signed with a key published in this repository. Generate one and "
         "put it in server/.env:\n\n"
         "    python3 -c \"import secrets; print(secrets.token_urlsafe(48))\"\n"
+    )
+
+
+def verify_secure_config() -> None:
+    """Refuse to start in a fail-open security posture. Called from lifespan.
+
+    Two defaults used to fail *open*: the app booted in a weaker mode and only
+    warned. A deploy that forgot `APP_DB_PASSWORD` ran as the schema owner with
+    row-level security bypassed — tenant isolation resting entirely on the
+    application's own query scoping — and one that forgot
+    `SECRETS_ENCRYPTION_KEY` wrote TOTP seeds and station credentials to the
+    database in plaintext. Everything about a fail-open default is built to pass
+    unnoticed: it is in the example file, it boots, and what it weakens is
+    invisible from the console. A warning on a log nobody reads is not a control,
+    so these now refuse — the same posture as `verify_signing_key`.
+
+    `ALLOW_INSECURE=1` restores the old warn-and-continue for local development,
+    where a throwaway database and no real secrets make the trade fine. It has
+    to be set on purpose; the default fails closed.
+    """
+    if settings.allow_insecure:
+        return
+    problems = []
+    if not settings.rls_enabled:
+        problems.append(
+            "APP_DB_PASSWORD is unset, so the app connects as the schema owner "
+            "and ROW-LEVEL SECURITY IS BYPASSED: one organisation can read "
+            "another's data the moment any query is mis-scoped."
+        )
+    if not (settings.secrets_encryption_key or "").strip():
+        problems.append(
+            "SECRETS_ENCRYPTION_KEY is unset, so TOTP seeds and station "
+            "credentials are stored in the database in plaintext."
+        )
+    if not problems:
+        return
+    raise RuntimeError(
+        "Refusing to start in a fail-open security posture:\n\n  - "
+        + "\n  - ".join(problems)
+        + "\n\nSet these in server/.env. For local development against a "
+        "throwaway database, set ALLOW_INSECURE=1 to run without them."
     )
