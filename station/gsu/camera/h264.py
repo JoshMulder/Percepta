@@ -823,6 +823,31 @@ class ProcessEncoder:
     #: and resynchronises on a keyframe rather than growing memory without end.
     DRAIN_MAX_CHUNKS = 64
 
+    #: How much of ffmpeg's stderr to keep, in 4 KB reads. The station reads
+    #: stderr only when the process exits — for the one diagnostic line — so an
+    #: unread stderr pipe FILLS on a camera that logs steadily (a bench camera's
+    #: non-monotonic-DTS warnings measured ~0.5 KB/s), and a full 64 KB pipe
+    #: blocks ffmpeg mid-write and stalls the feed every ~2 minutes. That was the
+    #: real cause of the stall the stdout drain above did not fix. Drained here
+    #: so it never fills; a bounded tail is all the exit diagnostic ever reads.
+    STDERR_TAIL_CHUNKS = 8
+
+    def _drain_stderr(self, process, tail: deque[bytes]) -> None:
+        """Read stderr so its pipe can never fill and block the process. Kept to
+        a bounded tail — the last few KB — which is all `_pump` reads for its
+        exit diagnostic and its acquire-race check. See STDERR_TAIL_CHUNKS."""
+        stderr = getattr(process, "stderr", None)
+        if stderr is None:  # pragma: no cover - defensive
+            return
+        try:
+            while not self._stop.is_set():
+                chunk = stderr.read(4096)
+                if not chunk:
+                    break
+                tail.append(chunk)
+        except (OSError, ValueError):  # pragma: no cover - defensive
+            pass
+
     def _drain(self, process, chunks: deque[bytes], eof: threading.Event) -> None:
         """Read the encoder's pipe as fast as the OS delivers it, and nothing
         else.
@@ -869,6 +894,14 @@ class ProcessEncoder:
                 name="gsu-h264-drain", daemon=True,
             )
             drain.start()
+            # And its stderr, on its own thread too: an unread stderr pipe fills
+            # on a noisy camera and blocks ffmpeg exactly as a full stdout would.
+            err_tail: deque[bytes] = deque(maxlen=self.STDERR_TAIL_CHUNKS)
+            err_drain = threading.Thread(
+                target=self._drain_stderr, args=(process, err_tail),
+                name="gsu-h264-stderr", daemon=True,
+            )
+            err_drain.start()
             try:
                 while not self._stop.is_set():
                     try:
@@ -885,20 +918,17 @@ class ProcessEncoder:
                 log.warning("Reading from %s stopped: %s", self.tool, exc)
             finally:
                 drain.join(timeout=1.0)
+                err_drain.join(timeout=1.0)
             for unit in self._reader.flush():
                 self._deliver(unit)
             if self._stop.is_set():
                 return
 
-            # It ended on its own, which is a fault: read what it said,
-            # because libcamera's own message is the whole diagnosis.
-            detail = b""
-            if process.stderr is not None:
-                try:
-                    detail = process.stderr.read() or b""
-                except (OSError, ValueError):  # pragma: no cover
-                    pass
-            text = detail.decode("utf-8", "replace").strip()
+            # It ended on its own, which is a fault: what it said is the
+            # diagnosis. Taken from the drained tail, not re-read from the pipe —
+            # the drain thread has already emptied stderr, so a read here would
+            # race it and usually come back empty.
+            text = b"".join(err_tail).decode("utf-8", "replace").strip()
             last_line = text.splitlines()[-1] if text else ""
 
             lost_race = (
