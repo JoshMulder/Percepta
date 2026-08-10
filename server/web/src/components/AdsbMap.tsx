@@ -105,6 +105,72 @@ interface Track {
   lastSeen: number;
 }
 
+/** Where the tracks are persisted across reloads. Versioned so a future change
+ *  to the stored shape can be ignored rather than mis-parsed. */
+const TRACK_STORAGE_KEY = "percepta.adsb.tracks.v1";
+/** Persisted at most this often. A reload loses at most this much of the newest
+ *  tail — imperceptible — and it keeps a stringify of the whole store off the
+ *  once-a-second render path. */
+const TRACK_PERSIST_MS = 2000;
+
+/** The store as it goes to storage: plain objects, since JSON cannot carry a
+ *  Map. Station id → ICAO → track. */
+type StoredTracks = Record<string, Record<string, Track>>;
+
+/**
+ * Rebuild the store from localStorage, dropping anything past its hour.
+ *
+ * Called once, at module load, so a reload comes back to the same tracks. The
+ * TTL is applied here too: a tab reopened the next morning must not resurrect a
+ * day-old track, and pruning on the way in is what stops the stored blob
+ * growing without bound across sessions. Any failure — no storage, corrupt
+ * JSON, a shape from an older build — starts empty rather than throwing on the
+ * module's first import.
+ */
+function loadTrailStore(): Map<string, Map<string, Track>> {
+  const store = new Map<string, Map<string, Track>>();
+  try {
+    const raw = localStorage.getItem(TRACK_STORAGE_KEY);
+    if (!raw) return store;
+    const now = Date.now();
+    const parsed = JSON.parse(raw) as StoredTracks;
+    for (const [stationId, tracks] of Object.entries(parsed)) {
+      const m = new Map<string, Track>();
+      for (const [icao, t] of Object.entries(tracks)) {
+        if (
+          t &&
+          Array.isArray(t.points) &&
+          typeof t.lastSeen === "number" &&
+          now - t.lastSeen <= TRAIL_TTL_MS
+        ) {
+          m.set(icao, { points: t.points, lastSeen: t.lastSeen });
+        }
+      }
+      if (m.size) store.set(stationId, m);
+    }
+  } catch {
+    return new Map();
+  }
+  return store;
+}
+
+/** Write the store back. Best-effort: a full or unavailable localStorage must
+ *  not take the live map down with it, so a failure is swallowed — the tracks
+ *  are still in memory, only the reload copy is missed. */
+function saveTrailStore(store: Map<string, Map<string, Track>>): void {
+  try {
+    const plain: StoredTracks = {};
+    for (const [stationId, tracks] of store) {
+      const obj: Record<string, Track> = {};
+      for (const [icao, t] of tracks) obj[icao] = t;
+      plain[stationId] = obj;
+    }
+    localStorage.setItem(TRACK_STORAGE_KEY, JSON.stringify(plain));
+  } catch {
+    /* quota exceeded or storage unavailable — persistence is best-effort */
+  }
+}
+
 /**
  * Every contact's track, by station then ICAO address.
  *
@@ -115,9 +181,12 @@ interface Track {
  * station so switching stations does not cross one airspace's tracks into
  * another's. Accumulated for every contact, not only the selected one, because
  * the operator may click a contact long after it first appeared and expect its
- * whole path.
+ * whole path. Hydrated from localStorage so a full page reload keeps it too,
+ * and written back on a throttle from the update effect.
  */
-const trailStore = new Map<string, Map<string, Track>>();
+const trailStore = loadTrailStore();
+/** When the store was last written, so the effect can throttle persistence. */
+let trailPersistedAt = 0;
 
 function tracksFor(stationId: string): Map<string, Track> {
   let m = trailStore.get(stationId);
@@ -543,21 +612,20 @@ function AdsbMapInner({
         if (!compact) {
           el.classList.add("clickable");
           const glyph = el.querySelector("svg");
-          // Hover shows, click keeps. Reading a contact is by far the common
-          // case and asking for a click first made it a two-step; committing
-          // to one so it survives the pointer moving away is the rarer
-          // intent, so that is what the click is for.
+          // Hover selects the contact — its card and its track — and the
+          // selection LATCHES: it is deliberately not dropped when the pointer
+          // leaves the glyph. Zoom here is centre-anchored, so a wheel notch
+          // slides every marker out from under a still pointer; clearing on the
+          // glyph's own pointerleave would then wipe the track the instant you
+          // zoomed out to see it, which is the whole complaint. It clears on
+          // leaving the map, clicking empty sky, Escape, or hovering another
+          // contact (a fresh pointerenter) instead.
           glyph?.addEventListener("pointerenter", () => {
             hoverRef.current(contact.icao);
           });
-          glyph?.addEventListener("pointerleave", () => {
-            // Only clears if it is still this contact: pointing straight from
-            // one aircraft to another fires the leave after the next enter.
-            hoverRef.current((h) => (h === contact.icao ? null : h));
-          });
           // Clicking pins rather than toggling: a second click on an already
           // open contact is far more often a missed drag than a request to
-          // close, and Close is right there.
+          // close, and Close is right there. A pin outlives even leaving the map.
           glyph?.addEventListener("click", (e) => {
             e.stopPropagation();
             pinRef.current(contact.icao);
@@ -634,12 +702,25 @@ function AdsbMapInner({
       existing.delete(icao);
     }
 
-    // Drop tracks not heard for the last hour. Runs on every frame rather than a
-    // timer — frames arrive about a second apart while a station is open, which
-    // is precisely when the store is worth trimming, and it saves carrying an
-    // interval per map.
-    for (const [icao, track] of trails) {
-      if (now - track.lastSeen > TRAIL_TTL_MS) trails.delete(icao);
+    // Drop tracks not heard for the last hour, across every station in the
+    // store — not just this one — so the persisted copy stays bounded rather
+    // than carrying the airspaces of stations no longer open. Runs on every
+    // frame rather than a timer: frames arrive about a second apart while a
+    // station is open, which is precisely when the store is worth trimming, and
+    // it saves carrying an interval per map.
+    for (const [, tracks] of trailStore) {
+      for (const [icao, track] of tracks) {
+        if (now - track.lastSeen > TRAIL_TTL_MS) tracks.delete(icao);
+      }
+    }
+
+    // Persist for the next page load, on a throttle. The store is the whole
+    // history, so this is stringified at most once every couple of seconds
+    // rather than every frame — a reload loses only that much of the freshest
+    // tail, which is not visible against a track that immediately resumes.
+    if (now - trailPersistedAt > TRACK_PERSIST_MS) {
+      trailPersistedAt = now;
+      saveTrailStore(trailStore);
     }
 
     // Draw the selected contact's track, or clear it. Follows selection —
@@ -754,12 +835,18 @@ function AdsbMapInner({
 
   return (
     <div className="map-holder">
-      {/* Clicking the map itself dismisses. The glyph handlers stop
-          propagation, so this only fires on empty sky. */}
+      {/* Clicking empty sky dismisses both the pin and the latched hover; the
+          glyph handlers stop propagation, so this only fires on empty map.
+          Leaving the map ends a latched hover (see the glyph handler) — a pin
+          is left alone, as it should outlive the pointer leaving the map. */}
       <div
         ref={holderRef}
         className="map-canvas"
-        onClick={() => setPinned(null)}
+        onClick={() => {
+          setPinned(null);
+          setHovered(null);
+        }}
+        onPointerLeave={() => setHovered(null)}
       />
       {!compact && config.basemaps.length > 1 && (
         <div className="basemap-switch" role="group" aria-label="Basemap">
@@ -784,12 +871,12 @@ function AdsbMapInner({
           className={`contact-anchor${anchor.below ? " below" : ""}${
             anchor.left ? " left" : ""
           }`}
-          // The panel counts as part of what is being hovered. Without this,
-          // moving the pointer off the aircraft to read the panel dismissed
-          // the panel on the way — the usual hover-menu gap, and the reason a
-          // hover-opened panel has to hold itself open.
+          // The panel counts as part of what is being hovered, so moving onto
+          // it keeps the selection on this contact. It does not clear on leave:
+          // the latch is ended by leaving the map or clicking empty sky (see
+          // the map holder), not by the pointer crossing off the panel — which
+          // would otherwise drop the track as you moved between panel and map.
           onPointerEnter={() => setHovered(openContact.icao)}
-          onPointerLeave={() => setHovered(null)}
           // Offset clear of the glyph so the panel does not cover the aircraft
           // it describes, on whichever side has the room — see `below`/`left`
           // above. `translate(-50%)` is deliberately not used: the panel is
