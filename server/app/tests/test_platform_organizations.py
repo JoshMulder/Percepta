@@ -24,10 +24,18 @@ from backend.auth.platform import PLATFORM_ORGANIZATION_ID, PLATFORM_ORGANIZATIO
 from backend.database.dependencies import get_db
 from backend.database.models.audit_log import AuditLog
 from backend.database.models.enums import UserRole
+from backend.database.models.ground_station import GroundStation
 from backend.database.models.organization import Organization
 from backend.database.models.organization_membership import OrganizationMembership
 from backend.database.models.user import User
 from backend.database.session import set_request_org_context
+
+
+def _org_ids(client) -> set[str]:
+    """The org ids the platform overview currently lists."""
+    body = client.get("/api/platform")
+    assert body.status_code == 200, body.text
+    return {o["id"] for o in body.json()["organizations"]}
 
 
 @pytest.fixture()
@@ -168,3 +176,115 @@ def test_an_ordinary_org_session_cannot_rename(client, org, db):
     assert response.status_code == 403, response.text
     db.expire_all()
     assert db.get(Organization, org.id).name == "Test Organisation"
+
+
+def test_the_platform_org_cannot_be_renamed(platform_client, db):
+    from backend.auth.platform import PLATFORM_ORGANIZATION_ID
+
+    response = platform_client.patch(
+        f"/api/platform/organizations/{PLATFORM_ORGANIZATION_ID}",
+        json={"name": "Something Else"},
+    )
+    assert response.status_code == 409, response.text
+    db.expire_all()
+    assert db.get(Organization, PLATFORM_ORGANIZATION_ID).name == PLATFORM_ORGANIZATION_NAME
+
+
+# --- removal ---------------------------------------------------------------
+
+
+def test_remove_deactivates_and_hides_the_org(platform_client, org, db):
+    assert str(org.id) in _org_ids(platform_client)
+    response = platform_client.delete(f"/api/platform/organizations/{org.id}")
+    assert response.status_code == 200, response.text
+    db.expire_all()
+    # A soft delete: the row is still there, just inactive — and gone from view.
+    assert db.get(Organization, org.id).is_active is False
+    assert str(org.id) not in _org_ids(platform_client)
+
+
+def test_remove_keeps_the_orgs_data(platform_client, org, station, db):
+    """The whole point of a soft delete: a non-empty org can be removed without
+    taking its stations (and their history) with it."""
+    station_id = station.id
+    assert platform_client.delete(
+        f"/api/platform/organizations/{org.id}"
+    ).status_code == 200
+    db.expire_all()
+    assert db.get(GroundStation, station_id) is not None, "the station was destroyed"
+
+
+def test_remove_leaves_an_audit_trail(platform_client, org, db):
+    assert platform_client.delete(
+        f"/api/platform/organizations/{org.id}"
+    ).status_code == 200
+    db.expire_all()
+    rows = db.execute(
+        select(AuditLog).where(AuditLog.action == "platform.organization.removed")
+    ).scalars().all()
+    assert any(
+        r.target_id == str(org.id) and (r.detail or {}).get("name") == "Test Organisation"
+        for r in rows
+    ), "the removal left no trail"
+
+
+def test_a_removed_orgs_membership_is_hidden(platform_client, org, db):
+    """A member of an org that has since been removed should not read as still
+    having access to it in the overview."""
+    user = User(
+        id=uuid.uuid4(),
+        email="member@example.test",
+        display_name="A Member",
+        first_name="A",
+        last_name="Member",
+        password_hash=hash_password("x"),
+    )
+    db.add(user)
+    db.flush()
+    db.add(OrganizationMembership(
+        id=uuid.uuid4(), user_id=user.id, organization_id=org.id,
+        roles=[UserRole.OPERATOR.value],
+    ))
+    db.commit()
+
+    assert platform_client.delete(
+        f"/api/platform/organizations/{org.id}"
+    ).status_code == 200
+
+    body = platform_client.get("/api/platform").json()
+    row = next(u for u in body["users"] if u["user_id"] == str(user.id))
+    assert all(m["organization_id"] != str(org.id) for m in row["memberships"]), \
+        "a removed org still showed as current access"
+
+
+def test_the_platform_org_cannot_be_removed(platform_client, db):
+    from backend.auth.platform import PLATFORM_ORGANIZATION_ID
+
+    response = platform_client.delete(
+        f"/api/platform/organizations/{PLATFORM_ORGANIZATION_ID}"
+    )
+    assert response.status_code == 409, response.text
+    db.expire_all()
+    assert db.get(Organization, PLATFORM_ORGANIZATION_ID).is_active is True
+
+
+def test_removing_an_unknown_org_is_a_404(platform_client):
+    response = platform_client.delete(f"/api/platform/organizations/{uuid.uuid4()}")
+    assert response.status_code == 404, response.text
+
+
+def test_a_second_removal_is_a_404(platform_client, org):
+    assert platform_client.delete(
+        f"/api/platform/organizations/{org.id}"
+    ).status_code == 200
+    # Already inactive — reads as absent, like everywhere else.
+    assert platform_client.delete(
+        f"/api/platform/organizations/{org.id}"
+    ).status_code == 404
+
+
+def test_an_ordinary_org_session_cannot_remove(client, org, db):
+    response = client.delete(f"/api/platform/organizations/{org.id}")
+    assert response.status_code == 403, response.text
+    db.expire_all()
+    assert db.get(Organization, org.id).is_active is True

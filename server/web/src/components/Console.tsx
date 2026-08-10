@@ -122,7 +122,17 @@ interface Alert {
   at: Date;
 }
 
-export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }) {
+export function Console({
+  me,
+  onSignedOut,
+  refreshMe,
+}: {
+  me: Me;
+  onSignedOut: () => void;
+  /** Re-read the identity — used when a roster nudge says org-level data (its
+   *  name) changed, so it updates without a reload. */
+  refreshMe: () => void;
+}) {
   const compact = useMediaQuery(COMPACT);
   // Off in the compact layout: there is no sidebar to fit there, and the tab
   // panel already takes the whole window.
@@ -165,6 +175,11 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
   // A stable handle to `reconcile` (defined below), so the socket callback —
   // which is deliberately dependency-free — can pull the list on a roster event.
   const reconcileRef = useRef<() => void>(() => {});
+  // Same, for `refreshMe`: the roster callback re-reads the identity so a
+  // renamed org's name reaches the header without rebuilding the callback each
+  // time the prop's arrow identity changes.
+  const refreshMeRef = useRef(refreshMe);
+  refreshMeRef.current = refreshMe;
   const [detail, setDetail] = useState<StationDetail | null>(null);
   const [mapConfig, setMapConfig] = useState<MapConfig | null>(null);
   const [mainView, setMainView] = useState<"adsb" | "video">("adsb");
@@ -251,9 +266,12 @@ export function Console({ me, onSignedOut }: { me: Me; onSignedOut: () => void }
   const handleMessage = useCallback((message: ServerMessage) => {
     // The org's station roster changed elsewhere — one created, deleted or
     // renamed. Re-pull the list so it appears (or vanishes, or renames) at once
-    // rather than on the next slow reconcile. Nothing station-specific.
+    // rather than on the next slow reconcile. Also re-read the identity: the
+    // same nudge is sent when the organisation itself is renamed, and its name
+    // sits on `me`, not in the station list.
     if (message.type === "roster") {
       reconcileRef.current();
+      refreshMeRef.current();
       return;
     }
     // Station up/down is org-wide: it arrives on the status stream for every

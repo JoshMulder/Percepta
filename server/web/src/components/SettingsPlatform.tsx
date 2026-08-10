@@ -61,6 +61,7 @@ export function SettingsPlatform() {
         busy={busy}
         onCreate={(name) => run(() => api.createOrganization(name))}
         onRename={(id, name) => run(() => api.renameOrganization(id, name))}
+        onRemove={(id) => run(() => api.removeOrganization(id))}
       />
 
       <section className="settings-section">
@@ -115,11 +116,13 @@ function Organizations({
   busy,
   onCreate,
   onRename,
+  onRemove,
 }: {
   data: PlatformOverview;
   busy: boolean;
   onCreate: (name: string) => void;
   onRename: (id: string, name: string) => void;
+  onRemove: (id: string) => void;
 }) {
   const [name, setName] = useState("");
   const [adding, setAdding] = useState(false);
@@ -127,6 +130,9 @@ function Organizations({
    *  re-reads the live name each render rather than freezing a stale copy. */
   const [editing, setEditing] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
+  /** The org whose removal is awaiting confirmation. Removal is a soft delete,
+   *  but it takes a whole tenant out of use, so it asks first. */
+  const [confirming, setConfirming] = useState<string | null>(null);
 
   function saveRename(id: string, current: string) {
     const next = editName.trim();
@@ -193,18 +199,50 @@ function Organizations({
                         Cancel
                       </button>
                     </>
-                  ) : (
-                    <button
-                      type="button"
-                      className="btn ghost"
-                      disabled={busy}
-                      onClick={() => {
-                        setEditing(o.id);
-                        setEditName(o.name);
-                      }}
-                    >
-                      Rename
-                    </button>
+                  ) : confirming === o.id ? (
+                    <>
+                      <button
+                        type="button"
+                        className="btn danger"
+                        disabled={busy}
+                        onClick={() => {
+                          onRemove(o.id);
+                          setConfirming(null);
+                        }}
+                      >
+                        Confirm remove
+                      </button>
+                      <button
+                        type="button"
+                        className="btn ghost"
+                        onClick={() => setConfirming(null)}
+                      >
+                        Cancel
+                      </button>
+                    </>
+                  ) : o.is_platform ? null : (
+                    <>
+                      <button
+                        type="button"
+                        className="btn ghost"
+                        disabled={busy}
+                        onClick={() => {
+                          setEditing(o.id);
+                          setEditName(o.name);
+                        }}
+                      >
+                        Rename
+                      </button>
+                      <button
+                        type="button"
+                        className="btn ghost danger-text"
+                        disabled={busy}
+                        title={`Remove ${o.name} — ${o.member_count} members, ${o.station_count} stations`}
+                        onClick={() => setConfirming(o.id)}
+                      >
+                        Remove
+                      </button>
+                    </>
                   )}
                 </td>
               </tr>
@@ -255,7 +293,9 @@ function Organizations({
       )}
       <small>
         A new organisation starts empty. Add people to it below, then its own
-        administrators create stations and grant access within it.
+        administrators create stations and grant access within it. Removing one
+        takes it out of use — it disappears from sign-in and from here — but
+        keeps its data; someone already signed into it stays until they sign out.
       </small>
     </section>
   );

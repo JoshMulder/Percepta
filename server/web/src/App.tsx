@@ -64,5 +64,16 @@ export function App() {
 
   if (!checked) return <div className="booting">Loading…</div>;
   if (!me) return <Login onSignedIn={setMe} />;
-  return <Console me={me} onSignedOut={() => setMe(null)} />;
+  return (
+    <Console
+      me={me}
+      onSignedOut={() => setMe(null)}
+      // Re-read the identity on demand — a roster nudge fires this so a renamed
+      // organisation's name updates in place rather than on the next reload. A
+      // failure is ignored: the 401 handler already covers a lost session.
+      refreshMe={() => {
+        void api.me().then(setMe).catch(() => {});
+      }}
+    />
+  );
 }

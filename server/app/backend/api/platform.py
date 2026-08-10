@@ -30,6 +30,7 @@ from backend.database.models.organization import Organization
 from backend.database.models.organization_membership import OrganizationMembership
 from backend.database.models.station_grant import StationGrant
 from backend.database.models.user import User
+from backend.realtime.bus import publish_roster_sync
 from backend.realtime.revocation import organization_changed, revoke_user
 from backend.services.audit import record
 
@@ -91,7 +92,13 @@ class MembershipSet(BaseModel):
 
 
 def _overview(db: Session) -> PlatformOverview:
-    orgs = db.execute(select(Organization).order_by(Organization.name)).scalars().all()
+    # Active only. A removed organisation is `is_active=False`, and it is hidden
+    # here for the same reason login and the org switcher hide it: it is gone.
+    orgs = db.execute(
+        select(Organization)
+        .where(Organization.is_active.is_(True))
+        .order_by(Organization.name)
+    ).scalars().all()
 
     member_counts = dict(
         db.execute(
@@ -144,7 +151,9 @@ def _overview(db: Session) -> PlatformOverview:
                         roles=list(m.roles or []),
                     )
                     for m in sorted(
-                        memberships.get(u.id, []),
+                        # Only memberships of orgs still present: a membership to
+                        # a removed org is not something to show as current access.
+                        (m for m in memberships.get(u.id, []) if m.organization_id in org_names),
                         key=lambda m: org_names.get(m.organization_id, ""),
                     )
                 ],
@@ -219,6 +228,14 @@ def rename_organization(
     org = db.get(Organization, organization_id)
     if org is None:
         raise HTTPException(status_code=404, detail="No such organisation")
+    if organization_id == PLATFORM_ORGANIZATION_ID:
+        # The platform org's name is a fixed system label — bootstrap sets it and
+        # things read it. It is identified by its id, not its name, so a rename
+        # would not break anything; it is refused because it should not be one of
+        # the customer organisations an admin renames by mistake.
+        raise HTTPException(
+            status_code=409, detail="The platform organisation cannot be renamed"
+        )
 
     name = body.name.strip()
     if not name:
@@ -265,6 +282,10 @@ def rename_organization(
     org.name = name
     db.commit()
 
+    # Nudge the renamed org's own consoles to re-pull, so the new name shows
+    # without a reload — the same contentless signal a station rename sends.
+    publish_roster_sync(organization_id)
+
     record(
         action="platform.organization.renamed",
         organization_id=identity.organization_id,
@@ -275,6 +296,52 @@ def rename_organization(
         detail={"from": previous, "to": name},
     )
     return out
+
+
+@router.delete("/organizations/{organization_id}", status_code=200)
+def remove_organization(
+    organization_id: uuid.UUID,
+    request: Request,
+    identity: Identity = Depends(require_platform_admin),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Remove an organisation — a soft delete.
+
+    `is_active` goes false rather than the row being deleted. That is the
+    schema's own signal: login and the org switcher already exclude an inactive
+    org, and the overview above hides it, so it disappears from use. Nothing is
+    destroyed — its stations, members and their history stay in the database and
+    the removal is reversible — which, for a whole tenant, is the only safe
+    default. A member already signed into it keeps that session until it ends;
+    they are not offered the org again once it is gone.
+
+    The platform organisation cannot be removed: it is the tenant this
+    cross-tenant surface runs inside.
+    """
+    org = db.get(Organization, organization_id)
+    # An already-removed org reads as absent here, exactly as it does everywhere
+    # else — so a double removal is a clean 404, not a second audit row.
+    if org is None or not org.is_active:
+        raise HTTPException(status_code=404, detail="No such organisation")
+    if organization_id == PLATFORM_ORGANIZATION_ID:
+        raise HTTPException(
+            status_code=409, detail="The platform organisation cannot be removed"
+        )
+
+    removed_name = org.name
+    org.is_active = False
+    db.commit()
+
+    record(
+        action="platform.organization.removed",
+        organization_id=identity.organization_id,
+        actor_user_id=identity.user_id,
+        target_type="organization",
+        target_id=str(organization_id),
+        ip_address=request.client.host if request.client else None,
+        detail={"name": removed_name},
+    )
+    return {"removed": True, "organization_id": str(organization_id)}
 
 
 @router.post("/users", response_model=PlatformUserOut, status_code=201)

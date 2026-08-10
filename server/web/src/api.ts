@@ -303,6 +303,12 @@ export const api = {
       body: JSON.stringify({ name }),
     }),
 
+  removeOrganization: (organizationId: string) =>
+    request<{ removed: boolean; organization_id: string }>(
+      `/api/platform/organizations/${organizationId}`,
+      { method: "DELETE" },
+    ),
+
   createUser: (body: { email: string; display_name: string; password: string | null }) =>
     request<PlatformUser>("/api/platform/users", {
       method: "POST",
