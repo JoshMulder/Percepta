@@ -438,6 +438,27 @@ function AdsbMapInner({
         },
       });
 
+      // TEMPORARY DIAGNOSTIC — a magenta dot at the selected contact's exact
+      // reported lng/lat, to settle whether the glyph or the track is the thing
+      // off its mark. If the glyph sits on the dot, the track is lagging; if the
+      // track's end sits on the dot, the glyph is drawn off its point. Remove
+      // once the track offset is diagnosed.
+      map.addSource("debug-point", {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+      });
+      map.addLayer({
+        id: "debug-point",
+        type: "circle",
+        source: "debug-point",
+        paint: {
+          "circle-radius": 5,
+          "circle-color": "#ff00ff",
+          "circle-stroke-width": 1.5,
+          "circle-stroke-color": "#ffffff",
+        },
+      });
+
       // Ring labels, due north of the station. Without them the rings are
       // decoration: an operator can see something is about two rings out and
       // has no idea what that is in kilometres.
@@ -750,6 +771,28 @@ function AdsbMapInner({
       } else {
         trailSource.setData({ type: "FeatureCollection", features: [] });
       }
+    }
+
+    // TEMPORARY DIAGNOSTIC — put the magenta dot on the selected contact's exact
+    // reported position, the same lng/lat the marker is set to. See the layer's
+    // note above.
+    const debugSource = map.getSource("debug-point") as
+      | maplibregl.GeoJSONSource
+      | undefined;
+    if (debugSource) {
+      const chosen = selected ? aircraft.find((c) => c.icao === selected) : null;
+      debugSource.setData(
+        chosen && chosen.longitude !== null && chosen.latitude !== null
+          ? {
+              type: "Feature",
+              properties: {},
+              geometry: {
+                type: "Point",
+                coordinates: [chosen.longitude, chosen.latitude],
+              },
+            }
+          : { type: "FeatureCollection", features: [] },
+      );
     }
     // `prefs` re-labels on a units or field change; `regVersion` re-labels once
     // a batch of registration lookups has landed in the cache. `selected`
