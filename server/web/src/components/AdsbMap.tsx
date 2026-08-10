@@ -75,6 +75,18 @@ const ALERT_COLOUR = "#ff2d2d";
 const DISPLAY_SCALE = 0.9;
 
 /**
+ * How long a contact's track is kept after it was last heard.
+ *
+ * The station sends no position history — each ADS-B frame is a snapshot — so
+ * the track an operator sees on click is built here, from every contact's
+ * fixes as the frames arrive. A track is held from the first time a contact is
+ * seen and for an hour after it was last seen, so one that drops out and
+ * returns, or is clicked minutes after it left the airspace, still has its
+ * path; after the hour it is dropped rather than kept forever.
+ */
+const TRAIL_TTL_MS = 60 * 60 * 1000;
+
+/**
  * The zoom each map was last left at, kept across the remount a swap forces.
  *
  * Console keys this component on its size (`stationId-s` / `stationId-m`), so
@@ -85,6 +97,36 @@ const DISPLAY_SCALE = 0.9;
  * rather than inheriting the last one's zoom. Saved on unmount, read on mount.
  */
 const zoomMemory = new Map<string, number>();
+
+/** One contact's track: its fixes oldest-first, and when it was last heard so
+ *  the store can drop it an hour later (see TRAIL_TTL_MS). */
+interface Track {
+  points: [number, number][];
+  lastSeen: number;
+}
+
+/**
+ * Every contact's track, by station then ICAO address.
+ *
+ * Module-level for the same reason as zoomMemory: Console keys this component
+ * on its size, so swapping airspace between the main stage and the sidebar
+ * preview remounts it — and a track held in component state would reset on that
+ * swap, losing history the operator was mid-way through building. Keyed by
+ * station so switching stations does not cross one airspace's tracks into
+ * another's. Accumulated for every contact, not only the selected one, because
+ * the operator may click a contact long after it first appeared and expect its
+ * whole path.
+ */
+const trailStore = new Map<string, Map<string, Track>>();
+
+function tracksFor(stationId: string): Map<string, Track> {
+  let m = trailStore.get(stationId);
+  if (!m) {
+    m = new Map();
+    trailStore.set(stationId, m);
+  }
+  return m;
+}
 
 function AdsbMapInner({
   stationId,
@@ -292,6 +334,41 @@ function AdsbMapInner({
         },
       });
 
+      // The clicked contact's track. Empty until a contact is clicked; the
+      // effect below fills it with that contact's trail and keeps its leading
+      // end on the aircraft as it moves. A dark halo under a bright line, the
+      // same two-pass trick the rings use to stay legible over satellite
+      // imagery — and rounded joins so a turning track does not show mitres.
+      map.addSource("contact-trail", {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+      });
+      map.addLayer({
+        id: "contact-trail-halo",
+        type: "line",
+        source: "contact-trail",
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: {
+          "line-color": "#050a0e",
+          "line-width": 4,
+          "line-opacity": 0.5,
+          "line-blur": 1,
+        },
+      });
+      map.addLayer({
+        id: "contact-trail",
+        type: "line",
+        source: "contact-trail",
+        layout: { "line-cap": "round", "line-join": "round" },
+        // Colour is set per update to match the marker — gold, or red when the
+        // contact is close and low — so the track reads as the same object.
+        paint: {
+          "line-color": CONTACT_COLOUR,
+          "line-width": 2,
+          "line-opacity": 0.9,
+        },
+      });
+
       // Ring labels, due north of the station. Without them the rings are
       // decoration: an operator can see something is about two rings out and
       // has no idea what that is in kilometres.
@@ -391,6 +468,8 @@ function AdsbMapInner({
     const map = mapRef.current;
     if (!map || !readyRef.current) return;
     const existing = markersRef.current;
+    const trails = tracksFor(stationId);
+    const now = Date.now();
     const seen = new Set<string>();
 
     for (const contact of aircraft) {
@@ -398,6 +477,26 @@ function AdsbMapInner({
       seen.add(contact.icao);
 
       const pos: [number, number] = [contact.longitude, contact.latitude];
+
+      // Grow this contact's track, and stamp it heard so the store keeps it for
+      // the hour after. A fix is appended only when the contact has actually
+      // moved: this effect also re-runs on selection and prefs changes, when
+      // the positions are the same objects as last time, and a contact holding
+      // station adds nothing — so a fix identical to the last is dropped. No
+      // length cap: the track is the whole path since the contact first
+      // appeared, and dropping only unmoved fixes keeps even a long flight
+      // bounded by how much it turned rather than by how long it was in view.
+      let track = trails.get(contact.icao);
+      if (!track) {
+        track = { points: [], lastSeen: now };
+        trails.set(contact.icao, track);
+      }
+      track.lastSeen = now;
+      const last = track.points[track.points.length - 1];
+      if (!last || last[0] !== pos[0] || last[1] !== pos[1]) {
+        track.points.push(pos);
+      }
+
       // The operator's own close-and-low threshold, not the station's alert
       // flag: this is the console's view of what is worth drawing red.
       const critical = isCritical(contact.range_km, contact.altitude_m, prefs);
@@ -525,14 +624,56 @@ function AdsbMapInner({
       }
     }
 
+    // A contact that has left the airspace loses its marker — but not its
+    // track: that is kept in the store for the hour after it was last heard, so
+    // the same aircraft returning continues one line rather than starting a new
+    // one. The marker is DOM and goes now; the track is dropped by time below.
     for (const [icao, marker] of existing) {
       if (seen.has(icao)) continue;
       marker.remove();
       existing.delete(icao);
     }
+
+    // Drop tracks not heard for the last hour. Runs on every frame rather than a
+    // timer — frames arrive about a second apart while a station is open, which
+    // is precisely when the store is worth trimming, and it saves carrying an
+    // interval per map.
+    for (const [icao, track] of trails) {
+      if (now - track.lastSeen > TRAIL_TTL_MS) trails.delete(icao);
+    }
+
+    // Draw the clicked contact's track, or clear it. Pinned only, not hover:
+    // the track is the answer to a deliberate "where did this come from", not
+    // something to flash under the pointer as it crosses the sky. A GeoJSON
+    // line in map coordinates, so it reprojects itself on zoom and needs no
+    // `move` handler like the anchored panel does; needs two fixes to be a line.
+    const trailSource = map.getSource("contact-trail") as
+      | maplibregl.GeoJSONSource
+      | undefined;
+    if (trailSource) {
+      const chosen = pinned ? aircraft.find((c) => c.icao === pinned) : null;
+      const path = pinned ? trails.get(pinned)?.points : undefined;
+      if (chosen && path && path.length >= 2) {
+        map.setPaintProperty(
+          "contact-trail",
+          "line-color",
+          isCritical(chosen.range_km, chosen.altitude_m, prefs)
+            ? ALERT_COLOUR
+            : CONTACT_COLOUR,
+        );
+        trailSource.setData({
+          type: "Feature",
+          properties: {},
+          geometry: { type: "LineString", coordinates: path },
+        });
+      } else {
+        trailSource.setData({ type: "FeatureCollection", features: [] });
+      }
+    }
     // `prefs` re-labels on a units or field change; `regVersion` re-labels once
-    // a batch of registration lookups has landed in the cache.
-  }, [aircraft, compact, selected, prefs, regVersion]);
+    // a batch of registration lookups has landed in the cache. `pinned` drives
+    // the track; `selected` still sets the marker's own highlight below.
+  }, [aircraft, compact, selected, pinned, prefs, regVersion, stationId]);
 
   /** A selected contact that has left the airspace must not leave a panel of
    *  values behind that no longer describe anything. Handled here rather than
