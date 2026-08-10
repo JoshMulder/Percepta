@@ -62,6 +62,7 @@ export function SettingsPlatform() {
         onCreate={(name) => run(() => api.createOrganization(name))}
         onRename={(id, name) => run(() => api.renameOrganization(id, name))}
         onRemove={(id) => run(() => api.removeOrganization(id))}
+        onReactivate={(id) => run(() => api.reactivateOrganization(id))}
       />
 
       <section className="settings-section">
@@ -117,12 +118,14 @@ function Organizations({
   onCreate,
   onRename,
   onRemove,
+  onReactivate,
 }: {
   data: PlatformOverview;
   busy: boolean;
   onCreate: (name: string) => void;
   onRename: (id: string, name: string) => void;
   onRemove: (id: string) => void;
+  onReactivate: (id: string) => void;
 }) {
   const [name, setName] = useState("");
   const [adding, setAdding] = useState(false);
@@ -156,7 +159,7 @@ function Organizations({
           </thead>
           <tbody>
             {data.organizations.map((o) => (
-              <tr key={o.id}>
+              <tr key={o.id} className={o.is_active ? undefined : "org-removed"}>
                 <th scope="row">
                   {editing === o.id ? (
                     <input
@@ -175,13 +178,23 @@ function Organizations({
                     <>
                       {o.name}
                       {o.is_platform && <span className="actuator-mark"> ·platform</span>}
+                      {!o.is_active && <span className="org-removed-tag"> ·removed</span>}
                     </>
                   )}
                 </th>
                 <td>{o.member_count}</td>
                 <td>{o.is_platform ? "—" : o.station_count}</td>
                 <td className="org-actions">
-                  {editing === o.id ? (
+                  {!o.is_active ? (
+                    <button
+                      type="button"
+                      className="btn ghost"
+                      disabled={busy}
+                      onClick={() => onReactivate(o.id)}
+                    >
+                      Reactivate
+                    </button>
+                  ) : editing === o.id ? (
                     <>
                       <button
                         type="button"
@@ -294,8 +307,9 @@ function Organizations({
       <small>
         A new organisation starts empty. Add people to it below, then its own
         administrators create stations and grant access within it. Removing one
-        takes it out of use — it disappears from sign-in and from here — but
-        keeps its data; someone already signed into it stays until they sign out.
+        takes it out of use — gone from sign-in and the org switcher — but keeps
+        its data and stays listed here as removed, so Reactivate brings it back
+        exactly as it was. Someone already signed into it stays until they sign out.
       </small>
     </section>
   );

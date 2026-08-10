@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, setUnauthorizedHandler } from "./api";
 import { Console } from "./components/Console";
 import { Login } from "./components/Login";
+import { PlatformDashboard } from "./components/PlatformDashboard";
 import { ResetPassword } from "./components/ResetPassword";
 import type { Me } from "./types";
 
@@ -64,16 +65,19 @@ export function App() {
 
   if (!checked) return <div className="booting">Loading…</div>;
   if (!me) return <Login onSignedIn={setMe} />;
-  return (
-    <Console
-      me={me}
-      onSignedOut={() => setMe(null)}
-      // Re-read the identity on demand — a roster nudge fires this so a renamed
-      // organisation's name updates in place rather than on the next reload. A
-      // failure is ignored: the 401 handler already covers a lost session.
-      refreshMe={() => {
-        void api.me().then(setMe).catch(() => {});
-      }}
-    />
-  );
+  // Re-read the identity on demand — a roster nudge fires this so a renamed
+  // organisation's name updates in place rather than on the next reload. A
+  // failure is ignored: the 401 handler already covers a lost session.
+  const refreshMe = () => {
+    void api.me().then(setMe).catch(() => {});
+  };
+  // A platform admin gets the whole-estate dashboard, not the station console.
+  // The predicate is session-scoped: descending into a customer org mints a
+  // session with is_platform_admin off, so that view falls through to Console.
+  if (me.is_platform_admin) {
+    return (
+      <PlatformDashboard me={me} onSignedOut={() => setMe(null)} refreshMe={refreshMe} />
+    );
+  }
+  return <Console me={me} onSignedOut={() => setMe(null)} refreshMe={refreshMe} />;
 }

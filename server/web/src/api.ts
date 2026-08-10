@@ -1,11 +1,14 @@
 import type {
   EnrolmentStatus,
+  FleetAdsb,
+  FleetView,
   IssuedToken,
   LoginChallenge,
   MapConfig,
   Me,
   OrganizationDetail,
   OrganizationOption,
+  PlatformMapConfig,
   PlatformOrg,
   PlatformOverview,
   PlatformUser,
@@ -308,6 +311,19 @@ export const api = {
       `/api/platform/organizations/${organizationId}`,
       { method: "DELETE" },
     ),
+
+  reactivateOrganization: (organizationId: string) =>
+    request<{ reactivated: boolean; organization_id: string }>(
+      `/api/platform/organizations/${organizationId}/reactivate`,
+      { method: "POST" },
+    ),
+
+  /** Cross-org fleet snapshot for the platform dashboard. */
+  platformFleet: () => request<FleetView>("/api/platform/fleet"),
+  /** Conglomerated ADS-B across the whole fleet. */
+  platformAdsb: () => request<FleetAdsb>("/api/platform/adsb"),
+  /** Basemap options for the fleet map (no station centre). */
+  platformMap: () => request<PlatformMapConfig>("/api/platform/map"),
 
   createUser: (body: { email: string; display_name: string; password: string | null }) =>
     request<PlatformUser>("/api/platform/users", {

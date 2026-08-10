@@ -12,8 +12,10 @@ that can be done *inside* one organisation belongs in `api/organization.py`,
 where RLS still applies.
 """
 
+import json
 import logging
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -28,11 +30,24 @@ from backend.database.models.enums import UserRole
 from backend.database.models.ground_station import GroundStation
 from backend.database.models.organization import Organization
 from backend.database.models.organization_membership import OrganizationMembership
+from backend.database.models.station_event import StationEvent
 from backend.database.models.station_grant import StationGrant
 from backend.database.models.user import User
-from backend.realtime.bus import publish_roster_sync
+from backend.realtime.bus import (
+    adsb_snapshot_key,
+    publish_roster_sync,
+    read_latest_sync,
+)
 from backend.realtime.revocation import organization_changed, revoke_user
 from backend.services.audit import record
+
+#: A station is online if it was heard within this window — the same rule and
+#: constant the per-org station list uses (api/stations.py), reproduced here for
+#: the cross-org fleet view rather than importing across API modules.
+ONLINE_WITHIN = timedelta(seconds=120)
+#: Past this, an offline station is not merely between frames — it has gone dark
+#: (matches services/station_watch.py's alarm threshold).
+DARK_AFTER = timedelta(minutes=15)
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/platform", tags=["platform"])
@@ -59,6 +74,9 @@ class PlatformOrgOut(BaseModel):
     id: str
     name: str
     is_platform: bool
+    #: False for a removed organisation. It is still listed here — the platform
+    #: view is where a removal is undone — but shown as removed.
+    is_active: bool
     member_count: int
     station_count: int
 
@@ -67,6 +85,79 @@ class PlatformOverview(BaseModel):
     organizations: list[PlatformOrgOut]
     users: list[PlatformUserOut]
     roles: list[str]
+
+
+# --- fleet dashboard -------------------------------------------------------
+
+
+class FleetStats(BaseModel):
+    stations_total: int
+    stations_online: int
+    stations_offline: int
+    stations_dark: int
+    stations_never: int
+    stations_no_location: int
+    stations_simulated: int
+    organizations_total: int
+    organizations_active: int
+    faults_critical_24h: int
+    faults_warning_24h: int
+
+
+class FleetStation(BaseModel):
+    id: str
+    name: str
+    organization_id: str
+    organization_name: str
+    latitude: float | None
+    longitude: float | None
+    locality: str | None
+    region: str | None
+    #: "online" | "offline" | "never" — derived from last_seen_at, not stored.
+    status: str
+    #: Offline for long enough to count as gone dark, not merely between frames.
+    dark: bool
+    last_seen_at: str | None
+    is_simulated: bool
+    model: str | None
+    config_version: int
+
+
+class FleetEvent(BaseModel):
+    id: str
+    station_id: str
+    station_name: str
+    organization_name: str
+    type: str
+    severity: str
+    message: str | None
+    received_at: str
+
+
+class FleetView(BaseModel):
+    stats: FleetStats
+    stations: list[FleetStation]
+    recent_events: list[FleetEvent]
+
+
+class FleetAircraft(BaseModel):
+    icao: str
+    callsign: str | None = None
+    latitude: float
+    longitude: float
+    altitude_m: float | None = None
+    track_deg: float | None = None
+    ground_speed_kt: float | None = None
+    #: How many stations in the fleet are currently hearing this contact.
+    heard_by: int
+
+
+class FleetAdsb(BaseModel):
+    #: Unique aircraft across the fleet (deduplicated by ICAO address).
+    aircraft: list[FleetAircraft]
+    #: Stations currently contributing a fix, so the map can show coverage.
+    contributing_stations: int
+    total_contacts: int
 
 
 class OrgCreate(BaseModel):
@@ -92,13 +183,15 @@ class MembershipSet(BaseModel):
 
 
 def _overview(db: Session) -> PlatformOverview:
-    # Active only. A removed organisation is `is_active=False`, and it is hidden
-    # here for the same reason login and the org switcher hide it: it is gone.
+    # All orgs, active and removed. A removed one carries `is_active=False` and is
+    # shown as removed rather than hidden — this platform view is the one place a
+    # removal is undone, so it has to be visible to be reactivated.
     orgs = db.execute(
-        select(Organization)
-        .where(Organization.is_active.is_(True))
-        .order_by(Organization.name)
+        select(Organization).order_by(Organization.name)
     ).scalars().all()
+    # For hiding a member's access to a removed org: the org is listed, but a
+    # membership of it is not current access and is not shown as such.
+    active_org_ids = {o.id for o in orgs if o.is_active}
 
     member_counts = dict(
         db.execute(
@@ -129,6 +222,7 @@ def _overview(db: Session) -> PlatformOverview:
                 id=str(o.id),
                 name=o.name,
                 is_platform=o.id == PLATFORM_ORGANIZATION_ID,
+                is_active=o.is_active,
                 member_count=member_counts.get(o.id, 0),
                 station_count=station_counts.get(o.id, 0),
             )
@@ -151,9 +245,9 @@ def _overview(db: Session) -> PlatformOverview:
                         roles=list(m.roles or []),
                     )
                     for m in sorted(
-                        # Only memberships of orgs still present: a membership to
-                        # a removed org is not something to show as current access.
-                        (m for m in memberships.get(u.id, []) if m.organization_id in org_names),
+                        # Only memberships of ACTIVE orgs: a membership to a
+                        # removed org is not current access and is not shown so.
+                        (m for m in memberships.get(u.id, []) if m.organization_id in active_org_ids),
                         key=lambda m: org_names.get(m.organization_id, ""),
                     )
                 ],
@@ -192,8 +286,8 @@ def create_organization(
     db.add(org)
     db.flush()
     out = PlatformOrgOut(
-        id=str(org.id), name=org.name, is_platform=False, member_count=0,
-        station_count=0,
+        id=str(org.id), name=org.name, is_platform=False, is_active=True,
+        member_count=0, station_count=0,
     )
     org_id = org.id
     db.commit()
@@ -270,6 +364,7 @@ def rename_organization(
         id=str(org.id),
         name=name,
         is_platform=organization_id == PLATFORM_ORGANIZATION_ID,
+        is_active=org.is_active,
         member_count=member_count,
         station_count=station_count,
     )
@@ -342,6 +437,41 @@ def remove_organization(
         detail={"name": removed_name},
     )
     return {"removed": True, "organization_id": str(organization_id)}
+
+
+@router.post("/organizations/{organization_id}/reactivate", status_code=200)
+def reactivate_organization(
+    organization_id: uuid.UUID,
+    request: Request,
+    identity: Identity = Depends(require_platform_admin),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Undo a removal — the inverse of the soft delete above.
+
+    Flips `is_active` back on, so the org returns to sign-in, the switcher and
+    its members' access. Its stations and people were never touched, so it comes
+    back exactly as it was.
+    """
+    org = db.get(Organization, organization_id)
+    if org is None:
+        raise HTTPException(status_code=404, detail="No such organisation")
+    if org.is_active:
+        # Already active — nothing to undo, and no audit row for a non-change.
+        return {"reactivated": False, "organization_id": str(organization_id)}
+
+    org.is_active = True
+    db.commit()
+
+    record(
+        action="platform.organization.reactivated",
+        organization_id=identity.organization_id,
+        actor_user_id=identity.user_id,
+        target_type="organization",
+        target_id=str(organization_id),
+        ip_address=request.client.host if request.client else None,
+        detail={"name": org.name},
+    )
+    return {"reactivated": True, "organization_id": str(organization_id)}
 
 
 @router.post("/users", response_model=PlatformUserOut, status_code=201)
@@ -529,3 +659,173 @@ def remove_membership(
         },
     )
     return {"removed": True, "station_grants_removed": grant_count}
+
+
+# --- fleet monitoring ------------------------------------------------------
+
+
+def _station_status(last_seen: datetime | None, now: datetime) -> tuple[str, bool]:
+    """(status, dark) from last contact — the derivation the per-org station
+    list uses (api/stations.py), extended with a dark tier. Never stored."""
+    if last_seen is None:
+        return "never", False
+    age = now - last_seen
+    if age < ONLINE_WITHIN:
+        return "online", False
+    return "offline", age >= DARK_AFTER
+
+
+@router.get("/fleet", response_model=FleetView)
+def fleet(
+    identity: Identity = Depends(require_platform_admin),
+    db: Session = Depends(get_db),
+) -> FleetView:
+    """The whole estate at a glance: every active station across every
+    organisation, its position and whether it is being heard, rollup counts, and
+    the most recent faults. Cross-tenant by design — the platform's own view."""
+    now = datetime.now(timezone.utc)
+
+    rows = db.execute(
+        select(GroundStation, Organization.name)
+        .join(Organization, GroundStation.organization_id == Organization.id)
+        .where(GroundStation.is_active.is_(True), Organization.is_active.is_(True))
+        .order_by(Organization.name, GroundStation.name)
+    ).all()
+
+    stations: list[FleetStation] = []
+    for station, org_name in rows:
+        status, dark = _station_status(station.last_seen_at, now)
+        model = None
+        if isinstance(station.hardware, dict):
+            candidate = station.hardware.get("model")
+            model = candidate if isinstance(candidate, str) else None
+        stations.append(FleetStation(
+            id=str(station.id),
+            name=station.name,
+            organization_id=str(station.organization_id),
+            organization_name=org_name,
+            latitude=station.latitude,
+            longitude=station.longitude,
+            locality=station.locality,
+            region=station.region,
+            status=status,
+            dark=dark,
+            last_seen_at=station.last_seen_at.isoformat() if station.last_seen_at else None,
+            is_simulated=station.is_simulated,
+            model=model,
+            config_version=station.config_version,
+        ))
+
+    org_flags = db.execute(select(Organization.is_active)).scalars().all()
+    since = now - timedelta(hours=24)
+    severity_counts = dict(db.execute(
+        select(StationEvent.severity, func.count(StationEvent.id))
+        .where(StationEvent.received_at >= since)
+        .group_by(StationEvent.severity)
+    ).all())
+
+    stats = FleetStats(
+        stations_total=len(stations),
+        stations_online=sum(1 for s in stations if s.status == "online"),
+        stations_offline=sum(1 for s in stations if s.status == "offline"),
+        stations_dark=sum(1 for s in stations if s.dark),
+        stations_never=sum(1 for s in stations if s.status == "never"),
+        stations_no_location=sum(
+            1 for s in stations if s.latitude is None or s.longitude is None
+        ),
+        stations_simulated=sum(1 for s in stations if s.is_simulated),
+        organizations_total=len(org_flags),
+        organizations_active=sum(1 for active in org_flags if active),
+        faults_critical_24h=severity_counts.get("critical", 0),
+        faults_warning_24h=severity_counts.get("warning", 0),
+    )
+
+    # The "needs attention" feed: the most recent notable events fleet-wide.
+    event_rows = db.execute(
+        select(StationEvent, GroundStation.name, Organization.name)
+        .join(GroundStation, StationEvent.ground_station_id == GroundStation.id)
+        .join(Organization, StationEvent.organization_id == Organization.id)
+        .where(StationEvent.severity.in_(("warning", "critical")))
+        .order_by(StationEvent.received_at.desc())
+        .limit(20)
+    ).all()
+    recent_events = [
+        FleetEvent(
+            id=str(event.id),
+            station_id=str(event.ground_station_id),
+            station_name=station_name,
+            organization_name=org_name,
+            type=event.type,
+            severity=event.severity,
+            message=event.message,
+            received_at=event.received_at.isoformat(),
+        )
+        for event, station_name, org_name in event_rows
+    ]
+
+    return FleetView(stats=stats, stations=stations, recent_events=recent_events)
+
+
+@router.get("/adsb", response_model=FleetAdsb)
+def fleet_adsb(
+    identity: Identity = Depends(require_platform_admin),
+    db: Session = Depends(get_db),
+) -> FleetAdsb:
+    """Conglomerated ADS-B across the whole fleet.
+
+    ADS-B lives only on each station's live telemetry stream — nothing stores it
+    — so the ingest writes each station's most recent aircraft list to a short-
+    lived Redis key (`realtime/bus.adsb_snapshot_key`). This reads that set in
+    one shot and merges it by ICAO address: an aircraft two stations both hear is
+    one contact, at one absolute position, tagged with how many stations see it.
+    Empty (not an error) when the bus is unavailable — the map just has no
+    traffic on it."""
+    station_ids = db.execute(
+        select(GroundStation.id).where(GroundStation.is_active.is_(True))
+    ).scalars().all()
+    if not station_ids:
+        return FleetAdsb(aircraft=[], contributing_stations=0, total_contacts=0)
+
+    blobs = read_latest_sync([adsb_snapshot_key(sid) for sid in station_ids])
+
+    merged: dict[str, FleetAircraft] = {}
+    contributing = 0
+    total = 0
+    for blob in blobs:
+        if not blob:
+            continue
+        try:
+            aircraft = (json.loads(blob) or {}).get("aircraft") or []
+        except (ValueError, TypeError):
+            continue
+        contributed = False
+        for contact in aircraft:
+            icao = contact.get("icao")
+            lat = contact.get("latitude")
+            lon = contact.get("longitude")
+            if not icao or lat is None or lon is None:
+                continue
+            contributed = True
+            total += 1
+            seen = merged.get(icao)
+            if seen is None:
+                merged[icao] = FleetAircraft(
+                    icao=icao,
+                    callsign=(contact.get("callsign") or None),
+                    latitude=lat,
+                    longitude=lon,
+                    altitude_m=contact.get("altitude_m"),
+                    track_deg=contact.get("track_deg"),
+                    ground_speed_kt=contact.get("speed_kt"),
+                    heard_by=1,
+                )
+            else:
+                seen.heard_by += 1
+        if contributed:
+            contributing += 1
+
+    return FleetAdsb(
+        aircraft=list(merged.values()),
+        contributing_stations=contributing,
+        total_contacts=total,
+    )

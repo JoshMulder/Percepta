@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from backend.auth.capabilities import Capability
 from backend.auth.dependencies import require_capability
 from backend.auth.identity import Identity
+from backend.auth.platform import require_platform_admin
 from backend.core.config import settings
 from backend.database.dependencies import get_db
 from backend.database.models.ground_station import GroundStation
@@ -79,24 +80,20 @@ def map_config(
     )
 
 
-@router.get("/stations/{station_id}/tiles/{style}/{z}/{x}/{y}.png")
-def tile(
-    station_id: uuid.UUID,
-    style: str,
-    z: int,
-    x: int,
-    y: int,
-    identity: Identity = Depends(require_capability(Capability.STATION_VIEW)),
-) -> Response:
-    """Serve a tile: from cache, or fetched upstream once and then cached.
+def _serve_tile(style: str, z: int, x: int, y: int) -> Response:
+    """Serve a tile: from the shared cache, or fetched upstream once and cached.
 
     The console never talks to a tile provider - every request lands here. That
     is what keeps the map working on a degraded link, stops each viewer costing
-    metered bandwidth, and means opening a station tells no third party where a
+    metered bandwidth, and means opening a map tells no third party where a
     customer's site is or when someone is watching it.
 
     With TILE_LIVE_FETCH off this is cache-only, and an uncached tile 404s so the
     map renders an empty background with aircraft still plotted over it.
+
+    The cache is keyed by style/z/x/y alone — it is shared across tenants, and
+    across the per-station and platform-wide callers — so a tile any station has
+    fetched is already warm for the fleet map.
     """
     try:
         data = tile_cache.read_cached(style, z, x, y)
@@ -117,8 +114,8 @@ def tile(
         content=data,
         media_type="image/png",
         headers={
-            # A fixed station's tiles do not change. immutable stops
-            # revalidation entirely, which matters on a link with real latency.
+            # A fixed tile does not change. immutable stops revalidation
+            # entirely, which matters on a link with real latency.
             "Cache-Control": "public, max-age=604800, immutable",
             # No cache hit/miss header. The tile cache is shared across every
             # tenant, so "hit" for an out-of-the-way tile told the caller that
@@ -128,4 +125,64 @@ def tile(
             # (Response timing still leaks the same bit on a live-fetch miss;
             # that is a deeper fix, but the free header is not worth handing out.)
         },
+    )
+
+
+@router.get("/stations/{station_id}/tiles/{style}/{z}/{x}/{y}.png")
+def tile(
+    station_id: uuid.UUID,
+    style: str,
+    z: int,
+    x: int,
+    y: int,
+    identity: Identity = Depends(require_capability(Capability.STATION_VIEW)),
+) -> Response:
+    """A basemap tile for one station's map, authorised by station view."""
+    return _serve_tile(style, z, x, y)
+
+
+@router.get("/platform/tiles/{style}/{z}/{x}/{y}.png")
+def platform_tile(
+    style: str,
+    z: int,
+    x: int,
+    y: int,
+    identity: Identity = Depends(require_platform_admin),
+) -> Response:
+    """A basemap tile for the platform fleet map — wide-area, not bounded to any
+    one station's radius. Same shared cache and upstream as the per-station
+    tiles; platform-admin only, since the fleet map spans every tenant."""
+    return _serve_tile(style, z, x, y)
+
+
+class PlatformMapConfig(BaseModel):
+    min_zoom: int
+    max_zoom: int
+    default_basemap: str
+    basemaps: list[BasemapOption]
+    live_fetch: bool
+
+
+@router.get("/platform/map", response_model=PlatformMapConfig)
+def platform_map(
+    identity: Identity = Depends(require_platform_admin),
+) -> PlatformMapConfig:
+    """Basemap options for the fleet map. Unlike the per-station config there is
+    no centre or radius — the map fits itself to the stations it is given — and
+    it may zoom right out, so `min_zoom` is low enough to see a whole country."""
+    return PlatformMapConfig(
+        min_zoom=3,
+        max_zoom=max(b.max_zoom for b in BASEMAPS.values()),
+        default_basemap=DEFAULT_BASEMAP,
+        basemaps=[
+            BasemapOption(
+                key=b.key,
+                label=b.label,
+                max_zoom=b.max_zoom,
+                attribution=b.attribution,
+                invert_for_dark=b.invert_for_dark,
+            )
+            for b in BASEMAPS.values()
+        ],
+        live_fetch=settings.tile_live_fetch,
     )

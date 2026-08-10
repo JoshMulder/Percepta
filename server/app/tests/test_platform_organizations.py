@@ -38,6 +38,13 @@ def _org_ids(client) -> set[str]:
     return {o["id"] for o in body.json()["organizations"]}
 
 
+def _org_row(client, org_id: str) -> dict | None:
+    """One org's row from the overview, or None if not listed."""
+    body = client.get("/api/platform")
+    assert body.status_code == 200, body.text
+    return next((o for o in body.json()["organizations"] if o["id"] == org_id), None)
+
+
 @pytest.fixture()
 def platform_client(db: Session) -> TestClient:
     """The app as a platform administrator.
@@ -193,14 +200,17 @@ def test_the_platform_org_cannot_be_renamed(platform_client, db):
 # --- removal ---------------------------------------------------------------
 
 
-def test_remove_deactivates_and_hides_the_org(platform_client, org, db):
-    assert str(org.id) in _org_ids(platform_client)
+def test_remove_deactivates_and_marks_the_org(platform_client, org, db):
+    before = _org_row(platform_client, str(org.id))
+    assert before is not None and before["is_active"] is True
     response = platform_client.delete(f"/api/platform/organizations/{org.id}")
     assert response.status_code == 200, response.text
     db.expire_all()
-    # A soft delete: the row is still there, just inactive — and gone from view.
+    # A soft delete: the row is still there, just inactive — and still listed so
+    # it can be reactivated, but marked removed.
     assert db.get(Organization, org.id).is_active is False
-    assert str(org.id) not in _org_ids(platform_client)
+    after = _org_row(platform_client, str(org.id))
+    assert after is not None and after["is_active"] is False
 
 
 def test_remove_keeps_the_orgs_data(platform_client, org, station, db):
@@ -288,3 +298,88 @@ def test_an_ordinary_org_session_cannot_remove(client, org, db):
     assert response.status_code == 403, response.text
     db.expire_all()
     assert db.get(Organization, org.id).is_active is True
+
+
+# --- reactivation ----------------------------------------------------------
+
+
+def test_reactivate_restores_a_removed_org(platform_client, org, db):
+    assert platform_client.delete(
+        f"/api/platform/organizations/{org.id}"
+    ).status_code == 200
+    db.expire_all()
+    assert db.get(Organization, org.id).is_active is False
+
+    response = platform_client.post(
+        f"/api/platform/organizations/{org.id}/reactivate"
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["reactivated"] is True
+    db.expire_all()
+    assert db.get(Organization, org.id).is_active is True
+
+
+def test_reactivate_leaves_an_audit_trail(platform_client, org, db):
+    platform_client.delete(f"/api/platform/organizations/{org.id}")
+    platform_client.post(f"/api/platform/organizations/{org.id}/reactivate")
+    db.expire_all()
+    rows = db.execute(
+        select(AuditLog).where(AuditLog.action == "platform.organization.reactivated")
+    ).scalars().all()
+    assert any(r.target_id == str(org.id) for r in rows), "no reactivation trail"
+
+
+def test_reactivating_an_active_org_is_a_noop(platform_client, org):
+    response = platform_client.post(
+        f"/api/platform/organizations/{org.id}/reactivate"
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["reactivated"] is False
+
+
+def test_reactivating_an_unknown_org_is_a_404(platform_client):
+    assert platform_client.post(
+        f"/api/platform/organizations/{uuid.uuid4()}/reactivate"
+    ).status_code == 404
+
+
+def test_an_ordinary_org_session_cannot_reactivate(client, org):
+    assert client.post(
+        f"/api/platform/organizations/{org.id}/reactivate"
+    ).status_code == 403
+
+
+# --- fleet dashboard -------------------------------------------------------
+
+
+def test_fleet_lists_stations_across_orgs(platform_client, station):
+    body = platform_client.get("/api/platform/fleet")
+    assert body.status_code == 200, body.text
+    data = body.json()
+    assert data["stats"]["stations_total"] >= 1
+    row = next(s for s in data["stations"] if s["id"] == str(station.id))
+    # The fixture station has never been heard from and belongs to Test Org.
+    assert row["status"] == "never"
+    assert row["organization_name"] == "Test Organisation"
+
+
+def test_fleet_omits_a_removed_orgs_stations(platform_client, station, org):
+    assert platform_client.delete(
+        f"/api/platform/organizations/{org.id}"
+    ).status_code == 200
+    data = platform_client.get("/api/platform/fleet").json()
+    assert str(station.id) not in {s["id"] for s in data["stations"]}, \
+        "a removed org's station still showed in the fleet"
+
+
+def test_fleet_adsb_is_empty_without_snapshots(platform_client, station):
+    body = platform_client.get("/api/platform/adsb")
+    assert body.status_code == 200, body.text
+    data = body.json()
+    assert data["aircraft"] == []
+    assert data["total_contacts"] == 0
+
+
+def test_an_ordinary_org_session_cannot_read_the_fleet(client):
+    assert client.get("/api/platform/fleet").status_code == 403
+    assert client.get("/api/platform/adsb").status_code == 403

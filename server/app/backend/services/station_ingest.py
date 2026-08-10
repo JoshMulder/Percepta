@@ -52,7 +52,7 @@ from sqlalchemy import select, update
 from backend.core.config import settings
 from backend.database.models.ground_station import GroundStation
 from backend.database.session import PrivilegedSessionLocal
-from backend.realtime.bus import command_channel
+from backend.realtime.bus import ADSB_SNAPSHOT_TTL, adsb_snapshot_key, command_channel
 from backend.realtime.hub import hub
 from backend.services import geocode, station_events, station_topics
 from backend.services.enrolment import has_valid_credential
@@ -466,6 +466,8 @@ class StationIngest:
             await self._reconcile_simulated(station_id, payload)
             await self._reconcile_position(station_id, payload)
             await self._reconcile_config_version(station_id, payload)
+        elif kind == "adsb":
+            await self._cache_adsb(station_id, payload)
 
         # Onto the internal fan-out, where authorisation and per-subscriber
         # delivery already apply. Nothing downstream needs to know the frame
@@ -522,6 +524,32 @@ class StationIngest:
                 .values(config_version=version)
             )
             db.commit()
+
+    async def _cache_adsb(self, station_id: uuid.UUID, payload: dict) -> None:
+        """Keep this station's latest aircraft list in Redis for the platform
+        dashboard to aggregate across the fleet.
+
+        ADS-B exists only on the live fan-out — nothing stores it — so a
+        platform-wide view would otherwise have to subscribe to every station.
+        Instead the one ingest leader drops the current list into a short-lived
+        key (`adsb_snapshot_key`), TTL'd so a station that goes quiet stops
+        contributing traffic that is no longer in the air. Best-effort: a failed
+        write costs that station a tick on the fleet map, never a stall in
+        ingest, which is why it is swallowed like the other display-only writes.
+        """
+        aircraft = payload.get("aircraft")
+        if not isinstance(aircraft, list):
+            return
+        if self._redis is None:
+            return
+        try:
+            await self._redis.setex(
+                adsb_snapshot_key(station_id),
+                ADSB_SNAPSHOT_TTL,
+                json.dumps({"aircraft": aircraft}),
+            )
+        except Exception:  # noqa: BLE001 - a cache write must never stop ingest
+            log.debug("Could not cache ADS-B for %s.", station_id, exc_info=True)
 
     async def _reconcile_simulated(self, station_id: uuid.UUID, payload: dict) -> None:
         """Believe the station about whether its own data is synthetic.

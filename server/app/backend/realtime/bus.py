@@ -132,6 +132,37 @@ def publish_sync(channel: str, payload: dict[str, Any]) -> bool:
         return False
 
 
+#: How long a station's last ADS-B snapshot is worth reading. ADS-B is only
+#: meaningful live, so a fix from a station that has since gone quiet must age
+#: out rather than linger on the platform map as traffic that is no longer there.
+ADSB_SNAPSHOT_TTL = 45
+
+
+def adsb_snapshot_key(station_id) -> str:
+    """Redis key holding one station's most recent ADS-B aircraft list.
+
+    The platform dashboard aggregates ADS-B across the whole fleet, but the
+    telemetry only exists on the live per-station WebSocket fan-out — there is no
+    stored copy. Rather than have the dashboard hold a subscription to every
+    station, the ingest writes each station's latest list here (TTL'd), and the
+    dashboard reads the set in one shot. Fleet-wide, not per-viewer."""
+    return f"latest:adsb:{station_id}"
+
+
+def read_latest_sync(keys: list[str]) -> list:
+    """MGET a batch of snapshot keys for a sync caller. Empty on any failure — a
+    dashboard read must not raise because Redis hiccuped, the same fail-soft
+    posture as the publish path above."""
+    client = _get_sync_client()
+    if client is None or not keys:
+        return []
+    try:
+        return client.mget(keys)
+    except Exception:
+        log.warning("Redis mget of %d keys failed.", len(keys), exc_info=True)
+        return []
+
+
 def publish_roster_sync(organization_id) -> bool:
     """Nudge every console in the org to re-pull its station list, because a
     station was just created, deleted or renamed.

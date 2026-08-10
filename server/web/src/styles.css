@@ -3600,3 +3600,159 @@ body {
   font-weight: 600;
   color: var(--muted);
 }
+
+/* ===== Platform dashboard ==================================================
+   A full-screen platform-admin view, NOT the fit-scaled console. Like the
+   settings dialog it sets its own px basis rather than inheriting the fluid rem
+   root meant for the telemetry wall, because this is a reading surface. */
+.pdash {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.45 var(--sans);
+}
+.pdash-head {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  padding: 0 20px;
+  height: 56px;
+  flex: 0 0 auto;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+.pdash-brand { display: flex; align-items: baseline; gap: 8px; }
+.pdash-brand strong { font-size: 16px; letter-spacing: 0.02em; }
+.pdash-brand span {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.14em;
+  color: var(--brand); border: 1px solid var(--brand-dim); border-radius: 4px;
+  padding: 2px 6px;
+}
+.pdash-tabs { display: flex; gap: 2px; }
+.pdash-tab {
+  background: none; border: none; color: var(--muted);
+  padding: 8px 14px; font: inherit; cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+.pdash-tab:hover { color: var(--text); }
+.pdash-tab.active { color: var(--text); border-bottom-color: var(--brand); }
+.pdash-tab:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
+.pdash-head-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+
+.pdash-main { flex: 1 1 auto; min-height: 0; display: flex; }
+.pdash-pane { flex: 1 1 auto; overflow-y: auto; padding: 18px 20px; min-width: 0; }
+.pdash-settings { font-size: 14px; }
+
+/* KPI tiles */
+.kpi-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.kpi {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line);
+  border-radius: 8px;
+  padding: 13px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.kpi-value { font: 600 30px/1 var(--mono); }
+.kpi-label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--muted);
+}
+.kpi-sub { font-size: 11px; color: var(--dim); }
+.kpi.ok { border-left-color: #35c48a; }
+.kpi.ok .kpi-value { color: #35c48a; }
+.kpi.warn { border-left-color: var(--warn); }
+.kpi.warn .kpi-value { color: var(--warn); }
+.kpi.bad { border-left-color: var(--danger); }
+.kpi.bad .kpi-value { color: var(--danger); }
+.kpi.gold { border-left-color: #f5c518; }
+.kpi.gold .kpi-value { color: #f5c518; }
+.kpi.neutral { border-left-color: var(--dim); }
+
+/* Overview: map beside the attention rail */
+.pdash-overview-grid {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  gap: 14px;
+  min-height: 470px;
+}
+@media (max-width: 940px) {
+  .pdash-overview-grid { grid-template-columns: 1fr; }
+  .pdash-map-wrap { min-height: 380px; }
+}
+.pdash-map-wrap {
+  min-height: 470px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.pdash-map-empty {
+  display: flex; align-items: center; justify-content: center;
+  height: 100%; color: var(--muted);
+}
+.pdash-attention {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px 16px;
+  overflow-y: auto;
+}
+.pdash-attention h3 {
+  margin: 0 0 10px; font-size: 12px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted);
+}
+.attention-list { list-style: none; margin: 0 0 18px; padding: 0; display: flex; flex-direction: column; gap: 9px; }
+.attention-list li {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-rows: auto auto;
+  column-gap: 9px;
+  align-items: center;
+}
+.attention-list .status-dot { grid-row: 1 / 3; grid-column: 1; }
+.attention-name { grid-column: 2; grid-row: 1; font-size: 13px; }
+.attention-meta { grid-column: 2; grid-row: 2; font-size: 11px; color: var(--muted); }
+
+.status-dot {
+  display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+  background: var(--dim); flex: 0 0 auto;
+}
+.status-dot.ok { background: #35c48a; }
+.status-dot.warn { background: var(--warn); }
+.status-dot.bad { background: var(--danger); }
+.status-dot.neutral { background: var(--dim); }
+.pdash-table .status-dot { margin-right: 6px; }
+
+/* Fleet map + its markers */
+.fleet-map { position: relative; width: 100%; height: 100%; }
+.fleet-map-canvas { position: absolute; inset: 0; }
+.fleet-station { display: flex; align-items: center; gap: 5px; cursor: default; }
+.fleet-dot {
+  width: 11px; height: 11px; border-radius: 50%;
+  border: 1.5px solid #0b1220; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45);
+}
+.fleet-station.simulated .fleet-dot { border-style: dashed; }
+.fleet-name {
+  font: 11px var(--mono); color: #fff; white-space: nowrap;
+  text-shadow: 0 0 3px rgba(0, 0, 0, 0.95), 0 0 6px rgba(0, 0, 0, 0.7);
+}
+.fleet-ac svg { display: block; transform-box: border-box; transform-origin: center; }
+
+/* Stations table */
+.pdash-table th[scope="row"] { font-weight: 500; }
+.pdash-table td, .pdash-table th { white-space: nowrap; }
+.sim-tag { color: var(--warn); font-size: 11px; }
+
+/* Removed org row (platform organisations table) */
+.org-removed { opacity: 0.5; }
+.org-removed-tag { color: var(--danger); font-size: 11px; }

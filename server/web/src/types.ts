@@ -476,6 +476,9 @@ export interface PlatformOrg {
   id: string;
   name: string;
   is_platform: boolean;
+  /** False for a removed organisation — still listed (this is where a removal
+   *  is undone) but shown as removed. */
+  is_active: boolean;
   member_count: number;
   station_count: number;
 }
@@ -497,6 +500,84 @@ export interface PlatformOverview {
   organizations: PlatformOrg[];
   users: PlatformUser[];
   roles: string[];
+}
+
+/* ---- Platform fleet dashboard ---- */
+
+export interface FleetStats {
+  stations_total: number;
+  stations_online: number;
+  stations_offline: number;
+  stations_dark: number;
+  stations_never: number;
+  stations_no_location: number;
+  stations_simulated: number;
+  organizations_total: number;
+  organizations_active: number;
+  faults_critical_24h: number;
+  faults_warning_24h: number;
+}
+
+export interface FleetStation {
+  id: string;
+  name: string;
+  organization_id: string;
+  organization_name: string;
+  latitude: number | null;
+  longitude: number | null;
+  locality: string | null;
+  region: string | null;
+  /** "online" | "offline" | "never" — derived from last_seen_at server-side. */
+  status: "online" | "offline" | "never";
+  /** Offline long enough to count as gone dark, not merely between frames. */
+  dark: boolean;
+  last_seen_at: string | null;
+  is_simulated: boolean;
+  model: string | null;
+  config_version: number;
+}
+
+export interface FleetEvent {
+  id: string;
+  station_id: string;
+  station_name: string;
+  organization_name: string;
+  type: string;
+  severity: string;
+  message: string | null;
+  received_at: string;
+}
+
+export interface FleetView {
+  stats: FleetStats;
+  stations: FleetStation[];
+  recent_events: FleetEvent[];
+}
+
+export interface FleetAircraft {
+  icao: string;
+  callsign: string | null;
+  latitude: number;
+  longitude: number;
+  altitude_m: number | null;
+  track_deg: number | null;
+  ground_speed_kt: number | null;
+  /** How many stations are currently hearing this contact. */
+  heard_by: number;
+}
+
+export interface FleetAdsb {
+  aircraft: FleetAircraft[];
+  contributing_stations: number;
+  total_contacts: number;
+}
+
+export interface PlatformMapConfig {
+  min_zoom: number;
+  max_zoom: number;
+  default_basemap: string;
+  basemaps: BasemapOption[];
+  live_fetch: boolean;
 }
 
 /**
