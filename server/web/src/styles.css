@@ -3026,10 +3026,20 @@ body {
 }
 .map-contact svg {
   display: block;
-  /* Rotated to the track. transform-box keeps the rotation about the glyph's
-     own centre rather than the marker's layout box, which otherwise swings the
-     aircraft around a point beside it. */
-  transform-box: fill-box;
+  /* Rotated to the track, about the centre of the svg's own border box — which,
+     now the label is out of the marker box, is the aircraft's point: MapLibre
+     centres the box on the lng/lat and the tar1090 shape sits at its viewBox
+     centre, which renders at the box centre. So pivoting there spins the
+     aircraft in place, on the end of its track.
+
+     Confirmed against the true point with an on-map diagnostic: `fill-box`
+     pivots about the *silhouette's* bounding box instead, which for a shape not
+     centred on its position dot sits beside the point — and a browser that
+     honours it on the outer svg (Firefox does; Chromium quietly falls back to
+     the box centre, which is why this looked fine in one engine and not the
+     other) swung the glyph off its own track by a per-icon amount as it turned.
+     `border-box` is the box centre in every engine, so it is right everywhere. */
+  transform-box: border-box;
   transform-origin: center;
 }
 /* Holds the glyph and, for a helicopter, the rotor stacked over it. Sized to
