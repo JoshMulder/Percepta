@@ -237,7 +237,7 @@ def test_a_removed_orgs_membership_is_hidden(platform_client, org, db):
         display_name="A Member",
         first_name="A",
         last_name="Member",
-        password_hash=hash_password("x"),
+        password_hash=hash_password("not-used-by-these-tests"),
     )
     db.add(user)
     db.flush()
