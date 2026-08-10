@@ -3098,31 +3098,24 @@ body {
      truncates the free-text fields, so this only ever bites on the pathological. */
   max-width: 12rem;
   overflow: hidden;
-  /* A backdrop rather than a glow. Two stacked text-shadows were enough over
-     water and open country and lost badly against a white rooftop or a
-     motorway, which is exactly where the aircraft worth reading tend to be.
-
-     Deliberately NOT backdrop-filter: this sits directly on the map's WebGL
-     canvas, which repaints continuously, and a filter over it costs a
-     full-screen GPU readback every frame — the fault that made scrolling the
-     settings pane lag the whole machine. A flat translucent fill costs
-     nothing and reads better anyway.
-
-     A faint shadow stays for the case where the label overhangs its own
-     backdrop by a pixel of antialiasing. */
-  background: rgba(4, 10, 14, 0.66);
-  border-radius: 0.15rem;
-  padding: 0.05rem 0.22rem;
-  text-shadow: 0 0 0.15rem rgba(0, 0, 0, 0.9);
+  /* No backdrop. A dark fill behind the text is what let a long value — or many
+     contacts bunched together when zoomed out — merge into a solid bar across
+     the map. The glyph already carries the state in its colour (gold, or red
+     when close and low), so the label is left as bare text, held legible over
+     imagery by a heavy shadow rather than a box. */
+  text-shadow:
+    0 0 0.14rem rgba(0, 0, 0, 0.95),
+    0 0 0.28rem rgba(0, 0, 0, 0.85);
 }
 .map-contact.alert svg { filter: drop-shadow(0 0 0.35rem rgba(255, 45, 45, 0.95)); }
-/* A close contact wears a red badge, not the map's default dark one — the
-   callsign that most needs reading at a glance is the one right on top of you,
-   and a red backdrop finds it in a field of amber traffic. */
+/* No badge either: a close contact is called out by its red glyph (and the
+   drawer, and the sound), so its label is bare text like every other, kept
+   white so it still reads as the one worth reading. */
 .map-contact.alert span {
-  background: rgba(255, 45, 45, 0.9);
   color: #fff;
-  text-shadow: 0 0 0.15rem rgba(0, 0, 0, 0.7);
+  text-shadow:
+    0 0 0.14rem rgba(0, 0, 0, 0.95),
+    0 0 0.28rem rgba(0, 0, 0, 0.85);
 }
 /* Only the glyph is clickable. The marker as a whole keeps pointer-events off
    so a callsign label — which can be several times the width of the aircraft
