@@ -39,6 +39,17 @@ export function buildLabel(
   return parts.join("\n");
 }
 
+/** A real callsign or registration is at most a handful of characters. This
+ *  bounds the free-text fields — the ones that carry values from the ADS-B
+ *  stream or an external registry — so a malformed one cannot become an
+ *  over-long label line. The CSS caps the rendered width too; this keeps the DOM
+ *  string itself sane and the clipped text meaningful rather than a blob. */
+function trim(value: string | null | undefined): string | null {
+  const text = value?.trim();
+  if (!text) return null;
+  return text.length > 12 ? text.slice(0, 12) : text;
+}
+
 function fieldText(
   field: LabelField,
   contact: Aircraft,
@@ -47,9 +58,9 @@ function fieldText(
 ): string | null {
   switch (field) {
     case "callsign":
-      return contact.callsign?.trim() || null;
+      return trim(contact.callsign);
     case "registration":
-      return registration || null;
+      return trim(registration);
     case "type":
       return emitterName(contact.emitter_type);
     case "altitude":

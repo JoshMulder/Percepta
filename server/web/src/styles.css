@@ -3091,6 +3091,13 @@ body {
      glyph. */
   white-space: pre;
   text-align: center;
+  /* A label is a hint, never a billboard. `white-space: pre` does not wrap, so a
+     single over-long value — a garbage callsign, or a registration lookup that
+     returned something malformed — would otherwise stretch the label into a
+     full-width dark bar across the map. Cap it and clip; the field builder also
+     truncates the free-text fields, so this only ever bites on the pathological. */
+  max-width: 12rem;
+  overflow: hidden;
   /* A backdrop rather than a glow. Two stacked text-shadows were enough over
      water and open country and lost badly against a white rooftop or a
      motorway, which is exactly where the aircraft worth reading tend to be.
