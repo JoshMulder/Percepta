@@ -2995,10 +2995,17 @@ body {
   pointer-events: none;
 }
 .map-contact {
+  /* The marker's box is the glyph alone — the label is taken out of flow and
+     hung below it (see `.map-contact span`). MapLibre centres the element on
+     the lng/lat with translate(-50%, -50%), so a label left inside the box
+     would drag that centre downward and float the glyph above the point, while
+     the track — drawn at the true lng/lat — ends at the point below it. Keeping
+     only the glyph in the box puts the glyph on the point, on the track's end.
+     Position relative so the absolute label hangs off it. */
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 0.1rem;
   pointer-events: none;
 }
 .map-contact svg {
@@ -3052,6 +3059,15 @@ body {
   }
 }
 .map-contact span {
+  /* Out of the marker's layout box and hung centred below the glyph, so the
+     glyph itself — not the glyph-plus-label midpoint — sits on the aircraft's
+     position and lines up with the end of its track. `margin-top` is the gap
+     the flex layout used to give. */
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-top: 0.1rem;
   font: 0.6rem var(--mono);
   /* `pre` so a multi-field label keeps the line breaks the label builder puts
      between fields; centred so the stack sits under the glyph. An empty label
