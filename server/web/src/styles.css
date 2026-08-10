@@ -3155,9 +3155,11 @@ body {
   border-radius: 0.5rem;
   /* Also no backdrop-filter, for the same reason and the same neighbour: this
      one sits directly on the map's WebGL canvas, which repaints continuously
-     as contacts move. Smaller area, same class of cost. At 0.97 the panel is
-     legible over imagery without one. */
-  background: rgba(11, 15, 19, 0.97);
+     as contacts move. Smaller area, same class of cost. Held translucent so
+     the map — and the contact's own track — stay visible behind the card;
+     0.85 lets them through while the dark base keeps the small text legible
+     over imagery without a blur. */
+  background: rgba(11, 15, 19, 0.85);
   box-shadow: 0 0.5rem 1.5rem rgba(0, 0, 0, 0.55);
 }
 .contact-head {

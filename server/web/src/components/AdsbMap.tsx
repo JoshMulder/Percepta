@@ -642,17 +642,17 @@ function AdsbMapInner({
       if (now - track.lastSeen > TRAIL_TTL_MS) trails.delete(icao);
     }
 
-    // Draw the clicked contact's track, or clear it. Pinned only, not hover:
-    // the track is the answer to a deliberate "where did this come from", not
-    // something to flash under the pointer as it crosses the sky. A GeoJSON
-    // line in map coordinates, so it reprojects itself on zoom and needs no
-    // `move` handler like the anchored panel does; needs two fixes to be a line.
+    // Draw the selected contact's track, or clear it. Follows selection —
+    // hover or pin — so pointing at a contact previews where it came from and a
+    // click just keeps it. A GeoJSON line in map coordinates, so it reprojects
+    // itself on zoom and needs no `move` handler like the anchored panel does;
+    // needs two fixes to be a line.
     const trailSource = map.getSource("contact-trail") as
       | maplibregl.GeoJSONSource
       | undefined;
     if (trailSource) {
-      const chosen = pinned ? aircraft.find((c) => c.icao === pinned) : null;
-      const path = pinned ? trails.get(pinned)?.points : undefined;
+      const chosen = selected ? aircraft.find((c) => c.icao === selected) : null;
+      const path = selected ? trails.get(selected)?.points : undefined;
       if (chosen && path && path.length >= 2) {
         map.setPaintProperty(
           "contact-trail",
@@ -671,9 +671,9 @@ function AdsbMapInner({
       }
     }
     // `prefs` re-labels on a units or field change; `regVersion` re-labels once
-    // a batch of registration lookups has landed in the cache. `pinned` drives
-    // the track; `selected` still sets the marker's own highlight below.
-  }, [aircraft, compact, selected, pinned, prefs, regVersion, stationId]);
+    // a batch of registration lookups has landed in the cache. `selected`
+    // drives both the track and the marker's own highlight.
+  }, [aircraft, compact, selected, prefs, regVersion, stationId]);
 
   /** A selected contact that has left the airspace must not leave a panel of
    *  values behind that no longer describe anything. Handled here rather than
