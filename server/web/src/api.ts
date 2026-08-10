@@ -297,6 +297,12 @@ export const api = {
       body: JSON.stringify({ name }),
     }),
 
+  renameOrganization: (organizationId: string, name: string) =>
+    request<PlatformOrg>(`/api/platform/organizations/${organizationId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name }),
+    }),
+
   createUser: (body: { email: string; display_name: string; password: string | null }) =>
     request<PlatformUser>("/api/platform/users", {
       method: "POST",

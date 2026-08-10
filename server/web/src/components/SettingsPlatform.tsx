@@ -56,7 +56,12 @@ export function SettingsPlatform() {
 
   return (
     <div className="settings-sections">
-      <Organizations data={data} busy={busy} onCreate={(name) => run(() => api.createOrganization(name))} />
+      <Organizations
+        data={data}
+        busy={busy}
+        onCreate={(name) => run(() => api.createOrganization(name))}
+        onRename={(id, name) => run(() => api.renameOrganization(id, name))}
+      />
 
       <section className="settings-section">
         <h3>People</h3>
@@ -109,13 +114,26 @@ function Organizations({
   data,
   busy,
   onCreate,
+  onRename,
 }: {
   data: PlatformOverview;
   busy: boolean;
   onCreate: (name: string) => void;
+  onRename: (id: string, name: string) => void;
 }) {
   const [name, setName] = useState("");
   const [adding, setAdding] = useState(false);
+  /** The org whose name is being edited, or null. Held as the id so the row
+   *  re-reads the live name each render rather than freezing a stale copy. */
+  const [editing, setEditing] = useState<string | null>(null);
+  const [editName, setEditName] = useState("");
+
+  function saveRename(id: string, current: string) {
+    const next = editName.trim();
+    // A no-op rename is not worth a round trip; the server treats it the same.
+    if (next && next !== current) onRename(id, next);
+    setEditing(null);
+  }
 
   return (
     <section className="settings-section">
@@ -127,17 +145,68 @@ function Organizations({
               <th scope="col">Name</th>
               <th scope="col">Members</th>
               <th scope="col">Stations</th>
+              <th scope="col" />
             </tr>
           </thead>
           <tbody>
             {data.organizations.map((o) => (
               <tr key={o.id}>
                 <th scope="row">
-                  {o.name}
-                  {o.is_platform && <span className="actuator-mark"> ·platform</span>}
+                  {editing === o.id ? (
+                    <input
+                      className="org-name-edit"
+                      value={editName}
+                      onChange={(e) => setEditName(e.target.value)}
+                      maxLength={255}
+                      autoFocus
+                      aria-label={`Rename ${o.name}`}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") saveRename(o.id, o.name);
+                        if (e.key === "Escape") setEditing(null);
+                      }}
+                    />
+                  ) : (
+                    <>
+                      {o.name}
+                      {o.is_platform && <span className="actuator-mark"> ·platform</span>}
+                    </>
+                  )}
                 </th>
                 <td>{o.member_count}</td>
                 <td>{o.is_platform ? "—" : o.station_count}</td>
+                <td className="org-actions">
+                  {editing === o.id ? (
+                    <>
+                      <button
+                        type="button"
+                        className="btn primary"
+                        disabled={busy || !editName.trim() || editName.trim() === o.name}
+                        onClick={() => saveRename(o.id, o.name)}
+                      >
+                        Save
+                      </button>
+                      <button
+                        type="button"
+                        className="btn ghost"
+                        onClick={() => setEditing(null)}
+                      >
+                        Cancel
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn ghost"
+                      disabled={busy}
+                      onClick={() => {
+                        setEditing(o.id);
+                        setEditName(o.name);
+                      }}
+                    >
+                      Rename
+                    </button>
+                  )}
+                </td>
               </tr>
             ))}
           </tbody>

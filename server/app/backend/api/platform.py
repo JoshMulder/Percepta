@@ -72,6 +72,10 @@ class OrgCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
 
 
+class OrgRename(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+
+
 class UserCreate(BaseModel):
     email: str = Field(min_length=3, max_length=320)
     display_name: str = Field(min_length=1, max_length=255)
@@ -193,6 +197,82 @@ def create_organization(
         target_id=str(org_id),
         ip_address=request.client.host if request.client else None,
         detail={"name": name},
+    )
+    return out
+
+
+@router.patch("/organizations/{organization_id}", response_model=PlatformOrgOut)
+def rename_organization(
+    organization_id: uuid.UUID,
+    body: OrgRename,
+    request: Request,
+    identity: Identity = Depends(require_platform_admin),
+    db: Session = Depends(get_db),
+) -> PlatformOrgOut:
+    """Rename an organisation.
+
+    The one field of an organisation this cross-tenant surface changes — a name
+    is how it is recognised everywhere, and only a platform admin sees enough of
+    every tenant to spot a clash. Everything else about an org is managed inside
+    it, under RLS.
+    """
+    org = db.get(Organization, organization_id)
+    if org is None:
+        raise HTTPException(status_code=404, detail="No such organisation")
+
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="A name is required")
+
+    # Case-insensitive uniqueness, matching create — but excluding this org, so a
+    # change of case in its own name is allowed and only a clash with a *different*
+    # org is refused. The column's own UNIQUE constraint is the backstop.
+    clash = db.execute(
+        select(Organization).where(
+            func.lower(Organization.name) == name.lower(),
+            Organization.id != organization_id,
+        )
+    ).scalar_one_or_none()
+    if clash is not None:
+        raise HTTPException(
+            status_code=409, detail=f"An organisation called {name!r} already exists"
+        )
+
+    member_count = db.execute(
+        select(func.count(OrganizationMembership.id)).where(
+            OrganizationMembership.organization_id == organization_id
+        )
+    ).scalar_one()
+    station_count = db.execute(
+        select(func.count(GroundStation.id)).where(
+            GroundStation.organization_id == organization_id,
+            GroundStation.is_active.is_(True),
+        )
+    ).scalar_one()
+    out = PlatformOrgOut(
+        id=str(org.id),
+        name=name,
+        is_platform=organization_id == PLATFORM_ORGANIZATION_ID,
+        member_count=member_count,
+        station_count=station_count,
+    )
+
+    previous = org.name
+    if name == previous:
+        # Nothing to change — return the current shape without a spurious audit row.
+        return out
+
+    org.name = name
+    db.commit()
+
+    record(
+        action="platform.organization.renamed",
+        organization_id=identity.organization_id,
+        actor_user_id=identity.user_id,
+        target_type="organization",
+        target_id=str(organization_id),
+        ip_address=request.client.host if request.client else None,
+        detail={"from": previous, "to": name},
     )
     return out
 

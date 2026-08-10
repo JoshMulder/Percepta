@@ -2729,6 +2729,22 @@ body {
   padding: 3px 6px;
 }
 .org-table .btn { padding: 2px 8px; font-size: 12px; }
+/* Inline rename input, matching the select beside it so a row reads as one. */
+.org-table .org-name-edit {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--text);
+  font: inherit;
+  padding: 3px 6px;
+  width: 100%;
+}
+.org-table .org-name-edit:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: -1px;
+}
+/* Save sits beside Cancel while editing; one Rename button otherwise. */
+.org-table .org-actions { display: flex; gap: 6px; }
 
 /* A checkbox reads left-to-right, unlike the stacked text fields around it. */
 .settings-pane .field.checkbox-field {

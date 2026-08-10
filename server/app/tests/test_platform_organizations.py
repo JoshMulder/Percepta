@@ -1,0 +1,170 @@
+"""Platform admins renaming organisations.
+
+`api/platform.py` is the cross-tenant surface, reachable only while the caller's
+active organisation IS the platform organisation. Renaming is the one field of
+an organisation it changes; these check that it does, refuses a clash with a
+different org, leaves an audit trail, and that an ordinary org session cannot
+reach it at all.
+"""
+
+from __future__ import annotations
+
+import uuid
+
+import pytest
+from fastapi import Depends
+from fastapi.testclient import TestClient
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from backend.auth.dependencies import get_identity
+from backend.auth.identity import Identity
+from backend.auth.password import hash_password
+from backend.auth.platform import PLATFORM_ORGANIZATION_ID, PLATFORM_ORGANIZATION_NAME
+from backend.database.dependencies import get_db
+from backend.database.models.audit_log import AuditLog
+from backend.database.models.enums import UserRole
+from backend.database.models.organization import Organization
+from backend.database.models.organization_membership import OrganizationMembership
+from backend.database.models.user import User
+from backend.database.session import set_request_org_context
+
+
+@pytest.fixture()
+def platform_client(db: Session) -> TestClient:
+    """The app as a platform administrator.
+
+    Modelled on conftest's `client`, but the active organisation is the platform
+    organisation and the session bypasses RLS — which is exactly what the real
+    platform auth path does, and what makes `api/platform.py` reachable.
+    """
+    from backend.main import app
+
+    if db.get(Organization, PLATFORM_ORGANIZATION_ID) is None:
+        db.add(Organization(id=PLATFORM_ORGANIZATION_ID, name=PLATFORM_ORGANIZATION_NAME))
+    admin = User(
+        id=uuid.uuid4(),
+        email="platform@example.test",
+        display_name="Platform Admin",
+        first_name="Platform",
+        last_name="Admin",
+        password_hash=hash_password("not-used-by-these-tests"),
+    )
+    db.add(admin)
+    db.flush()
+    db.add(OrganizationMembership(
+        id=uuid.uuid4(),
+        user_id=admin.id,
+        organization_id=PLATFORM_ORGANIZATION_ID,
+        roles=[UserRole.ADMIN.value],
+    ))
+    db.commit()
+
+    identity = Identity(
+        user_id=admin.id,
+        organization_id=PLATFORM_ORGANIZATION_ID,
+        session_id=uuid.uuid4(),
+        roles=(UserRole.ADMIN.value,),
+        is_platform_admin=True,
+    )
+
+    def _identity(session: Session = Depends(get_db)) -> Identity:
+        set_request_org_context(
+            session, organization_id=PLATFORM_ORGANIZATION_ID, bypass=True
+        )
+        return identity
+
+    app.dependency_overrides[get_identity] = _identity
+    try:
+        with TestClient(app) as test_client:
+            yield test_client
+    finally:
+        app.dependency_overrides.pop(get_identity, None)
+
+
+def test_rename_changes_the_name(platform_client, org, db):
+    response = platform_client.patch(
+        f"/api/platform/organizations/{org.id}", json={"name": "Renamed Co"}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["name"] == "Renamed Co"
+    db.expire_all()
+    assert db.get(Organization, org.id).name == "Renamed Co"
+
+
+def test_the_name_is_trimmed(platform_client, org, db):
+    assert platform_client.patch(
+        f"/api/platform/organizations/{org.id}", json={"name": "  Spaced Co  "}
+    ).status_code == 200
+    db.expire_all()
+    assert db.get(Organization, org.id).name == "Spaced Co"
+
+
+def test_rename_leaves_an_audit_trail(platform_client, org, db):
+    assert platform_client.patch(
+        f"/api/platform/organizations/{org.id}", json={"name": "Audited Co"}
+    ).status_code == 200
+    db.expire_all()
+    rows = db.execute(
+        select(AuditLog).where(AuditLog.action == "platform.organization.renamed")
+    ).scalars().all()
+    assert any(
+        r.target_id == str(org.id)
+        and (r.detail or {}).get("from") == "Test Organisation"
+        and (r.detail or {}).get("to") == "Audited Co"
+        for r in rows
+    ), "the rename left no trail"
+
+
+def test_a_clash_with_a_different_org_is_refused(platform_client, org, db):
+    db.add(Organization(id=uuid.uuid4(), name="Taken Ltd"))
+    db.commit()
+    # Case-insensitive, like create: a different case of a taken name still clashes.
+    response = platform_client.patch(
+        f"/api/platform/organizations/{org.id}", json={"name": "taken ltd"}
+    )
+    assert response.status_code == 409, response.text
+    db.expire_all()
+    assert db.get(Organization, org.id).name == "Test Organisation", "renamed anyway"
+
+
+def test_recasing_its_own_name_is_allowed(platform_client, org, db):
+    """The uniqueness check excludes the org itself, so fixing the capitalisation
+    of a name is not a clash with the name it already has."""
+    response = platform_client.patch(
+        f"/api/platform/organizations/{org.id}", json={"name": "test organisation"}
+    )
+    assert response.status_code == 200, response.text
+    db.expire_all()
+    assert db.get(Organization, org.id).name == "test organisation"
+
+
+def test_an_unknown_organisation_is_a_404(platform_client):
+    response = platform_client.patch(
+        f"/api/platform/organizations/{uuid.uuid4()}", json={"name": "Nobody"}
+    )
+    assert response.status_code == 404, response.text
+
+
+def test_a_blank_name_is_refused(platform_client, org, db):
+    # An empty string fails the schema's min_length; whitespace-only passes it and
+    # is refused in the handler after stripping. Both are 422, neither renames.
+    assert platform_client.patch(
+        f"/api/platform/organizations/{org.id}", json={"name": ""}
+    ).status_code == 422
+    assert platform_client.patch(
+        f"/api/platform/organizations/{org.id}", json={"name": "   "}
+    ).status_code == 422
+    db.expire_all()
+    assert db.get(Organization, org.id).name == "Test Organisation"
+
+
+def test_an_ordinary_org_session_cannot_rename(client, org, db):
+    """The default client is an org admin, not a platform admin — 403, and the
+    name is untouched."""
+    response = client.patch(
+        f"/api/platform/organizations/{org.id}", json={"name": "Sneaky Co"}
+    )
+    assert response.status_code == 403, response.text
+    db.expire_all()
+    assert db.get(Organization, org.id).name == "Test Organisation"
