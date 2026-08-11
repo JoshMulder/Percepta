@@ -27,17 +27,25 @@
 #     is still OFF by default — the setup page's radio tab is the switch, and it
 #     only lights up because these files are present.
 #
-# The versions are ARGs so a build can pin them; the defaults track upstream's
-# default branch. Pinning to a release for a reproducible image is the follow-up
-# the base-image digest pin below already commits this file to.
+# The versions are ARGs so a build can override them, but the defaults are
+# pinned to upstream release tags — not a moving branch — so the image is
+# reproducible and a rebuild cannot break on upstream churn. That churn is not
+# hypothetical: building whisper.cpp from master once broke the first multi-arch
+# release (see the GGML_NATIVE note in the builder stage). Bump these tags
+# deliberately and rebuild-verify both arches. This is the reproducibility
+# follow-up the base-image digest pin below already committed this file to.
+#
+# RTLSDR_REF V1.4.0 is rtl-sdr-blog's current release and, as of this pin, the
+# exact commit its master pointed at — so it locks today's driver rather than
+# changing it. Both tags are validated by the multi-arch build that set them.
 #
 # amd64 and arm64 only. 3.11 is the floor, not a preference: the agent uses
 # datetime.UTC. **The digest pin stays** — it is the multi-arch index, so it
 # selects the right manifest for whichever of the two architectures is building.
 
 ARG BASE=python:3.11-slim-bookworm@sha256:b18992999dbe963a45a8a4da40ac2b1975be1a776d939d098c647482bcad5cba
-ARG WHISPER_REF=master
-ARG RTLSDR_REF=master
+ARG WHISPER_REF=v1.9.2
+ARG RTLSDR_REF=V1.4.0
 # The ladder baked into the image, and the preferred ceiling the env points at.
 # The station picks the largest of the ladder it can run; WHISPER_MODEL caps it.
 ARG WHISPER_MODELS="small.en base.en"
@@ -95,6 +103,14 @@ RUN git clone --depth 1 --branch "${RTLSDR_REF}" \
 # assembles and runs on any arm64 box. The cost is no dotprod/i8mm SIMD on arm64,
 # so whisper is slower on a Pi 5; reclaim it with a native-arm build or an
 # explicit GGML_CPU_ARM_ARCH once the fleet's arm baseline is settled.
+#
+# Pinning WHISPER_REF to a release (top of file) does not retire this flag. Its
+# first reason — keeping the build host's detected CPU features out of a binary
+# that ships to a mixed fleet — holds at every version, and the QEMU probe
+# failure is a property of ggml's build-time detection, not of any single
+# release, so a newer tag is no reason to drop it. Confirmed at the pinned
+# v1.9.2: the arm64 half builds a real whisper-cli with this flag, on the release
+# box under QEMU emulation.
 #
 # **Copy the real CLI, not a deprecation shim.** Upstream renames this binary
 # from time to time — `main`, then `whisper-cli`, and a master build was seen
