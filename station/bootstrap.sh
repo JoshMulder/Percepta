@@ -5,15 +5,19 @@
 #   cd station && ./bootstrap.sh
 #
 # ---------------------------------------------------------------------------
-# WHAT THIS DELIBERATELY DOES NOT DO
+# WHAT THIS INSTALLS, AND WHAT IT STILL DOES NOT
 #
-# It installs nothing, configures no systemd unit, adds no udev rule and
-# touches no host package. The version this replaces did all of those — five
-# hundred lines of them — because the agent used to run on the host, and the
-# CSI camera was the one thing that could not work in a container.
+# It prepares a bare Raspberry Pi OS box to run the station, installing only
+# what is missing and only on Debian/apt: Docker and the compose plugin, chrony,
+# the udev rule and the kernel blacklist the SDR needs, and the SD-wear timers
+# off. Every step checks before it acts, so re-running is safe.
 #
-# The camera is out of scope and the agent runs in a container. The host needs
-# Docker, and nothing else.
+# What it still does NOT do is run the agent on the host. The version before
+# last did — five hundred lines of systemd unit and host packages — because the
+# agent ran outside a container and a CSI camera could not run inside one. The
+# camera is out of scope and the agent runs in a container, so what lands on the
+# host is only what the container genuinely cannot carry: the daemon that runs
+# it, the SDR's access to the USB bus, and a clock.
 #
 # Updating is:
 #
@@ -46,9 +50,127 @@ export BUILDKIT_PROGRESS=plain
 
 die() { printf '\n%s\n' "$*" >&2; exit 1; }
 
+# The clock, before the install or the build depends on it. A box whose clock is
+# behind — a Pi with no RTC that has not reached an NTP server, which is most
+# fresh ones — makes apt reject Debian's repositories as "not valid yet", and
+# the install and then the build fail a hundred lines later with an error that
+# never mentions the time. The reference, with no network to ask: this checkout
+# cannot predate the commit it is on, so a clock an hour or more before that
+# commit is wrong. A fixed floor stands in when this is not a git checkout.
+now_epoch=$(date +%s)
+clock_ref=1735689600  # 2025-01-01 UTC, before any real deploy of this code
+if command -v git >/dev/null 2>&1; then
+  commit_epoch=$(git log -1 --format=%ct 2>/dev/null || true)
+  [ -n "$commit_epoch" ] && clock_ref=$commit_epoch
+fi
+if [ "$now_epoch" -lt "$((clock_ref - 3600))" ]; then
+  die "The system clock looks wrong. It reads:
+
+    $(date)
+
+which is before this code was even committed. A clock that is behind makes apt
+reject Debian's repositories as 'not valid yet', and the install and build then
+fail with an error that never mentions the time.
+
+NTP has evidently not corrected it — on a fresh Pi that is normal — so set it by
+hand to the real current local time and run this again:
+
+    sudo date -s 'YYYY-MM-DD HH:MM:SS'"
+fi
+
+# ---------------------------------------------------------------------------
+# HOST PREP — install what a bare box is missing, and only what is missing.
+# Idempotent (every step checks first) and Debian/apt only; on any other host it
+# installs nothing and the checks below explain what to add. Privileged steps go
+# through sudo, or run directly as root.
+# ---------------------------------------------------------------------------
+if [ "$(id -u)" -eq 0 ]; then SUDO=""; can_root=1
+elif command -v sudo >/dev/null 2>&1; then SUDO="sudo"; can_root=1
+else SUDO=""; can_root=0
+fi
+reboot_wanted=0
+
+if command -v apt-get >/dev/null 2>&1 && [ "$can_root" -eq 1 ]; then
+  pkgs=""
+  command -v docker  >/dev/null 2>&1 || pkgs="$pkgs docker.io"
+  command -v chronyd >/dev/null 2>&1 || pkgs="$pkgs chrony"
+  if docker compose version >/dev/null 2>&1; then compose_ok=1; else compose_ok=0; fi
+
+  if [ -n "$pkgs" ] || [ "$compose_ok" -eq 0 ]; then
+    echo "Preparing the host — installing what is missing.${pkgs:+ Packages:$pkgs}"
+    export DEBIAN_FRONTEND=noninteractive
+    $SUDO apt-get update \
+      || die "apt-get update failed. Check the network and the clock, then run this again."
+    if [ -n "$pkgs" ]; then
+      $SUDO apt-get install -y $pkgs || die "Installing$pkgs failed — the error is above."
+    fi
+    if [ "$compose_ok" -eq 0 ]; then
+      # Compose v2 is 'docker-compose-v2' in Debian (Trixie); Docker's own repo
+      # calls it 'docker-compose-plugin'. Try one, then the other; the check
+      # further down explains it if neither is reachable.
+      $SUDO apt-get install -y docker-compose-v2 \
+        || $SUDO apt-get install -y docker-compose-plugin \
+        || echo "  No compose plugin from apt — the check below will say what to do."
+    fi
+  fi
+
+  # The daemon up now and on every boot: a station that needs a hand after a
+  # power cut is not one.
+  if command -v docker >/dev/null 2>&1; then
+    $SUDO systemctl enable --now docker >/dev/null 2>&1 || true
+  fi
+
+  # The kernel's DVB driver claims any RTL2832U on sight and then nothing else
+  # can open it — the "device busy" on a dongle nothing is using.
+  bl=/etc/modprobe.d/blacklist-rtlsdr.conf
+  if [ ! -f "$bl" ]; then
+    if printf 'blacklist dvb_usb_rtl28xxu\nblacklist rtl2832\nblacklist rtl2830\n' \
+         | $SUDO tee "$bl" >/dev/null; then
+      echo "Blacklisted the DVB driver ($bl)."
+      # The blacklist stops it loading next boot; one already loaded has to go
+      # now, or at a reboot. Try the gentle way and only ask for a reboot if the
+      # module will not unload (it is in use the moment a dongle is plugged in).
+      if lsmod 2>/dev/null | grep -q '^dvb_usb_rtl28xxu'; then
+        $SUDO modprobe -r dvb_usb_rtl28xxu rtl2832 rtl2830 2>/dev/null || reboot_wanted=1
+      fi
+    fi
+  fi
+
+  # So the container (running as 'gsu' in the plugdev group) can open the raw USB
+  # node without root. The rule ships in the checkout.
+  if [ -f deploy/99-percepta-sdr.rules ] && [ ! -f /etc/udev/rules.d/99-percepta-sdr.rules ]; then
+    if $SUDO cp deploy/99-percepta-sdr.rules /etc/udev/rules.d/; then
+      $SUDO udevadm control --reload >/dev/null 2>&1 || true
+      $SUDO udevadm trigger >/dev/null 2>&1 || true
+      echo "Installed the SDR udev rule."
+    fi
+  fi
+
+  # This box writes events and audio to the SD card without pause, and the card
+  # is the likeliest failure on a remote site — so stop the routine churn that is
+  # pure wear on an appliance: man-db's reindex and apt's daily jobs.
+  $SUDO systemctl disable --now man-db.timer apt-daily.timer apt-daily-upgrade.timer >/dev/null 2>&1 || true
+
+elif ! command -v docker >/dev/null 2>&1; then
+  if [ "$can_root" -eq 0 ]; then
+    echo "Docker is missing and this user cannot install it (no sudo, not root)."
+  else
+    echo "This is not a Debian/apt host, so nothing was installed."
+  fi
+  echo "Install Docker and the compose plugin, then run this again."
+fi
+
+if [ "$reboot_wanted" -eq 1 ]; then
+  printf '\n%s\n' "NOTE: the DVB driver is blacklisted but still loaded, so the SDR will not
+open until you reboot. Everything else can continue now — reboot before you
+rely on the radio."
+fi
+
 command -v docker >/dev/null 2>&1 \
-  || die "Docker is not installed. That is the only thing this box needs.
-Install it (https://docs.docker.com/engine/install/) and run this again."
+  || die "Docker is still not installed. The host prep above could not add it —
+most likely this is not a Debian/apt box, or this user cannot use sudo. Install
+Docker and the compose plugin by hand
+(https://docs.docker.com/engine/install/) and run this again."
 
 docker compose version >/dev/null 2>&1 \
   || die "Docker is installed but the compose plugin is not.
@@ -97,40 +219,6 @@ $docker_diag
 If it is not running, start it (on most systems: sudo systemctl start docker)
 and run this again." ;;
   esac
-fi
-
-# The clock, before the build depends on it. A box whose clock is behind — a Pi
-# with no RTC that has not reached an NTP server, which is most fresh ones —
-# makes apt reject Debian's repositories as "not valid yet", and the build then
-# fails a hundred lines later with an error that never mentions the time. The
-# reference, with no network to ask: this checkout cannot predate the commit it
-# is on, so a clock an hour or more before that commit is wrong. A fixed floor
-# stands in when this is not a git checkout.
-now_epoch=$(date +%s)
-clock_ref=1735689600  # 2025-01-01 UTC, before any real deploy of this code
-if command -v git >/dev/null 2>&1; then
-  commit_epoch=$(git log -1 --format=%ct 2>/dev/null || true)
-  [ -n "$commit_epoch" ] && clock_ref=$commit_epoch
-fi
-if [ "$now_epoch" -lt "$((clock_ref - 3600))" ]; then
-  die "The system clock looks wrong. It reads:
-
-    $(date)
-
-which is before this code was even committed. A clock that is behind makes apt
-reject Debian's repositories as 'not valid yet', and the build then fails with
-an error that never mentions the time.
-
-NTP has evidently not corrected it — on a fresh Pi that is normal — so set it by
-hand to the real current local time and run this again:
-
-    sudo date -s 'YYYY-MM-DD HH:MM:SS'
-
-Then, once the box is up, get NTP working so it stays right — a station's TLS,
-its enrolment token and every timestamp depend on the clock:
-
-    sudo apt-get install --reinstall chrony   # recreates chrony's user, if missing
-    sudo systemctl restart chrony"
 fi
 
 # Existing values become the defaults, so re-running is safe and changing one
