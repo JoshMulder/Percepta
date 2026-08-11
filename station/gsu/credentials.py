@@ -117,6 +117,12 @@ class Enrolment:
     site: Site
     config_version: int
     enrolled_at: datetime
+    #: The cosign public keys the platform handed us at enrolment to verify
+    #: update signatures (server/docs/07), written to the updater's handoff so its
+    #: `cosign verify` has them. A tuple, so this frozen record stays immutable
+    #: and hashable; empty on a platform that ships none. A renewal returns the
+    #: whole record, so a rotated set arrives the same way — see `with_credential`.
+    update_signing_keys: tuple[str, ...] = ()
 
     @classmethod
     def from_response(cls, body: dict, at: datetime | None = None) -> Enrolment:
@@ -152,6 +158,7 @@ class Enrolment:
             ),
             config_version=int(body.get("config_version", 0)),
             enrolled_at=at or clock.now(),
+            update_signing_keys=tuple(body.get("update_signing_keys") or ()),
         )
 
     def to_json(self) -> str:
@@ -177,6 +184,7 @@ class Enrolment:
             site=Site(**data["site"]),
             config_version=int(data.get("config_version", 0)),
             enrolled_at=clock.parse(data.get("enrolled_at")) or clock.now(),
+            update_signing_keys=tuple(data.get("update_signing_keys") or ()),
         )
 
     def with_credential(self, other: Enrolment) -> Enrolment:

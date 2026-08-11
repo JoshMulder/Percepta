@@ -758,6 +758,10 @@ class Agent:
             self.enrolment = enrolment
 
             self._persist_ca(enrolment)
+            # The cosign keys the platform pinned us with, into the updater's
+            # handoff — like the CA, and refreshed the same way a rotation arrives
+            # on renewal (see _on_renewed).
+            self.updates.store_signing_keys(enrolment.update_signing_keys)
 
             # The platform states its own address, which on a development stack
             # is frequently only routable from inside it. The override exists
@@ -962,8 +966,10 @@ class Agent:
     def _on_renewed(self, enrolment: Enrolment) -> None:
         self.enrolment = enrolment
         # A renewal returns the whole response, CA included, so this is where a
-        # rotated CA arrives on a station that never re-enrols.
+        # rotated CA — and a rotated update-signing key — arrive on a station that
+        # never re-enrols.
         self._persist_ca(enrolment)
+        self.updates.store_signing_keys(enrolment.update_signing_keys)
         if self.transport is not None:
             self.transport.set_credential(enrolment.credential.secret)
         self.store.record_event(

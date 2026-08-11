@@ -17,6 +17,7 @@ to replace itself.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -72,6 +73,32 @@ class UpdateCoordinator:
         log.info("Update requested: %s@%s (tag %s), from %s.",
                  image, digest[:16], marker["tag"] or "-", self.version)
         return f"requested {marker['tag'] or digest[:16]}"
+
+    def store_signing_keys(self, keys: tuple[str, ...]) -> None:
+        """Write the cosign public keys the platform pinned us with into the
+        handoff, where the host updater's `cosign verify --key` reads them.
+
+        Enrolment and every renewal hand over the whole set, and this replaces it
+        wholesale — each key its own file, named by its own hash so an unchanged
+        key keeps its name, and any file no longer in the set is removed. That is
+        what makes a rotation (add the new key; later drop the old) land here
+        without a site visit: the updater verifies against whatever is present,
+        so old-and-new both work through the overlap and the old one simply stops
+        being written once the platform stops sending it.
+        """
+        keys_dir = self.handoff_dir / "signing-keys"
+        keys_dir.mkdir(parents=True, exist_ok=True)
+        wanted: dict[str, str] = {
+            f"cosign-{hashlib.sha256(pem.encode()).hexdigest()[:16]}.pub": pem
+            for pem in keys
+        }
+        for name, pem in wanted.items():
+            tmp = (keys_dir / name).with_suffix(".tmp")
+            tmp.write_text(pem)
+            tmp.replace(keys_dir / name)
+        for existing in keys_dir.glob("*.pub"):
+            if existing.name not in wanted:
+                existing.unlink(missing_ok=True)
 
     @property
     def desired_version(self) -> str | None:

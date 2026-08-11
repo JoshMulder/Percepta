@@ -18,6 +18,45 @@ class UpdateCoordinatorTests(unittest.TestCase):
     def _coord(self, directory, version="2.3.1"):
         return UpdateCoordinator(version, Path(directory) / "update")
 
+    def test_signing_keys_are_written_and_pruned(self):
+        with tempfile.TemporaryDirectory() as directory:
+            coord = self._coord(directory)
+            keys_dir = Path(directory) / "update" / "signing-keys"
+
+            coord.store_signing_keys(("KEY-A", "KEY-B"))
+            self.assertEqual(
+                sorted(p.read_text() for p in keys_dir.glob("*.pub")),
+                ["KEY-A", "KEY-B"])
+            # A rotation: keep one, add one, drop one.
+            coord.store_signing_keys(("KEY-B", "KEY-C"))
+            self.assertEqual(
+                sorted(p.read_text() for p in keys_dir.glob("*.pub")),
+                ["KEY-B", "KEY-C"])
+            # An empty set — a platform that ships none — clears them, so nothing
+            # verifies and nothing runs.
+            coord.store_signing_keys(())
+            self.assertEqual(list(keys_dir.glob("*.pub")), [])
+
+    def test_the_enrolment_carries_and_persists_the_signing_keys(self):
+        from gsu.credentials import Enrolment
+        body = {
+            "station_id": "s1",
+            "credential": {
+                "secret": "x",
+                "expires_at": "2099-01-01T00:00:00+00:00",
+                "renew_after": "2098-01-01T00:00:00+00:00",
+            },
+            "broker": {"url": "wss://example/broker"},
+            "station": {},
+            "config_version": 0,
+            "update_signing_keys": ["KEY-A", "KEY-B"],
+        }
+        enrol = Enrolment.from_response(body)
+        self.assertEqual(enrol.update_signing_keys, ("KEY-A", "KEY-B"))
+        # Survives the on-disk round-trip the store uses.
+        restored = Enrolment.from_json(enrol.to_json())
+        self.assertEqual(restored.update_signing_keys, ("KEY-A", "KEY-B"))
+
     def test_a_request_writes_the_target_marker(self):
         with tempfile.TemporaryDirectory() as directory:
             coord = self._coord(directory)
