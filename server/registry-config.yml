@@ -1,0 +1,19 @@
+# Registry storage on S3-compatible object storage (e.g. Cloudflare R2), mounted
+# by docker-compose.r2.yaml over registry:2's default config. See
+# server/docs/07-remote-update-distribution.md.
+#
+# It declares ONLY the storage driver and the listen address. Every bucket,
+# endpoint and credential comes from the environment (REGISTRY_STORAGE_S3_* /
+# REGISTRY_STORAGE_REDIRECT_* / REGISTRY_STORAGE_DELETE_*, fed from .env), and the
+# auth block comes from the base compose's REGISTRY_AUTH_TOKEN_* — so nothing
+# site-specific is committed here, and no IP or hostname is baked in.
+#
+# This exists because registry:2 refuses to start with two storage drivers: the
+# base compose's filesystem storage and an S3 driver cannot both be configured.
+# When this file is in use the base's filesystem env is absent (see the compose
+# comment), so only S3 is declared and there is no conflict.
+version: 0.1
+storage:
+  s3:
+http:
+  addr: :5000

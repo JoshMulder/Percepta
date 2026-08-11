@@ -21,6 +21,7 @@ the platform's self-signed certificate, neither of which belongs anywhere near a
 real deployment.
 """
 
+from _env import platform_url
 import argparse
 import asyncio
 import os
@@ -36,7 +37,7 @@ except ImportError:
         "  .venv/bin/python -m playwright install chromium"
     )
 
-BASE = os.environ.get("PERCEPTA_URL", "https://192.168.2.49:8000")
+BASE = platform_url()
 EMAIL = os.environ.get("PERCEPTA_EMAIL", "admin@percepta.local")
 PASSWORD = os.environ.get("PERCEPTA_PASSWORD", "percepta-dev-2026")
 

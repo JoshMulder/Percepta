@@ -4,9 +4,10 @@ readyState and videoWidth come from the media element itself, so a pass here
 means the browser actually decoded H.264 that arrived through the relay - not
 that bytes moved.
 """
+from _env import platform_url
 import asyncio, os
 from playwright.async_api import async_playwright
-BASE = os.environ.get("PERCEPTA_URL", "https://192.168.2.49:8000")
+BASE = platform_url()
 async def main():
     async with async_playwright() as p:
         b = await p.chromium.launch(args=["--autoplay-policy=no-user-gesture-required"])

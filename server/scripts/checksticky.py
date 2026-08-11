@@ -6,13 +6,14 @@ pixels of the row sliding under the dialog header, which a screenshot of a dark
 UI hides completely.
 """
 
+from _env import platform_url
 import asyncio
 import os
 import sys
 
 from playwright.async_api import async_playwright
 
-BASE = os.environ.get("PERCEPTA_URL", "https://192.168.2.49:8000")
+BASE = platform_url()
 EMAIL = os.environ.get("PERCEPTA_EMAIL", "admin@percepta.local")
 PASSWORD = os.environ.get("PERCEPTA_PASSWORD", "percepta-dev-2026")
 

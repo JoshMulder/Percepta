@@ -49,6 +49,7 @@ else
         -e "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$(gen 24)|" \
         -e "s|^APP_DB_PASSWORD=.*|APP_DB_PASSWORD=$(gen 24)|" \
         -e "s|^SECRET_KEY=.*|SECRET_KEY=$(gen 48)|" \
+        -e "s|^REGISTRY_ROBOT_TOKEN=.*|REGISTRY_ROBOT_TOKEN=$(gen 32)|" \
         -e "s|^POSTGRES_HOST=.*|POSTGRES_HOST=postgres|" \
         -e "s|^REDIS_URL=.*|REDIS_URL=redis://redis:6379/0|" \
         .env

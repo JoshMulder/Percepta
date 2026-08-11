@@ -9,13 +9,14 @@ Development only - it signs in with the seeded development credentials and
 trusts the platform's self-signed certificate.
 """
 
+from _env import platform_url
 import asyncio
 import os
 import sys
 
 from playwright.async_api import async_playwright
 
-BASE = os.environ.get("PERCEPTA_URL", "https://192.168.2.49:8000")
+BASE = platform_url()
 EMAIL = os.environ.get("PERCEPTA_EMAIL", "admin@percepta.local")
 PASSWORD = os.environ.get("PERCEPTA_PASSWORD", "percepta-dev-2026")
 

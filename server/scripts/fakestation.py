@@ -4,9 +4,10 @@ Splits the file at `moof` boundaries: everything before the first one is the
 initialisation segment, and each `moof`+`mdat` after it is a media fragment -
 which is exactly the framing the contract asks a station for.
 """
+from _env import platform_host
 import asyncio, os, ssl, sys, websockets
 
-HOST = os.environ.get("PERCEPTA_HOST", "192.168.2.49:8000")
+HOST = platform_host()
 CA = os.environ.get("PERCEPTA_CA", "/certs/ca.crt")
 SECRET = os.environ["STATION_SECRET"]
 PATH = os.environ.get("MP4", "/out/test.mp4")

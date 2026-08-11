@@ -177,7 +177,11 @@ services:
     container_name: percepta-registry
     restart: unless-stopped
     environment:
-      REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY: /var/lib/registry
+      # Storage is the image's default filesystem driver at /var/lib/registry
+      # (the registry_data volume below). NOT set explicitly on purpose: an
+      # explicit filesystem env here would collide with the S3 driver when the
+      # r2 overlay is applied (registry:2 refuses two storage drivers), and the
+      # image default is the same path. See docker-compose.r2.yaml.
       REGISTRY_STORAGE_DELETE_ENABLED: "true"
       REGISTRY_AUTH: token
       # REALM is this platform's token endpoint; SERVICE and ISSUER must match

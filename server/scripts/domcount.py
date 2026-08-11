@@ -1,6 +1,7 @@
+from _env import platform_url
 import asyncio, os
 from playwright.async_api import async_playwright
-BASE=os.environ.get("PERCEPTA_URL","https://192.168.2.49:8000")
+BASE=platform_url()
 async def main():
     async with async_playwright() as p:
         b=await p.chromium.launch(); c=await b.new_context(viewport={"width":1920,"height":1080},ignore_https_errors=True)
