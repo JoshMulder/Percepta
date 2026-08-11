@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import type { Capability, Me, RadioPayload } from "../types";
+import type { Capability, HealthPayload, Me, RadioPayload } from "../types";
 import { SettingsAccount } from "./SettingsAccount";
 import { SettingsDisplay } from "./SettingsDisplay";
 import { SettingsOrganization } from "./SettingsOrganization";
 import { SettingsPlatform } from "./SettingsPlatform";
 import { SettingsRadio } from "./SettingsRadio";
+import { SettingsUpdate } from "./SettingsUpdate";
 
 /**
  * The settings overlay.
@@ -22,13 +23,14 @@ import { SettingsRadio } from "./SettingsRadio";
  * unpleasant to use. Different job, different rules.
  */
 
-type Tab = "account" | "display" | "radio" | "organization" | "platform";
+type Tab = "account" | "display" | "radio" | "update" | "organization" | "platform";
 
 export function Settings({
   me,
   stationId,
   stationName,
   radio,
+  health,
   capabilities,
   onClose,
   onProfileChanged,
@@ -41,6 +43,9 @@ export function Settings({
   /** Live radio telemetry for the station being watched. The Radio pane shows a
    *  signal meter, which only exists for the station currently subscribed. */
   radio: RadioPayload | null;
+  /** Live health telemetry for the watched station. The Update pane reads the
+   *  running/desired version and last update result from `health.software`. */
+  health: HealthPayload | null;
   capabilities: Capability[];
   onClose: () => void;
   onProfileChanged: (displayName: string) => void;
@@ -57,12 +62,18 @@ export function Settings({
   // inside it are gated on config.write separately.
   const canRadio = capabilities.includes("radio.listen") && stationId !== null;
 
+  // Its own capability (station.update), the most consequential grant. Hidden,
+  // not disabled, when the operator lacks it — a disabled tab advertises a power
+  // they do not have.
+  const canUpdate = capabilities.includes("station.update") && stationId !== null;
+
   const tabs: { id: Tab; label: string }[] = [
     { id: "account", label: "My account" },
     // Available to everyone: these are display choices for the person looking,
     // gated by no capability.
     { id: "display", label: "Map" },
     ...(canRadio ? [{ id: "radio" as Tab, label: "Radio" }] : []),
+    ...(canUpdate ? [{ id: "update" as Tab, label: "Software" }] : []),
     ...(isAdmin ? [{ id: "organization" as Tab, label: "Organisation" }] : []),
     // Only while the active org IS the platform org. A platform admin working
     // inside a customer's organisation does not get this.
@@ -135,6 +146,14 @@ export function Settings({
             {tab === "radio" && (
               <SettingsRadio
                 radio={radio}
+                caps={capabilities}
+                stationId={stationId}
+                stationName={stationName}
+              />
+            )}
+            {tab === "update" && (
+              <SettingsUpdate
+                health={health}
                 caps={capabilities}
                 stationId={stationId}
                 stationName={stationName}

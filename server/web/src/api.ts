@@ -200,6 +200,26 @@ export const api = {
       body: JSON.stringify({ on }),
     }),
 
+  /** Push a signed software update to a station (system.update). 202 like the
+   *  rest: the station is told, and what it ends up running comes back on the
+   *  health stream as its software version. `digest` is the immutable pin the
+   *  station verifies and runs; `tag` is a human label; `force` re-attempts a
+   *  digest a previous try rejected. Needs station.update — the console hides the
+   *  control without it, and the API is the real gate. */
+  updateStation: (
+    id: string,
+    body: { image: string; digest: string; tag?: string; force?: boolean },
+  ) =>
+    request<{ accepted: boolean }>(`/api/stations/${id}/update`, {
+      method: "POST",
+      body: JSON.stringify({
+        image: body.image,
+        digest: body.digest,
+        tag: body.tag ?? "",
+        force: body.force ?? false,
+      }),
+    }),
+
   /* Settings. Everything below needs config.write at the station, or org admin
      for the organisation routes. A 404 here means "not yours", the same as
      everywhere else — the API never distinguishes that from "does not exist". */

@@ -11,7 +11,10 @@ export type Capability =
   | "radio.transmit"
   | "light.control"
   | "media.review"
-  | "config.write";
+  | "config.write"
+  // Its own capability, not config.write: pushing a signed image is the most
+  // consequential thing an operator can do here (server auth/capabilities.py).
+  | "station.update";
 
 export interface Me {
   user_id: string;
@@ -324,6 +327,20 @@ export interface HealthPayload extends Availability {
   kind: "health";
   status?: "ok" | "degraded" | "failing";
   agent_version?: string;
+  /** The running software version and, while a remote update is in flight, the
+   *  desired version and the host updater's last result. From the station's
+   *  UpdateCoordinator (station/gsu/update.py); see DECISIONS item 49. Absent on
+   *  an older agent, which reports only `agent_version` — a build constant that
+   *  never moves across a release, so it can show neither an update landing nor a
+   *  rollback. `running_version` is the same string but the field that carries
+   *  update state alongside it. */
+  software?: {
+    running_version?: string;
+    desired_version?: string;
+    update_last_result?: string;
+    update_last_version?: string;
+    update_at?: string;
+  };
   config_version?: number;
   uptime_s?: number;
   conditions?: HealthCondition[];

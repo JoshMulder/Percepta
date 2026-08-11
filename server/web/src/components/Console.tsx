@@ -1236,6 +1236,7 @@ export function Console({
           stationId={stationId}
           stationName={stations.find((s) => s.id === stationId)?.name ?? null}
           radio={radio}
+          health={health}
           capabilities={caps}
           onClose={() => setSettingsOpen(false)}
           onProfileChanged={setDisplayName}
@@ -1350,6 +1351,7 @@ export function Console({
           stationId={stationId}
           stationName={stations.find((s) => s.id === stationId)?.name ?? null}
           radio={radio}
+          health={health}
           capabilities={caps}
           onClose={() => setSettingsOpen(false)}
           onProfileChanged={setDisplayName}
