@@ -49,6 +49,21 @@ class Settings(BaseSettings):
     secret_key: str = Field(default=DEFAULT_SECRET_KEY)
     access_token_expire_minutes: int = 60 * 12
 
+    # --- Registry token auth (remote update, server/docs/07) ---------------
+    #: The RSA private key that signs the short-lived JWTs the private registry
+    #: accepts (its self-signed cert is the registry's rootcertbundle). The
+    #: issuer and service (JWT audience) must match the registry's config exactly.
+    registry_token_key_file: str = "/certs/registry-token.key"
+    registry_token_issuer: str = "percepta-platform"
+    registry_token_service: str = "registry.percepta.aeronavics.com"
+    registry_token_ttl_seconds: int = 300
+    #: The one repository a station may pull; anything else is granted no access.
+    registry_repository: str = "percepta-gsu"
+    #: The release box's push credential. Unset until set on the platform, so no
+    #: robot exists by default and only pull tokens can be minted.
+    registry_robot_user: str | None = None
+    registry_robot_token: str | None = None
+
     # Set the Secure flag on the session cookie. Off by default so local HTTP
     # development works; it must be on anywhere reachable over a network, or the
     # session cookie can be sent in clear.
