@@ -3702,14 +3702,24 @@ body {
 .kpi.gold .kpi-value { color: #f5c518; }
 .kpi.neutral { border-left-color: var(--dim); }
 
-/* Overview: map beside the attention rail */
+/* Overview: map beside the attention rail, filling the window height */
+.pdash-overview {
+  display: flex;
+  flex-direction: column;
+}
 .pdash-overview-grid {
   display: grid;
   grid-template-columns: 1fr 320px;
   gap: 14px;
+  /* Grow to fill the pane below the KPI row, so the map is the full window
+     height rather than a fixed 470px block with dead space beneath it. */
+  flex: 1 1 auto;
   min-height: 470px;
 }
 @media (max-width: 940px) {
+  /* Stacked and back to normal flow, so a short window scrolls the pane instead
+     of squashing the map and the rail together. */
+  .pdash-overview { display: block; }
   .pdash-overview-grid { grid-template-columns: 1fr; }
   .pdash-map-wrap { min-height: 380px; }
 }
