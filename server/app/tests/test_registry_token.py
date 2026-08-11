@@ -83,6 +83,27 @@ def test_a_station_gets_a_pull_only_token(client, db, station, org, public_key):
     assert header["kid"]  # the registry matches this against its bundle
 
 
+def test_station_auth_runs_on_a_privileged_session(client, db, station, org, public_key, monkeypatch):
+    """Station auth must use a privileged (RLS-bypassing) session, like the broker.
+    The station is *derived* from the secret, so there is no org context to scope a
+    query to; a request-scoped session under row-level security sees zero credential
+    rows and 401s every real station. The unit database bypasses RLS, so a plain
+    functional test cannot catch a reversion to `get_db` — this spies on the session
+    factory instead, and would fail the moment station auth stopped using it."""
+    _give_credential(db, station, org, "priv-me")
+    import backend.api.registry as reg
+    calls: list[int] = []
+    real = reg.PrivilegedSessionLocal
+    monkeypatch.setattr(reg, "PrivilegedSessionLocal",
+                        lambda *a, **k: (calls.append(1), real(*a, **k))[1])
+    resp = client.get("/v2/token", params={
+        "service": settings.registry_token_service,
+        "scope": f"repository:{settings.registry_repository}:pull",
+    }, headers=_basic(str(station.id), "priv-me"))
+    assert resp.status_code == 200, resp.text
+    assert calls, "issue_token must authenticate the station on a PrivilegedSessionLocal"
+
+
 def test_the_response_envelope_is_what_the_docker_client_parses(client, db, station, org, public_key):
     """`issued_at` must be an RFC3339 *string*, not the JWT's numeric `iat`. The
     Docker client unmarshals it into a Go time.Time and rejects the entire

@@ -301,19 +301,21 @@ services:
     restart: unless-stopped
     init: true
     environment:
-      GSU_IMAGE: ${GSU_IMAGE:-ghcr.io/joshmulder/percepta-gsu}
+      GSU_IMAGE: ${GSU_IMAGE:-registry.percepta.aeronavics.com/percepta-gsu}
       GSU_COMPOSE_DIR: /workspace
       GSU_ENV_FILE: /workspace/.env
       GSU_UPDATE_HANDOFF: /handoff
       GSU_UPDATE_STATE: /var/lib/updater
       GSU_AGENT_CONTAINER: percepta-gsu
       GSU_AGENT_SERVICE: gsu
-      GSU_COSIGN_IDENTITY: ${GSU_COSIGN_IDENTITY:-^https://github.com/JoshMulder/Percepta/.github/workflows/release.yml@refs/tags/v.*}
-      GSU_COSIGN_ISSUER: ${GSU_COSIGN_ISSUER:-https://token.actions.githubusercontent.com}
-      # A read-only registry pull token, from .env. Empty means the image is
-      # public or docker is already logged in on the box.
-      GSU_REGISTRY_USER: ${GSU_REGISTRY_USER:-}
-      GSU_REGISTRY_TOKEN: ${GSU_REGISTRY_TOKEN:-}
+      # Neither the signing keys nor the registry credential are configured here.
+      # The agent writes both into the shared handoff at enrolment and every
+      # renewal — signing-keys/*.pub and registry-credential.json — and
+      # gsu-update.sh reads them there (a private-key cosign verify against the
+      # pinned keys, and a docker login with the station's own bearer secret).
+      # So nothing update-specific lives in this service's env, and a key rotation
+      # or a credential refresh lands with no compose change. The old keyless
+      # cosign identity/issuer and a static pull token are gone with that design.
       GSU_UPDATE_GATE_S: ${GSU_UPDATE_GATE_S:-180}
       GSU_UPDATE_POLL_S: ${GSU_UPDATE_POLL_S:-30}
     volumes:

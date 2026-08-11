@@ -39,11 +39,10 @@ from functools import lru_cache
 
 import jwt
 from cryptography.hazmat.primitives import serialization
-from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, HTTPException, Request
 
 from backend.core.config import settings
-from backend.database.dependencies import get_db
+from backend.database.session import PrivilegedSessionLocal
 from backend.services import enrolment
 
 router = APIRouter(tags=["registry"])
@@ -91,7 +90,6 @@ def issue_token(
     request: Request,
     service: str = "",
     scope: str = "",
-    db: Session = Depends(get_db),
 ) -> dict:
     """Authenticate a pull (station credential) or a push (robot credential) and
     mint the scoped, short-lived JWT the registry accepts."""
@@ -114,10 +112,17 @@ def issue_token(
             raise HTTPException(status_code=401, detail="bad robot credential")
         subject = user
     else:
-        found = enrolment.authenticate(db, secret=password)
-        if found is None:
-            raise HTTPException(status_code=401, detail="credential not recognised")
-        subject = str(found[0].id)
+        # Station auth runs WITHOUT an org context: the station is *derived* from
+        # the secret, so there is no tenant to scope a query to yet. A
+        # request-scoped (RLS-enforcing) session sees zero credential rows and
+        # rejects every real station — the broker authenticates the same way, on
+        # a privileged session (api/broker.py). The unit tests bypass RLS (schema
+        # owner), so only a real RLS deployment surfaced this.
+        with PrivilegedSessionLocal() as db:
+            found = enrolment.authenticate(db, secret=password)
+            if found is None:
+                raise HTTPException(status_code=401, detail="credential not recognised")
+            subject = str(found[0].id)
 
     # A station gets pull; the robot gets whatever it asks. A scope for any other
     # repository grants nothing — the token is still valid for `docker login`,
