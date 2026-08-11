@@ -124,16 +124,17 @@ if command -v apt-get >/dev/null 2>&1 && [ "$can_root" -eq 1 ]; then
   # can open it — the "device busy" on a dongle nothing is using.
   bl=/etc/modprobe.d/blacklist-rtlsdr.conf
   if [ ! -f "$bl" ]; then
-    if printf 'blacklist dvb_usb_rtl28xxu\nblacklist rtl2832\nblacklist rtl2830\n' \
-         | $SUDO tee "$bl" >/dev/null; then
-      echo "Blacklisted the DVB driver ($bl)."
-      # The blacklist stops it loading next boot; one already loaded has to go
-      # now, or at a reboot. Try the gentle way and only ask for a reboot if the
-      # module will not unload (it is in use the moment a dongle is plugged in).
-      if lsmod 2>/dev/null | grep -q '^dvb_usb_rtl28xxu'; then
-        $SUDO modprobe -r dvb_usb_rtl28xxu rtl2832 rtl2830 2>/dev/null || reboot_wanted=1
-      fi
-    fi
+    printf 'blacklist dvb_usb_rtl28xxu\nblacklist rtl2832\nblacklist rtl2830\n' \
+      | $SUDO tee "$bl" >/dev/null && echo "Blacklisted the DVB driver ($bl)."
+  fi
+  # The blacklist only stops it loading next boot; anything already bound has to
+  # be dropped now or at a reboot — and this runs whether the blacklist was just
+  # written or written on an earlier run that never rebooted. On a Pi 5 the whole
+  # stack loads (the SDR module, the USB driver, the DVB core), so take them
+  # leaf-first and ask for a reboot only if one is pinned.
+  if lsmod 2>/dev/null | grep -q '^dvb_usb_rtl28xxu'; then
+    $SUDO modprobe -r rtl2832_sdr dvb_usb_rtl28xxu dvb_usb_v2 rtl2832 rtl2830 dvb_core \
+      2>/dev/null || reboot_wanted=1
   fi
 
   # So the container (running as 'gsu' in the plugdev group) can open the raw USB
