@@ -253,6 +253,21 @@ technician on site.
                                      // health.config_version. Two copies of
                                      // one number is the thing §7 forbids for
                                      // position, and it applies here too.
+  "update_signing_keys": ["…"],      // the cosign public keys a station pins to
+                                     // verify an update image's signature
+                                     // (server/docs/07 and §5). A list so a key
+                                     // rotation hands out old and new together
+                                     // and a signature matching any one
+                                     // verifies; the station persists them all
+                                     // and re-reads the set on each enrolment
+                                     // and renewal, so a rotated key arrives the
+                                     // same way the credential does. Absent or
+                                     // empty means this platform has configured
+                                     // no signing key, so nothing verifies and
+                                     // no update runs — the safe default, never
+                                     // a downgrade to unsigned. Additive in 2.1
+                                     // beside the `system.update` command; a
+                                     // station that predates it ignores it.
   "contract_version": "2.1"          // which version of this contract the
                                      // platform speaks. Stated so a station
                                      // learns it at the one moment both sides
@@ -468,6 +483,16 @@ install, its fingerprint checked by eye — because trusting the first thing the
 network shows you would let whoever intercepts that first call issue the
 credential. The station refuses to enrol over a link it cannot verify, rather
 than trusting on first use.
+
+**The update signing keys arrive the same way the broker CA does.**
+`update_signing_keys` (§4) carries the cosign public keys a station pins to
+verify a software update's signature — a trust root like `broker.ca_pem`,
+delivered in the enrolment response, persisted beside the credential, and
+refreshed on renewal so a key rotation reaches an unattended fleet without a
+site visit. An empty set means no update can be verified and none runs, which is
+the safe default rather than a downgrade to unsigned images. This is the
+enrolment half of the update path §9.5 leaves open; the mechanism it feeds is
+`server/docs/07-remote-update-distribution.md`.
 
 ---
 
