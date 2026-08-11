@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+import os
 import threading
 import time
 
@@ -140,6 +141,27 @@ class RtlSdrFrontEnd:
             bw = 8000.0
         self.channel_bw_hz = min(8000.0, max(2000.0, bw))
         self.voice_filter = self._coerce_bool(voice_filter)
+        # TEMPORARY, while this station is a Pi 2B on a 15 W supply that must
+        # also carry the video stream: the polyphase anti-alias FIR is the
+        # dominant demod cost, and a shorter one trades a little stopband — masked
+        # by the voice band-pass anyway — for the CPU headroom to stay real time
+        # while ffmpeg shares the core. GSU_RADIO_DECIM_TAPS overrides the 251-tap
+        # full-quality default; unset (the Pi 5, once it can be powered from ~27 W)
+        # keeps full quality. firwin needs an odd count for linear phase.
+        taps_env = os.environ.get("GSU_RADIO_DECIM_TAPS")
+        decim_taps = 251
+        if taps_env:
+            try:
+                decim_taps = int(taps_env)
+            except ValueError:
+                log.warning(
+                    "GSU_RADIO_DECIM_TAPS=%r is not an integer; using 251.",
+                    taps_env,
+                )
+                decim_taps = 251
+        if decim_taps < 1:
+            decim_taps = 251
+        self.decim_taps = decim_taps if decim_taps % 2 else decim_taps + 1
         #: The inventory allocates a tuner by serial number, as `rtlsdr:<serial>`.
         self.serial_hint = resource.split(":", 1)[1] if ":" in resource else ""
         if self.serial_hint.startswith("unprogrammed@"):
@@ -469,6 +491,7 @@ class RtlSdrFrontEnd:
             self._demod = am.AmDemodulator(
                 SAMPLE_RATE, AUDIO_RATE, OFFSET_HZ,
                 cutoff_hz=self.channel_bw_hz, voice_filter=self.voice_filter,
+                numtaps=self.decim_taps,
             )
             self._device = device
             self._failures = 0
