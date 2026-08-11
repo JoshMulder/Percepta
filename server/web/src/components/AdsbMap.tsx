@@ -471,7 +471,7 @@ function AdsbMapInner({
           const el = document.createElement("div");
           el.className = "map-ring-label";
           el.textContent = `${km} km`;
-          new maplibregl.Marker({ element: el })
+          new maplibregl.Marker({ element: el, subpixelPositioning: true })
             .setLngLat([lon, lat + km / 110.574])
             .addTo(map);
         }
@@ -479,7 +479,9 @@ function AdsbMapInner({
 
       const dot = document.createElement("div");
       dot.className = "map-station";
-      new maplibregl.Marker({ element: dot }).setLngLat(centre).addTo(map);
+      new maplibregl.Marker({ element: dot, subpixelPositioning: true })
+        .setLngLat(centre)
+        .addTo(map);
     });
 
     return () => {
@@ -656,7 +658,7 @@ function AdsbMapInner({
             pinRef.current(contact.icao);
           });
         }
-        marker = new maplibregl.Marker({ element: el }).setLngLat(pos).addTo(map);
+        marker = new maplibregl.Marker({ element: el, subpixelPositioning: true }).setLngLat(pos).addTo(map);
         existing.set(contact.icao, marker);
       } else {
         marker.setLngLat(pos);
@@ -805,7 +807,7 @@ function AdsbMapInner({
         const el = document.createElement("div");
         el.style.cssText =
           "width:8px;height:8px;background:#00e5ff;border:1.5px solid #002;border-radius:1px;";
-        debugMarkerRef.current = new maplibregl.Marker({ element: el })
+        debugMarkerRef.current = new maplibregl.Marker({ element: el, subpixelPositioning: true })
           .setLngLat(chosenAt)
           .addTo(map);
       } else {
