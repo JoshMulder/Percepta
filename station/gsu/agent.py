@@ -1437,8 +1437,6 @@ class Agent:
         """
         if self.radio is None:
             return None
-        self._radio_write_ms = 0.0  # TEMP(radio-chop): stage timing
-        self._radio_publish_ms = 0.0
         telemetry, audio = self.radio.tick(dt)
         self._radio_telemetry = telemetry
         self._radio_pumped = True
@@ -1507,12 +1505,10 @@ class Agent:
         # and decoding the frame we just encoded to get back to where we started
         # would be absurd.
         if self.radio.last_pcm:
-            _t = time.perf_counter()  # TEMP(radio-chop)
             self.store.write_audio(
                 self.radio.last_pcm, AUDIO_RATE,
                 label=f"{self.radio.freq_hz // 1000}kHz",
             )
-            self._radio_write_ms = (time.perf_counter() - _t) * 1000.0
 
         if audio is None:
             return None
@@ -1598,32 +1594,9 @@ class Agent:
                 # The gate change goes out from here, because the next sweep is
                 # up to a second away and the console's channel-open light must
                 # not trail the audio it is announcing.
-                _pump_started = time.perf_counter()  # TEMP(radio-chop)
                 self._pump_radio(min(elapsed, AUDIO_TICK_S * 4),
                                  publish_gate_change=True,
                                  publish_spectrum=spectrum_due)
-                # TEMPORARY diagnostic for the 2B audio chop. A sub-tick that
-                # runs long loses everything past the 0.5 s clamp above. This
-                # shows where the time went: inside the pump (and which stage),
-                # or in the wall-clock `gap` since the last sub-tick — a gap far
-                # larger than the pump means the sensor sweep, not the radio,
-                # ate the second. Throttled to abnormal ticks so a healthy box
-                # stays quiet.
-                _pump_ms = (time.perf_counter() - _pump_started) * 1000.0
-                if elapsed >= 0.30 or _pump_ms >= 75.0:
-                    log.warning(
-                        "[radio-timing] gap=%.0fms pump=%.0fms (read %.0f "
-                        "demod %.0f encode %.0f write %.0f publish %.0f) "
-                        "asked=%.0fms%s",
-                        elapsed * 1000.0, _pump_ms,
-                        getattr(self.radio, "last_read_ms", 0.0),
-                        getattr(self.radio, "last_demod_ms", 0.0),
-                        getattr(self.radio, "last_encode_ms", 0.0),
-                        getattr(self, "_radio_write_ms", 0.0),
-                        getattr(self, "_radio_publish_ms", 0.0),
-                        min(elapsed, AUDIO_TICK_S * 4) * 1000.0,
-                        " CLAMPED" if elapsed > AUDIO_TICK_S * 4 else "",
-                    )
             except Exception:  # noqa: BLE001 - a dead loop is a dead site
                 log.exception("Radio sub-tick failed; continuing.")
             else:
