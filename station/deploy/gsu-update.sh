@@ -21,9 +21,10 @@
 #      --force): a bad image must not be re-pulled every cycle.
 #   3. Log in to the registry, pull the pinned digest. `docker pull` is atomic at
 #      the image level, so a dropped link cannot leave a half-built image.
-#   4. VERIFY THE SIGNATURE (cosign, keyless) before running it. The pin proves
-#      the bytes did not change; the signature proves we built them. A failed
-#      verification is recorded and NOT deployed.
+#   4. VERIFY THE SIGNATURE (cosign, against the pinned public key from the
+#      handoff) before running it. The pin proves the bytes did not change; the
+#      signature proves we signed them. A failed verification is recorded and NOT
+#      deployed.
 #   5. Recreate the agent service on the new ref (docker compose up -d gsu).
 #   6. Gate on it PUBLISHING within the window — up, uplink up, and its published
 #      counter rising. Read over the agent's own loopback via `docker exec`, the
@@ -53,14 +54,19 @@ STATE="${GSU_UPDATE_STATE:-/var/lib/updater}"        # updater-only: rejects, pr
 IMAGE="${GSU_IMAGE:-ghcr.io/joshmulder/percepta-gsu}"
 AGENT_CONTAINER="${GSU_AGENT_CONTAINER:-percepta-gsu}"
 AGENT_SERVICE="${GSU_AGENT_SERVICE:-gsu}"
-COSIGN_IDENTITY_REGEXP="${GSU_COSIGN_IDENTITY:-^https://github.com/JoshMulder/Percepta/.github/workflows/release.yml@refs/tags/v.*}"
-COSIGN_ISSUER="${GSU_COSIGN_ISSUER:-https://token.actions.githubusercontent.com}"
 GATE_SECONDS="${GSU_UPDATE_GATE_S:-180}"
 POLL_SECONDS="${GSU_UPDATE_POLL_S:-30}"
 REGISTRY="${IMAGE%%/*}"
 
 REQUEST="${HANDOFF}/update-request.json"
 STATUS="${HANDOFF}/update-status.json"
+# Written into the handoff by the agent at enrolment and every renewal: the
+# cosign public key(s) to verify against (one or more during a rotation overlap),
+# and the station's own credential to pull with. Both refresh with the station's
+# identity, so nothing update-specific is stored on the box. See
+# server/docs/07-remote-update-distribution.md.
+SIGNING_KEYS="${HANDOFF}/signing-keys"
+REGISTRY_CRED="${HANDOFF}/registry-credential.json"
 REJECTS="${STATE}/rejected-digests"
 PREVIOUS="${STATE}/previous-ref"
 
@@ -99,6 +105,23 @@ write_status() {  # the agent reports last_result/last_version in telemetry
 }
 
 recreate() { ( cd "${COMPOSE_DIR}" && docker compose up -d --no-build "${AGENT_SERVICE}" ); } # VERIFY
+
+# Verify the pulled image against the pinned cosign key(s). More than one can be
+# present during a rotation overlap, so any that verifies is enough; none
+# present, or none that verifies, is a refusal. `--key`, never keyless: nothing
+# here reaches a public transparency log.
+verify_signature() {
+    local image="$1" key
+    local keys=("${SIGNING_KEYS}"/*.pub)
+    if [ ! -e "${keys[0]}" ]; then
+        log "no cosign keys in the handoff; cannot verify (enrolment/renewal writes them)."
+        return 1
+    fi
+    for key in "${keys[@]}"; do
+        cosign verify --key "${key}" "${image}" >/dev/null 2>&1 && return 0
+    done
+    return 1
+}
 
 # The publish-gate: up, uplink up, and the published counter rising across two
 # reads inside the window — the one condition a "did it start?" check cannot fake.
@@ -144,8 +167,7 @@ reconcile() {
     if [ -n "${CHECK:-}" ]; then
         log "check: would update ${current:-<none>} -> ${label}"
         log "  pull     ${target}"
-        log "  verify   signed by ${COSIGN_IDENTITY_REGEXP}"
-        log "           issuer ${COSIGN_ISSUER}"
+        log "  verify   against the pinned cosign key(s) in ${SIGNING_KEYS}"
         log "  recreate ${AGENT_SERVICE}, then gate on it publishing within ${GATE_SECONDS}s"
         log "  rollback to ${current:-<none>} and re-gate if that gate fails"
         log "check: nothing was changed."
@@ -155,19 +177,24 @@ reconcile() {
     log "updating to ${label} (${target})"
     echo "${current}" >"${PREVIOUS}"
 
-    if [ -n "${GSU_REGISTRY_TOKEN:-}" ]; then
-        printf '%s' "${GSU_REGISTRY_TOKEN}" | docker login "${REGISTRY}" \
-            -u "${GSU_REGISTRY_USER:-x}" --password-stdin >/dev/null 2>&1 \
+    # Log in with the station's own credential from the handoff. The platform's
+    # registry token endpoint accepts the same bearer secret the broker does, so
+    # the pull is authorised as this station and nothing else — no update-specific
+    # registry secret exists on the box.
+    if [ -f "${REGISTRY_CRED}" ]; then
+        cred_user="$(json_field "${REGISTRY_CRED}" username)"
+        cred_secret="$(json_field "${REGISTRY_CRED}" secret)"
+        printf '%s' "${cred_secret}" | docker login "${REGISTRY}" \
+            -u "${cred_user:-station}" --password-stdin >/dev/null 2>&1 \
             || log "WARNING: docker login failed; relying on any existing credentials."
+    else
+        log "WARNING: no registry credential in the handoff yet (enrolment/renewal writes it); the pull may be refused."
     fi
     if ! docker pull "${target}"; then
         log "pull failed; leaving the running container untouched."; return 0
     fi
 
-    if ! cosign verify \
-            --certificate-identity-regexp "${COSIGN_IDENTITY_REGEXP}" \
-            --certificate-oidc-issuer "${COSIGN_ISSUER}" \
-            "${target}" >/dev/null 2>&1; then   # VERIFY: keyless flags vs release.yml
+    if ! verify_signature "${target}"; then   # VERIFY: --key against the pinned keys
         log "SIGNATURE VERIFICATION FAILED for ${label}. Refusing to run it."
         echo "${digest}" >>"${REJECTS}"; write_status "signature_rejected" "${label}"; return 1
     fi

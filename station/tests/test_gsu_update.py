@@ -75,7 +75,7 @@ def _exe(path: Path, body: str) -> None:
 
 
 def _run(tmp_path, *, arg=None, request=True, running=OLD_REF, rejected=None,
-         gate_s="4", scenario=None):
+         gate_s="4", scenario=None, keys=True):
     compose = tmp_path / "compose"
     compose.mkdir()
     (compose / "docker-compose.yml").write_text("services:\n  gsu: {}\n")
@@ -83,6 +83,15 @@ def _run(tmp_path, *, arg=None, request=True, running=OLD_REF, rejected=None,
     env_file.write_text("GSU_SITE_NAME=test\n")
     handoff = tmp_path / "handoff"
     handoff.mkdir()
+    # What the agent writes into the handoff at enrolment: the pinned cosign
+    # key(s) to verify against, and the station's credential to pull with.
+    if keys:
+        signing = handoff / "signing-keys"
+        signing.mkdir()
+        (signing / "cosign-test.pub").write_text(
+            "-----BEGIN PUBLIC KEY-----\nX\n-----END PUBLIC KEY-----\n")
+    (handoff / "registry-credential.json").write_text(
+        json.dumps({"username": "s1", "secret": "sekret"}))
     state = tmp_path / "state"
     state.mkdir()
     if request:
@@ -146,6 +155,15 @@ def test_a_bad_signature_is_refused_and_remembered(tmp_path):
     assert r["status"]["last_result"] == "signature_rejected"
     assert DIGEST in r["rejects"]
     assert r["request_left"]  # not cleared — it never ran
+
+
+def test_no_pinned_keys_is_a_refusal(tmp_path):
+    # The updater verifies against the keys the agent wrote to the handoff; none
+    # there means it cannot prove provenance, so it refuses rather than run.
+    r = _run(tmp_path, keys=False)
+    assert r["proc"].returncode == 1
+    assert r["status"]["last_result"] == "signature_rejected"
+    assert DIGEST in r["rejects"]
 
 
 def test_a_failed_pull_leaves_the_container_untouched(tmp_path):

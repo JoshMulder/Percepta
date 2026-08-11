@@ -100,6 +100,20 @@ class UpdateCoordinator:
             if existing.name not in wanted:
                 existing.unlink(missing_ok=True)
 
+    def store_registry_credential(self, username: str, secret: str) -> None:
+        """Write the credential the host updater uses to pull from the private
+        registry into the handoff. It is the station's own bearer secret — the
+        one the platform's registry token endpoint accepts — so no update-specific
+        credential exists on the box, and it is refreshed on enrolment and every
+        renewal, so a rotated secret follows the same path. 0600, in a volume
+        shared only with the updater."""
+        self.handoff_dir.mkdir(parents=True, exist_ok=True)
+        path = self.handoff_dir / "registry-credential.json"
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"username": username, "secret": secret}))
+        tmp.chmod(0o600)
+        tmp.replace(path)
+
     @property
     def desired_version(self) -> str | None:
         """The tag (or short digest) the last request named, or None. Read from
