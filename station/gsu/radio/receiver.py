@@ -526,7 +526,9 @@ class RadioController:
                 "opens the squelch.", MONITOR_MAX_S,
             )
 
+        _t = time.perf_counter()  # TEMP(radio-chop): stage timing
         block = self.front_end.read(dt)
+        self.last_read_ms = (time.perf_counter() - _t) * 1000.0
         self._last_spectrum = block.spectrum_db
         self._rssi_db = dsp.in_channel_power_db(block.spectrum_db, block.bin_hz)
         self._floor_db = dsp.noise_floor_db(block.spectrum_db, block.bin_hz)
@@ -592,8 +594,12 @@ class RadioController:
 
         audio = None
         self.last_pcm = b""
+        self.last_demod_ms = 0.0  # TEMP(radio-chop): stage timing
+        self.last_encode_ms = 0.0
         if self._open:
+            _t = time.perf_counter()  # TEMP(radio-chop)
             samples = self.front_end.demodulate(int(AUDIO_RATE * dt))
+            self.last_demod_ms = (time.perf_counter() - _t) * 1000.0
             # PCM is kept whatever happens to the payload: it is what goes to
             # local storage, and a transmission is recorded whether or not
             # anybody is listening and whether or not the link is up.
@@ -604,7 +610,9 @@ class RadioController:
                 # contract requires — 80 ms of speech is not worth an envelope
                 # of its own — so the recording still happens and nothing goes
                 # on the wire yet.
+                _t = time.perf_counter()  # TEMP(radio-chop)
                 audio = audio_payload(self.last_pcm, encoder, AUDIO_RATE)
+                self.last_encode_ms = (time.perf_counter() - _t) * 1000.0
         self._feed_listeners(self.last_pcm, dt)
         return telemetry, audio
 
