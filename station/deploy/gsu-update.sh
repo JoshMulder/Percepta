@@ -236,6 +236,12 @@ case "${1:-once}" in
         log "watching ${REQUEST} every ${POLL_SECONDS}s."
         while true; do reconcile "" || true; sleep "${POLL_SECONDS}"; done
         ;;
-    --force) reconcile 1 ;;
-    *) reconcile "" ;;
+    # `|| exit` puts reconcile in a context where set -e is suppressed inside it,
+    # exactly as `--watch` does with `|| true`. Without it a hand-run has set -e
+    # live inside reconcile and aborts on the first non-zero — a failed recreate,
+    # or even the no-op "already on this digest" path — skipping the gate and
+    # rollback that make it safe, so `once` would not behave like the `--watch`
+    # it is meant to rehearse. The final exit code still reaches the operator.
+    --force) reconcile 1 || exit "$?" ;;
+    *) reconcile "" || exit "$?" ;;
 esac
