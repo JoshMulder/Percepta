@@ -63,6 +63,11 @@ class Settings(BaseSettings):
     #: robot exists by default and only pull tokens can be minted.
     registry_robot_user: str | None = None
     registry_robot_token: str | None = None
+    #: Directory of cosign public keys (the release box's `cosign.pub`) a station
+    #: is handed at enrolment to verify update signatures. A directory, not a
+    #: single file, so a key rotation can serve old and new together through an
+    #: overlap. Empty or absent means no keys are shipped (and no update verifies).
+    update_signing_keys_dir: str = "/certs/update-keys"
 
     # Set the Secure flag on the session cookie. Off by default so local HTTP
     # development works; it must be on anywhere reachable over a network, or the

@@ -146,6 +146,11 @@ class EnrolResponse(BaseModel):
     broker: BrokerOut
     station: StationOut
     config_version: int
+    #: The cosign public keys the station pins to verify update signatures
+    #: (server/docs/07). A list so a rotation can hand out old+new together; empty
+    #: on a platform that has configured none, which means updates cannot be
+    #: verified and so will not run — the safe default.
+    update_signing_keys: list[str] = []
 
 
 def _source(request: Request) -> str:
@@ -168,6 +173,21 @@ def _ca_pem() -> str | None:
             "to pin. Run scripts/make_certs.sh.", settings.tls_ca_file,
         )
         return None
+
+
+def _update_signing_keys() -> list[str]:
+    """The cosign public keys handed to a station to verify update signatures.
+    Every `*.pub` in `update_signing_keys_dir` — a rotation is dropping the new
+    key beside the old and removing the old once the fleet has renewed. A missing
+    directory or none present is an empty list, so no update verifies, which is
+    the safe failure."""
+    keys: list[str] = []
+    for path in sorted(pathlib.Path(settings.update_signing_keys_dir).glob("*.pub")):
+        try:
+            keys.append(path.read_text())
+        except OSError:
+            log.warning("Could not read update signing key %s.", path)
+    return keys
 
 
 def _broker_trust(request: Request | None) -> tuple[str, str | None]:
@@ -292,6 +312,7 @@ def _response(issued: enrolment.IssuedCredential, request: Request) -> EnrolResp
             ) or None,
         ),
         config_version=station.config_version,
+        update_signing_keys=_update_signing_keys(),
     )
 
 
