@@ -85,6 +85,17 @@ RUN git clone --depth 1 --branch "${RTLSDR_REF}" \
 # whisper.cpp, built static (BUILD_SHARED_LIBS=OFF) so the CLI carries its own
 # whisper/ggml and the runtime needs only libgomp and the C/C++ runtimes.
 #
+# GGML_NATIVE=OFF, deliberately. Left on, ggml probes the *build* machine's CPU
+# by running feature-test binaries and bakes the detected -march into the binary
+# — wrong for an image shipped to a fleet, and outright broken for the arm64 half
+# of a multi-arch build: under QEMU the dotprod/i8mm probes fail, so ggml appends
+# +nodotprod+noi8mm onto a -march that already carries +dotprod+i8mm and the
+# assembler rejects the contradiction ("must specify extensions to add before
+# specifying those to remove"). OFF builds a portable armv8-a baseline that
+# assembles and runs on any arm64 box. The cost is no dotprod/i8mm SIMD on arm64,
+# so whisper is slower on a Pi 5; reclaim it with a native-arm build or an
+# explicit GGML_CPU_ARM_ARCH once the fleet's arm baseline is settled.
+#
 # **Copy the real CLI, not a deprecation shim.** Upstream renames this binary
 # from time to time — `main`, then `whisper-cli`, and a master build was seen
 # producing `whisper-whisper-cli` with `whisper-cli` left behind as a stub that
@@ -107,6 +118,7 @@ RUN mkdir -p /opt/whisper-bin \
         && cmake -S /tmp/whisper -B /tmp/whisper/build \
              -DCMAKE_BUILD_TYPE=Release \
              -DBUILD_SHARED_LIBS=OFF \
+             -DGGML_NATIVE=OFF \
         && cmake --build /tmp/whisper/build --config Release -j "$(nproc)" \
         && whisper_bin="$(find /tmp/whisper/build -type f -name 'whisper*cli' \
              -printf '%s\t%p\n' | sort -rn | head -1 | cut -f2)" \
