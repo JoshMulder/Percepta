@@ -17,4 +17,11 @@ describe("formatAltitude", () => {
   it("renders a genuine zero rather than nothing", () => {
     expect(formatAltitude(0, "ft")).toBe("0 ft");
   });
+
+  it("floors a below-ground barometric altitude at zero", () => {
+    // The contract allows down to -1000 m; the display floors it rather than
+    // showing the operator a negative height.
+    expect(formatAltitude(-50, "m")).toBe("0 m");
+    expect(formatAltitude(-50, "both")).toBe("0 m · 0 ft");
+  });
 });
