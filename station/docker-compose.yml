@@ -301,7 +301,7 @@ services:
     restart: unless-stopped
     init: true
     environment:
-      GSU_IMAGE: ${GSU_IMAGE:-registry.percepta.aeronavics.com/percepta-gsu}
+      GSU_IMAGE: ${GSU_IMAGE:-registry.percepta.nz/percepta-gsu}
       GSU_COMPOSE_DIR: /workspace
       GSU_ENV_FILE: /workspace/.env
       GSU_UPDATE_HANDOFF: /handoff

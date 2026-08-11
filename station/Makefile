@@ -12,7 +12,7 @@
 # and, if not the defaults below: REGISTRY, COSIGN_KEY.
 
 VERSION    ?=
-REGISTRY   ?= registry.percepta.aeronavics.com
+REGISTRY   ?= registry.percepta.nz
 IMAGE      := $(REGISTRY)/percepta-gsu
 PLATFORMS  ?= linux/amd64,linux/arm64
 COSIGN_KEY ?= cosign.key

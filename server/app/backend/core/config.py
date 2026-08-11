@@ -55,7 +55,7 @@ class Settings(BaseSettings):
     #: issuer and service (JWT audience) must match the registry's config exactly.
     registry_token_key_file: str = "/certs/registry-token.key"
     registry_token_issuer: str = "percepta-platform"
-    registry_token_service: str = "registry.percepta.aeronavics.com"
+    registry_token_service: str = "registry.percepta.nz"
     registry_token_ttl_seconds: int = 300
     #: The one repository a station may pull; anything else is granted no access.
     registry_repository: str = "percepta-gsu"

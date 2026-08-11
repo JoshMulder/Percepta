@@ -11,11 +11,11 @@ from __future__ import annotations
 import os
 import pathlib
 
-_DEFAULT = "https://percepta.aeronavics.com"
+_DEFAULT = "https://app.percepta.nz"
 
 
 def platform_url() -> str:
-    """The platform base URL, e.g. https://percepta.aeronavics.com (no trailing /)."""
+    """The platform base URL, e.g. https://app.percepta.nz (no trailing /)."""
     value = os.environ.get("PERCEPTA_URL")
     if not value:
         dotenv = pathlib.Path(__file__).resolve().parents[1] / ".env"

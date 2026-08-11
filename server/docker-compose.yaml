@@ -187,8 +187,8 @@ services:
       # REALM is this platform's token endpoint; SERVICE and ISSUER must match
       # what that endpoint stamps into every JWT; the bundle is the public cert
       # of the app's token-signing key (placed in ./certs by the next piece).
-      REGISTRY_AUTH_TOKEN_REALM: "${GSU_REGISTRY_TOKEN_REALM:-https://percepta.aeronavics.com/v2/token}"
-      REGISTRY_AUTH_TOKEN_SERVICE: "${GSU_REGISTRY_SERVICE:-registry.percepta.aeronavics.com}"
+      REGISTRY_AUTH_TOKEN_REALM: "${GSU_REGISTRY_TOKEN_REALM:-https://app.percepta.nz/v2/token}"
+      REGISTRY_AUTH_TOKEN_SERVICE: "${GSU_REGISTRY_SERVICE:-registry.percepta.nz}"
       REGISTRY_AUTH_TOKEN_ISSUER: "${GSU_REGISTRY_ISSUER:-percepta-platform}"
       REGISTRY_AUTH_TOKEN_ROOTCERTBUNDLE: /certs/registry-token.crt
     volumes:

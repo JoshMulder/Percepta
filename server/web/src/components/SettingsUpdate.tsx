@@ -190,7 +190,7 @@ export function SettingsUpdate({
             <input
               type="text"
               value={image}
-              placeholder="registry.percepta.aeronavics.com/percepta-gsu"
+              placeholder="registry.percepta.nz/percepta-gsu"
               spellCheck={false}
               autoCapitalize="none"
               onChange={(e) => {
