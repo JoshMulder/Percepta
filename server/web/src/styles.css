@@ -3287,8 +3287,16 @@ body {
 /* The provider credit (a licence condition). MapLibre's default is a white pill
    built for a light map; restyle it to sit quietly in the dark UI — small,
    muted, unobtrusive in the corner, but present. Its link keeps a readable
-   colour so a click-through to the provider still works. */
-.maplibregl-ctrl-attrib {
+   colour so a click-through to the provider still works.
+
+   The selector is doubled on purpose. MapLibre paints the white background with
+   `.maplibregl-ctrl.maplibregl-ctrl-attrib` — two classes on the one element,
+   specificity 0,2,0 — so a single-class override (0,1,0) loses to it whatever
+   the load order, and the credit shows as a white box on the dark map. Matching
+   the specificity is what makes the dark background win. Same for the compact
+   variant the fleet map uses, whose white lives on `.maplibregl-compact`. */
+.maplibregl-ctrl.maplibregl-ctrl-attrib,
+.maplibregl-ctrl-attrib.maplibregl-compact {
   background: rgba(11, 15, 19, 0.6);
   color: var(--muted);
   font-size: 0.625rem;
