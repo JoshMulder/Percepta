@@ -108,8 +108,14 @@ recreate() { ( cd "${COMPOSE_DIR}" && docker compose up -d --no-build "${AGENT_S
 
 # Verify the pulled image against the pinned cosign key(s). More than one can be
 # present during a rotation overlap, so any that verifies is enough; none
-# present, or none that verifies, is a refusal. `--key`, never keyless: nothing
-# here reaches a public transparency log.
+# present, or none that verifies, is a refusal.
+#
+# --insecure-ignore-tlog: the release signs with --tlog-upload=false (Makefile),
+# so the image carries NO public transparency-log entry — by design, to keep the
+# whole path off public infrastructure. Verify must therefore not look for one,
+# or it fails every image over a network call we deliberately avoid. `--key`,
+# never keyless: no Fulcio, no Rekor, nothing public. The two sides are a pair —
+# if the release ever starts uploading a tlog entry, drop this flag in step.
 verify_signature() {
     local image="$1" key
     local keys=("${SIGNING_KEYS}"/*.pub)
@@ -118,7 +124,7 @@ verify_signature() {
         return 1
     fi
     for key in "${keys[@]}"; do
-        cosign verify --key "${key}" "${image}" >/dev/null 2>&1 && return 0
+        cosign verify --key "${key}" --insecure-ignore-tlog=true "${image}" >/dev/null 2>&1 && return 0
     done
     return 1
 }

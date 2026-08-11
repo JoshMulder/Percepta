@@ -19,6 +19,12 @@ with its self-signed cert at the registry's `rootcertbundle`); generate it with:
     openssl req -x509 -newkey rsa:4096 -nodes -days 3650 \\
       -keyout certs/registry-token.key -out certs/registry-token.crt \\
       -subj "/CN=percepta-registry-token"
+
+The key must be readable by the app's runtime uid, which reaches certs through a
+shared group (the container runs as uid 10001, added to the cert gid). Give it
+the same 640 / cert-group ownership as the other private keys — a 600 key openssl
+writes by default is owner-only, and the endpoint then 503s "registry token key
+unavailable" for every token. That was the first-run failure on `.49`.
 """
 
 from __future__ import annotations
@@ -28,6 +34,7 @@ import binascii
 import hashlib
 import time
 import uuid
+from datetime import UTC, datetime
 from functools import lru_cache
 
 import jwt
@@ -142,4 +149,9 @@ def issue_token(
         "access": access,
     }
     token = jwt.encode(claims, private_key, algorithm="RS256", headers={"kid": kid})
-    return {"token": token, "access_token": token, "expires_in": ttl, "issued_at": now}
+    # issued_at MUST be an RFC3339 *string*: the Docker client parses it into a
+    # Go time.Time and refuses the whole response ("input is not a JSON string")
+    # if it is the bare epoch the JWT's `iat` uses. Found the hard way — the JWT
+    # claims are fine, so only a real `docker login` catches it.
+    issued_at = datetime.fromtimestamp(now, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {"token": token, "access_token": token, "expires_in": ttl, "issued_at": issued_at}

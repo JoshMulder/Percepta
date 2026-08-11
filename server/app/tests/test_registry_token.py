@@ -83,6 +83,22 @@ def test_a_station_gets_a_pull_only_token(client, db, station, org, public_key):
     assert header["kid"]  # the registry matches this against its bundle
 
 
+def test_the_response_envelope_is_what_the_docker_client_parses(client, db, station, org, public_key):
+    """`issued_at` must be an RFC3339 *string*, not the JWT's numeric `iat`. The
+    Docker client unmarshals it into a Go time.Time and rejects the entire
+    response ("input is not a JSON string") if it is a bare number — a real
+    `docker login` fails though every JWT claim is correct."""
+    _give_credential(db, station, org, "pull-me-env")
+    body = client.get("/v2/token", params={
+        "service": settings.registry_token_service,
+        "scope": f"repository:{settings.registry_repository}:pull",
+    }, headers=_basic(str(station.id), "pull-me-env")).json()
+    assert isinstance(body["expires_in"], int)
+    assert isinstance(body["issued_at"], str)
+    # Parses as RFC3339 (the trailing Z is UTC) — exactly what the client needs.
+    datetime.strptime(body["issued_at"], "%Y-%m-%dT%H:%M:%SZ")
+
+
 def test_a_station_asking_for_push_gets_only_pull(client, db, station, org, public_key):
     _give_credential(db, station, org, "pull-me-2")
     resp = client.get("/v2/token", params={
