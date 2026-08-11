@@ -97,6 +97,12 @@ LIMIT_GAIN = 1.5
 #: and the rumble below, without a filter so long its group delay is audible.
 VOICE_TAPS = 201
 
+#: How long the start of every over is ramped up from silence. A gate that snaps
+#: open onto a carrier-normalised block at full amplitude is an audible click
+#: against the listener's silence; a fifth of a second eases it in instead. This
+#: is longer than one demod block, so the ramp is tracked across blocks.
+FADE_IN_S = 0.2
+
 
 def design_lowpass(numtaps: int, cutoff_hz: float, fs: float) -> np.ndarray:
     """Windowed-sinc lowpass, Hamming window, unity gain at DC.
@@ -402,6 +408,11 @@ class AmDemodulator:
         self._alpha = 1.0 - math.exp(
             -(AGC_SUB_SAMPLES / self.audio_rate) / AGC_TAU_S
         )
+        # Fade-in state. `_fade_pos` counts samples into the ramp at the start of
+        # an over and is carried across blocks, since 0.2 s spans several. It
+        # starts complete, so nothing fades until an over opens and asks.
+        self._fade_samples = max(1, int(FADE_IN_S * self.audio_rate))
+        self._fade_pos = self._fade_samples
 
     def reset(self) -> None:
         """Retune, or a gap in demodulation. Forget the filters and the carrier:
@@ -417,10 +428,11 @@ class AmDemodulator:
     def process(self, samples: np.ndarray, fade_in: bool = False) -> np.ndarray:
         """One block of IQ to float audio in [-1, 1] at `audio_rate`.
 
-        `fade_in` ramps the first few milliseconds up from zero. The controller
-        starts and stops sending audio as the gate opens and closes, and a
-        carrier-normalised block starting at full amplitude against the
-        listener's silence is an audible click on every over.
+        `fade_in` marks the first block of an over; the audio then ramps up from
+        silence over `FADE_IN_S`, carried across as many blocks as that spans.
+        The controller starts and stops sending audio as the gate opens and
+        closes, and a carrier-normalised block starting at full amplitude against
+        the listener's silence is an audible click on every over.
         """
         baseband = self._mixer.process(samples)
         channel = self._decimator.process(baseband)
@@ -437,11 +449,16 @@ class AmDemodulator:
             audio = self._voice.process(audio)
         audio = np.tanh(LIMIT_GAIN * audio).astype(np.float32)
 
+        # A new over restarts the fade; it then runs across blocks until
+        # FADE_IN_S of audio has been ramped, so the rise is smooth rather than
+        # reaching full a block in.
         if fade_in:
-            ramp_samples = min(audio.size, max(1, self.audio_rate // 200))  # 5 ms
-            audio[:ramp_samples] *= np.linspace(
-                0.0, 1.0, ramp_samples, dtype=np.float32
-            )
+            self._fade_pos = 0
+        if self._fade_pos < self._fade_samples:
+            positions = self._fade_pos + np.arange(audio.size, dtype=np.float32)
+            gains = np.minimum(1.0, positions / self._fade_samples).astype(np.float32)
+            audio = audio * gains
+            self._fade_pos += audio.size
         return audio
 
     def _smooth_carrier(self, envelope: np.ndarray) -> np.ndarray:

@@ -444,6 +444,22 @@ class DemodulationTests(unittest.TestCase):
         self.assertLess(abs(float(audio[0])), 1e-6)
         self.assertGreater(float(np.abs(audio[2000:]).max()), 0.05)
 
+    def test_the_fade_in_is_02s_and_carries_across_blocks(self):
+        """The ramp is 0.2 s — longer than one demod block — so it continues
+        over the blocks that follow the one that opened the over, rather than
+        reaching full amplitude a block in."""
+        demod = am.AmDemodulator(SAMPLE_RATE, 24_000, OFFSET_HZ)
+        self.assertEqual(demod._fade_samples, int(am.FADE_IN_S * 24_000))
+        # A single 50 ms block cannot finish a 0.2 s fade: it carries on.
+        demod.process(airband_iq(0.05, depth=0.8), fade_in=True)
+        self.assertGreater(demod._fade_pos, 0)
+        self.assertLess(demod._fade_pos, demod._fade_samples)
+        # Feeding past 0.2 s of audio completes it, and it does not re-arm
+        # without another over opening.
+        for _ in range(5):
+            demod.process(airband_iq(0.05, depth=0.8))
+        self.assertGreaterEqual(demod._fade_pos, demod._fade_samples)
+
 
 @unittest.skipIf(np is None, "numpy is not installed")
 class SquelchThresholdTests(unittest.TestCase):
