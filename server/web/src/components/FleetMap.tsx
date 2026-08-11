@@ -165,7 +165,9 @@ function FleetMapInner({
         const el = document.createElement("div");
         el.className = "fleet-station";
         el.innerHTML = "<span class='fleet-dot'></span><span class='fleet-name'></span>";
-        marker = new maplibregl.Marker({ element: el }).setLngLat(pos).addTo(map);
+        marker = new maplibregl.Marker({ element: el, subpixelPositioning: true })
+          .setLngLat(pos)
+          .addTo(map);
         existing.set(s.id, marker);
       } else {
         marker.setLngLat(pos);
@@ -230,7 +232,9 @@ function FleetMapInner({
           "<path d='M0,-5 L4,4 L0,2 L-4,4 Z' fill='" +
           CONTACT_COLOUR +
           "' stroke='#0b1220' stroke-width='0.8'/></svg>";
-        marker = new maplibregl.Marker({ element: el }).setLngLat(pos).addTo(map);
+        marker = new maplibregl.Marker({ element: el, subpixelPositioning: true })
+          .setLngLat(pos)
+          .addTo(map);
         existing.set(a.icao, marker);
       } else {
         marker.setLngLat(pos);

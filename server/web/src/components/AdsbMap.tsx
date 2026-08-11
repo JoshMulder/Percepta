@@ -212,10 +212,6 @@ function AdsbMapInner({
   const mapRef = useRef<maplibregl.Map | null>(null);
   /** Markers by ICAO address, reused between updates. */
   const markersRef = useRef(new Map<string, maplibregl.Marker>());
-  // TEMPORARY DIAGNOSTIC — a plain DOM marker at the selected contact's point,
-  // to tell "our glyph marker is misplaced" from "MapLibre's DOM markers are
-  // off the canvas". Remove with the debug-point layer.
-  const debugMarkerRef = useRef<maplibregl.Marker | null>(null);
   const readyRef = useRef(false);
   const [style, setStyle] = useState(config.default_basemap);
   /** ICAO of the contact whose detail panel is open, or null.
@@ -439,27 +435,6 @@ function AdsbMapInner({
           "line-color": CONTACT_COLOUR,
           "line-width": 2,
           "line-opacity": 0.9,
-        },
-      });
-
-      // TEMPORARY DIAGNOSTIC — a magenta dot at the selected contact's exact
-      // reported lng/lat, to settle whether the glyph or the track is the thing
-      // off its mark. If the glyph sits on the dot, the track is lagging; if the
-      // track's end sits on the dot, the glyph is drawn off its point. Remove
-      // once the track offset is diagnosed.
-      map.addSource("debug-point", {
-        type: "geojson",
-        data: { type: "FeatureCollection", features: [] },
-      });
-      map.addLayer({
-        id: "debug-point",
-        type: "circle",
-        source: "debug-point",
-        paint: {
-          "circle-radius": 5,
-          "circle-color": "#ff00ff",
-          "circle-stroke-width": 1.5,
-          "circle-stroke-color": "#ffffff",
         },
       });
 
@@ -777,45 +752,6 @@ function AdsbMapInner({
       } else {
         trailSource.setData({ type: "FeatureCollection", features: [] });
       }
-    }
-
-    // TEMPORARY DIAGNOSTIC — put the magenta dot on the selected contact's exact
-    // reported position, the same lng/lat the marker is set to. See the layer's
-    // note above.
-    const debugSource = map.getSource("debug-point") as
-      | maplibregl.GeoJSONSource
-      | undefined;
-    const chosen = selected ? aircraft.find((c) => c.icao === selected) : null;
-    const chosenAt: [number, number] | null =
-      chosen && chosen.longitude !== null && chosen.latitude !== null
-        ? [chosen.longitude, chosen.latitude]
-        : null;
-    if (debugSource) {
-      debugSource.setData(
-        chosenAt
-          ? { type: "Feature", properties: {}, geometry: { type: "Point", coordinates: chosenAt } }
-          : { type: "FeatureCollection", features: [] },
-      );
-    }
-
-    // TEMPORARY DIAGNOSTIC 2 — a plain cyan DOM marker at the same point. If it
-    // lands on the magenta circle, MapLibre places DOM markers on the canvas
-    // correctly and the glyph is our bug; if it is offset too, it is a
-    // MapLibre-wide DOM-vs-canvas issue and no marker CSS of ours can fix it.
-    if (chosenAt) {
-      if (!debugMarkerRef.current) {
-        const el = document.createElement("div");
-        el.style.cssText =
-          "width:8px;height:8px;background:#00e5ff;border:1.5px solid #002;border-radius:1px;";
-        debugMarkerRef.current = new maplibregl.Marker({ element: el, subpixelPositioning: true })
-          .setLngLat(chosenAt)
-          .addTo(map);
-      } else {
-        debugMarkerRef.current.setLngLat(chosenAt);
-      }
-    } else if (debugMarkerRef.current) {
-      debugMarkerRef.current.remove();
-      debugMarkerRef.current = null;
     }
     // `prefs` re-labels on a units or field change; `regVersion` re-labels once
     // a batch of registration lookups has landed in the cache. `selected`

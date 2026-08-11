@@ -3011,14 +3011,19 @@ body {
   pointer-events: none;
 }
 .map-contact {
-  /* The marker's box is the glyph alone — the label is taken out of flow and
-     hung below it (see `.map-contact span`). MapLibre centres the element on
-     the lng/lat with translate(-50%, -50%), so a label left inside the box
-     would drag that centre downward and float the glyph above the point, while
-     the track — drawn at the true lng/lat — ends at the point below it. Keeping
-     only the glyph in the box puts the glyph on the point, on the track's end.
-     Position relative so the absolute label hangs off it. */
-  position: relative;
+  /* Absolute, NOT relative. MapLibre gives every marker `position: absolute` and
+     moves it with a transform; overriding that with `position: relative` drops
+     the markers into normal document flow, where they stack and each one lands
+     offset from its own coordinate by the height of the markers before it — the
+     glyph floating off the end of its track by a per-contact amount, while the
+     canvas layers (dot, track) stay put. (It cost an afternoon: the label
+     needed a positioned box to hang from, and `relative` looked like the way to
+     give it one.) Absolute keeps MapLibre's placement AND is still a positioned
+     box for the out-of-flow label below (see `.map-contact span`) — `top: 100%`
+     is 100% of the glyph, so the label sits just under it. The label being out
+     of flow keeps this box equal to the glyph, so the glyph sits on the point
+     the track ends at. */
+  position: absolute;
   display: flex;
   flex-direction: column;
   align-items: center;
