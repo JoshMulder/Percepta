@@ -321,9 +321,12 @@ function AdsbMapInner({
       // is shown rather than hidden behind an expandable "i". Fed from each
       // source's `attribution` above; MapLibre displays only the visible one.
       attributionControl: { compact: false },
-      // Locked to the station. Dragging, rotation, pitch and double-click zoom
-      // are all off, so it cannot drift off centre by any route.
-      dragPan: false,
+      // Centred on the station, but the operator may drag away to look around;
+      // it eases back to centre five seconds after they let go (the dragend
+      // handler below). Rotation, pitch and double-click zoom stay off, so a
+      // deliberate pan is the only way it ever leaves centre — and a temporary
+      // one.
+      dragPan: true,
       dragRotate: false,
       pitchWithRotate: false,
       touchPitch: false,
@@ -357,6 +360,26 @@ function AdsbMapInner({
       };
       holder.addEventListener("wheel", onWheel, { passive: false });
     }
+
+    // Pan-and-return. Dragging is on so the operator can look around, but the
+    // map belongs to the station, so a drift away is temporary: five seconds
+    // after they release, it eases back to centre. A new drag cancels a pending
+    // return (dragstart) and each release restarts the count (dragend), so a run
+    // of pans never snaps out from under the pointer mid-look.
+    let recentreTimer: ReturnType<typeof setTimeout> | undefined;
+    const clearRecentre = () => {
+      if (recentreTimer !== undefined) {
+        clearTimeout(recentreTimer);
+        recentreTimer = undefined;
+      }
+    };
+    map.on("dragstart", clearRecentre);
+    map.on("dragend", () => {
+      clearRecentre();
+      recentreTimer = setTimeout(() => {
+        map.easeTo({ center: centre, duration: 600 });
+      }, 5000);
+    });
 
     map.on("load", () => {
       readyRef.current = true;
@@ -461,6 +484,7 @@ function AdsbMapInner({
 
     return () => {
       readyRef.current = false;
+      clearRecentre();
       // Remember where this size was left, so the sibling that mounts on a swap
       // comes up at the same zoom rather than the default.
       zoomMemory.set(zoomKey, map.getZoom());
