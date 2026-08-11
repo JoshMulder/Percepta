@@ -7,3 +7,9 @@ __pycache__/
 
 # Wheels staged for an offline install on a box with no network.
 deploy/wheels/
+
+# The release signing keypair (make cosign-keygen). cosign.key is the whole
+# trust root for remote update and must never be committed; cosign.pub is pinned
+# on stations through enrolment, not the repo.
+cosign.key
+cosign.pub
