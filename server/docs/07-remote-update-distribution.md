@@ -1,6 +1,6 @@
 # 07. Remote update: secure image distribution to the fleet
 
-**Status: Proposed.** Refines DECISIONS.md item 48, which is implemented on the
+**Status: Accepted 2026-08-11; not yet implemented.** Refines DECISIONS.md item 48, which is implemented on the
 station and host-updater side (the marker handoff, `gsu-update.sh`, the
 publish-gate and rollback) but assumed a distribution shape that does not fit the
 security bar below. Nothing here is built yet; this note is the thing to react to
@@ -171,23 +171,28 @@ operator triggers ────────────►  system.update{image,d
   credential on infrastructure we do not own and builds on machines we do not
   control — against the whole point.
 
-## Open questions
+## Decisions (2026-08-11), and the detail left to implementation
 
-1. **Token TTL and scope** — minutes, `pull` only, single repository. Exact
-   numbers.
-2. **Private cosign key custody and rotation** — where it lives on the release
-   box; how it is rotated; whether more than one release box ever holds it.
-3. **Pinned public key delivery and rotation** — enrolment response vs baked into
-   the updater image; how a key rotation reaches already-enrolled stations
-   (probably: ship the new public key in the enrolment/renewal response and
-   accept a set of valid keys during an overlap).
-4. **Registry retention/GC** — how many past digests to keep (rollback needs the
-   previous one on the *box*, but the registry wants a retention policy), and
-   Distribution's garbage collection cadence.
-5. **Release build environment** — a native-arm box for a fast un-emulated arm64
-   build vs buildx emulation on an x86 box; whether to build each arch natively
-   and stitch a manifest.
-6. **Push-path exposure** — the registry needs an auth-gated, internet-reachable
-   push endpoint for the release box (auth-required, not public). If even that is
-   unwanted, the release box reaches the registry over the LAN/VPN only and never
-   from the internet — decide which.
+Resolved:
+
+- **Push-path exposure — auth-gated internet endpoint.** The registry's push path
+  is internet-reachable behind a robot credential, as the platform API already
+  is; the release box publishes from anywhere. Auth-required is not public.
+- **cosign key custody — on the release box, encrypted at rest.** The private key
+  never leaves the one release box inside the boundary and is decrypted only for
+  a release. Rotation generates a new key and re-pins its public half (below).
+- **Public key delivery — in the enrolment/renewal response.** Shipped like the
+  broker CA. A rotation delivers the new public key on the next renewal, with the
+  station accepting old+new during an overlap window, so a key change reaches
+  already-enrolled boxes without a chicken-and-egg update.
+- **Registry retention — keep the last ~5 digests**, garbage-collected on a
+  schedule. The updater also keeps the immediate previous ref on the box, so
+  rollback never depends solely on the registry.
+
+Left to settle at implementation time, not blocking:
+
+- **Token TTL and scope** — minutes, `pull` only, single repository; the exact
+  TTL.
+- **Release build environment** — a native-arm box for a fast, un-emulated arm64
+  build vs buildx emulation on x86, and whether to build each arch natively and
+  stitch a manifest.
