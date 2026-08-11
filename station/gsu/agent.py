@@ -43,6 +43,7 @@ from .radio.audio import AUDIO_RATE
 from .radio.receiver import RadioController
 from .radio.transcribe import Transcriber
 from .store import LocalStore, TRANSCRIPT_KIND
+from .system import SystemStats
 from .update import UpdateCoordinator
 from .stream import StreamSession
 from .transport import (
@@ -136,6 +137,7 @@ class Agent:
         self.site = SiteConfig.load(config.site_config_path)
         self.store = LocalStore(config.store_path, config.recordings_dir)
         self.updates = UpdateCoordinator(config.version, config.update_dir)
+        self.system = SystemStats()
         # Airband transcription, off unless configured and the binary and model
         # are both present. Reads captured overs on a low-priority thread; live
         # audio always wins. See gsu/radio/transcribe.py.
@@ -1270,6 +1272,10 @@ class Agent:
         # Apply any queued device commands before this tick senses, so a retune
         # or gain change lands on the front end on the one thread that reads it.
         self._drain_commands()
+        # Host CPU/temperature/memory for the Summary page, sampled on the tick so
+        # the busy-fraction delta is ready before any page asks — a couple of
+        # small /proc reads, nothing that troubles the timing.
+        self.system.sample()
         light_load = getattr(self.light, "load_w", 0.0) if self.light else 0.0
 
         reading = None
@@ -2189,6 +2195,7 @@ class Agent:
             "raw_samples": self.raw_samples(),
             "events": [event.to_dict() for event in self.store.recent_events(15)],
             "storage": self.store.stats(),
+            "system": self.system.read(),
             "clock": datetime.now(UTC).isoformat(),
             "clock_source": clock.discipline().to_dict(),
             "security": self.security(),

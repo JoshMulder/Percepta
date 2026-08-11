@@ -1902,6 +1902,49 @@ class Console:
                 f"<span class='{css}'>{html.escape(str(value))}</span></div>"
             )
         out.append("</div>")
+        # The host itself — CPU, temperature, memory, uptime. Read-only like the
+        # rest of this page; it is what an installer glances at to know the box
+        # is not cooking or thrashing before they leave. Absent on a host that
+        # cannot supply it (the fields simply do not appear), so the whole card
+        # is skipped rather than showing a row of dashes.
+        system = state.get("system") or {}
+        device_rows: list[tuple[str, str, str]] = []
+        cpu = system.get("cpu_percent")
+        if cpu is not None:
+            device_rows.append(("CPU", f"{cpu:.0f}%", "warn" if cpu >= 85 else "ok"))
+        load = system.get("load_1m")
+        if load is not None:
+            device_rows.append(("Load (1 min)", f"{load:.2f}", "ok"))
+        temp = system.get("temperature_c")
+        if temp is not None:
+            # A Pi throttles around 80-85 C: amber approaching it, red at it.
+            temp_css = "bad" if temp >= 80 else "warn" if temp >= 70 else "ok"
+            device_rows.append(("Temperature", f"{temp:.0f} °C", temp_css))
+        memory = system.get("memory") or {}
+        used_pct = memory.get("used_percent")
+        if used_pct is not None:
+            detail = f"{used_pct:.0f}%"
+            if memory.get("used_mb") and memory.get("total_mb"):
+                detail += f" ({memory['used_mb']} / {memory['total_mb']} MB)"
+            device_rows.append(("Memory", detail, "warn" if used_pct >= 90 else "ok"))
+        elif memory.get("total_mb"):
+            device_rows.append(("Memory", f"{memory['total_mb']} MB", "ok"))
+        uptime = system.get("uptime_s")
+        if uptime is not None:
+            total = int(uptime)
+            days, rem = divmod(total, 86400)
+            hours, rem = divmod(rem, 3600)
+            up_txt = (f"{days}d " if days else "") + \
+                (f"{hours}h " if days or hours else "") + f"{rem // 60}m"
+            device_rows.append(("Uptime", up_txt.strip(), "ok"))
+        if device_rows:
+            out.append("<h2>Device</h2><div class=card>")
+            for label, value, css in device_rows:
+                out.append(
+                    f"<div class=row><span class=k>{html.escape(label)}</span>"
+                    f"<span class='{css}'>{html.escape(str(value))}</span></div>"
+                )
+            out.append("</div>")
         # One line per slot: the same pill the Devices page shows, without the
         # forms. Intent (the label) and fact (the pill), still never merged.
         out.append("<h2>Slots</h2><div class='card slot-grid'>")
