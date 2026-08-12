@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import { ApiError, api } from "../api";
 import type {
   FleetAdsb,
@@ -11,6 +12,7 @@ import { FleetMap } from "./FleetMap";
 import { OrgSwitcher } from "./OrgSwitcher";
 import { SettingsAccount } from "./SettingsAccount";
 import { SettingsPlatform } from "./SettingsPlatform";
+import { StationHostShell } from "./StationHostShell";
 
 /**
  * The platform admin's home. A full-screen view of the whole estate, shown
@@ -323,6 +325,11 @@ function StationsTab({
   fleet: FleetView | null;
   error: string | null;
 }) {
+  // Which station's on-box console / host shell is open, if any. Local to this
+  // tab: each is a reach into one box, opened from its row and closed back to
+  // the list.
+  const [console_, setConsole] = useState<FleetStation | null>(null);
+  const [shell, setShell] = useState<FleetStation | null>(null);
   const rows = useMemo(
     () =>
       [...(fleet?.stations ?? [])].sort(
@@ -354,6 +361,7 @@ function StationsTab({
               <th scope="col">Last seen</th>
               <th scope="col">Location</th>
               <th scope="col">Model</th>
+              <th scope="col">Access</th>
             </tr>
           </thead>
           <tbody>
@@ -371,16 +379,108 @@ function StationsTab({
                 <td>{ago(st.last_seen_at)}</td>
                 <td>{st.locality ?? (st.latitude === null ? "no position" : "—")}</td>
                 <td>{st.model ?? "—"}</td>
+                <td className="pdash-access">
+                  {/* Enabled only for a station that could answer — the box has
+                      to be online to open either socket back down the link, and
+                      a button that reliably fails reads as broken. */}
+                  <button
+                    type="button"
+                    className="btn ghost tiny"
+                    disabled={st.status !== "online"}
+                    onClick={() => setConsole(st)}
+                    title={
+                      st.status === "online"
+                        ? "Open this station's on-box setup console"
+                        : "The station is offline; its console cannot be opened"
+                    }
+                  >
+                    Console
+                  </button>
+                  {/* A root shell on the host — the biggest escalation here, so
+                      it is its own control and needs the box opted in on both the
+                      profile and the agent flag, or it simply will not answer. */}
+                  <button
+                    type="button"
+                    className="btn ghost tiny danger"
+                    disabled={st.status !== "online"}
+                    onClick={() => setShell(st)}
+                    title={
+                      st.status === "online"
+                        ? "Open a shell on this station's host (audited)"
+                        : "The station is offline; a host shell cannot be opened"
+                    }
+                  >
+                    Shell
+                  </button>
+                </td>
               </tr>
             ))}
             {rows.length === 0 && (
               <tr>
-                <td colSpan={6}>No stations yet.</td>
+                <td colSpan={7}>No stations yet.</td>
               </tr>
             )}
           </tbody>
         </table>
       </div>
+      {console_ && (
+        <StationConsole station={console_} onClose={() => setConsole(null)} />
+      )}
+      {shell && (
+        <StationHostShell station={shell} onClose={() => setShell(null)} />
+      )}
     </div>
+  );
+}
+
+/**
+ * The station's own setup console, reached over the platform and shown in an
+ * iframe. The src is the reverse proxy in `api/console.py`, served same-origin
+ * so the platform-admin session cookie authorises it and the box's console —
+ * enrolment, device inventory, radio, location, factory reset, logs — renders
+ * inside the frame. Opening it makes the station dial its console socket back to
+ * the platform (audited there); closing the panel stops the polling, and the
+ * station's own idle window then closes the socket.
+ */
+function StationConsole({
+  station,
+  onClose,
+}: {
+  station: FleetStation;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return createPortal(
+    <div className="station-console-scrim" role="presentation" onClick={onClose}>
+      <div
+        className="station-console"
+        role="dialog"
+        aria-label={`${station.name} setup console`}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <header className="station-console-head">
+          <div>
+            <strong>{station.name}</strong>
+            <span className="station-console-org">{station.organization_name}</span>
+          </div>
+          <button type="button" className="btn ghost tiny" onClick={onClose}>
+            Close
+          </button>
+        </header>
+        <iframe
+          className="station-console-frame"
+          title={`${station.name} setup console`}
+          src={`/api/platform/stations/${station.id}/console/`}
+        />
+      </div>
+    </div>,
+    document.body,
   );
 }

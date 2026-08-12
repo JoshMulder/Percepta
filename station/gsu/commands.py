@@ -75,7 +75,8 @@ class CommandRouter:
         return True
 
 def build_handlers(radio, light, on_config, stream=None,
-                   events=None, updates=None) -> dict[str, Handler]:
+                   events=None, updates=None, console_proxy=None,
+                   host_shell=None) -> dict[str, Handler]:
     """Wire the contract's commands to the things that carry them out.
 
     Every entry here has a matching field in a telemetry payload — that pairing
@@ -228,6 +229,38 @@ def build_handlers(radio, light, on_config, stream=None,
         # sandbox does the privileged work (DECISIONS.md item 48). Registered
         # only when an updater coordinator exists, like the device handlers.
         handlers["system.update"] = system_update
+
+    def console_open(payload: dict) -> str:
+        # -> the console socket opening, which the platform observes directly
+        # (its /console/ingest sees the connection). Refused unless the box has
+        # opted in — the proxy itself enforces that, so a station without
+        # GSU_CONSOLE_PROXY answers here with a refusal rather than a socket.
+        return console_proxy.open(payload.get("lease_seconds"))
+
+    def console_close(payload: dict) -> str:
+        return console_proxy.close(
+            str(payload.get("reason") or "closed by the platform"))
+
+    if console_proxy is not None:
+        # Registered only when the proxy exists — like the device handlers, a
+        # station that cannot carry this instruction lets it fall through to the
+        # ignored-command path rather than accepting it and doing nothing.
+        handlers["console.open"] = console_open
+        handlers["console.close"] = console_close
+
+    def host_open(payload: dict) -> str:
+        # -> a request file the privileged helper acts on. Refused unless the box
+        # has opted in (GSU_HOST_SHELL); the coordinator enforces that, so an
+        # opted-out station answers with a refusal rather than a host session.
+        return host_shell.request_open(payload.get("lease_seconds"))
+
+    def host_close(payload: dict) -> str:
+        return host_shell.request_close(
+            str(payload.get("reason") or "closed by the platform"))
+
+    if host_shell is not None:
+        handlers["host.open"] = host_open
+        handlers["host.close"] = host_close
 
     # radio.transmit is deliberately absent. It is ungrantable on the platform
     # and must not exist here until the fail-released design in

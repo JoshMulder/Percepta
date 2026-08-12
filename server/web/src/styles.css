@@ -3789,3 +3789,80 @@ body {
 /* Removed org row (platform organisations table) */
 .org-removed { opacity: 0.5; }
 .org-removed-tag { color: var(--danger); font-size: 11px; }
+
+/* ===== Station console (the box's own setup page, re-originated) ============
+   A near-full-screen dialog over the dashboard holding an iframe of the
+   station's on-box console. Sized to fill the window rather than to its content
+   the way the power-detail dialog is: the framed page is a whole app, and a
+   scrollbar inside a small box on top of a scrollbar inside the frame is two too
+   many. The scrim/z-index match the other portalled dialogs. */
+.station-console-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 1500;
+  background: rgba(3, 6, 9, 0.86);
+  display: grid;
+  place-items: center;
+}
+.station-console {
+  width: min(78rem, calc(100vw - 2rem));
+  height: calc(100vh - 2rem);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  background: var(--panel);
+  box-shadow: 0 1rem 3rem rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+}
+.station-console-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.6rem 0.9rem;
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+.station-console-head strong { font-size: 0.9rem; }
+.station-console-org { color: var(--muted); font-size: 0.8rem; margin-left: 0.6rem; }
+/* The frame is the box's own console, which paints its own dark theme (its CSS
+   is transcribed from this same palette). White by default while it loads, so
+   the surface underneath matches rather than flashing white. */
+.station-console-frame {
+  flex: 1 1 auto;
+  width: 100%;
+  border: 0;
+  background: var(--bg);
+}
+
+/* The two access controls sit on one row, and the destructive one (a host
+   shell) reads as such. */
+.pdash-access { display: flex; gap: 0.4rem; }
+.btn.tiny.danger { color: var(--danger); border-color: rgba(255, 122, 69, 0.4); }
+.btn.tiny.danger:hover:not(:disabled) {
+  background: rgba(255, 122, 69, 0.12);
+  border-color: var(--danger);
+}
+
+/* The host-shell terminal. The xterm canvas needs a definite height, so the
+   wrap is a flex child with min-height:0 and the terminal fills it. */
+.host-shell { padding: 0; }
+.host-term-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  background: #0c1219;
+  padding: 0.4rem 0.5rem;
+}
+.host-term { width: 100%; height: 100%; }
+/* The status line floats over the terminal until the socket is live, so an
+   empty black rectangle is never mistaken for a working-but-silent shell. */
+.host-term-status {
+  position: absolute;
+  inset: 0.6rem auto auto 0.8rem;
+  z-index: 1;
+  color: var(--muted);
+  font: 0.8rem var(--mono);
+  pointer-events: none;
+}

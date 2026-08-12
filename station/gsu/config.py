@@ -90,6 +90,37 @@ class AgentConfig:
     #: and a box with no credential has nothing on it worth reaching.
     setup_window_minutes: float = 0.0
 
+    #: Let a platform admin reach this box's own setup console remotely, down the
+    #: station's outbound link (`gsu/transport/console_proxy.py`). **Off by
+    #: default, and the default is the safety property**: reaching into a box
+    #: remotely is a trust escalation, so a station opens the console socket only
+    #: when this is set — the same refuse-to-bind posture `setup_access.py` takes
+    #: about the LAN listener. When on, a `console.open` command opens a
+    #: time-boxed WebSocket to the platform's `/console/ingest`; the socket
+    #: closes itself when the window lapses, and every open is audited on the
+    #: platform.
+    console_proxy: bool = False
+
+    #: Where the platform's console ingest is, when it is not simply the API's
+    #: host. Same reason `GSU_MEDIA_URL` exists — unset, it is derived from
+    #: `platform_url` with the scheme switched to WebSocket.
+    console_url: str | None = None
+
+    #: Let a platform admin open a shell on this box's **host** remotely
+    #: (`gsu/transport/host_shell.py` + the privileged helper in
+    #: `deploy/hostshell/`). **Off by default, and the biggest trust escalation
+    #: in the station** — a root-capable shell on the host, reached over the
+    #: platform. Two gates must both be open: this flag, which lets the agent
+    #: write the helper its instructions, and the `hostshell` compose profile,
+    #: which is what makes the privileged helper container exist at all. When on,
+    #: a `host.open` command writes a time-boxed request the helper acts on, and
+    #: every open/close is audited on the platform.
+    host_shell: bool = False
+
+    #: Where the platform's host ingest is, when it is not simply the API's host.
+    #: Same override reason as `console_url`/`media_url`.
+    host_shell_url: str | None = None
+
     #: Provision this box as a demo station: every slot starts on its Demo
     #: sensor, so it is a complete working station out of the box with no
     #: hardware attached.
@@ -205,6 +236,11 @@ class AgentConfig:
             # plain line must not silently keep honouring the old line.
             setup_password=_env("GSU_SETUP_PASSWORD_HASH") or _env("GSU_SETUP_PASSWORD"),
             setup_window_minutes=float(_env("GSU_SETUP_WINDOW_MINUTES", "0")),
+            console_proxy=_env("GSU_CONSOLE_PROXY", "0")
+            not in ("0", "false", "no", ""),
+            console_url=_env("GSU_CONSOLE_URL"),
+            host_shell=_env("GSU_HOST_SHELL", "0") not in ("0", "false", "no", ""),
+            host_shell_url=_env("GSU_HOST_SHELL_URL"),
             demo=_env("GSU_DEMO", "0") not in ("0", "false", "no", ""),
             airband_traffic=_env("GSU_AIRBAND_TRAFFIC", "low"),
             radio_transcribe=_env("GSU_RADIO_TRANSCRIBE", "0")
@@ -280,6 +316,15 @@ class AgentConfig:
         the host through Docker's volume path."""
         override = _env("GSU_UPDATE_DIR")
         return Path(override) if override else self.home / "update"
+
+    @property
+    def host_shell_dir(self) -> Path:
+        """Where a `host.open` request is written for the privileged host-shell
+        helper to pick up. GSU_HOST_SHELL_DIR points it at a bind-mounted handoff
+        directory the helper container shares (like GSU_UPDATE_DIR does for the
+        updater); unset, it falls back under the state directory."""
+        override = _env("GSU_HOST_SHELL_DIR")
+        return Path(override) if override else self.home / "hostshell"
 
     @property
     def lock_path(self) -> Path:

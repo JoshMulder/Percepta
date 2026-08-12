@@ -13,7 +13,9 @@ from backend.api.broker import router as broker_router
 from backend.api.account import router as account_router
 from backend.api.auth import router as auth_router
 from backend.api.commands import router as commands_router
+from backend.api.console import router as console_router
 from backend.api.enrolment import router as enrolment_router
+from backend.api.host import router as host_router
 from backend.api.media import renew_leases, router as media_router
 from backend.services import audio_demand, station_watch
 from backend.api.organization import router as organization_router
@@ -108,7 +110,9 @@ app.include_router(aircraft_router)
 app.include_router(auth_router)
 app.include_router(broker_router)
 app.include_router(commands_router)
+app.include_router(console_router)
 app.include_router(enrolment_router)
+app.include_router(host_router)
 app.include_router(media_router)
 app.include_router(organization_router)
 app.include_router(platform_router)

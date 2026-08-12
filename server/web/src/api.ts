@@ -342,6 +342,15 @@ export const api = {
   platformFleet: () => request<FleetView>("/api/platform/fleet"),
   /** Conglomerated ADS-B across the whole fleet. */
   platformAdsb: () => request<FleetAdsb>("/api/platform/adsb"),
+  /** Single-use, 60s, station-bound ticket for a host-shell terminal socket.
+   *  A browser cannot set headers on a WebSocket, so — like the media ticket —
+   *  this is how the terminal socket is authorised. Asking for it also tells the
+   *  station to open its host session, and is audited platform-side. */
+  hostShellTicket: (id: string) =>
+    request<{ ticket: string; expires_in: number; url: string }>(
+      `/api/platform/stations/${id}/host-shell-ticket`,
+      { method: "POST" },
+    ),
   /** Basemap options for the fleet map (no station centre). */
   platformMap: () => request<PlatformMapConfig>("/api/platform/map"),
 

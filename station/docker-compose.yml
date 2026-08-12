@@ -133,6 +133,12 @@ services:
       # — the container path of the handoff bind mount below. The host side is
       # watched by gsu-update.path (item 48).
       GSU_UPDATE_DIR: /var/lib/percepta-gsu-update
+      # Where the agent writes a host.open request for the privileged host-shell
+      # helper — the container path of the shared handoff volume below. Only used
+      # when GSU_HOST_SHELL is set in .env (opt-in) AND the `hostshell` profile is
+      # up; the agent writes the request either way, and nothing reads it unless
+      # the helper container exists.
+      GSU_HOST_SHELL_DIR: /var/lib/percepta-gsu-hostshell
 
     volumes:
       # State: credential, pinned broker CA, device inventory, events,
@@ -192,6 +198,11 @@ services:
       # inherits it. Both are containers, so nothing reaches into Docker's volume
       # path from the host (which is what item 48 cautioned against).
       - gsu-update:/var/lib/percepta-gsu-update
+      # The host-shell handoff: the agent writes a host.open request here and the
+      # privileged helper reads it. Written whether or not the helper is running;
+      # a box that has not brought up the `hostshell` profile simply has nothing
+      # reading it, which is one of the two gates on this feature.
+      - gsu-hostshell:/var/lib/percepta-gsu-hostshell
 
     # Visibility is not permission — the device cgroup still has to allow each
     # major, or every open() returns EPERM against a node that is plainly
@@ -336,8 +347,56 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # The host-shell helper — the second half of "a platform admin reaches a
+  # station" (the first is the agent's console proxy, which needs no privileged
+  # container). This one does: it opens a shell on the HOST, which the sandboxed
+  # agent cannot and must not. It is the biggest trust escalation in the station,
+  # so it is fenced accordingly:
+  #
+  #   * Behind the `hostshell` profile, so it does not exist unless a box opts in
+  #     with `docker compose --profile hostshell up -d`. That is one of two gates;
+  #     the other is GSU_HOST_SHELL in .env, without which the agent refuses to
+  #     write this helper any request at all (gsu/transport/host_shell.py).
+  #   * It talks to nobody on its own. The agent writes a time-boxed request into
+  #     the shared handoff (only when a platform admin asks, over an audited,
+  #     platform-admin-only path), and this dials OUT to /host/ingest to serve it.
+  #   * It holds nothing else — no docker socket, no state, no listening port.
+  #
+  # `privileged` + `pid: host` are inherent to the job: to open a *host* shell it
+  # must `nsenter` into the host's init (PID 1), which needs to see the host PID
+  # namespace and the capability to enter its mount namespace. There is no
+  # narrower version of "give me a shell on the host"; the gates above are what
+  # bound it, not the capability set.
+  hostshell:
+    profiles: ["hostshell"]
+    build:
+      context: .
+      dockerfile: deploy/hostshell.Dockerfile
+    image: percepta/gsu-hostshell:local
+    container_name: percepta-hostshell
+    restart: unless-stopped
+    init: true
+    # See host_ingest_url derivation and the credential in the handoff — nothing
+    # platform-specific is configured here, exactly like the updater.
+    pid: host
+    privileged: true
+    environment:
+      GSU_HOST_SHELL_DIR: /handoff
+    volumes:
+      # The handoff, read-only: it only ever reads the agent's request. The agent
+      # is the sole writer.
+      - gsu-hostshell:/handoff:ro
+    mem_limit: 128m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
   gsu-state:
   updater-state:
   # The agent<->updater handoff (item 48): the request and the status file.
   gsu-update:
+  # The agent->hostshell handoff: the host.open request the helper acts on.
+  gsu-hostshell:

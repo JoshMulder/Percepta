@@ -50,6 +50,8 @@ from .transport import (
     AUDIO, CONTRACT_VERSION, EVENTS, TELEMETRY,
     Transport, build_transport, redact_url,
 )
+from .transport.console_proxy import ConsoleProxy, console_ingest_url
+from .transport.host_shell import HostShellCoordinator, host_ingest_url
 from .video import CameraPreview
 
 log = logging.getLogger("gsu.agent")
@@ -172,6 +174,16 @@ class Agent:
         self.router: CommandRouter | None = None
         self.events: EventSender | None = None
         self.renewer: Renewer | None = None
+        #: Opens the box's own setup console back down the outbound link when a
+        #: platform admin asks (`transport/console_proxy.py`). Built at attach —
+        #: it authenticates with the station credential — and off unless the box
+        #: has opted in with GSU_CONSOLE_PROXY.
+        self.console_proxy: ConsoleProxy | None = None
+        #: Writes the privileged host-shell helper its instructions when a
+        #: platform admin asks (`transport/host_shell.py`). The agent cannot open
+        #: a host shell itself (sandboxed by design); this only records the
+        #: request. Off unless the box has opted in with GSU_HOST_SHELL.
+        self.host_shell: HostShellCoordinator | None = None
 
         # Devices exist before enrolment does. A box waiting for a technician to
         # type a code is still a box on a hillside with sensors on it.
@@ -663,7 +675,8 @@ class Agent:
         if self.router is not None:
             self.router.handlers = build_handlers(
                 self.radio, self.light, self._apply_config,
-                getattr(self, "stream", None), updates=self.updates,
+                getattr(self, "stream", None), self.events, updates=self.updates,
+                console_proxy=self.console_proxy, host_shell=self.host_shell,
             )
 
         self._report_capabilities()
@@ -755,6 +768,8 @@ class Agent:
         with self._attach_lock:
             if self.transport is not None:
                 self.transport.stop()
+            if self.console_proxy is not None:
+                self.console_proxy.stop()
             self.enrolment = enrolment
 
             self._persist_ca(enrolment)
@@ -825,9 +840,34 @@ class Agent:
             # exists is exactly as valid and closes the window entirely.
             if self.transport is not None:
                 self.events = EventSender(self.store, self.transport.publish)
+            # The console proxy authenticates with the station credential, like
+            # the media uplink, and reaches the same platform host. Built here so
+            # a renewal (which re-enters _attach's siblings) and a re-enrol both
+            # rebuild it against the current secret. Its manager thread is idle —
+            # and opens no socket — until a `console.open` arrives AND the box
+            # has opted in, so starting it always costs nothing.
+            self.console_proxy = ConsoleProxy(
+                console_ingest_url(self.config, enrolment),
+                secret=enrolment.credential.secret,
+                trust=self.api_trust,
+                enabled=self.config.console_proxy,
+                loopback_port=self.config.setup_port,
+            )
+            self.console_proxy.start()
+            # No socket and no thread here: the agent is sandboxed and cannot open
+            # a host shell, so this only writes the privileged helper a request
+            # file. Built against the current secret for the same reason the
+            # console proxy is, and refused unless the box opted in.
+            self.host_shell = HostShellCoordinator(
+                self.config.host_shell_dir,
+                host_ingest_url(self.config, enrolment),
+                enrolment.credential.secret,
+                enabled=self.config.host_shell,
+            )
             handlers = build_handlers(
                 self.radio, self.light, self._apply_config, self.stream,
                 self.events, updates=self.updates,
+                console_proxy=self.console_proxy, host_shell=self.host_shell,
             )
             self.router = CommandRouter(handlers)
             if self.transport is not None:
@@ -902,6 +942,13 @@ class Agent:
                 except Exception:  # noqa: BLE001 - already on the way out
                     log.debug("Transport close failed during reset.", exc_info=True)
                 self.transport = None
+            if self.console_proxy is not None:
+                self.console_proxy.stop()
+                self.console_proxy = None
+            if self.host_shell is not None:
+                # Leave no standing host-session request behind for the helper.
+                self.host_shell.close()
+                self.host_shell = None
             self.router = None
             self.events = None
             self.enrolment = None
@@ -977,6 +1024,13 @@ class Agent:
             enrolment.station_id, enrolment.credential.secret)
         if self.transport is not None:
             self.transport.set_credential(enrolment.credential.secret)
+        if self.console_proxy is not None:
+            # Read on the next connect, like the transport's — no live socket
+            # needs interrupting, the old credential holds through the overlap.
+            self.console_proxy.secret = enrolment.credential.secret
+        if self.host_shell is not None:
+            # Written into the next host.open request rather than a live socket.
+            self.host_shell.update_secret(enrolment.credential.secret)
         self.store.record_event(
             "credential.renewed", "info",
             f"Credential renewed; expires {enrolment.credential.expires_at.isoformat()}.",
@@ -2317,6 +2371,10 @@ class Agent:
             self.renewer.stop()
         if self.transport is not None:
             self.transport.stop()
+        if self.console_proxy is not None:
+            self.console_proxy.stop()
+        if self.host_shell is not None:
+            self.host_shell.close()
         self.store.close()
         if self._lock_handle is not None:
             try:
