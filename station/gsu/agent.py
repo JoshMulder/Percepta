@@ -573,10 +573,22 @@ class Agent:
             "traffic": self.config.airband_traffic,
         }
 
-    def build_devices(self, force_camera: bool = False) -> None:
+    def build_devices(self, force_camera: bool = False,
+                      slots: set[str] | None = None) -> None:
         """Construct whatever the inventory says is fitted, and record why
         anything else is missing. Never substitutes a simulation for hardware
         that did not answer.
+
+        `slots`, when given, is the set rediscovery found missing: rebuild only
+        those and leave every present device running. The pass used to be
+        all-or-nothing — it shut down and reopened *every* slot, the radio
+        included, on each 30s tick while anything at all was missing, so one
+        wedged ADS-B or an unreachable weather head flapped a perfectly healthy
+        RTL-SDR every half minute (the first field station's journal, again).
+        `slots=None` is still a full rebuild — start-up and a saved camera
+        change — and only a full pass touches the camera-owed machinery below,
+        because a deliberate camera change forces its own rebuild (console.py)
+        and never rides on rediscovery.
 
         `force_camera` rebuilds the camera slot even while the live stream holds
         it, for the one caller that has decided the slot must change *now*: an
@@ -616,13 +628,23 @@ class Agent:
         """
         context = self.device_context()
         self._last_discovery = time.monotonic()
+
+        # A slot is (re)built on a full pass, or when it is one this pass was
+        # asked for. An incremental pass names only what is missing, so a
+        # present device is never in the set and is left exactly as it is.
+        def _wants(slot: str) -> bool:
+            return slots is None or slot in slots
+
         keep_camera = self._stream_holds_camera() and not force_camera
         # Set when this pass leaves the camera alone, cleared when it builds
         # one. Assigned rather than or-ed: a rebuild that did the camera has
-        # discharged the debt however it was incurred.
-        self._camera_rebuild_owed = keep_camera
+        # discharged the debt however it was incurred. Only a full pass owns
+        # this decision — an incremental pass never has a stream-held camera in
+        # `slots` (rediscovery excludes it), so it leaves the debt as it found it.
+        if slots is None:
+            self._camera_rebuild_owed = keep_camera
 
-        if self.radio is not None:
+        if _wants("radio") and self.radio is not None:
             try:
                 self.radio.shutdown()
             except Exception:  # noqa: BLE001
@@ -632,24 +654,31 @@ class Agent:
                 continue  # its front end was just shut down through the controller
             if slot == "camera" and keep_camera:
                 continue
+            if not _wants(slot):
+                continue  # present and unnamed: leave the hardware where it is
             self._retire_driver(driver)
 
-        self.adsb = self.inventory.build("adsb", context)
-        self.weather = self.inventory.build("weather", context)
-        self.power = self.inventory.build("power", context)
-        self.light = self.inventory.build("light", context)
-        front_end = self.inventory.build("radio", context)
-        self.radio = (
-            RadioController(front_end, state_path=self.config.receiver_state_path)
-            if front_end is not None else None
-        )
+        if _wants("adsb"):
+            self.adsb = self.inventory.build("adsb", context)
+        if _wants("weather"):
+            self.weather = self.inventory.build("weather", context)
+        if _wants("power"):
+            self.power = self.inventory.build("power", context)
+        if _wants("light"):
+            self.light = self.inventory.build("light", context)
+        if _wants("radio"):
+            front_end = self.inventory.build("radio", context)
+            self.radio = (
+                RadioController(front_end, state_path=self.config.receiver_state_path)
+                if front_end is not None else None
+            )
         # Constructed here and read from the preview thread. Constructing it
         # must stay cheap for that reason — a network camera opens nothing and
         # runs no subprocess until the first capture, which happens off this
         # loop. The context carries the sensor lease, so the new driver
         # contends with the outgoing one through the same arbiter rather than
         # through luck.
-        if not keep_camera:
+        if _wants("camera") and not keep_camera:
             self.camera = self.inventory.build("camera", context)
             # Forget the outgoing camera's last picture. The preview keeps a
             # stale frame on purpose - a picture with a stated age beats a
@@ -1219,15 +1248,21 @@ class Agent:
                 # where configured, and — when a camera change is owed — get it
                 # to let the sensor go so the rebuild below can run.
                 self._maintain_warm_stream()
-                if (
-                    started - self._last_discovery > REDISCOVER_SECONDS
-                    and self._anything_missing()
-                ):
-                    self.build_devices()
-                elif self._camera_rebuild_owed and not self._stream_holds_camera():
+                rebuilt = False
+                if started - self._last_discovery > REDISCOVER_SECONDS:
+                    missing = self._missing_slots()
+                    if missing:
+                        # Rebuild only what is missing. A wedged ADS-B or an
+                        # unreachable weather head must not tear down a radio
+                        # that is working — that flapped the RTL-SDR every 30s
+                        # on the first field station (see build_devices).
+                        self.build_devices(slots=missing)
+                        rebuilt = True
+                if (not rebuilt and self._camera_rebuild_owed
+                        and not self._stream_holds_camera()):
                     # The stream has let go of the sensor, so the camera swap
                     # that was deferred can happen now. Not on the rediscovery
-                    # interval and not behind `_anything_missing`: this is a
+                    # interval and not behind `_missing_slots`: this is a
                     # configuration change somebody made and is waiting on, not
                     # a hunt for hardware that might have been plugged back in.
                     log.info("Applying the deferred camera change now the live "
@@ -1319,17 +1354,26 @@ class Agent:
         except Exception:  # noqa: BLE001 - the replacement matters more
             log.exception("Retiring an outgoing driver failed; continuing.")
 
-    def _anything_missing(self) -> bool:
-        # The camera is excluded while the stream holds the sensor: snapshot
-        # failures during a stream are contention, not a missing device, and
-        # counting them here is what put rediscovery into a rebuild loop on
-        # the first real station.
+    def _missing_slots(self) -> set[str]:
+        """The configured slots whose device is not present right now.
+
+        The camera is excluded while the stream holds the sensor: snapshot
+        failures during a stream are contention, not a missing device, and
+        counting them here is what put rediscovery into a rebuild loop on
+        the first real station.
+        """
         skip_camera = self._stream_holds_camera()
-        return any(
-            report.configured and report.driver_available and report.status != "present"
-            and not (report.slot == "camera" and skip_camera)
+        return {
+            report.slot
             for report in self.inventory.report()
-        )
+            if report.configured
+            and report.driver_available
+            and report.status != "present"
+            and not (report.slot == "camera" and skip_camera)
+        }
+
+    def _anything_missing(self) -> bool:
+        return bool(self._missing_slots())
 
     def step(self, dt: float, weather_due: bool = False, health_due: bool = False) -> None:
         """One tick. Sensing first, publishing last, and no step in between
