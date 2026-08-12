@@ -316,6 +316,29 @@ class ContainerTests(unittest.TestCase):
             if line.strip() and not line.lstrip().startswith("#")
         )
 
+    @classmethod
+    def _service_directives(cls, name: str) -> str:
+        """The directive lines of one compose service, for per-service checks.
+
+        Text-sliced rather than parsed (this suite adds no PyYAML on purpose): a
+        service starts at its 2-space-indented `  <name>:` header and runs until
+        the next key at that indent or a top-level one.
+        """
+        lines = cls.directives.splitlines()
+        start = next(
+            (i for i, line in enumerate(lines) if line.rstrip() == f"  {name}:"),
+            None,
+        )
+        if start is None:
+            return ""
+        block = []
+        for line in lines[start + 1:]:
+            indent = len(line) - len(line.lstrip(" "))
+            if line.strip() and indent <= 2:
+                break
+            block.append(line)
+        return "\n".join(block)
+
     def test_the_container_can_see_what_is_disciplining_the_clock(self):
         # Without this mount `/run` inside the container is its own tmpfs, so
         # timesyncd's flag file is invisible, and neither chronyc nor
@@ -359,11 +382,18 @@ class ContainerTests(unittest.TestCase):
                             (249, "pps")):
             self.assertIn(f"c {major}:* rmw", self.directives, what)
 
-    def test_privileged_is_still_not_used(self):
+    def test_the_agent_and_updater_are_never_privileged(self):
         # Not for isolation — that was traded away deliberately — but because
-        # it also changes cgroup, AppArmor and /sys handling, which is a
-        # blunter tool and one more thing to reason about when debugging.
-        self.assertNotIn("privileged", self.directives.replace("no-new-privileges", ""))
+        # privileged also changes cgroup, AppArmor and /sys handling, a blunter
+        # tool and one more thing to reason about when debugging. The agent earns
+        # its device access with cgroup rules instead; the updater holds the
+        # docker socket and must not be privileged on top of that. The one
+        # deliberate exception is the opt-in host-shell helper (a shell on the
+        # host cannot avoid it), asserted on its own below.
+        for name in ("gsu", "updater"):
+            block = self._service_directives(name).replace("no-new-privileges", "")
+            self.assertNotIn("privileged", block,
+                             f"the {name} service reached for privileged")
 
     def test_the_docs_agree_that_the_container_is_the_path(self):
         # Prose is line-wrapped, so match on collapsed whitespace rather than
@@ -404,10 +434,22 @@ class ContainerTests(unittest.TestCase):
     def test_no_bytecode_is_written_to_the_sd_card(self):
         self.assertIn("PYTHONDONTWRITEBYTECODE=1", self.dockerfile)
 
-    def test_nothing_reaches_for_privileged(self):
-        # The device mappings are the honest cost of the container path;
-        # privileged: true would be the dishonest way out of them.
-        self.assertNotIn("privileged", self.directives.replace("no-new-privileges", ""))
+    def test_privileged_is_confined_to_the_optin_host_shell(self):
+        # The device mappings are the honest cost of the agent's container path;
+        # privileged: true would be the dishonest way out of them. It appears
+        # exactly once — in the host-shell helper, whose whole job is a shell on
+        # the host — and that helper is behind an off-by-default profile, so a
+        # stock box runs nothing privileged at all. Guards both directions: no
+        # other service may gain it, and the helper may not shed the profile.
+        privileged = [
+            name for name in ("gsu", "updater", "hostshell")
+            if "privileged: true" in self._service_directives(name)
+        ]
+        self.assertEqual(privileged, ["hostshell"],
+                         "privileged: true escaped the opt-in host-shell helper")
+        self.assertIn('profiles: ["hostshell"]',
+                      self._service_directives("hostshell"),
+                      "the privileged helper is not behind its opt-in profile")
 
     def test_the_container_hardening_matches_the_unit(self):
         for directive in ("cap_drop:", "- ALL", "no-new-privileges:true",
