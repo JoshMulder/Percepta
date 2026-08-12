@@ -51,6 +51,9 @@ export function StationHostShell({
       term = new Terminal({
         fontFamily: "var(--mono), ui-monospace, monospace",
         fontSize: 13,
+        // xterm packs rows at 1.0 by default; a little leading makes a wrapped
+        // `ls` or `lsusb` far easier to read on the small panel.
+        lineHeight: 1.3,
         cursorBlink: true,
         // Matches the console palette so it reads as one surface.
         theme: { background: "#0c1219", foreground: "#dde6ed", cursor: "#00a0dc" },
