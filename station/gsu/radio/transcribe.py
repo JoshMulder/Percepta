@@ -388,17 +388,26 @@ def _biquad(samples: list[float], b0: float, b1: float, b2: float,
 
 
 def bandpass_voice(
-    pcm: bytes, rate: int = WHISPER_RATE, low_hz: float = 300.0, high_hz: float = 3400.0
+    pcm: bytes, rate: int = WHISPER_RATE, low_hz: float = 300.0, high_hz: float = 5000.0
 ) -> bytes:
-    """The comms voice band (~300-3400 Hz) of 16-bit mono PCM, in stdlib.
+    """The speech band (~300-5000 Hz) of 16-bit mono PCM, in stdlib.
 
     A transcription-only stage: it runs on the copy handed to whisper, never on
     the audio the listeners and the recording get, so a site can listen full-band
-    while whisper still sees speech with the carrier rumble below and the channel
-    hiss above taken off — the two things a general model trips on hardest. Two
-    2nd-order Butterworth sections (high-pass then low-pass, RBJ cookbook): 12
-    dB/octave skirts for a few multiplies a sample, on an over the model is about
-    to spend seconds on. No numpy, keeping this file's no-heavy-deps promise.
+    while whisper still sees speech with the carrier rumble below and the worst of
+    the channel hiss above taken off. Two 2nd-order Butterworth sections (high-pass
+    then low-pass, RBJ cookbook): 12 dB/octave skirts for a few multiplies a
+    sample, on an over the model is about to spend seconds on. No numpy, keeping
+    this file's no-heavy-deps promise.
+
+    The ceiling is 5 kHz, not the 3.4 kHz of a comms-voice channel. 3.4 kHz is the
+    right cut for a human ear on a narrow AM channel, but it throws away the
+    consonant/fricative energy (s, f, t, sh live at 4-8 kHz) that whisper leans on
+    to tell the phonetic alphabet and digit strings apart — measured on real overs,
+    dropping the ceiling to 3.4 kHz turned "New Zealand 647" into "take 4-7". 5 kHz
+    recovers those cues while still cutting the noisy top octave, where opening up
+    fully let whisper hallucinate on hiss. Wideband whisper was trained on natural
+    speech, so the lighter the band-limiting the better, up to that noise limit.
     """
     if not pcm:
         return pcm

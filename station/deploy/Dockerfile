@@ -21,11 +21,12 @@
 #   * whisper.cpp and a ladder of models, for on-box airband transcription. Built
 #     static so one self-contained `whisper-cli` binary drops into the runtime,
 #     and the models are baked in. WHISPER_MODELS is the ladder (small.en +
-#     base.en by default, ~600 MB together); the station benchmarks them at
-#     start-up and keeps the largest this board can keep up with, stepping down to
-#     a smaller one — or off — on a slow box (see radio/transcribe.py). Transcription
-#     is still OFF by default — the setup page's radio tab is the switch, and it
-#     only lights up because these files are present.
+#     base.en by default), downloaded as f16 and quantized here to q8_0 (~340 MB
+#     together, and near-lossless — see the model step). The station benchmarks
+#     them at start-up and keeps the largest this board can keep up with, stepping
+#     down to a smaller one — or off — on a slow box (see radio/transcribe.py).
+#     Transcription is still OFF by default — the setup page's radio tab is the
+#     switch, and it only lights up because these files are present.
 #
 # The versions are ARGs so a build can override them, but the defaults are
 # pinned to upstream release tags — not a moving branch — so the image is
@@ -140,22 +141,40 @@ RUN mkdir -p /opt/whisper-bin \
              -printf '%s\t%p\n' | sort -rn | head -1 | cut -f2)" \
         && test -n "${whisper_bin}" \
         && test "$(stat -c%s "${whisper_bin}")" -gt 1000000 \
-        && cp "${whisper_bin}" /opt/whisper-bin/whisper-cli ) \
+        && cp "${whisper_bin}" /opt/whisper-bin/whisper-cli \
+        && quantize_bin="$(find /tmp/whisper/build -type f -name '*quantize*' \
+             -printf '%s\t%p\n' | sort -rn | head -1 | cut -f2)" \
+        && test -n "${quantize_bin}" \
+        && cp "${quantize_bin}" /usr/local/bin/whisper-quantize ) \
       || { echo "no real whisper-cli built (only a deprecation stub?)"; exit 1; } ; \
     else \
       echo "GSU_TRANSCRIBE=${GSU_TRANSCRIBE}: skipping the whisper.cpp build"; \
     fi
+# whisper-quantize is kept build-side (/usr/local/bin, NOT /opt/whisper-bin, so it
+# does not ship to the runtime) — the model step below uses it to quantize the
+# ladder to q8_0.
 
 # The model ladder, pinned by name; the files are content-stable at these URLs.
-# WHISPER_MODELS is declared here, below the whisper build, on purpose: changing
-# the ladder then re-runs only this download and never rebuilds whisper.cpp above.
+# Downloaded as upstream f16, then quantized to q8_0 in place with the
+# whisper-quantize kept from the build above. q8_0 is near-lossless and roughly
+# halves a decode window on the Pi 5 (small.en: ~22s f16 -> ~12s q8_0), which is
+# what keeps the model inside the 25s real-time budget with headroom to spare
+# under load — f16 was tipping over it and forcing a step-down to base.en. The
+# transcript text is unchanged by the quantization. WHISPER_MODELS is declared
+# here, below the whisper build, on purpose: changing the ladder then re-runs only
+# this step and never rebuilds whisper.cpp above.
 ARG WHISPER_MODELS
 RUN mkdir -p /opt/models \
  && if [ "${GSU_TRANSCRIBE}" = "1" ]; then \
       for m in ${WHISPER_MODELS}; do \
-        curl -fSL -o "/opt/models/ggml-$m.bin" \
+        curl -fSL -C - --retry 5 --retry-delay 3 --retry-all-errors \
+          --connect-timeout 20 --speed-limit 2048 --speed-time 30 \
+          -o "/tmp/ggml-$m-f16.bin" \
           "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-$m.bin" \
         || { echo "failed to fetch ggml-$m.bin"; exit 1; }; \
+        whisper-quantize "/tmp/ggml-$m-f16.bin" "/opt/models/ggml-$m.bin" q8_0 \
+        || { echo "failed to quantize ggml-$m.bin"; exit 1; }; \
+        rm -f "/tmp/ggml-$m-f16.bin"; \
       done ; \
     else \
       echo "GSU_TRANSCRIBE=${GSU_TRANSCRIBE}: skipping the model download"; \

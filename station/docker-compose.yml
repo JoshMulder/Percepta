@@ -279,9 +279,18 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=32m
 
-    # A fence, not a target. The agent's own footprint is a fraction of this;
-    # the limit exists so that a leak takes out the agent rather than the box.
-    mem_limit: 384m
+    # A fence, not a target. The agent's own footprint is a fraction of this, but
+    # on-box transcription is not: whisper-cli runs as a child of the agent, in
+    # this same cgroup, and small.en at q8_0 needs ~650 MB while it decodes (264 MB
+    # model + ~235 MB kv/compute buffers + the agent). The old 384 MB — sized for
+    # the agent alone — could not hold that, so a board that enforces the memory
+    # cgroup would OOM-kill the container the moment it benchmarks the model. (The
+    # field Pi 5 does NOT enforce it — its kernel ships cgroup memory off — which is
+    # the only reason 384 MB ever "worked" even with the f16 model; do not rely on
+    # that.) 768 MB fits it with headroom and still fences a leak well below the
+    # Pi 5's 8 GB. A box built GSU_TRANSCRIBE=0 never loads a model and sits far
+    # under this.
+    mem_limit: 768m
     pids_limit: 64
 
     # --- logs, which are what fills an SD card -------------------------------
