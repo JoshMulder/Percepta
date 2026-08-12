@@ -296,7 +296,8 @@ class ContainerTests(unittest.TestCase):
     careful read can check: the base image is pinned, device access is
     permissive enough that a missing sensor cannot stop the station, the log
     rotation that protects the SD card is present, and no `privileged: true`
-    has crept in.
+    has crept in — with the one exception of the opt-in host-shell helper,
+    whose narrowed elevation is confined to it (see the confinement test).
 
     The device assertions are the ones that matter. They encode a decision that
     reversed twice, and a well-meaning tightening of them would restore the
@@ -315,6 +316,24 @@ class ContainerTests(unittest.TestCase):
             line for line in cls.compose.splitlines()
             if line.strip() and not line.lstrip().startswith("#")
         )
+
+    def service(self, name: str) -> str:
+        """The comment-free directives of one compose service.
+
+        Sliced out of self.directives (already comment-stripped, so a
+        `privileged` written in prose never trips a negative assertion) and
+        bounded by the next service key or the top-level `volumes:`. Service
+        names sit at exactly two spaces of indent; everything inside a service
+        is indented deeper, so those two markers delimit a block unambiguously
+        without pulling PyYAML in for one slice.
+        """
+        lines = self.directives.splitlines()
+        start = lines.index(f"  {name}:")
+        for end in range(start + 1, len(lines)):
+            indent = len(lines[end]) - len(lines[end].lstrip())
+            if indent == 0 or (indent == 2 and lines[end].rstrip().endswith(":")):
+                return "\n".join(lines[start:end])
+        return "\n".join(lines[start:])
 
     def test_the_container_can_see_what_is_disciplining_the_clock(self):
         # Without this mount `/run` inside the container is its own tmpfs, so
@@ -359,11 +378,41 @@ class ContainerTests(unittest.TestCase):
                             (249, "pps")):
             self.assertIn(f"c {major}:* rmw", self.directives, what)
 
-    def test_privileged_is_still_not_used(self):
-        # Not for isolation — that was traded away deliberately — but because
-        # it also changes cgroup, AppArmor and /sys handling, which is a
-        # blunter tool and one more thing to reason about when debugging.
-        self.assertNotIn("privileged", self.directives.replace("no-new-privileges", ""))
+    def test_privileged_is_confined_to_the_optin_host_shell(self):
+        """Elevated privilege lives in the opt-in host-shell helper, nowhere else.
+
+        The agent and the updater must never be `privileged` nor gain
+        `SYS_ADMIN`: the device mappings are the honest cost of the container
+        path, and privilege would be the dishonest way out of them — a
+        well-meaning "just add privileged" here would restore the failure that
+        made containers unacceptable twice over (item 35c). The host-shell
+        helper is the one exception, and only because opening a *host* shell
+        inherently needs it — `nsenter` into host PID 1 needs CAP_SYS_ADMIN.
+        Even there it takes the NARROW form: CAP_SYS_ADMIN plus an AppArmor lift
+        for the /sys writes a host shell makes, not the blunt `privileged: true`
+        that would also hand it every other capability, all devices and an
+        unmasked /proc it does not need. And it is fenced behind the
+        off-by-default `hostshell` profile so an un-opted-in box never runs it.
+        """
+        # The blunt instrument appears nowhere; the narrowing removed it.
+        self.assertNotIn("privileged: true", self.directives)
+
+        # The agent and the updater carry no elevation of any kind.
+        for name in ("gsu", "updater"):
+            block = self.service(name)
+            self.assertNotIn("privileged", block, name)
+            self.assertNotIn("SYS_ADMIN", block, name)
+            self.assertNotIn("cap_add", block, name)
+            self.assertNotIn("apparmor", block, name)
+
+        # The helper has exactly the narrowed set, and only behind its profile.
+        helper = self.service("hostshell")
+        self.assertIn('profiles: ["hostshell"]', helper)
+        self.assertIn("pid: host", helper)
+        self.assertIn("cap_add:", helper)
+        self.assertIn("- SYS_ADMIN", helper)
+        self.assertIn("apparmor:unconfined", helper)
+        self.assertNotIn("privileged", helper)
 
     def test_the_docs_agree_that_the_container_is_the_path(self):
         # Prose is line-wrapped, so match on collapsed whitespace rather than
@@ -403,11 +452,6 @@ class ContainerTests(unittest.TestCase):
 
     def test_no_bytecode_is_written_to_the_sd_card(self):
         self.assertIn("PYTHONDONTWRITEBYTECODE=1", self.dockerfile)
-
-    def test_nothing_reaches_for_privileged(self):
-        # The device mappings are the honest cost of the container path;
-        # privileged: true would be the dishonest way out of them.
-        self.assertNotIn("privileged", self.directives.replace("no-new-privileges", ""))
 
     def test_the_container_hardening_matches_the_unit(self):
         for directive in ("cap_drop:", "- ALL", "no-new-privileges:true",

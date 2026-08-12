@@ -2,10 +2,11 @@
 """The privileged host-shell helper: a host PTY, bridged to the platform.
 
 This runs in the `hostshell` helper container (`deploy/hostshell.Dockerfile`,
-behind an off-by-default compose profile), which is `pid: host` and privileged
-for one reason: to `nsenter` into the host's init and open a **host** shell — the
-thing the sandboxed agent cannot and must not do. It is the most dangerous
-component in the station, so it does as little as possible and only when told.
+behind an off-by-default compose profile), which is `pid: host` and holds
+CAP_SYS_ADMIN for one reason: to `nsenter` into the host's init and open a
+**host** shell — the thing the sandboxed agent cannot and must not do. It is the
+most dangerous component in the station, so it does as little as possible and
+only when told.
 
 It does NOT talk to the platform on its own. The agent — which holds the
 credential and the command channel — writes a request into the shared handoff

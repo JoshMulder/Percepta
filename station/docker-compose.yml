@@ -348,7 +348,7 @@ services:
         max-file: "3"
 
   # The host-shell helper — the second half of "a platform admin reaches a
-  # station" (the first is the agent's console proxy, which needs no privileged
+  # station" (the first is the agent's console proxy, which needs no elevated
   # container). This one does: it opens a shell on the HOST, which the sandboxed
   # agent cannot and must not. It is the biggest trust escalation in the station,
   # so it is fenced accordingly:
@@ -362,11 +362,22 @@ services:
   #     platform-admin-only path), and this dials OUT to /host/ingest to serve it.
   #   * It holds nothing else — no docker socket, no state, no listening port.
   #
-  # `privileged` + `pid: host` are inherent to the job: to open a *host* shell it
-  # must `nsenter` into the host's init (PID 1), which needs to see the host PID
-  # namespace and the capability to enter its mount namespace. There is no
-  # narrower version of "give me a shell on the host"; the gates above are what
-  # bound it, not the capability set.
+  # It needs elevated privilege, but NOT `privileged: true`. Opening a *host*
+  # shell means `nsenter` into the host's init (PID 1), and that takes two things
+  # and only two: seeing host PID 1 (`pid: host`) and CAP_SYS_ADMIN to `setns`
+  # into its namespaces. So that is all it is granted. The default seccomp
+  # profile already permits `setns` — and `syslog(2)`, so `dmesg` — once
+  # CAP_SYS_ADMIN is held, so no seccomp override is needed; AppArmor is lifted
+  # only because docker-default forbids the /sys writes a host shell makes (a USB
+  # unbind/bind), which nsenter into the host mount namespace does not escape.
+  #
+  # This is narrower than `privileged` on the helper itself — no other
+  # capabilities, no blanket device-cgroup access, a masked /proc — but it is NOT
+  # a boundary against the shell it opens: once nsenter lands in the host
+  # mount+pid namespaces that session is host root, which is the whole point. The
+  # narrowing only shrinks what the helper holds BEFORE it nsenters, should the
+  # bridge ever be exploited pre-nsenter. The real fences are the two gates above
+  # (the off-by-default profile and GSU_HOST_SHELL), not the capability set.
   hostshell:
     profiles: ["hostshell"]
     build:
@@ -379,7 +390,14 @@ services:
     # See host_ingest_url derivation and the credential in the handoff — nothing
     # platform-specific is configured here, exactly like the updater.
     pid: host
-    privileged: true
+    # See the note above: `nsenter` into host PID 1 needs CAP_SYS_ADMIN and no
+    # more, and AppArmor lifted for the /sys writes a host shell makes. Not
+    # `privileged: true`. `no-new-privileges` is deliberately absent — the host
+    # shell must be able to run setuid host tools (sudo, mount) after nsenter.
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
     environment:
       GSU_HOST_SHELL_DIR: /handoff
     volumes:

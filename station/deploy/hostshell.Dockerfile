@@ -4,8 +4,9 @@
 # copied verbatim so this stays a handful of files with no pip dependency.
 #
 # Built locally and trusted, like the updater. It is the most dangerous container
-# in the station — privileged and `pid: host` so it can open a shell on the host
-# — so it holds NOTHING else: no docker socket, no state, no network service. It
+# in the station — CAP_SYS_ADMIN and `pid: host` so it can `nsenter` a shell onto
+# the host — so it holds NOTHING else: no docker socket, no state, no network
+# service. It
 # only dials OUT to the platform, and only while the agent has written it a live
 # request (deploy/hostshell/bridge.py). It lives behind the `hostshell` compose
 # profile, so a box that has not opted in never builds or runs it at all.
