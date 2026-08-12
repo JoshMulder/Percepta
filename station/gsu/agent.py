@@ -706,6 +706,7 @@ class Agent:
                 self.radio, self.light, self._apply_config,
                 getattr(self, "stream", None), self.events, updates=self.updates,
                 console_proxy=self.console_proxy, host_shell=self.host_shell,
+                renew=self._renew_from_command,
             )
 
         self._report_capabilities()
@@ -897,6 +898,7 @@ class Agent:
                 self.radio, self.light, self._apply_config, self.stream,
                 self.events, updates=self.updates,
                 console_proxy=self.console_proxy, host_shell=self.host_shell,
+                renew=self._renew_from_command,
             )
             self.router = CommandRouter(handlers)
             if self.transport is not None:
@@ -1150,6 +1152,18 @@ class Agent:
             if set_thresholds:
                 set_thresholds(self.site.alert_range_km, self.site.alert_altitude_m)
         return f"version {self.site.version}, changed {changed or 'nothing'}"
+
+    def _renew_from_command(self) -> str:
+        """`config.refresh`: renew the credential now so the box adopts the
+        platform's current name and timezone from a fresh enrolment record,
+        without waiting for the scheduled renewal. A no-op with a clear line when
+        there is no renewer yet (the box is not enrolled). Non-blocking — it wakes
+        the renewer thread, which does the /renew and reports the new expiry in
+        the next health frame."""
+        if self.renewer is None:
+            return "not enrolled; nothing to renew"
+        self.renewer.renew_now()
+        return "renewal requested"
 
     # --- the loop -------------------------------------------------------
 

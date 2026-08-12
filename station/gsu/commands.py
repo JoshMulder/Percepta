@@ -76,7 +76,7 @@ class CommandRouter:
 
 def build_handlers(radio, light, on_config, stream=None,
                    events=None, updates=None, console_proxy=None,
-                   host_shell=None) -> dict[str, Handler]:
+                   host_shell=None, renew=None) -> dict[str, Handler]:
     """Wire the contract's commands to the things that carry them out.
 
     Every entry here has a matching field in a telemetry payload — that pairing
@@ -223,6 +223,16 @@ def build_handlers(radio, light, on_config, stream=None,
         # platform holds no site policy of its own (`contract/enrolment.md`
         # §7). Handled so a station is ready the day that changes.
         handlers["config.set"] = on_config
+
+    if renew is not None:
+        def config_refresh(payload: dict) -> str:
+            # -> the credential renews (health.credential.expires_at moves) and the
+            # box adopts the platform's current name and timezone from the fresh
+            # enrolment record. Just wakes the renewer thread; the renewal runs
+            # there, and the platform sees the effect in health, never here.
+            return renew()
+
+        handlers["config.refresh"] = config_refresh
 
     if updates is not None:
         # Recorded, never executed here: the host-side updater outside the

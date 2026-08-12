@@ -25,7 +25,7 @@ from backend.auth.identity import Identity
 from backend.database.dependencies import get_db
 from backend.database.models.ground_station import GroundStation
 from backend.database.models.station_credential import StationCredential
-from backend.realtime.bus import publish_roster_sync
+from backend.realtime.bus import command_channel, publish_roster_sync, publish_sync
 from backend.services import enrolment
 from backend.services import geocode
 from backend.services.audit import record
@@ -131,7 +131,7 @@ def update_config(
     if station is None:
         raise HTTPException(status_code=404, detail="Station not available")
 
-    # Name and position are settled at enrolment and not afterwards.
+    # Position is settled at enrolment and not afterwards.
     #
     # The owner's reasoning, and it is right: a station that needs a different
     # position has physically moved, and a box that has moved needs commissioning
@@ -140,11 +140,13 @@ def update_config(
     # a station's history silently describe two different places, and every
     # bearing it ever reported becomes unattributable.
     #
-    # Editable before enrolment, because until then the record is a plan rather
-    # than a station and correcting a typo should not need a site visit.
+    # Name is deliberately NOT frozen (2.1): it is a label the platform owns and
+    # delivers to the box in the enrolment record, so a rename here pushes to the
+    # station (the config.refresh nudge below) and the two stay in step without a
+    # re-enrolment. Everything here is editable before enrolment, because until
+    # then the record is a plan rather than a station.
     if _has_enrolled(db, station_id):
         frozen = {
-            "name": (station.name, body.name.strip()),
             "latitude": (station.latitude, body.latitude),
             "longitude": (station.longitude, body.longitude),
             "elevation": (station.elevation_m, body.elevation_m),
@@ -240,6 +242,14 @@ def update_config(
     # list. Only on a name change — position and zoom are not in the roster.
     if "name" in changed:
         publish_roster_sync(identity.organization_id)
+
+    # Nudge an enrolled station to renew now, so a name or timezone edit lands on
+    # the box promptly rather than on its next scheduled renewal — both live in
+    # the enrolment record the renewal re-delivers. Best-effort and fail-soft:
+    # the scheduled renewal is the guarantee, so an offline station simply adopts
+    # the change later, and a nudge that cannot be sent is not shown as an error.
+    if result.enrolled and ("name" in changed or "timezone" in changed):
+        publish_sync(command_channel(station_id), {"kind": "config.refresh"})
     return result
 
 

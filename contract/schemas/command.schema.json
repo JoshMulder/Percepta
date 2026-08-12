@@ -298,6 +298,18 @@
         "image",
         "digest"
       ]
+    },
+    {
+      "type": "object",
+      "description": "Renew the credential now, and with it adopt the platform's current station record - name and timezone - instead of waiting for the scheduled renewal (enrolment.md §6). Added in 2.1, additive, and ignored by a station that does not know it. Name and timezone are the platform's to set and reach the box only through the enrolment record, so this is how an edit made in the console lands promptly rather than on the next renewal cycle. Position stays the station's own - the platform's copy is only what the station reported - so a renewal round-trips it unchanged. Reported back as the renewed credential expiry in health.credential.",
+      "properties": {
+        "kind": {
+          "const": "config.refresh"
+        }
+      },
+      "required": [
+        "kind"
+      ]
     }
   ]
 }

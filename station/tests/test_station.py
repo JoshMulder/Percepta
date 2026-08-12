@@ -356,6 +356,7 @@ class CommandTests(unittest.TestCase):
             build_handlers(
                 self.agent.radio, self.agent.light, self.agent._apply_config,
                 self.agent.stream, updates=self.agent.updates,
+                renew=self.agent._renew_from_command,
             ),
         )
 
@@ -383,6 +384,20 @@ class CommandTests(unittest.TestCase):
             option["properties"]["kind"]["const"] for option in COMMANDS["oneOf"]
         }
         self.assertTrue(kinds <= set(self.router.handlers), kinds - set(self.router.handlers))
+
+    def test_config_refresh_triggers_an_immediate_renewal(self):
+        """`config.refresh` is how a platform name/timezone edit reaches the box:
+        it wakes the renewer so the station re-fetches its enrolment record now,
+        rather than on its next scheduled renewal. A no-op — not a crash — when
+        the box is not enrolled and has no renewer."""
+        from unittest import mock
+
+        self.agent.renewer = None
+        self.assertTrue(self.router.dispatch({"kind": "config.refresh"}))
+
+        self.agent.renewer = mock.Mock()
+        self.assertTrue(self.router.dispatch({"kind": "config.refresh"}))
+        self.agent.renewer.renew_now.assert_called_once()
 
     def test_a_command_needs_no_channel_to_be_this_stations_own(self):
         """The near-miss this used to guard against cannot happen any more.
