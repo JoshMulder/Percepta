@@ -39,6 +39,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import deque
 
 from . import clock
 from .camera import sensor_exclusive
@@ -54,19 +55,48 @@ from .transport.stream import (
 log = logging.getLogger("gsu.stream")
 
 
-def _pace_ticks(gap_s: float, timescale: int) -> int:
-    """This sample's duration in timescale ticks, from the wall-clock gap since
-    the previous access unit, clamped either side.
+#: How far back the delivered frame rate is averaged, and the fewest samples
+#: before it is trusted. Annex B carries no timestamp, so the muxer must invent
+#: one. A network camera in low light delivers a whole GOP in a burst and then
+#: pauses (a 2s keyframe interval at 5 fps is ten frames in a blink, then nearly
+#: two seconds of nothing), so a *per-frame* gap is lumpy — the burst reads as
+#: 120 fps, the pause as a stall — and pacing from it makes the timeline more
+#: jagged, not less (the first version of this fix did exactly that). A window a
+#: few GOPs long gives the true average rate; the muxer is paced uniformly at
+#: that and the player's own buffer absorbs the bursty arrival.
+RATE_WINDOW_S = 5.0
+MIN_RATE_FRAMES = 5
 
-    Annex B carries no timestamp, so the muxer would otherwise stamp every frame
-    at the one nominal rate — which runs the timeline fast against a camera that
-    has slowed down after dark, then stalls, then races to catch up (the "two
-    seconds then stop" a viewer sees). The real gap is the honest duration. A
-    gap under 1/120 s is frames the network clumped together, not a true
-    120 fps; one over a few seconds is a stall the player already treats as a
-    gap, not one very long frame. Clamp both so neither corrupts the timeline.
+
+def _smoothed_rate(arrivals: deque, now: float,
+                   window_s: float = RATE_WINDOW_S) -> float | None:
+    """Frames per second over the last `window_s`, or None until it has filled.
+
+    Counted against the *fixed* window, not the first-to-last span: a low-light
+    burst's frames all land at the window's trailing edge, so a span from first
+    to now ends inside a burst and reads high — biased fast, which is the drift
+    we are removing. The fixed denominator includes the pauses and gives the true
+    average. None until the window has actually filled, before which the
+    denominator understates and the muxer's nominal rate is the better guess.
+
+    Mutates `arrivals`: appends `now` and drops entries older than the window.
     """
-    return min(timescale * 4, max(timescale // 120, round(gap_s * timescale)))
+    arrivals.append(now)
+    cutoff = now - window_s
+    while arrivals and arrivals[0] < cutoff:
+        arrivals.popleft()
+    if len(arrivals) < MIN_RATE_FRAMES or now - arrivals[0] < window_s * 0.8:
+        return None
+    return len(arrivals) / window_s
+
+
+def _ticks_for_rate(rate: float, timescale: int) -> int:
+    """A uniform sample duration in timescale ticks for a frames-per-second
+    rate, clamped against an absurd-fast (a clumped burst) or absurd-slow (a
+    stall) estimate so neither corrupts the timeline.
+    """
+    ticks = round(timescale / rate) if rate > 0 else timescale
+    return min(timescale * 4, max(timescale // 120, ticks))
 
 
 #: Lease bounds. Five seconds is the shortest that survives one missed command
@@ -171,6 +201,9 @@ class StreamSession:
         self._codec_mismatch = ""
         self._session_open = False
         self._last_frame_at: float | None = None
+        #: Recent access-unit arrival times, for the smoothed delivery rate the
+        #: muxer is paced from (see _smoothed_rate). Bounded by RATE_WINDOW_S.
+        self._arrivals: deque[float] = deque()
         #: When this session entered "starting". `tick` uses it to notice a
         #: start that never finished — see STARTING_LIMIT_S.
         self._starting_at: float | None = None
@@ -365,6 +398,7 @@ class StreamSession:
         self.bytes_out = 0
         self.dropped = 0
         self._last_frame_at = None
+        self._arrivals.clear()
         self._session_open = False
         self.codec = ""
         self._codec_mismatch = ""
@@ -875,10 +909,6 @@ class StreamSession:
         self.frames += 1
         self.bytes_out += len(unit.data)
         now = time.monotonic()
-        # The gap since the previous access unit is this frame's real duration —
-        # a camera slowing down after dark sends them further apart, and Annex B
-        # carries no timestamp to say so. `None` on the first frame: no gap yet.
-        gap = None if self._last_frame_at is None else now - self._last_frame_at
         self._last_frame_at = now
         uplink, muxer = self.uplink, self.muxer
         if uplink is None or muxer is None:
@@ -892,7 +922,14 @@ class StreamSession:
         if not self._codec_agrees(nals, muxer):
             return
 
-        duration = None if gap is None else _pace_ticks(gap, muxer.timescale)
+        # Pace the sample uniformly at the delivery rate averaged over the last
+        # few GOPs, not the instantaneous arrival gap: a low-light camera bursts
+        # a whole GOP then pauses, so per-frame gaps are lumpy while the average
+        # is steady. Uniform durations at the average let the player's buffer
+        # absorb the burst and keep the timeline honest. None until the window
+        # has enough samples — the muxer's nominal rate carries the first frames.
+        rate = _smoothed_rate(self._arrivals, now, RATE_WINDOW_S)
+        duration = _ticks_for_rate(rate, muxer.timescale) if rate else None
         fragment, keyframe, changed = muxer.feed(unit, nals, duration)
         if changed or not self._session_open:
             # A new encoder session: parameters that no longer match decode as

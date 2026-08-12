@@ -1084,11 +1084,10 @@ class H264SequenceParameterSetTests(unittest.TestCase):
         self.assertEqual((muxer.picture_width, muxer.picture_height), (1920, 1080))
         self.assertTrue(muxer.codec().startswith("avc1."))
 
-    def test_a_sample_paced_from_a_gap_advances_by_the_gap_not_the_rate(self):
-        # The night-stutter fix: Annex B carries no timestamp, so a frame's real
-        # duration is the wall-clock gap since the last one. A slow night frame
-        # must move the timeline by its own gap, not by the daylight rate — or
-        # the timeline runs fast, underruns, and races to catch up.
+    def test_a_sample_given_a_duration_advances_by_that_not_the_nominal_rate(self):
+        # The muxer plumbing the night-stutter fix rides on: a per-sample
+        # duration overrides the fixed sample_duration and moves the decode clock
+        # by exactly that; None keeps the nominal rate.
         from gsu.camera.h264 import StreamSettings
         from gsu.camera.h264_synthetic import SyntheticH264Source
         from gsu.media.fmp4 import Fmp4Muxer
@@ -1098,22 +1097,45 @@ class H264SequenceParameterSetTests(unittest.TestCase):
         while not muxer.ready:                       # prime with the keyframe's SPS/PPS
             muxer.feed(source.frame())
 
-        base = muxer.decode_time                      # no gap given -> the fixed rate
+        base = muxer.decode_time                      # no duration -> the fixed rate
         self.assertIsNotNone(muxer.feed(source.frame())[0])
         self.assertEqual(muxer.decode_time - base, muxer.sample_duration)
 
-        base = muxer.decode_time                      # a real 0.1s (10 fps) night gap
+        base = muxer.decode_time                      # a 0.1s (10 fps) sample
         self.assertIsNotNone(muxer.feed(source.frame(), duration=9000)[0])
         self.assertEqual(muxer.decode_time - base, 9000)
         self.assertNotEqual(9000, muxer.sample_duration)
 
-    def test_pace_ticks_clamps_bursts_and_stalls(self):
-        from gsu.stream import _pace_ticks
+    def test_ticks_for_rate_clamps_absurd_estimates(self):
+        from gsu.stream import _ticks_for_rate
         ts = 90000
-        self.assertEqual(_pace_ticks(0.1, ts), 9000)           # a real 10 fps gap
-        self.assertEqual(_pace_ticks(1 / 24, ts), round(ts / 24))
-        self.assertEqual(_pace_ticks(0.0001, ts), ts // 120)   # clumped burst -> 120 fps floor
-        self.assertEqual(_pace_ticks(30.0, ts), ts * 4)        # a stall -> capped, not a 30s frame
+        self.assertEqual(_ticks_for_rate(5.0, ts), 18000)         # 5 fps -> 200ms
+        self.assertEqual(_ticks_for_rate(25.0, ts), 3600)         # 25 fps -> 40ms
+        self.assertEqual(_ticks_for_rate(1000.0, ts), ts // 120)  # clumped burst -> floor
+        self.assertEqual(_ticks_for_rate(0.1, ts), ts * 4)        # a stall -> capped
+
+    def test_smoothed_rate_rides_over_bursty_arrival(self):
+        # The regression v0.2.1 caused: a low-light camera delivers a whole GOP
+        # in a burst then pauses (~5 fps as ten frames every ~2s). Paced per-gap,
+        # that read as 100+ fps then a stall — jagged. The smoothed rate must sit
+        # near the 5 fps average instead, so the muxer stays uniform and the
+        # player's buffer absorbs the burst.
+        from collections import deque
+        from gsu.stream import _smoothed_rate, RATE_WINDOW_S
+
+        arrivals: deque = deque()
+        t, rates = 0.0, []
+        for _gop in range(12):
+            for _frame in range(10):
+                r = _smoothed_rate(arrivals, t, RATE_WINDOW_S)
+                if r is not None:
+                    rates.append(r)
+                t += 0.01               # ten frames in 0.1s: the burst
+            t += 1.90                   # then the pause — 2.0s per GOP = ~5 fps
+        self.assertTrue(rates, "the window never filled")
+        for r in rates:
+            self.assertGreater(r, 3.5, "smoothed rate collapsed below the 5 fps average")
+            self.assertLess(r, 7.0, "smoothed rate spiked toward the burst")
 
 
 class EncoderTests(unittest.TestCase):
