@@ -17,12 +17,14 @@ from sqlalchemy.orm import Session
 from backend.auth.dependencies import get_identity
 from backend.auth.identity import Identity
 from backend.auth.password import PasswordError, hash_password, verify_password
+from backend.core.email import EmailNotConfiguredError
 from backend.database.dependencies import get_db
 from backend.database.models.auth_session import AuthSession
 from backend.database.models.common import utcnow
 from backend.database.models.user import User
 from backend.database.session import PrivilegedSessionLocal
 from backend.realtime.revocation import revoke_session
+from backend.services import email_change
 from backend.services.audit import record
 
 log = logging.getLogger(__name__)
@@ -39,6 +41,14 @@ class PasswordChange(BaseModel):
     # pydantic character limits would disagree with it on any multibyte
     # password, turning a clear 400 into a 500.
     new_password: str
+
+
+class EmailChangeRequest(BaseModel):
+    # A light check only — the real proof the address is valid and reachable is
+    # that the verification link sent to it gets opened. Kept permissive so a
+    # legitimate but unusual address is not refused by an over-strict regex.
+    new_email: str = Field(min_length=3, max_length=320)
+    current_password: str
 
 
 class ProfileResponse(BaseModel):
@@ -176,3 +186,77 @@ def change_password(
         detail={"other_sessions_ended": ended},
     )
     return {"other_sessions_ended": ended}
+
+
+@router.post("/email", status_code=202)
+def request_email_change(
+    body: EmailChangeRequest,
+    request: Request,
+    identity: Identity = Depends(get_identity),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Start a self-service email change.
+
+    Verify the current password, then send a confirmation link to the NEW
+    address. Nothing about the account moves here — the address changes only when
+    that link is opened (POST /api/auth/email-change/redeem), which is the proof
+    that the person controls the new mailbox.
+
+    The current password is required for the same reason the password change
+    requires it: the email is the sign-in identifier, so moving it is exactly
+    what a borrowed session — an unattended desk, a stolen cookie — would be used
+    for.
+    """
+    user = db.get(User, identity.user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    if not verify_password(body.current_password, user.password_hash):
+        record(
+            action="account.email.rejected",
+            organization_id=identity.organization_id,
+            actor_user_id=identity.user_id,
+            actor_email=user.email,
+            ip_address=request.client.host if request.client else None,
+            detail={"reason": "current-password-wrong"},
+        )
+        raise HTTPException(status_code=400, detail="Current password is not correct")
+
+    new_email = email_change.normalise(body.new_email)
+    if "@" not in new_email or "." not in new_email.split("@")[-1]:
+        raise HTTPException(
+            status_code=400, detail="That does not look like an email address"
+        )
+    if new_email == email_change.normalise(user.email):
+        raise HTTPException(status_code=400, detail="That is already your email address")
+
+    # Refuse early if the address is plainly taken. Not the authoritative check —
+    # the redeem re-checks at the moment it lands — but a clearer 'no' now than a
+    # link that will fail when opened.
+    taken = db.execute(select(User).where(User.email == new_email)).scalar_one_or_none()
+    if taken is not None:
+        raise HTTPException(status_code=409, detail="That address is already in use")
+
+    token, plaintext = email_change.issue(db, user=user, new_email=new_email)
+    old_email = user.email
+    db.commit()
+
+    try:
+        email_change.send(new_email=new_email, plaintext=plaintext)
+    except EmailNotConfiguredError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Email is not configured, so the verification link could not be sent.",
+        ) from exc
+
+    record(
+        action="account.email.requested",
+        organization_id=identity.organization_id,
+        actor_user_id=identity.user_id,
+        actor_email=old_email,
+        target_type="user",
+        target_id=str(identity.user_id),
+        ip_address=request.client.host if request.client else None,
+        detail={"from": old_email, "to": new_email},
+    )
+    return {"sent_to": new_email}

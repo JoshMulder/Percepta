@@ -9,6 +9,7 @@ dropping its table.
 from backend.database.models.audit_log import AuditLog
 from backend.database.models.auth_session import AuthSession
 from backend.database.models.device import Device, DeviceKind
+from backend.database.models.email_change_token import EmailChangeToken
 from backend.database.models.enums import UserRole
 from backend.database.models.ground_station import GroundStation
 from backend.database.models.organization import Organization
@@ -28,6 +29,7 @@ __all__ = [
     "AuthSession",
     "Device",
     "DeviceKind",
+    "EmailChangeToken",
     "GroundStation",
     "Organization",
     "PasswordResetToken",

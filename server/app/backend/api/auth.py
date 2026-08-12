@@ -31,7 +31,7 @@ from backend.repositories.organization_membership_repository import (
     OrganizationMembershipRepository,
 )
 from backend.repositories.user_repository import UserRepository
-from backend.services import password_reset
+from backend.services import email_change, password_reset
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -603,3 +603,56 @@ def redeem_password_reset(
     # user had, and handing one straight back to whoever held the link would
     # undo exactly what that is for.
     return {"reset": True}
+
+
+class EmailChangeRedeem(BaseModel):
+    token: str
+
+
+@router.post("/email-change/redeem", status_code=200)
+def redeem_email_change(
+    body: EmailChangeRedeem,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Confirm a new email address from an emailed link. No session required.
+
+    The link was sent to the new address, so opening it is the proof the person
+    controls it; the token is the whole of the authorisation. Runs on a
+    privileged session for the same reason the reset redemption does — there is
+    no caller identity here, so row-level security has no organisation to bind a
+    policy to, and a normal session would report every valid link invalid.
+
+    Deliberately does NOT revoke sessions. Unlike a password reset, changing the
+    sign-in address does not imply the account was compromised; the existing
+    password and sessions remain the holder's, and only future sign-ins use the
+    new address.
+    """
+    with PrivilegedSessionLocal() as privileged:
+        try:
+            redeemed = email_change.redeem(privileged, token_value=body.token)
+        except email_change.EmailChangeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        # Read before the commit — org context is unset here, so anything read
+        # afterwards comes back through policies that match nothing.
+        user_id = redeemed.user.id
+        new_email = redeemed.new_email
+        # Somewhere an admin will find the entry; a user can belong to several
+        # organisations and an email belongs to none of them, so any one is as
+        # correct as another.
+        organization_id = privileged.execute(
+            select(OrganizationMembership.organization_id)
+            .where(OrganizationMembership.user_id == user_id)
+            .limit(1)
+        ).scalar_one_or_none()
+        privileged.commit()
+
+    _audit(
+        "user.email_change.redeemed",
+        request=request,
+        actor_email=new_email,
+        actor_user_id=user_id,
+        organization_id=organization_id,
+    )
+    return {"email": new_email}
