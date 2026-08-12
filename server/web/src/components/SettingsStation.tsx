@@ -58,58 +58,73 @@ export function SettingsStation({
   const station = stations.find((s) => s.id === selected) ?? null;
 
   return (
-    <div className="settings-sections">
-      <div className="station-picker">
-        <label className="field">
-          <span>Station</span>
-          <select
-            value={selected ?? ""}
-            onChange={(e) => setSelected(e.target.value)}
-          >
-            {stations.length === 0 && <option value="">No stations yet</option>}
-            {stations.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name}
-                {s.is_simulated ? " · DEMO" : ""}
-              </option>
-            ))}
-          </select>
-        </label>
-        <AddStation
-          onCreated={async (id) => {
-            // Refresh the list and select the new record in place, so the
-            // operator lands on it ready to set position and issue a code.
-            await loadStations(id);
-            onSaved();
-          }}
-        />
-      </div>
-
-      {station ? (
-        <>
-          <StationConfigForm
-            key={station.id}
-            stationId={station.id}
-            onSaved={onSaved}
-          />
-          <SettingsEnrolment
-            stationId={station.id}
-            stationName={station.name}
-            onCredentialChanged={() => setCredentialSeq((n) => n + 1)}
-          />
-          <DeleteStation
-            key={`del-${station.id}`}
-            credentialSeq={credentialSeq}
-            station={station}
-            onDeleted={async () => {
-              await loadStations();
+    <div className="member-layout station-layout">
+      {/* The enrolled stations, scrollable, with Add pinned to the bottom of the
+          column — the same list-and-detail shape as People. Picking one is
+          independent of the console's own station switcher: you configure
+          whichever site needs it, not the one you happen to be watching. */}
+      <div className="station-list-col">
+        <ul className="member-list station-list">
+          {stations.length === 0 && (
+            <li className="station-list-empty settings-note">No stations yet.</li>
+          )}
+          {stations.map((s) => (
+            <li key={s.id}>
+              <button
+                type="button"
+                className={`member-item${s.id === selected ? " active" : ""}`}
+                onClick={() => setSelected(s.id)}
+              >
+                <span className="member-name">
+                  {s.name}
+                  {s.is_simulated && <em> · DEMO</em>}
+                </span>
+                <span className={`member-roles station-status${s.online ? " online" : ""}`}>
+                  {s.online ? "online" : "offline"}
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+        <div className="station-list-add">
+          <AddStation
+            onCreated={async (id) => {
+              // Refresh the list and select the new record in place, so the
+              // operator lands on it ready to set position and issue a code.
+              await loadStations(id);
               onSaved();
             }}
           />
-        </>
-      ) : (
-        <p className="settings-note">No stations yet. Add one to get started.</p>
-      )}
+        </div>
+      </div>
+
+      <div className="member-detail station-detail">
+        {station ? (
+          <>
+            <StationConfigForm
+              key={station.id}
+              stationId={station.id}
+              onSaved={onSaved}
+            />
+            <SettingsEnrolment
+              stationId={station.id}
+              stationName={station.name}
+              onCredentialChanged={() => setCredentialSeq((n) => n + 1)}
+            />
+            <DeleteStation
+              key={`del-${station.id}`}
+              credentialSeq={credentialSeq}
+              station={station}
+              onDeleted={async () => {
+                await loadStations();
+                onSaved();
+              }}
+            />
+          </>
+        ) : (
+          <p className="settings-note">No stations yet. Add one to get started.</p>
+        )}
+      </div>
     </div>
   );
 }
@@ -245,29 +260,32 @@ function StationConfigForm({
 }) {
   const [config, setConfig] = useState<StationConfig | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    setConfig(null);
+  const load = useCallback(async () => {
     setLoadError(null);
-    api
-      .stationConfig(stationId)
-      .then((c) => !cancelled && setConfig(c))
-      .catch((err) => {
-        if (cancelled) return;
-        setLoadError(
-          err instanceof ApiError && err.status === 404
-            ? "You do not have configuration access to this station."
-            : "Could not load configuration.",
-        );
-      });
-    return () => {
-      cancelled = true;
-    };
+    try {
+      setConfig(await api.stationConfig(stationId));
+    } catch (err) {
+      setLoadError(
+        err instanceof ApiError && err.status === 404
+          ? "You do not have configuration access to this station."
+          : "Could not load configuration.",
+      );
+    }
   }, [stationId]);
+
+  useEffect(() => {
+    // A fresh station: drop the old config, leave edit mode, clear the last
+    // save message, and reload.
+    setConfig(null);
+    setEditing(false);
+    setMessage(null);
+    void load();
+  }, [load]);
 
   function set<K extends keyof StationConfig>(key: K, value: StationConfig[K]) {
     setConfig((c) => (c ? { ...c, [key]: value } : c));
@@ -293,6 +311,7 @@ function StationConfigForm({
       });
       setConfig(saved);
       setMessage("Saved.");
+      setEditing(false);
       onSaved();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Could not save.");
@@ -305,6 +324,48 @@ function StationConfigForm({
   if (!config) return <p className="settings-note">Loading…</p>;
 
   const zoomInverted = config.map_min_zoom > config.map_max_zoom;
+
+  if (!editing) {
+    return (
+      <section className="settings-section">
+        <div className="member-detail-head">
+          <h3>Configuration</h3>
+          <button
+            type="button"
+            className="btn primary"
+            onClick={() => {
+              setMessage(null);
+              setEditing(true);
+            }}
+          >
+            Edit
+          </button>
+        </div>
+        <dl className="settings-facts">
+          <dt>Name</dt>
+          <dd>{config.name}</dd>
+          <dt>Timezone</dt>
+          <dd>{config.timezone}</dd>
+          <dt>Position</dt>
+          <dd>
+            {config.latitude != null && config.longitude != null
+              ? `${config.latitude.toFixed(5)}, ${config.longitude.toFixed(5)}`
+              : "not set"}
+          </dd>
+          <dt>Elevation</dt>
+          <dd>
+            {config.elevation_m != null ? `${config.elevation_m} m` : "not set"}
+          </dd>
+          <dt>Basemap cache</dt>
+          <dd>
+            zoom {config.map_min_zoom}–{config.map_max_zoom}, {config.map_radius_km} km
+            radius
+          </dd>
+        </dl>
+        {message && <span className="settings-ok">{message}</span>}
+      </section>
+    );
+  }
 
   return (
     <form onSubmit={save}>
@@ -458,6 +519,18 @@ function StationConfigForm({
           disabled={saving || zoomInverted || !config.name.trim()}
         >
           {saving ? "Saving…" : "Save"}
+        </button>
+        <button
+          type="button"
+          className="btn ghost"
+          disabled={saving}
+          onClick={() => {
+            setError(null);
+            setEditing(false);
+            void load();
+          }}
+        >
+          Cancel
         </button>
         {message && <span className="settings-ok">{message}</span>}
         {error && <span className="settings-error">{error}</span>}

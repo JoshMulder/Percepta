@@ -2556,6 +2556,10 @@ body {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  /* Scrolls independently of the detail beside it, so a long roster does not
+     push the settings dialog taller than the viewport. */
+  max-height: 340px;
+  overflow-y: auto;
 }
 .member-item {
   width: 100%;
@@ -2608,6 +2612,35 @@ body {
 .grant-grid input.ineffective { accent-color: var(--dim); opacity: 0.55; }
 .actuator-mark { color: var(--warn); margin-left: 2px; }
 
+/* A detail's heading beside its Edit button: name/email (People) or a section
+   title (Station config) on the left, the action on the right. */
+.member-detail-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.member-detail-head h4 { margin: 0; }
+/* A section title used as a detail head keeps its weight but drops the full-width
+   underline, which would only run under the title text inside a flex row. */
+.member-detail-head h3 { margin: 0; border-bottom: none; padding-bottom: 0; }
+.member-detail-head .btn { flex: 0 0 auto; }
+.member-role-value { text-transform: capitalize; }
+
+/* Read-only grant overview: one row per station with its granted capabilities as
+   plain text. The editable checkbox grid appears only under Edit. */
+.grant-summary { display: flex; flex-direction: column; gap: 2px; }
+.grant-summary-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  font-size: 13px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+.grant-summary-station { color: var(--text); font-weight: 500; }
+.grant-summary-caps { color: var(--muted); text-align: right; }
+
 .btn.danger {
   background: var(--danger);
   border-color: var(--danger);
@@ -2631,40 +2664,28 @@ body {
   .settings-tab.active { border-left-color: transparent; border-bottom-color: var(--brand); }
 }
 
-/* The station selector sits above the panes it drives. It is the mode the whole
-   pane is in — which station you are editing — not the first field of the form,
-   so it reads as a control bar over the sections rather than the top of them: a
-   distinct fill, a brand accent below it (the same brand rule the active tab
-   uses), and a shadow that lifts it off the content scrolling beneath. */
-.station-picker {
+/* Stations pane: the same list-and-detail shape as People. The left column holds
+   the scrollable roster with Add pinned to its bottom, so creating a station is
+   the list's footer action rather than a bar floating over the form. */
+.station-list-col {
+  flex: 0 0 210px;
   display: flex;
-  align-items: flex-end;
-  gap: 12px;
-  background: var(--panel-2);
-  border-bottom: 2px solid var(--brand);
-  box-shadow: 0 8px 16px -12px rgba(0, 0, 0, 0.6);
-  /* Held at the top while the pane scrolls: which station you are editing is
-     the one thing that must never be off screen while you edit it. The negative
-     margins pull the bar out over the pane's own padding, so content scrolls
-     under it rather than appearing in the gap at the edges. */
-  position: sticky;
-  /* -20px, not 0, because `top` aligns the *margin* box and the margin above is
-     -20px. At top:0 the row locked 20px down the pane and content scrolled
-     through the strip above it - measured at y=210 against a pane top of 190. */
-  top: -20px;
-  z-index: 2;
-  margin: -20px -24px 22px;
-  padding: 18px 24px 16px;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
 }
-.station-picker .field { margin-bottom: 0; flex: 0 1 340px; }
-/* --panel, not the inherited --panel-2: the select would otherwise be the same
-   shade as the bar it sits in. On --panel it reads as a control on the bar. */
-.station-picker .field select { background: var(--panel); }
-/* The label heads the bar rather than captioning a field, so it is not dimmed. */
-.station-picker .field > span { color: var(--text); font-weight: 600; }
-/* Add sits at the far right of the bar: choosing a station and creating one are
-   two actions, and the gap between them says so. */
-.station-picker .btn { flex: 0 0 auto; margin-left: auto; }
+/* Flexes to fill the column and scrolls, leaving Add always visible below it. */
+.station-list { flex: 1 1 auto; }
+.station-list-empty { padding: 8px 10px; }
+.station-list-add { flex: 0 0 auto; }
+/* Pinned Add spans the column so it reads as the list's footer, not a stray
+   button beside it. */
+.station-list-add .btn { width: 100%; }
+.station-detail { flex: 1 1 380px; min-width: 0; }
+/* The status line inherits .member-roles; online gets the ok colour, offline
+   stays muted. Not capitalised — it is a state, not a label. */
+.station-status { text-transform: none; }
+.station-status.online { color: var(--ok, #3fb950); }
 
 /* The Organisation pane splits into People and Stations — a quiet segmented
    control inside the one pane, not another vertical nav down the side. */

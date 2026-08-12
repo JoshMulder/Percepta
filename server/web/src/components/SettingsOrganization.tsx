@@ -60,7 +60,7 @@ export function SettingsOrganization({
   const [selected, setSelected] = useState<string | null>(null);
   // Members and stations are two jobs, and the station picker below is a sticky
   // bar that would fight the members grid if they shared one scroll. Kept apart.
-  const [section, setSection] = useState<"people" | "stations">("people");
+  const [section, setSection] = useState<"people" | "stations" | "settings">("people");
 
   const load = useCallback(async () => {
     try {
@@ -118,6 +118,15 @@ export function SettingsOrganization({
         >
           Stations
         </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={section === "settings"}
+          className={`org-subtab${section === "settings" ? " active" : ""}`}
+          onClick={() => setSection("settings")}
+        >
+          Settings
+        </button>
       </div>
 
       {section === "stations" && (
@@ -132,7 +141,7 @@ export function SettingsOrganization({
         />
       )}
 
-      {section === "people" && (
+      {section === "settings" && (
       <section className="settings-section">
         <h3>{org.name}</h3>
 
@@ -147,6 +156,18 @@ export function SettingsOrganization({
           />
           <span>Require two-factor authentication</span>
         </label>
+        <small>
+          When on, a member without a second factor is walked through setting one
+          up at their next sign-in, after their password is accepted — no one is
+          locked out. Turning it off leaves existing enrolments in place.
+        </small>
+        {error && <p className="settings-error">{error}</p>}
+      </section>
+      )}
+
+      {section === "people" && (
+      <section className="settings-section">
+        <h3>People</h3>
 
         <InviteMember roles={org.roles} onInvited={load} />
 
@@ -211,6 +232,11 @@ function MemberDetail({
   onRoles: (roles: string[]) => void;
   onGrant: (stationId: string, capabilities: string[]) => void;
 }) {
+  // The detail rests as a read-only overview; the role and grant controls only
+  // appear once Edit is pressed. Reset to view whenever the selected member
+  // changes — the parent passes `key={member.user_id}`, so this remounts and
+  // the initial `false` takes hold, but stating it keeps the intent local.
+  const [editing, setEditing] = useState(false);
   const isAdmin = member.roles.includes("admin");
   const isViewer = member.roles.includes("viewer");
   const adminCount = org.members.filter((m) => m.roles.includes("admin")).length;
@@ -230,110 +256,167 @@ function MemberDetail({
 
   return (
     <div className="member-detail">
-      <h4>{member.display_name}</h4>
-      <p className="settings-note">{member.email}</p>
-
-      <PasswordReset member={member} />
-
-      <div className="field">
-        <span>Role</span>
-        <div className="role-buttons">
-          {org.roles.map((role) => (
-            <button
-              key={role}
-              type="button"
-              className={`btn ghost${member.roles.includes(role) ? " active" : ""}`}
-              disabled={
-                busy === `roles:${member.user_id}` ||
-                (lastAdmin && member.roles.includes("admin") && role !== "admin")
-              }
-              onClick={() => onRoles([role])}
-            >
-              {role}
-            </button>
-          ))}
+      <div className="member-detail-head">
+        <div>
+          <h4>{member.display_name}</h4>
+          <p className="settings-note">{member.email}</p>
         </div>
-        {lastAdmin && (
-          <small>
-            The only administrator. Promote someone else before changing this —
-            an organisation with no admin cannot be recovered from the console.
-          </small>
+        {!editing && (
+          <button type="button" className="btn primary" onClick={() => setEditing(true)}>
+            Edit
+          </button>
         )}
       </div>
 
-      {isAdmin ? (
-        <p className="settings-note">
-          Administrators hold every capability on every station in this
-          organisation implicitly. Per-station grants below do not apply while
-          this person is an admin.
-        </p>
+      {!editing ? (
+        <>
+          <dl className="settings-facts">
+            <dt>Role</dt>
+            <dd className="member-role-value">{member.roles.join(", ") || "no role"}</dd>
+            {member.mfa_enabled !== undefined && (
+              <>
+                <dt>Two-factor</dt>
+                <dd>{member.mfa_enabled ? "enrolled" : "not set up"}</dd>
+              </>
+            )}
+          </dl>
+
+          {isAdmin ? (
+            <p className="settings-note">
+              Administrators hold every capability on every station in this
+              organisation implicitly.
+            </p>
+          ) : (
+            <div className="grant-summary">
+              {org.stations.map((station) => {
+                const caps = capsFor(station.id);
+                return (
+                  <div key={station.id} className="grant-summary-row">
+                    <span className="grant-summary-station">{station.name}</span>
+                    <span className="grant-summary-caps">
+                      {caps.length
+                        ? caps.map((c) => LABELS[c] ?? c).join(", ")
+                        : "no access"}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          <PasswordReset member={member} />
+        </>
       ) : (
         <>
-          {isViewer && (
-            <p className="settings-note">
-              A viewer can never hold the capabilities marked below, whatever is
-              ticked. The limit is applied when access is checked, so ticking one
-              stores it without granting it — and it takes effect if their role
-              changes later.
-            </p>
-          )}
-          <div className="grant-grid-wrap">
-            <table className="grant-grid">
-              <thead>
-                <tr>
-                  <th scope="col">Station</th>
-                  {org.grantable_capabilities.map((c) => (
-                    <th key={c} scope="col" title={c}>
-                      {LABELS[c] ?? c}
-                      {ACTUATORS.has(c) && <span className="actuator-mark">*</span>}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {org.stations.map((station) => {
-                  const caps = capsFor(station.id);
-                  return (
-                    <tr key={station.id}>
-                      <th scope="row">{station.name}</th>
-                      {org.grantable_capabilities.map((c) => {
-                        const ineffective = isViewer && ACTUATORS.has(c);
-                        return (
-                          <td key={c}>
-                            <input
-                              type="checkbox"
-                              checked={caps.includes(c)}
-                              disabled={busy !== null}
-                              onChange={() => toggle(station.id, c)}
-                              aria-label={`${LABELS[c] ?? c} at ${station.name}`}
-                              className={ineffective ? "ineffective" : undefined}
-                              title={
-                                ineffective
-                                  ? "Stored, but a viewer cannot use this"
-                                  : undefined
-                              }
-                            />
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+          <div className="field">
+            <span>Role</span>
+            <div className="role-buttons">
+              {org.roles.map((role) => (
+                <button
+                  key={role}
+                  type="button"
+                  className={`btn ghost${member.roles.includes(role) ? " active" : ""}`}
+                  disabled={
+                    busy === `roles:${member.user_id}` ||
+                    (lastAdmin && member.roles.includes("admin") && role !== "admin")
+                  }
+                  onClick={() => onRoles([role])}
+                >
+                  {role}
+                </button>
+              ))}
+            </div>
+            {lastAdmin && (
+              <small>
+                The only administrator. Promote someone else before changing this —
+                an organisation with no admin cannot be recovered from the console.
+              </small>
+            )}
           </div>
-          <small>
-            <span className="actuator-mark">*</span> Does something physical at
-            the station. Every use is audited, and a viewer may never hold one.
-            Changes take effect immediately, including on anyone currently
-            watching a stream.
-          </small>
-          {me.user_id === member.user_id && (
+
+          {isAdmin ? (
             <p className="settings-note">
-              These are your own permissions. As an administrator you can still
-              reach every station regardless of what is ticked here.
+              Administrators hold every capability on every station in this
+              organisation implicitly. Per-station grants below do not apply while
+              this person is an admin.
             </p>
+          ) : (
+            <>
+              {isViewer && (
+                <p className="settings-note">
+                  A viewer can never hold the capabilities marked below, whatever is
+                  ticked. The limit is applied when access is checked, so ticking one
+                  stores it without granting it — and it takes effect if their role
+                  changes later.
+                </p>
+              )}
+              <div className="grant-grid-wrap">
+                <table className="grant-grid">
+                  <thead>
+                    <tr>
+                      <th scope="col">Station</th>
+                      {org.grantable_capabilities.map((c) => (
+                        <th key={c} scope="col" title={c}>
+                          {LABELS[c] ?? c}
+                          {ACTUATORS.has(c) && <span className="actuator-mark">*</span>}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {org.stations.map((station) => {
+                      const caps = capsFor(station.id);
+                      return (
+                        <tr key={station.id}>
+                          <th scope="row">{station.name}</th>
+                          {org.grantable_capabilities.map((c) => {
+                            const ineffective = isViewer && ACTUATORS.has(c);
+                            return (
+                              <td key={c}>
+                                <input
+                                  type="checkbox"
+                                  checked={caps.includes(c)}
+                                  disabled={busy !== null}
+                                  onChange={() => toggle(station.id, c)}
+                                  aria-label={`${LABELS[c] ?? c} at ${station.name}`}
+                                  className={ineffective ? "ineffective" : undefined}
+                                  title={
+                                    ineffective
+                                      ? "Stored, but a viewer cannot use this"
+                                      : undefined
+                                  }
+                                />
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <small>
+                <span className="actuator-mark">*</span> Does something physical at
+                the station. Every use is audited, and a viewer may never hold one.
+                Changes take effect immediately, including on anyone currently
+                watching a stream.
+              </small>
+              {me.user_id === member.user_id && (
+                <p className="settings-note">
+                  These are your own permissions. As an administrator you can still
+                  reach every station regardless of what is ticked here.
+                </p>
+              )}
+            </>
           )}
+
+          <PasswordReset member={member} />
+
+          <div className="settings-actions">
+            <button type="button" className="btn primary" onClick={() => setEditing(false)}>
+              Done
+            </button>
+          </div>
         </>
       )}
     </div>
