@@ -2149,6 +2149,14 @@ class Agent:
             "unsourced_fields": self._unsourced_fields(),
             "resources": [resource.to_dict() for resource in self.inventory.resources()],
             "storage": self.store.stats(),
+            # Host device stats — CPU busy %, 1-minute load, SoC temperature,
+            # memory and host uptime — the same sample the local Summary page
+            # shows, so a remote operator can see them without the console proxy.
+            # Every field is best-effort: an absent sensor (a non-Pi dev box)
+            # omits it, so `{}` means "nothing to report", never a fault. Distinct
+            # from the agent-process `uptime_s` below — `system.uptime_s` is the
+            # host's, which is the one that answers "has the box rebooted".
+            "system": self.system.read(),
             # What video is costing, measured. It is the largest single consumer
             # on the link when it is running, and the only honest way to know
             # what a given camera and setting cost is for the box to say — see

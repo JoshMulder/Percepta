@@ -1271,6 +1271,41 @@
               "description": "Events evicted from local storage before they could be delivered, cumulative and surviving a reboot. **This is what separates a real gap from a delivery fault**: `events_pending` high and rising is a backlog, this rising is history that no longer exists. A station that evicts and cannot say so leaves an operator reading a complete timeline that is not."
             }
           }
+        },
+        "system": {
+          "type": "object",
+          "description": "Host device stats — the same sample the station's local Summary page shows, carried in health so a remote operator sees them without the console proxy. Every field is best-effort: a host missing a sensor (a non-Pi dev box) omits it, so an empty object means nothing to report, not a fault.",
+          "properties": {
+            "cpu_percent": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100,
+              "description": "Busy fraction of all cores since the previous sample, as a percentage."
+            },
+            "load_1m": {
+              "type": "number",
+              "minimum": 0,
+              "description": "One-minute load average."
+            },
+            "temperature_c": {
+              "type": "number",
+              "description": "SoC temperature in degrees Celsius, from the thermal zone (thermal_zone0 is the CPU package on a Pi)."
+            },
+            "uptime_s": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Host uptime in seconds. Distinct from the health-level `uptime_s`, which is the agent process — this is the one that answers 'has the box rebooted'."
+            },
+            "memory": {
+              "type": "object",
+              "description": "Host memory. `used` is total minus the kernel's MemAvailable estimate, so file cache does not read as memory pressure.",
+              "properties": {
+                "total_mb": { "type": "number", "minimum": 0 },
+                "used_mb": { "type": "number", "minimum": 0 },
+                "used_percent": { "type": "number", "minimum": 0, "maximum": 100 }
+              }
+            }
+          }
         }
       },
       "allOf": [
