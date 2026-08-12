@@ -53,6 +53,22 @@ from .transport.stream import (
 
 log = logging.getLogger("gsu.stream")
 
+
+def _pace_ticks(gap_s: float, timescale: int) -> int:
+    """This sample's duration in timescale ticks, from the wall-clock gap since
+    the previous access unit, clamped either side.
+
+    Annex B carries no timestamp, so the muxer would otherwise stamp every frame
+    at the one nominal rate — which runs the timeline fast against a camera that
+    has slowed down after dark, then stalls, then races to catch up (the "two
+    seconds then stop" a viewer sees). The real gap is the honest duration. A
+    gap under 1/120 s is frames the network clumped together, not a true
+    120 fps; one over a few seconds is a stall the player already treats as a
+    gap, not one very long frame. Clamp both so neither corrupts the timeline.
+    """
+    return min(timescale * 4, max(timescale // 120, round(gap_s * timescale)))
+
+
 #: Lease bounds. Five seconds is the shortest that survives one missed command
 #: on a link that drops; five minutes is the longest anyone should be able to
 #: commit the link to without asking again.
@@ -858,7 +874,12 @@ class StreamSession:
         """
         self.frames += 1
         self.bytes_out += len(unit.data)
-        self._last_frame_at = time.monotonic()
+        now = time.monotonic()
+        # The gap since the previous access unit is this frame's real duration —
+        # a camera slowing down after dark sends them further apart, and Annex B
+        # carries no timestamp to say so. `None` on the first frame: no gap yet.
+        gap = None if self._last_frame_at is None else now - self._last_frame_at
+        self._last_frame_at = now
         uplink, muxer = self.uplink, self.muxer
         if uplink is None or muxer is None:
             return
@@ -871,7 +892,8 @@ class StreamSession:
         if not self._codec_agrees(nals, muxer):
             return
 
-        fragment, keyframe, changed = muxer.feed(unit, nals)
+        duration = None if gap is None else _pace_ticks(gap, muxer.timescale)
+        fragment, keyframe, changed = muxer.feed(unit, nals, duration)
         if changed or not self._session_open:
             # A new encoder session: parameters that no longer match decode as
             # corruption rather than as an error, so the platform is told to

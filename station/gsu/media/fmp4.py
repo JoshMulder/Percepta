@@ -429,7 +429,8 @@ class Fmp4Muxer:
 
     # --- frames ----------------------------------------------------------
 
-    def feed(self, unit, nals: list[bytes] | None = None
+    def feed(self, unit, nals: list[bytes] | None = None,
+             duration: int | None = None
              ) -> tuple[bytes | None, bool, bool]:
         """One access unit → `(fragment, keyframe, parameters_changed)`.
 
@@ -439,6 +440,16 @@ class Fmp4Muxer:
         frame, and on a 4K stream at 25 fps a second pass is tens of
         milliseconds per frame on a Pi 2B — enough to matter on the one board
         this has to run on. `gsu/stream.py` splits once and passes it here.
+
+        `duration` is this sample's presentation time in timescale ticks, when
+        the caller knows it — the wall-clock gap since the previous frame. A
+        camera that slows down in low light (long night exposures) sends frames
+        further apart, and Annex B carries no timestamp to say so; without this
+        every frame gets `sample_duration` and the timeline runs at the daylight
+        rate against a stream arriving slower, which shows as the "race two
+        seconds, stall, race two more" stutter after dark. `None` keeps the
+        fixed rate — the first frame, dropped frames, and every test source that
+        has no wall clock to offer.
 
         `parameters_changed` is true when this frame carried a sequence
         parameter set different from the one in the current init segment — a
@@ -473,27 +484,41 @@ class Fmp4Muxer:
 
         if not payload or not self.ready:
             return None, keyframe, changed
-        return self.fragment(to_length_prefixed(payload), keyframe), keyframe, changed
+        return (self.fragment(to_length_prefixed(payload), keyframe, duration),
+                keyframe, changed)
 
-    def fragment(self, sample: bytes, keyframe: bool) -> bytes:
-        """`moof` + `mdat` for one sample, at the current decode time."""
+    def fragment(self, sample: bytes, keyframe: bool,
+                 duration: int | None = None) -> bytes:
+        """`moof` + `mdat` for one sample, at the current decode time.
+
+        `duration` is this sample's length in timescale ticks; `None` uses the
+        fixed `sample_duration`. See `feed`.
+        """
         self.sequence += 1
-        moof = self._moof(len(sample), keyframe)
-        self.advance()
+        ticks = self.sample_duration if duration is None else max(1, int(duration))
+        moof = self._moof(len(sample), keyframe, ticks)
+        self.advance(duration=ticks)
         return moof + box(b"mdat", sample)
 
-    def advance(self, frames: int = 1) -> None:
+    def advance(self, frames: int = 1, duration: int | None = None) -> None:
         """Move the clock on, whether or not the frame was sent.
 
         Called for dropped fragments too. Decode times must keep pace with the
         wall clock or a player treats a gap as a stall and then as a jump: the
         gap is real and the timeline has to say so, rather than pretending the
         frames that were dropped never existed.
+
+        `duration` is the per-frame step in timescale ticks; `None` uses the
+        fixed `sample_duration`, which is what a drop (no wall-clock gap of its
+        own) still wants.
         """
-        self.decode_time += self.sample_duration * frames
+        step = self.sample_duration if duration is None else max(1, int(duration))
+        self.decode_time += step * frames
         self.samples += frames
 
-    def _moof(self, sample_size: int, keyframe: bool) -> bytes:
+    def _moof(self, sample_size: int, keyframe: bool,
+              duration: int | None = None) -> bytes:
+        ticks = self.sample_duration if duration is None else max(1, int(duration))
         mfhd = full_box(b"mfhd", 0, 0, _u32(self.sequence))
         # default-base-is-moof: offsets are measured from the start of this
         # moof, which is the only interpretation that survives a stream where
@@ -509,7 +534,7 @@ class Fmp4Muxer:
                 b"trun", 0, flags,
                 _u32(1), offset.to_bytes(4, "big", signed=True),
                 _u32(SYNC_SAMPLE if keyframe else NON_SYNC_SAMPLE),
-                _u32(self.sample_duration), _u32(sample_size),
+                _u32(ticks), _u32(sample_size),
             )
 
         provisional = box(b"moof", mfhd, box(b"traf", tfhd, tfdt, trun(0)))

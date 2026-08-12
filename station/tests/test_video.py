@@ -1084,6 +1084,37 @@ class H264SequenceParameterSetTests(unittest.TestCase):
         self.assertEqual((muxer.picture_width, muxer.picture_height), (1920, 1080))
         self.assertTrue(muxer.codec().startswith("avc1."))
 
+    def test_a_sample_paced_from_a_gap_advances_by_the_gap_not_the_rate(self):
+        # The night-stutter fix: Annex B carries no timestamp, so a frame's real
+        # duration is the wall-clock gap since the last one. A slow night frame
+        # must move the timeline by its own gap, not by the daylight rate — or
+        # the timeline runs fast, underruns, and races to catch up.
+        from gsu.camera.h264 import StreamSettings
+        from gsu.camera.h264_synthetic import SyntheticH264Source
+        from gsu.media.fmp4 import Fmp4Muxer
+
+        source = SyntheticH264Source(StreamSettings(width=320, height=240, fps=25))
+        muxer = Fmp4Muxer(320, 240, 25.0)          # nominal sample_duration 3600
+        while not muxer.ready:                       # prime with the keyframe's SPS/PPS
+            muxer.feed(source.frame())
+
+        base = muxer.decode_time                      # no gap given -> the fixed rate
+        self.assertIsNotNone(muxer.feed(source.frame())[0])
+        self.assertEqual(muxer.decode_time - base, muxer.sample_duration)
+
+        base = muxer.decode_time                      # a real 0.1s (10 fps) night gap
+        self.assertIsNotNone(muxer.feed(source.frame(), duration=9000)[0])
+        self.assertEqual(muxer.decode_time - base, 9000)
+        self.assertNotEqual(9000, muxer.sample_duration)
+
+    def test_pace_ticks_clamps_bursts_and_stalls(self):
+        from gsu.stream import _pace_ticks
+        ts = 90000
+        self.assertEqual(_pace_ticks(0.1, ts), 9000)           # a real 10 fps gap
+        self.assertEqual(_pace_ticks(1 / 24, ts), round(ts / 24))
+        self.assertEqual(_pace_ticks(0.0001, ts), ts // 120)   # clumped burst -> 120 fps floor
+        self.assertEqual(_pace_ticks(30.0, ts), ts * 4)        # a stall -> capped, not a 30s frame
+
 
 class EncoderTests(unittest.TestCase):
     """Two encoders behind one interface, and a probe that says which."""
