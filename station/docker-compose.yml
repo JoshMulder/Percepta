@@ -363,13 +363,26 @@ services:
   #   * It holds nothing else — no docker socket, no state, no listening port.
   #
   # It needs elevated privilege, but NOT `privileged: true`. Opening a *host*
-  # shell means `nsenter` into the host's init (PID 1), and that takes two things
-  # and only two: seeing host PID 1 (`pid: host`) and CAP_SYS_ADMIN to `setns`
-  # into its namespaces. So that is all it is granted. The default seccomp
-  # profile already permits `setns` — and `syslog(2)`, so `dmesg` — once
-  # CAP_SYS_ADMIN is held, so no seccomp override is needed; AppArmor is lifted
-  # only because docker-default forbids the /sys writes a host shell makes (a USB
-  # unbind/bind), which nsenter into the host mount namespace does not escape.
+  # shell means `nsenter` into the host's init (PID 1), and that takes two caps
+  # and only two: CAP_SYS_PTRACE to open PID 1's namespace links under
+  # /proc/1/ns (the read is gated by ptrace_may_access, which for PID 1 needs the
+  # cap), and CAP_SYS_ADMIN to `setns` into them. Plus `pid: host` so PID 1 is
+  # visible at all. So that is all it is granted — not the ~40 caps, blanket
+  # device access and unmasked /proc `privileged` would also hand it.
+  #
+  # No seccomp override: docker-default already permits `setns` — and
+  # `syslog(2)`, so `dmesg` — once CAP_SYS_ADMIN is held. Verified on the field
+  # Pi 5 (aarch64): the narrowed form opens a host shell under the stock seccomp
+  # profile. AppArmor IS lifted, because docker-default forbids the /sys writes a
+  # host shell makes (a USB unbind/bind), which nsenter into the host mount
+  # namespace does not otherwise escape.
+  #
+  # History worth keeping: 5bec14e first narrowed this to CAP_SYS_ADMIN alone,
+  # which failed on the Pi 5 with `nsenter: reassociate to namespaces failed:
+  # Operation not permitted`. The reflex was to blame seccomp on `setns` — wrong.
+  # nsenter never reached `setns`: it could not even read /proc/1/ns/*, because
+  # CAP_SYS_PTRACE was missing. `privileged` had hidden that by granting every
+  # capability. Adding CAP_SYS_PTRACE, not a seccomp lift, is what fixed it.
   #
   # This is narrower than `privileged` on the helper itself — no other
   # capabilities, no blanket device-cgroup access, a masked /proc — but it is NOT
@@ -390,12 +403,14 @@ services:
     # See host_ingest_url derivation and the credential in the handoff — nothing
     # platform-specific is configured here, exactly like the updater.
     pid: host
-    # See the note above: `nsenter` into host PID 1 needs CAP_SYS_ADMIN and no
-    # more, and AppArmor lifted for the /sys writes a host shell makes. Not
+    # See the note above: `nsenter` into host PID 1 needs CAP_SYS_PTRACE (to open
+    # /proc/1/ns/*) and CAP_SYS_ADMIN (to `setns` into them), plus AppArmor
+    # lifted for the /sys writes a host shell makes. Default seccomp is fine. Not
     # `privileged: true`. `no-new-privileges` is deliberately absent — the host
-    # shell must be able to run setuid host tools (sudo, mount) after nsenter.
+    # shell must run setuid host tools (sudo, mount) after nsenter.
     cap_add:
       - SYS_ADMIN
+      - SYS_PTRACE
     security_opt:
       - apparmor:unconfined
     environment:

@@ -387,12 +387,15 @@ class ContainerTests(unittest.TestCase):
         well-meaning "just add privileged" here would restore the failure that
         made containers unacceptable twice over (item 35c). The host-shell
         helper is the one exception, and only because opening a *host* shell
-        inherently needs it — `nsenter` into host PID 1 needs CAP_SYS_ADMIN.
-        Even there it takes the NARROW form: CAP_SYS_ADMIN plus an AppArmor lift
-        for the /sys writes a host shell makes, not the blunt `privileged: true`
-        that would also hand it every other capability, all devices and an
-        unmasked /proc it does not need. And it is fenced behind the
-        off-by-default `hostshell` profile so an un-opted-in box never runs it.
+        inherently needs it — `nsenter` into host PID 1 needs CAP_SYS_PTRACE (to
+        open its /proc/1/ns/* links) and CAP_SYS_ADMIN (to `setns` into them).
+        Even there it takes the NARROW form: those two caps plus an AppArmor lift
+        for the /sys writes a host shell makes — NOT a seccomp override (stock
+        docker-default permits `setns` once CAP_SYS_ADMIN is held, proven on the
+        field Pi 5), and NOT the blunt `privileged: true` that would hand it
+        every other capability, all devices and an unmasked /proc it does not
+        need. And it is fenced behind the off-by-default `hostshell` profile so
+        an un-opted-in box never runs it.
         """
         # The blunt instrument appears nowhere; the narrowing removed it.
         self.assertNotIn("privileged: true", self.directives)
@@ -402,16 +405,24 @@ class ContainerTests(unittest.TestCase):
             block = self.service(name)
             self.assertNotIn("privileged", block, name)
             self.assertNotIn("SYS_ADMIN", block, name)
+            self.assertNotIn("SYS_PTRACE", block, name)
             self.assertNotIn("cap_add", block, name)
             self.assertNotIn("apparmor", block, name)
+            self.assertNotIn("seccomp", block, name)
 
-        # The helper has exactly the narrowed set, and only behind its profile.
+        # The helper has exactly the narrowed set, and only behind its profile:
+        # the two caps opening a host shell actually needs, an AppArmor lift, and
+        # NO seccomp override (default profile allows `setns` under CAP_SYS_ADMIN,
+        # confirmed on the Pi 5 — the earlier EPERM was a missing CAP_SYS_PTRACE
+        # on the /proc/1/ns read, not seccomp on `setns`).
         helper = self.service("hostshell")
         self.assertIn('profiles: ["hostshell"]', helper)
         self.assertIn("pid: host", helper)
         self.assertIn("cap_add:", helper)
         self.assertIn("- SYS_ADMIN", helper)
+        self.assertIn("- SYS_PTRACE", helper)
         self.assertIn("apparmor:unconfined", helper)
+        self.assertNotIn("seccomp", helper)
         self.assertNotIn("privileged", helper)
 
     def test_the_docs_agree_that_the_container_is_the_path(self):
