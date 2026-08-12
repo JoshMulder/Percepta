@@ -96,6 +96,11 @@ class Session:
         self.proc = subprocess.Popen(
             NSENTER + SHELL,
             stdin=slave, stdout=slave, stderr=slave,
+            # Colour: host tools (ls, systemctl, dmesg) emit ANSI only when TERM
+            # says the terminal can show it. The panel is xterm.js; without this
+            # the shell inherits the helper container's empty TERM and everything
+            # comes out monochrome. nsenter passes the environment through.
+            env=dict(os.environ, TERM="xterm-256color"),
             preexec_fn=os.setsid, close_fds=True,
         )
         os.close(slave)
