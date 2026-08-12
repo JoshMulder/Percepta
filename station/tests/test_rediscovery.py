@@ -212,5 +212,75 @@ class MidStreamTests(unittest.TestCase):
                         "with no stream, a failed camera is a real fault")
 
 
+class IncrementalRediscoveryTests(unittest.TestCase):
+    """A missing device rebuilds only its own slot, never a healthy radio.
+
+    The wedge this guards against, from the Kennels Road journal: a USB
+    ADS-B adapter latched into a hung state and reported absent for ever, so
+    rediscovery fired every 30s — and each pass tore down and reopened the
+    RTL-SDR, gapping the radio and flapping it connected/disconnected the whole
+    time. Rebuilding only what is actually missing leaves a working device
+    alone.
+    """
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self.agent = agent_in(self._dir.name)
+        self.addCleanup(self.agent.shutdown)
+
+    @staticmethod
+    def _report(slot: str, status: str) -> SlotReport:
+        return SlotReport(
+            slot=slot, type_id=f"{slot}-x", label=slot, connection="usb",
+            configured=True, detected=(status == "present"),
+            driver_available=True, status=status, detail="",
+            simulated=False, provides=(), absent=(), telemetry_kind=slot,
+        )
+
+    def test_rebuilding_one_slot_leaves_every_other_device_running(self):
+        radio = self.agent.radio
+        adsb = self.agent.adsb
+        weather, power = self.agent.weather, self.agent.power
+        light, camera = self.agent.light, self.agent.camera
+        self.assertIsNotNone(radio, "demo build should leave a radio to protect")
+
+        self.agent.build_devices(slots={"adsb"})
+
+        self.assertIsNot(self.agent.adsb, adsb, "the named slot was not rebuilt")
+        self.assertIs(self.agent.radio, radio,
+                      "a working radio was torn down for a different missing slot")
+        self.assertIs(self.agent.weather, weather)
+        self.assertIs(self.agent.power, power)
+        self.assertIs(self.agent.light, light)
+        self.assertIs(self.agent.camera, camera)
+
+    def test_a_full_pass_still_replaces_every_slot(self):
+        # slots=None is what start-up and a saved camera change use; it must go
+        # on rebuilding every slot, or those callers silently stop refreshing.
+        radio, adsb = self.agent.radio, self.agent.adsb
+        self.agent.build_devices()
+        self.assertIsNot(self.agent.radio, radio)
+        self.assertIsNot(self.agent.adsb, adsb)
+
+    def test_missing_slots_lists_only_absent_configured_slots(self):
+        self.agent.inventory.report = lambda: [
+            self._report("radio", "present"),
+            self._report("adsb", "configured_absent"),
+            self._report("weather", "stalled"),
+            self._report("power", "present"),
+        ]
+        self.assertEqual(self.agent._missing_slots(), {"adsb", "weather"})
+        self.assertTrue(self.agent._anything_missing())
+
+    def test_a_present_fleet_asks_for_no_rebuild(self):
+        self.agent.inventory.report = lambda: [
+            self._report("radio", "present"),
+            self._report("adsb", "present"),
+        ]
+        self.assertEqual(self.agent._missing_slots(), set())
+        self.assertFalse(self.agent._anything_missing())
+
+
 if __name__ == "__main__":
     unittest.main()
