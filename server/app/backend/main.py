@@ -20,6 +20,7 @@ from backend.api.media import renew_leases, router as media_router
 from backend.services import audio_demand, station_watch
 from backend.api.organization import router as organization_router
 from backend.api.platform import router as platform_router
+from backend.api.releases import router as releases_router
 from backend.api.registry import router as registry_router
 from backend.api.station_config import router as station_config_router
 from backend.api.station_enrolment import router as station_enrolment_router
@@ -116,6 +117,7 @@ app.include_router(host_router)
 app.include_router(media_router)
 app.include_router(organization_router)
 app.include_router(platform_router)
+app.include_router(releases_router)
 app.include_router(registry_router)
 app.include_router(station_config_router)
 app.include_router(station_enrolment_router)

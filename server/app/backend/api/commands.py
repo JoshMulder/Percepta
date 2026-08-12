@@ -345,3 +345,45 @@ def update(
                 "tag": body.tag, "force": body.force},
     )
     return {"accepted": True}
+
+
+@router.post("/update/latest", status_code=202)
+def update_to_latest(
+    station_id: uuid.UUID,
+    request: Request,
+    identity: Identity = Depends(require_capability(Capability.STATION_UPDATE)),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Update the station to the latest published release — one click, no digest.
+
+    The operator chooses a station, not an image: the platform resolves the most
+    recently published release (api/releases.py) to its pinned {image, digest}
+    and dispatches the same system.update the manual push does. Security is
+    unchanged — the station's updater cosign-verifies that digest against its
+    pinned keys before running it, so 'latest' can only ever be a signed image a
+    platform admin published, never arbitrary input.
+    """
+    from sqlalchemy import select
+
+    from backend.database.models.release import Release
+
+    release = db.execute(
+        select(Release).order_by(Release.created_at.desc()).limit(1)
+    ).scalar_one_or_none()
+    if release is None:
+        raise HTTPException(status_code=409, detail="No release has been published yet.")
+
+    command = {
+        "kind": "system.update",
+        "image": release.image,
+        "digest": release.digest,
+        "tag": release.tag,
+    }
+    _dispatch(station_id, command)
+    _audit(
+        request=request, identity=identity, station_id=station_id,
+        action="station_update",
+        detail={"image": release.image, "digest": release.digest,
+                "tag": release.tag, "via": "latest"},
+    )
+    return {"accepted": True, "tag": release.tag}

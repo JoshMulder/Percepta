@@ -46,6 +46,10 @@ class StationSummary(BaseModel):
     # Synthetic data. Drives the DEMO badge and suppresses fault indication -
     # on a simulated station a fault would only ever mean the simulator stopped.
     is_simulated: bool
+    # The version this station last reported running, from the cached health
+    # frame — for the console's update-available pill. Null when it has not
+    # reported, or when the cache is unavailable.
+    running_version: str | None = None
 
 
 class PowerPoint(BaseModel):
@@ -103,7 +107,9 @@ def _online(station: GroundStation) -> bool:
     ).total_seconds() < OFFLINE_AFTER_SECONDS
 
 
-def _summary(station: GroundStation) -> StationSummary:
+def _summary(
+    station: GroundStation, running_version: str | None = None
+) -> StationSummary:
     return StationSummary(
         id=str(station.id),
         name=station.name,
@@ -115,7 +121,30 @@ def _summary(station: GroundStation) -> StationSummary:
         else None,
         online=_online(station),
         is_simulated=station.is_simulated,
+        running_version=running_version,
     )
+
+
+def _running_versions(station_ids: list[uuid.UUID]) -> dict[uuid.UUID, str]:
+    """Map each station to the version it last reported running, read from the
+    ingest's cached health snapshots in one MGET. Best-effort — a station with no
+    cached frame is simply absent, and the update pill stays off for that row."""
+    if not station_ids:
+        return {}
+    out: dict[uuid.UUID, str] = {}
+    keys = [health_snapshot_key(sid) for sid in station_ids]
+    for sid, blob in zip(station_ids, read_latest_sync(keys)):
+        if not blob:
+            continue
+        try:
+            frame = json.loads(blob)
+        except (ValueError, TypeError):
+            continue
+        software = frame.get("software") or {}
+        version = software.get("running_version") or frame.get("agent_version")
+        if isinstance(version, str):
+            out[sid] = version
+    return out
 
 
 @router.get("", response_model=list[StationSummary])
@@ -138,8 +167,9 @@ def list_stations(
         select(GroundStation)
         .where(GroundStation.id.in_(allowed))
         .order_by(GroundStation.name)
-    ).scalars()
-    return [_summary(s) for s in rows]
+    ).scalars().all()
+    versions = _running_versions([s.id for s in rows])
+    return [_summary(s, versions.get(s.id)) for s in rows]
 
 
 class StationCreate(BaseModel):
