@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, api } from "../api";
-import type { PlatformOverview, PlatformUser } from "../types";
+import type { PlatformOverview, PlatformUser, Release } from "../types";
 
 /**
  * Organisations and the people in them. Platform administrators only.
@@ -65,6 +65,8 @@ export function SettingsPlatform() {
         onReactivate={(id) => run(() => api.reactivateOrganization(id))}
       />
 
+      <Releases />
+
       <section className="settings-section">
         <h3>People</h3>
         <NewUser busy={busy} onCreate={(body) => run(() => api.createUser(body))} />
@@ -109,6 +111,181 @@ export function SettingsPlatform() {
         {error && <p className="settings-error">{error}</p>}
       </section>
     </div>
+  );
+}
+
+const DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
+
+/**
+ * The station-image release catalog: the signed images the fleet can update to.
+ * Publishing one makes it the "latest" a console offers as a one-click update on
+ * a station row; the station still cosign-verifies the digest before running it,
+ * so this only records which signed image to offer — it builds and signs nothing.
+ */
+function Releases() {
+  const [releases, setReleases] = useState<Release[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [open, setOpen] = useState(false);
+
+  const load = useCallback(() => {
+    api
+      .releases()
+      .then((r) => {
+        setReleases(r);
+        setError(null);
+      })
+      .catch((e) =>
+        setError(e instanceof ApiError ? e.message : "Could not load releases."),
+      );
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  return (
+    <section className="settings-section">
+      <div className="member-detail-head">
+        <h3>Station releases</h3>
+        {!open && (
+          <button type="button" className="btn primary" onClick={() => setOpen(true)}>
+            Publish release
+          </button>
+        )}
+      </div>
+      <p className="settings-note">
+        The signed station images the fleet can update to. Publishing one makes it
+        the “latest” a console offers as a one-click update on a station row — the
+        station verifies the signature before running it, so this only records
+        which signed image to offer.
+      </p>
+
+      {open && (
+        <PublishRelease
+          onPublished={() => {
+            setOpen(false);
+            load();
+          }}
+          onCancel={() => setOpen(false)}
+        />
+      )}
+
+      {error && <p className="settings-error">{error}</p>}
+
+      {releases && releases.length === 0 && (
+        <p className="settings-note">No releases published yet.</p>
+      )}
+      {releases && releases.length > 0 && (
+        <ul className="release-list">
+          {releases.map((r, i) => (
+            <li key={r.id} className="release-item">
+              <span className="release-tag">
+                {r.tag}
+                {i === 0 && <em className="release-latest"> · latest</em>}
+              </span>
+              <code className="release-digest" title={r.digest}>
+                {r.digest.slice(0, 19)}…
+              </code>
+              <span className="release-meta">
+                {new Date(r.published_at).toLocaleString()}
+                {r.published_by ? ` · ${r.published_by}` : ""}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function PublishRelease({
+  onPublished,
+  onCancel,
+}: {
+  onPublished: () => void;
+  onCancel: () => void;
+}) {
+  const [image, setImage] = useState("registry.percepta.nz/percepta-gsu");
+  const [digest, setDigest] = useState("");
+  const [tag, setTag] = useState("");
+  const [notes, setNotes] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const digestOk = DIGEST_RE.test(digest.trim());
+  const valid = image.trim() !== "" && digestOk && tag.trim() !== "";
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!valid) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.publishRelease({
+        image: image.trim(),
+        digest: digest.trim(),
+        tag: tag.trim(),
+        notes: notes.trim() || undefined,
+      });
+      onPublished();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Could not publish.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form onSubmit={submit}>
+      <label className="field">
+        <span>Image</span>
+        <input
+          value={image}
+          onChange={(e) => setImage(e.target.value)}
+          spellCheck={false}
+          autoCapitalize="none"
+        />
+      </label>
+      <label className="field">
+        <span>Digest</span>
+        <input
+          value={digest}
+          placeholder="sha256:…"
+          spellCheck={false}
+          autoCapitalize="none"
+          aria-invalid={digest.trim().length > 7 && !digestOk}
+          onChange={(e) => setDigest(e.target.value)}
+        />
+      </label>
+      <label className="field">
+        <span>Tag</span>
+        <input
+          value={tag}
+          placeholder="v0.3.0"
+          spellCheck={false}
+          autoCapitalize="none"
+          onChange={(e) => setTag(e.target.value)}
+        />
+      </label>
+      <label className="field">
+        <span>Notes (optional)</span>
+        <textarea value={notes} rows={2} onChange={(e) => setNotes(e.target.value)} />
+      </label>
+      <div className="settings-actions">
+        <button type="submit" className="btn primary" disabled={busy || !valid}>
+          {busy ? "Publishing…" : "Publish"}
+        </button>
+        <button type="button" className="btn ghost" onClick={onCancel} disabled={busy}>
+          Cancel
+        </button>
+        {error && <span className="settings-error">{error}</span>}
+      </div>
+      <small>
+        The digest is the immutable pin the station verifies against its enrolment
+        keys — paste the one the release pipeline printed. This makes the release
+        the fleet's new “latest”; it does not touch the registry.
+      </small>
+    </form>
   );
 }
 

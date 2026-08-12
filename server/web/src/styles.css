@@ -2687,6 +2687,43 @@ body {
 .station-status { text-transform: none; }
 .station-status.online { color: var(--ok, #3fb950); }
 
+/* A station row: the selector button, and an update pill pinned to its right
+   when a newer release is published than the version the station is running. */
+.station-row { display: flex; align-items: center; gap: 6px; }
+.station-row .member-item { flex: 1 1 auto; min-width: 0; }
+.update-pill {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 4px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--brand);
+  background: var(--panel-2);
+  color: var(--brand);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.update-pill:hover:not(:disabled) { background: var(--brand); color: var(--panel); }
+.update-pill:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+.update-pill:disabled { opacity: 0.6; cursor: default; }
+
+/* The platform's release catalog list. */
+.release-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.release-item {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 13px;
+  flex-wrap: wrap;
+}
+.release-tag { font-weight: 600; color: var(--text); }
+.release-latest { color: var(--ok, #3fb950); font-style: normal; font-weight: 500; }
+.release-digest { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.release-meta { color: var(--muted); margin-left: auto; }
+
 /* The Organisation pane splits into People and Stations — a quiet segmented
    control inside the one pane, not another vertical nav down the side. */
 .org-subtabs {

@@ -12,6 +12,8 @@ import type {
   PlatformOrg,
   PlatformOverview,
   PlatformUser,
+  LatestRelease,
+  Release,
   StationConfig,
   StationDetail,
   StationHealth,
@@ -270,6 +272,35 @@ export const api = {
    *  recently. Needs telemetry.view. */
   stationHealth: (id: string) =>
     request<StationHealth>(`/api/stations/${id}/health`),
+
+  /** The latest published release, for the update-available pill. Any user; the
+   *  digest is not included. */
+  latestRelease: () => request<LatestRelease>("/api/releases/latest"),
+
+  /** The whole release catalog, newest first. Platform admins only. */
+  releases: () => request<Release[]>("/api/releases"),
+
+  /** Publish a signed release to the catalog, making it the new latest. Platform
+   *  admins only. */
+  publishRelease: (body: {
+    image: string;
+    digest: string;
+    tag: string;
+    notes?: string;
+  }) =>
+    request<Release>("/api/releases", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  /** Update a station to the latest published release — no digest entered. The
+   *  platform resolves it server-side; the station still verifies the signature.
+   *  202, like the manual push. */
+  updateStationToLatest: (id: string) =>
+    request<{ accepted: boolean; tag: string }>(
+      `/api/stations/${id}/update/latest`,
+      { method: "POST" },
+    ),
 
   /** `is_simulated` and `enrolled` are read-only: the first is written from
    *  the station's own health frame, the second is a fact about the record.

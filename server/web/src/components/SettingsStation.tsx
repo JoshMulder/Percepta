@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, api } from "../api";
-import type { StationConfig, StationHealth, StationSummary } from "../types";
+import type {
+  LatestRelease,
+  StationConfig,
+  StationHealth,
+  StationSummary,
+} from "../types";
 import { SettingsEnrolment } from "./SettingsEnrolment";
 
 /**
@@ -26,6 +31,11 @@ export function SettingsStation({
   // section re-asks whether it should be showing. The two are siblings reading
   // the same status, and only one of them was refetching it.
   const [credentialSeq, setCredentialSeq] = useState(0);
+  // The latest published release drives the per-row update pill; `updating` marks
+  // the stations a one-click update was just requested for, so their pill reads
+  // "Updating…" until the station reports the new version and the row refreshes.
+  const [latest, setLatest] = useState<LatestRelease | null>(null);
+  const [updating, setUpdating] = useState<Record<string, boolean>>({});
 
   const loadStations = useCallback(async (prefer?: string) => {
     try {
@@ -52,10 +62,42 @@ export function SettingsStation({
     void loadStations();
   }, [loadStations]);
 
+  // The latest release, for the update pills.
+  useEffect(() => {
+    api.latestRelease().then(setLatest).catch(() => setLatest(null));
+  }, []);
+
+  // Keep the list current while the panel is open, so online status, the running
+  // version and the update pills track without a manual reload.
+  useEffect(() => {
+    const timer = window.setInterval(() => void loadStations(), 30000);
+    return () => window.clearInterval(timer);
+  }, [loadStations]);
+
   if (listError) return <p className="settings-error">{listError}</p>;
   if (!stations) return <p className="settings-note">Loading…</p>;
 
   const station = stations.find((s) => s.id === selected) ?? null;
+
+  const updateAvailable = (s: StationSummary): boolean =>
+    Boolean(latest?.tag && s.running_version && s.running_version !== latest.tag);
+
+  async function updateToLatest(id: string) {
+    setUpdating((u) => ({ ...u, [id]: true }));
+    try {
+      await api.updateStationToLatest(id);
+      // Leave the pill reading "Updating…"; the station reports the new version
+      // on its next health frame, and the periodic refresh clears the pill once
+      // running_version matches the latest tag.
+    } catch {
+      // Refused — drop back to an actionable pill rather than a stuck "Updating…".
+      setUpdating((u) => {
+        const next = { ...u };
+        delete next[id];
+        return next;
+      });
+    }
+  }
 
   return (
     <div className="member-layout station-layout">
@@ -69,7 +111,7 @@ export function SettingsStation({
             <li className="station-list-empty settings-note">No stations yet.</li>
           )}
           {stations.map((s) => (
-            <li key={s.id}>
+            <li key={s.id} className="station-row">
               <button
                 type="button"
                 className={`member-item${s.id === selected ? " active" : ""}`}
@@ -83,6 +125,17 @@ export function SettingsStation({
                   {s.online ? "online" : "offline"}
                 </span>
               </button>
+              {updateAvailable(s) && (
+                <button
+                  type="button"
+                  className="update-pill"
+                  disabled={Boolean(updating[s.id])}
+                  onClick={() => void updateToLatest(s.id)}
+                  title={`Update ${s.name} to ${latest?.tag}`}
+                >
+                  {updating[s.id] ? "Updating…" : `Update to ${latest?.tag}`}
+                </button>
+              )}
             </li>
           ))}
         </ul>

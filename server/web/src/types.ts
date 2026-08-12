@@ -49,6 +49,9 @@ export interface StationSummary {
    *  routinely both at once — a real station alongside simulated ones — and a
    *  global flag had to be wrong about one of them. */
   is_simulated: boolean;
+  /** The version this station last reported running, for the update-available
+   *  pill. Null when it has not reported, or the cache is unavailable. */
+  running_version?: string | null;
 }
 
 export interface DeviceSummary {
@@ -433,6 +436,27 @@ export interface StationHealth {
   online: boolean;
   status?: string | null;
   system?: StationSystemStats | null;
+}
+
+/** One published station-image release. `digest` is only present in the
+ *  platform-admin catalog; the operator-facing latest never carries it. */
+export interface Release {
+  id: string;
+  image: string;
+  digest: string;
+  tag: string;
+  notes: string | null;
+  published_at: string;
+  published_by: string | null;
+}
+
+/** The most recently published release, for the update-available pill. All null
+ *  when nothing has been published — the console then shows no pill. */
+export interface LatestRelease {
+  tag: string | null;
+  image: string | null;
+  notes: string | null;
+  published_at: string | null;
 }
 
 export interface EnrolmentStatus {
