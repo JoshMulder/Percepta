@@ -304,6 +304,26 @@ class ModelSelectionTests(unittest.TestCase):
         run.assert_not_called()
         self.assertTrue(t._capable)
 
+    def test_a_configured_custom_model_is_preferred_over_a_generic_one(self):
+        # A domain-adapted fine-tune (an ATC model, say) whose filename does not
+        # rank must still win: it is the operator's explicit choice, baked beside
+        # the generic ladder. The old rank-only sort buried a rank-0 custom model
+        # behind ggml-small.en.bin, so the configured model never actually ran.
+        times = {"ggml-atc-small.bin": (10.0, ""), "ggml-small.en.bin": (10.0, "")}
+        t = self._select(["ggml-atc-small.bin", "ggml-small.en.bin"],
+                         "ggml-atc-small.bin", lambda *a: times[Path(a[-1]).name])
+        self.assertTrue(t._capable)
+        self.assertEqual(Path(t._model).name, "ggml-atc-small.bin")
+
+    def test_a_slow_custom_model_steps_down_to_a_smaller_generic(self):
+        # The custom primary is tried first; if this board cannot run it in
+        # budget, the ladder below it still applies — the smaller generic base.en.
+        outcomes = {"ggml-atc-small.bin": (40.0, ""), "ggml-base.en.bin": (10.0, "")}
+        t = self._select(["ggml-atc-small.bin", "ggml-base.en.bin"],
+                         "ggml-atc-small.bin", lambda *a: outcomes[Path(a[-1]).name])
+        self.assertTrue(t._capable)
+        self.assertEqual(Path(t._model).name, "ggml-base.en.bin")
+
 
 class AvailabilityTests(unittest.TestCase):
     def test_off_without_a_model(self):

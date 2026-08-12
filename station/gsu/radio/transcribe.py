@@ -261,26 +261,39 @@ class Transcriber:
                   "on this board. Overs are still recorded, just not transcribed.")
 
     def _candidate_models(self) -> list[str]:
-        """The models to weigh, largest first, capped at the configured one.
+        """The models to weigh: the configured one first, then smaller fallbacks.
 
-        Every `ggml-*.bin` beside the configured model — the ladder the image
-        baked — no larger than what was asked for. Capping there makes
-        GSU_WHISPER_MODEL the ceiling: the selector may step down from it on a
-        slow board, never up past it. The configured model is always included,
-        even if its name does not rank (a custom one), so it is at least tried.
+        The configured model is the operator's explicit choice, so it is always
+        the FIRST candidate — tried before anything else, whatever its name. That
+        matters for a custom fine-tune (a domain-adapted ATC model, say) whose
+        filename does not rank: the old logic sorted it purely by rank, so a
+        rank-0 custom model sitting beside the generic `ggml-small.en.bin` the
+        image ships was buried behind it and never ran, which is the whole reason
+        to configure one. Preferring the configured model directly fixes that.
+
+        After it come the other baked `ggml-*.bin` — the ladder — largest first,
+        but only those strictly SMALLER than the configured model, as boards too
+        slow for the primary step down to. GSU_WHISPER_MODEL stays the ceiling:
+        the selector steps down from it, never up past it. A custom (rank-0)
+        primary has no rank to compare against, so it is treated as the top of
+        the ladder — every generic model beside it is a smaller step down.
         """
         if not self._model:
             return []
         cap = _model_rank(self._model)
         found: list[tuple[int, str]] = []
         for path in Path(self._model).parent.glob("ggml-*.bin"):
-            rank = _model_rank(str(path))
-            if rank and (cap == 0 or rank <= cap):
-                found.append((rank, str(path)))
-        if not any(path == self._model for _, path in found):
-            found.append((cap, self._model))
+            path = str(path)
+            if path == self._model:
+                continue  # the configured model is prepended below, not ranked in
+            rank = _model_rank(path)
+            # A smaller generic model to fall back to. When the configured model
+            # is custom (cap == 0) it has no rank to compare, so every ranked
+            # model beside it counts as a step down.
+            if rank and (cap == 0 or rank < cap):
+                found.append((rank, path))
         found.sort(key=lambda ranked: ranked[0], reverse=True)
-        return [path for _, path in found]
+        return [self._model] + [path for _, path in found]
 
     def _benchmark(self, model: str) -> tuple[float | None, str]:
         """Decode one second of silence and time it: (elapsed_s, error).
