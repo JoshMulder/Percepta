@@ -4,6 +4,7 @@ import { Console } from "./components/Console";
 import { Login } from "./components/Login";
 import { PlatformDashboard } from "./components/PlatformDashboard";
 import { ResetPassword } from "./components/ResetPassword";
+import { VerifyEmail } from "./components/VerifyEmail";
 import type { Me } from "./types";
 
 /** The reset link's token, if this load is one. Read before the session check:
@@ -25,10 +26,20 @@ function resetToken(): string | null {
     ?? new URLSearchParams(window.location.search).get("token");
 }
 
+/** The email-verification link's token, if this load is one. Same fragment
+ *  reasoning as the reset link — the token stays out of the proxy access log. */
+function verifyEmailToken(): string | null {
+  if (window.location.pathname !== "/verify-email") return null;
+  const fragment = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+  return fragment.get("token")
+    ?? new URLSearchParams(window.location.search).get("token");
+}
+
 export function App() {
   const [me, setMe] = useState<Me | null>(null);
   const [checked, setChecked] = useState(false);
   const [token, setToken] = useState<string | null>(resetToken);
+  const [verifyToken, setVerifyToken] = useState<string | null>(verifyEmailToken);
 
   // The session lives in an HttpOnly cookie, so the only way to know whether we
   // are signed in is to ask.
@@ -57,6 +68,21 @@ export function App() {
           // may be open in this tab, so whatever `me` holds is stale.
           setMe(null);
           setToken(null);
+          window.history.replaceState(null, "", "/");
+        }}
+      />
+    );
+  }
+
+  if (verifyToken) {
+    return (
+      <VerifyEmail
+        token={verifyToken}
+        onDone={() => {
+          // An email change keeps every session, so if this tab was signed in it
+          // still is; clear the route and land on the app, and the session check
+          // below shows login only if it was not signed in.
+          setVerifyToken(null);
           window.history.replaceState(null, "", "/");
         }}
       />

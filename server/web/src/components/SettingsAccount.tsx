@@ -87,26 +87,60 @@ function EditProfileModal({
   onSaved: (displayName: string) => void;
 }) {
   const [name, setName] = useState(displayName);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [savingName, setSavingName] = useState(false);
+  const [nameError, setNameError] = useState<string | null>(null);
 
-  async function submit(e: React.FormEvent) {
+  // The email change is a separate flow (its own form, so it does not nest
+  // inside the name form) and a separate build on the server: the request needs
+  // the current password and only sends a verification link — nothing moves
+  // until that link is opened.
+  const [changingEmail, setChangingEmail] = useState(false);
+  const [newEmail, setNewEmail] = useState("");
+  const [emailPassword, setEmailPassword] = useState("");
+  const [emailBusy, setEmailBusy] = useState(false);
+  const [emailMessage, setEmailMessage] = useState<string | null>(null);
+  const [emailError, setEmailError] = useState<string | null>(null);
+
+  async function saveName(e: React.FormEvent) {
     e.preventDefault();
-    setSaving(true);
-    setError(null);
+    setSavingName(true);
+    setNameError(null);
     try {
       const updated = await api.updateProfile(name.trim());
       onSaved(updated.display_name);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not save.");
+      setNameError(err instanceof ApiError ? err.message : "Could not save.");
     } finally {
-      setSaving(false);
+      setSavingName(false);
+    }
+  }
+
+  async function requestEmail(e: React.FormEvent) {
+    e.preventDefault();
+    setEmailBusy(true);
+    setEmailError(null);
+    setEmailMessage(null);
+    try {
+      const result = await api.requestEmailChange(newEmail.trim(), emailPassword);
+      setEmailMessage(
+        `Verification link sent to ${result.sent_to}. Open it to confirm — your ` +
+          `sign-in email changes only then.`,
+      );
+      setNewEmail("");
+      setEmailPassword("");
+      setChangingEmail(false);
+    } catch (err) {
+      setEmailError(
+        err instanceof ApiError ? err.message : "Could not start the change.",
+      );
+    } finally {
+      setEmailBusy(false);
     }
   }
 
   return (
     <Modal title="Edit account" onClose={onClose}>
-      <form onSubmit={submit}>
+      <form onSubmit={saveName}>
         <label className="field">
           <span>Display name</span>
           <input
@@ -117,29 +151,91 @@ function EditProfileModal({
             required
           />
         </label>
-        <label className="field">
-          <span>Email</span>
-          <input value={me.email} readOnly disabled />
-          <small>
-            Your email is your sign-in and is recorded against everything you do.
-            Changing it needs a verification link to the new address — coming
-            soon; ask an administrator until then.
-          </small>
-        </label>
         <div className="settings-actions">
           <button
             type="submit"
             className="btn primary"
-            disabled={saving || !name.trim() || name === displayName}
+            disabled={savingName || !name.trim() || name === displayName}
           >
-            {saving ? "Saving…" : "Save"}
+            {savingName ? "Saving…" : "Save name"}
           </button>
-          <button type="button" className="btn ghost" onClick={onClose} disabled={saving}>
-            Cancel
-          </button>
-          {error && <span className="settings-error">{error}</span>}
+          {nameError && <span className="settings-error">{nameError}</span>}
         </div>
       </form>
+
+      <div className="field">
+        <span>Email</span>
+        {!changingEmail ? (
+          <div className="settings-actions">
+            <span>{me.email}</span>
+            <button
+              type="button"
+              className="btn ghost"
+              onClick={() => {
+                setEmailMessage(null);
+                setEmailError(null);
+                setChangingEmail(true);
+              }}
+            >
+              Change email
+            </button>
+          </div>
+        ) : (
+          <form onSubmit={requestEmail}>
+            <label className="field">
+              <span>New email</span>
+              <input
+                type="email"
+                value={newEmail}
+                onChange={(e) => setNewEmail(e.target.value)}
+                autoComplete="email"
+                autoFocus
+                required
+              />
+            </label>
+            <label className="field">
+              <span>Current password</span>
+              <input
+                type="password"
+                value={emailPassword}
+                onChange={(e) => setEmailPassword(e.target.value)}
+                autoComplete="current-password"
+                required
+              />
+            </label>
+            <div className="settings-actions">
+              <button
+                type="submit"
+                className="btn primary"
+                disabled={emailBusy || !newEmail.trim() || !emailPassword}
+              >
+                {emailBusy ? "Sending…" : "Send verification"}
+              </button>
+              <button
+                type="button"
+                className="btn ghost"
+                onClick={() => setChangingEmail(false)}
+                disabled={emailBusy}
+              >
+                Cancel
+              </button>
+            </div>
+          </form>
+        )}
+        {emailMessage && <span className="settings-ok">{emailMessage}</span>}
+        {emailError && <span className="settings-error">{emailError}</span>}
+        <small>
+          Changing your email sends a confirmation link to the new address and
+          needs your current password. Your sign-in only changes once you open
+          the link.
+        </small>
+      </div>
+
+      <div className="settings-actions">
+        <button type="button" className="btn ghost" onClick={onClose}>
+          Close
+        </button>
+      </div>
     </Modal>
   );
 }

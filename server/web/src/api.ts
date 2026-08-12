@@ -239,6 +239,17 @@ export const api = {
       }),
     }),
 
+  /** Start a self-service email change. Gated on the current password; sends a
+   *  confirmation link to the new address. Nothing changes until it is opened. */
+  requestEmailChange: (newEmail: string, currentPassword: string) =>
+    request<{ sent_to: string }>("/api/account/email", {
+      method: "POST",
+      body: JSON.stringify({
+        new_email: newEmail,
+        current_password: currentPassword,
+      }),
+    }),
+
   createStation: (body: {
     name: string;
     timezone: string;
@@ -409,5 +420,13 @@ export const api = {
     request<{ reset: boolean }>("/api/auth/password-reset/redeem", {
       method: "POST",
       body: JSON.stringify({ token, new_password: newPassword }),
+    }),
+
+  /** Confirm a new email from the emailed link. Works signed out or in — the
+   *  token is the whole authorisation — and does not revoke sessions. */
+  redeemEmailChange: (token: string) =>
+    request<{ email: string }>("/api/auth/email-change/redeem", {
+      method: "POST",
+      body: JSON.stringify({ token }),
     }),
 };
