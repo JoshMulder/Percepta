@@ -453,6 +453,25 @@ class ContainerTests(unittest.TestCase):
     def test_no_bytecode_is_written_to_the_sd_card(self):
         self.assertIn("PYTHONDONTWRITEBYTECODE=1", self.dockerfile)
 
+    def test_every_named_state_volume_is_created_and_owned_in_the_image(self):
+        # The agent runs as the non-root gsu user and cannot chown a fresh named
+        # volume — cap_drop: ALL removes CAP_CHOWN — so every /var/lib/percepta-*
+        # dir it mounts a volume at must be created and chowned to gsu in the
+        # image. A volume added to compose without the matching mkdir/chown is
+        # root-owned and every write is EPERM: exactly how the host-shell handoff
+        # shipped broken. Derived from the compose so a new mount cannot skip it.
+        mounts = re.findall(
+            r"-\s+[\w-]+:(/var/lib/percepta-[\w-]+)",
+            self.service("gsu"))
+        self.assertIn("/var/lib/percepta-gsu-hostshell", mounts,
+                      "the host-shell handoff mount vanished; update this test")
+        for path in mounts:
+            self.assertRegex(
+                self.dockerfile,
+                rf"chown gsu:gsu[^\n]*{re.escape(path)}(?:\s|$)",
+                f"{path} is mounted on the agent but never chowned to gsu",
+            )
+
     def test_the_container_hardening_matches_the_unit(self):
         for directive in ("cap_drop:", "- ALL", "no-new-privileges:true",
                           "read_only: true"):
