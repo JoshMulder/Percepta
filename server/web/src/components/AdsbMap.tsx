@@ -638,16 +638,17 @@ function AdsbMapInner({
         if (!compact) {
           el.classList.add("clickable");
           const glyph = el.querySelector("svg");
-          // Hover selects the contact — its card and its track — and the
-          // selection LATCHES: it is deliberately not dropped when the pointer
-          // leaves the glyph. Zoom here is centre-anchored, so a wheel notch
-          // slides every marker out from under a still pointer; clearing on the
-          // glyph's own pointerleave would then wipe the track the instant you
-          // zoomed out to see it, which is the whole complaint. It clears on
-          // leaving the map, clicking empty sky, Escape, or hovering another
-          // contact (a fresh pointerenter) instead.
+          // Hover previews the contact — its card and its track — transiently:
+          // it clears when the pointer leaves the glyph, so a card lingers only
+          // once you CLICK to pin it. A centre-anchored wheel-zoom slides the
+          // marker out from under a still pointer and so ends a bare hover; to
+          // hold a contact across a zoom, click it — a pin survives both a zoom
+          // and leaving the map.
           glyph?.addEventListener("pointerenter", () => {
             hoverRef.current(contact.icao);
+          });
+          glyph?.addEventListener("pointerleave", () => {
+            hoverRef.current(null);
           });
           // Clicking pins rather than toggling: a second click on an already
           // open contact is far more often a missed drag than a request to

@@ -87,6 +87,14 @@ class AccessUnit:
     #: existed. Empty on an AccessUnit built by hand; `split_annexb` remains
     #: the answer for a caller that only has bytes.
     nals: tuple[bytes, ...] = ()
+    #: The picture's presentation timestamp in 90 kHz ticks, when the source
+    #: knows it. Only the RTSP remux does — it reads the camera over MPEG-TS and
+    #: recovers the PES timestamps (`gsu/media/mpegts.py`) — and 90 kHz is the
+    #: fMP4 muxer's timescale, so the gap between two access units' `pts` is a
+    #: sample duration with nothing to scale. None for the encoders in this file:
+    #: `rpicam-vid` and the synthetic source emit raw Annex B, which carries no
+    #: timestamp, and their timeline is the muxer's nominal rate.
+    pts: int | None = None
 
     @property
     def bytes(self) -> int:
@@ -648,7 +656,7 @@ class ProcessEncoder:
         #: created after `stop()` has decided the session is over. See `_spawn`
         #: for the orphaned `rpicam-vid` this prevents.
         self._spawn_lock = threading.Lock()
-        self._reader = AnnexBReader(self.nal_rules)
+        self._reader = self._make_reader()
         self._on_unit = None
         self.started_at: float | None = None
         self.frames = 0
@@ -660,6 +668,17 @@ class ProcessEncoder:
         )
 
     # --- what the subclasses provide ------------------------------------
+
+    def _make_reader(self):
+        """The reader that cuts this source's stdout into access units.
+
+        Annex B for every encoder here — that is what `rpicam-vid` and the
+        synthetic source write. The RTSP remux overrides it: it reads the camera
+        over MPEG-TS so the camera's own timestamps survive, and a TS reader
+        recovers them (`gsu/media/mpegts.py`). Both produce `AccessUnit`s, so the
+        pump below neither knows nor cares which it is holding.
+        """
+        return AnnexBReader(self.nal_rules)
 
     def command(self) -> list[str]:  # pragma: no cover - abstract
         raise NotImplementedError
@@ -754,7 +773,7 @@ class ProcessEncoder:
         self.frames = 0
         self.bytes_out = 0
         self.keyframes = 0
-        self._reader = AnnexBReader(self.nal_rules)
+        self._reader = self._make_reader()
         self._thread = threading.Thread(target=self._pump, name="gsu-h264", daemon=True)
         self._thread.start()
         log.info("Started %s", " ".join(self.command()))
@@ -963,7 +982,7 @@ class ProcessEncoder:
                 self.reason = f"{self.tool} could not be restarted: {exc}"[:200]
                 log.error("%s", self.reason)
                 return
-            self._reader = AnnexBReader(self.nal_rules)
+            self._reader = self._make_reader()
 
     def _deliver(self, unit) -> None:
         self.frames += 1

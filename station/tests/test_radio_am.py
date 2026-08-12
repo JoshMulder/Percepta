@@ -352,9 +352,9 @@ class DemodulationTests(unittest.TestCase):
         self.assertAlmostEqual(recovered, 0.1 * am.LIMIT_GAIN, delta=0.01)
 
     def test_the_voice_filter_removes_out_of_band_audio(self):
-        """A 5 kHz tone is inside the channel but above the voice band, so the
+        """A 7 kHz tone is inside the channel but above the voice band, so the
         voice filter should all but erase it while leaving speech alone."""
-        iq = airband_iq(0.5, audio_hz=5000.0, depth=0.5)
+        iq = airband_iq(0.5, audio_hz=7000.0, depth=0.5)
         on = self.demodulate(iq, voice_filter=True)
         off = self.demodulate(iq, voice_filter=False)
         on_rms = float(np.sqrt(np.mean(on[4000:] ** 2)))

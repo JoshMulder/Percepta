@@ -372,8 +372,8 @@ class AmDemodulator:
         cutoff_hz: float = 8000.0,
         numtaps: int = 251,
         voice_filter: bool = True,
-        voice_low_hz: float = 300.0,
-        voice_high_hz: float = 3400.0,
+        voice_low_hz: float = 339.0,
+        voice_high_hz: float = 5500.0,
     ) -> None:
         if sample_rate % audio_rate:
             raise ValueError(
