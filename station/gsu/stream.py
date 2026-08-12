@@ -39,7 +39,6 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from collections import deque
 
 from . import clock
 from .camera import sensor_exclusive
@@ -55,48 +54,44 @@ from .transport.stream import (
 log = logging.getLogger("gsu.stream")
 
 
-#: How far back the delivered frame rate is averaged, and the fewest samples
-#: before it is trusted. Annex B carries no timestamp, so the muxer must invent
-#: one. A network camera in low light delivers a whole GOP in a burst and then
-#: pauses (a 2s keyframe interval at 5 fps is ten frames in a blink, then nearly
-#: two seconds of nothing), so a *per-frame* gap is lumpy — the burst reads as
-#: 120 fps, the pause as a stall — and pacing from it makes the timeline more
-#: jagged, not less (the first version of this fix did exactly that). A window a
-#: few GOPs long gives the true average rate; the muxer is paced uniformly at
-#: that and the player's own buffer absorbs the bursty arrival.
-RATE_WINDOW_S = 5.0
-MIN_RATE_FRAMES = 5
+#: PES timestamps are 33 bits and wrap; a gap between two is taken modulo this,
+#: so the frame after a wrap is one small step forward rather than a jump back
+#: through the whole clock.
+_PTS_MODULO = 1 << 33
+
+#: The largest frame gap honoured as-is, in 90 kHz ticks — ten seconds. A gap
+#: longer than this is a discontinuity, not a slow frame (a camera resetting its
+#: clock on reconnect, a stall), and the frame falls back to the nominal rate
+#: rather than stamping a ten-plus-second step into the decode clock.
+_MAX_FRAME_TICKS = 90_000 * 10
 
 
-def _smoothed_rate(arrivals: deque, now: float,
-                   window_s: float = RATE_WINDOW_S) -> float | None:
-    """Frames per second over the last `window_s`, or None until it has filled.
+def _pts_duration(last_pts: int | None, pts: int | None) -> int | None:
+    """A sample's duration in muxer ticks, from the camera's own PES timestamps.
 
-    Counted against the *fixed* window, not the first-to-last span: a low-light
-    burst's frames all land at the window's trailing edge, so a span from first
-    to now ends inside a burst and reads high — biased fast, which is the drift
-    we are removing. The fixed denominator includes the pauses and gives the true
-    average. None until the window has actually filled, before which the
-    denominator understates and the muxer's nominal rate is the better guess.
+    This is the whole night-stutter fix, in one subtraction. The camera slows to
+    a few frames a second in the dark, with long exposures, but it stamps every
+    frame with a real presentation time — `ffprobe` on the real Kennels Rd camera
+    showed them at exactly 0.2, 0.4, 0.6 s. The remux now reads those stamps over
+    MPEG-TS (`gsu/media/mpegts.py`) instead of discarding them, and because a PES
+    PTS is in 90 kHz — the fMP4 muxer's own timescale — the gap between two
+    frames' stamps is a sample duration directly, with nothing estimated and
+    nothing scaled. Every earlier attempt invented the timeline from how bytes
+    happened to arrive and failed on the real station; this reads the timeline
+    the camera already put in the stream.
 
-    Mutates `arrivals`: appends `now` and drops entries older than the window.
+    `None` — a source with no timestamps (rpicam, the synthetic encoder), the
+    first frame of a session, or a discontinuity — keeps the muxer's nominal rate
+    for that one frame. A discontinuity is any gap implausible as a frame: the
+    33-bit clock wrapping, the camera resetting its timeline, or a gap so long it
+    is a stall. Taking one at face value would stamp a bogus multi-second (or,
+    across a wrap, negative) step into the decode clock; a single frame at the
+    nominal rate instead is invisible.
     """
-    arrivals.append(now)
-    cutoff = now - window_s
-    while arrivals and arrivals[0] < cutoff:
-        arrivals.popleft()
-    if len(arrivals) < MIN_RATE_FRAMES or now - arrivals[0] < window_s * 0.8:
+    if pts is None or last_pts is None:
         return None
-    return len(arrivals) / window_s
-
-
-def _ticks_for_rate(rate: float, timescale: int) -> int:
-    """A uniform sample duration in timescale ticks for a frames-per-second
-    rate, clamped against an absurd-fast (a clumped burst) or absurd-slow (a
-    stall) estimate so neither corrupts the timeline.
-    """
-    ticks = round(timescale / rate) if rate > 0 else timescale
-    return min(timescale * 4, max(timescale // 120, ticks))
+    delta = (pts - last_pts) % _PTS_MODULO
+    return delta if 0 < delta <= _MAX_FRAME_TICKS else None
 
 
 #: Lease bounds. Five seconds is the shortest that survives one missed command
@@ -201,9 +196,11 @@ class StreamSession:
         self._codec_mismatch = ""
         self._session_open = False
         self._last_frame_at: float | None = None
-        #: Recent access-unit arrival times, for the smoothed delivery rate the
-        #: muxer is paced from (see _smoothed_rate). Bounded by RATE_WINDOW_S.
-        self._arrivals: deque[float] = deque()
+        #: The previous access unit's PES timestamp, so the muxer can be paced
+        #: from the gap to the next one (see `_pts_duration`). None until the
+        #: first timestamped frame of a session; only the RTSP remux ever sets
+        #: it, because only it reads a source that carries timestamps.
+        self._last_pts: int | None = None
         #: When this session entered "starting". `tick` uses it to notice a
         #: start that never finished — see STARTING_LIMIT_S.
         self._starting_at: float | None = None
@@ -398,7 +395,7 @@ class StreamSession:
         self.bytes_out = 0
         self.dropped = 0
         self._last_frame_at = None
-        self._arrivals.clear()
+        self._last_pts = None
         self._session_open = False
         self.codec = ""
         self._codec_mismatch = ""
@@ -922,14 +919,19 @@ class StreamSession:
         if not self._codec_agrees(nals, muxer):
             return
 
-        # Pace the sample uniformly at the delivery rate averaged over the last
-        # few GOPs, not the instantaneous arrival gap: a low-light camera bursts
-        # a whole GOP then pauses, so per-frame gaps are lumpy while the average
-        # is steady. Uniform durations at the average let the player's buffer
-        # absorb the burst and keep the timeline honest. None until the window
-        # has enough samples — the muxer's nominal rate carries the first frames.
-        rate = _smoothed_rate(self._arrivals, now, RATE_WINDOW_S)
-        duration = _ticks_for_rate(rate, muxer.timescale) if rate else None
+        # Pace the sample from the camera's own timestamp, not from when its
+        # bytes arrived. The remux reads the camera over MPEG-TS and recovers a
+        # per-frame PTS (`unit.pts`); the gap to the previous one is the sample
+        # duration in muxer ticks directly, because a PES PTS and this muxer share
+        # the 90 kHz timescale. `None` — no timestamp (rpicam, the synthetic
+        # source), the first frame, or a discontinuity — carries the muxer's
+        # nominal rate. This replaced pacing from a rate estimated over arrival,
+        # which no estimate could get right: a low-light camera bursts a GOP then
+        # pauses, so arrival says nothing true about the timeline the camera
+        # already stamped into the stream.
+        duration = _pts_duration(self._last_pts, unit.pts)
+        if unit.pts is not None:
+            self._last_pts = unit.pts
         fragment, keyframe, changed = muxer.feed(unit, nals, duration)
         if changed or not self._session_open:
             # A new encoder session: parameters that no longer match decode as

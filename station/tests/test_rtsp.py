@@ -4,8 +4,9 @@ No RTSP camera has ever been plugged into this code — HARDWARE.md §10 is the
 register of what that means. What CAN be held to account without one, and is:
 the URLs it builds, the secrets it must never render, the completeness gate on
 snapshots, the honesty of every failure sentence, and the remux pipeline from
-Annex B bytes on a pipe through to fMP4 fragments — driven with real synthetic
-H.264 through the same reader and muxer the field paths use.
+MPEG-TS on a pipe through to fMP4 fragments, the camera's timestamps and all —
+driven with real synthetic H.264 wrapped in TS through the same reader and muxer
+the field paths use.
 """
 
 import os
@@ -369,9 +370,12 @@ class RemuxSourceTests(unittest.TestCase):
     def test_the_command_copies_and_never_encodes(self):
         command = self.source().command()
         self.assertIn("copy", command)
-        # Deliberately NO h264_mp4toannexb: RTP already carries Annex B and
-        # the filter rejects a stream that is not MP4 length-prefixed, which
-        # is how the first real camera failed. The h264 muxer emits Annex B.
+        # MPEG-TS out, so the camera's PES timestamps survive for the reader to
+        # recover — the night-stutter fix. Still no bitstream filter: `-c copy`
+        # into TS takes RTP's Annex B as it arrives, and h264_mp4toannexb would
+        # reject a stream that is not MP4 length-prefixed (how the first real
+        # camera failed).
+        self.assertEqual(command[command.index("-f") + 1], "mpegts")
         self.assertNotIn("h264_mp4toannexb", command)
         self.assertNotIn("-bsf:v", command)
         self.assertIn("-an", command)
@@ -380,19 +384,29 @@ class RemuxSourceTests(unittest.TestCase):
             self.assertNotIn(encoder, joined,
                              "a transcode flag on a box that cannot transcode")
 
-    def test_the_pump_turns_piped_annexb_into_access_units(self):
-        """The real pump thread, real synthetic H.264, a pipe instead of a
-        camera: cat is the subprocess and the reader/muxer path is the same
-        code the field runs."""
+    def test_the_pump_turns_piped_mpegts_into_timestamped_access_units(self):
+        """The real pump thread, real synthetic H.264 wrapped in MPEG-TS, a pipe
+        instead of a camera: cat is the subprocess and the reader/muxer path is
+        the same code the field runs. The remux reads TS now, not raw Annex B,
+        so this proves the camera's own timestamps survive the whole pump and
+        land on the access units — which is the entire night-stutter fix."""
         from gsu.camera.h264_synthetic import SyntheticH264Source
         from gsu.media.fmp4 import Fmp4Muxer
+        from tests.mpegts_stream import build_ts
 
         synthetic = SyntheticH264Source(
             StreamSettings(width=320, height=240, fps=10, intra_period=5),
         )
-        annexb = b"".join(synthetic.frame().data for _ in range(8))
+        frames = [synthetic.frame() for _ in range(8)]
+        # A few frames a second with a deliberately irregular gap — the night
+        # camera the fix is for. In 90 kHz ticks: 0.2s, 0.15s, 0.2s, 0.3s, ...
+        gaps = [18000, 13500, 18000, 27000, 18000, 9000, 18000]
+        pts = [90000]
+        for gap in gaps:
+            pts.append(pts[-1] + gap)
+        stream = build_ts([f.data for f in frames], pts)
         with tempfile.NamedTemporaryFile(delete=False) as handle:
-            handle.write(annexb)
+            handle.write(stream)
             path = handle.name
         self.addCleanup(os.unlink, path)
 
@@ -404,8 +418,12 @@ class RemuxSourceTests(unittest.TestCase):
         self.assertTrue(source.start(units.append))
         source._thread.join(timeout=10)
 
-        self.assertGreaterEqual(len(units), 7)
+        self.assertEqual(len(units), len(frames))
         self.assertTrue(units[0].keyframe)
+        # The camera's timestamps came through the pump intact — the property
+        # `_pts_duration` turns into a per-sample duration downstream.
+        self.assertEqual([u.pts for u in units], pts,
+                         "the camera's timestamps did not survive the pump")
 
         muxer = Fmp4Muxer(320, 240, fps=10)
         fragments = 0

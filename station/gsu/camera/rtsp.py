@@ -20,13 +20,15 @@ subprocesses:
                camera encodes for itself and serves both — which is why
                `owns_sensor` is False here and why this path needs no lease.
     stream     remux without re-encode (`-c copy`): the camera's own H.264 or
-               HEVC copied into Annex B on stdout, cut into access units by the
-               same reader as every other encoder, muxed into the same fMP4.
-               Which codec it is decides the ffmpeg muxer and the NAL grammar
-               together — see `STREAM_CODECS`, and the comment on it, which is
-               a scar. A source that is neither is refused by name rather than
-               transcoded, which would peg the CPU and deliver seconds per
-               frame.
+               HEVC wrapped in MPEG-TS on stdout, cut into access units by a TS
+               reader that recovers the camera's own PES timestamps, muxed into
+               the same fMP4. Reading it as raw Annex B instead — which is what
+               this did — discarded those timestamps and left the fMP4 muxer
+               guessing the timeline, the night-stutter. The codec still decides
+               the NAL grammar the reader parses — see `STREAM_CODECS` — but the
+               container out of ffmpeg is MPEG-TS for both. A source that is
+               neither H.264 nor HEVC is refused by name rather than transcoded,
+               which would peg the CPU and deliver seconds per frame.
 
 `ffmpeg` is an apt dependency (DEPLOYMENT.md §2 and the installer say so). A
 box without it reports exactly that, per path, rather than a camera fault.
@@ -84,14 +86,18 @@ NO_FFMPEG = (
 )
 
 #: What the live path can carry, by ffprobe's name for it, mapped to the NAL
-#: grammar the reader downstream must use and the ffmpeg muxer that produces it.
-#: Both have to change together: `-f h264` around an HEVC stream is a container
-#: that lies, and the reader then looks for H.264 headers in H.265 and finds a
-#: frame every few thousand. That combination is what the first real camera
-#: produced, silently, and it is why this is one table rather than two defaults.
+#: grammar the reader downstream must parse it with. The container is now always
+#: MPEG-TS regardless of codec — TS carries an H.264 or an HEVC elementary stream
+#: identically, and the PES timestamps this remux exists to recover come out the
+#: same way for both, so the per-codec ffmpeg muxer this table used to name is
+#: gone. What still differs, and still has to be right, is the NAL grammar:
+#: reading an HEVC stream with H.264's header rule finds an IDR about once every
+#: few thousand NALs and a picture almost never — which is what the first real
+#: HEVC camera produced, silently, before the grammar was chosen from the probe
+#: rather than assumed.
 STREAM_CODECS = {
-    "h264": ("h264", H264),
-    "hevc": ("hevc", HEVC),
+    "h264": H264,
+    "hevc": HEVC,
 }
 
 
@@ -579,22 +585,29 @@ class RtspCamera:
 
 
 class RtspRemuxSource(ProcessEncoder):
-    """The camera's own H.264 or HEVC copied to Annex B on stdout.
+    """The camera's own H.264 or HEVC copied into MPEG-TS on stdout.
 
-    No encoder anywhere. Everything downstream — the access-unit reader, the
-    fMP4 muxer, the uplink — is the same code on both codecs, which is the
-    point: one container, one bug surface, and the synthetic source proves the
-    H.264 half of it. What is different is stated: the bitrate, resolution and
-    keyframe interval are the *camera's*, set on the camera, and the settings
-    this station computed are hints it cannot enforce. Attempting a transcode
-    instead would peg a Pi 2B and deliver seconds per frame, which is a worse
-    failure than an honest one.
+    No encoder anywhere. Everything downstream — the fMP4 muxer, the uplink — is
+    the same code on both codecs, which is the point: one container out, one bug
+    surface, and the synthetic source proves the H.264 half of it. What is
+    different is stated: the bitrate, resolution and keyframe interval are the
+    *camera's*, set on the camera, and the settings this station computed are
+    hints it cannot enforce. Attempting a transcode instead would peg a Pi 2B and
+    deliver seconds per frame, which is a worse failure than an honest one.
 
-    `codec` is what ffprobe said, and it decides two things that must agree:
-    the ffmpeg muxer that frames stdout, and the NAL grammar the reader parses
-    it with. They were previously both fixed at H.264, and an HEVC camera
-    therefore produced an H.264-labelled container full of H.265 that failed
-    without a single error message in it.
+    **MPEG-TS in, so the camera's clock survives.** This used to copy the stream
+    as raw Annex B, which carries no timestamps, and the fMP4 muxer then invented
+    a timeline that raced then stalled after dark — the night-stutter. TS wraps
+    the same copied bytes in PES packets that keep the timestamps, and
+    `_make_reader` swaps in a `TsReader` to recover them. That is the whole of
+    what is different about this source's plumbing; `command()` and
+    `_make_reader()` are its two seams.
+
+    `codec` is what ffprobe said, and it decides the NAL grammar the reader parses
+    the elementary stream with. It was previously fixed at H.264, so an HEVC
+    camera produced a stream full of H.265 read by H.264's rule, which failed
+    without a single error message in it. The container itself — MPEG-TS — is the
+    same for both.
     """
 
     name = "rtsp-remux"
@@ -611,7 +624,7 @@ class RtspRemuxSource(ProcessEncoder):
         # Before super().__init__, which builds the first access-unit reader
         # and needs to be told which grammar it is reading.
         self.codec = codec if codec in STREAM_CODECS else "h264"
-        self.muxer_format, self.nal_rules = STREAM_CODECS[self.codec]
+        self.nal_rules = STREAM_CODECS[self.codec]
         super().__init__(settings)
         self.url = url
         self.transport = transport
@@ -631,6 +644,18 @@ class RtspRemuxSource(ProcessEncoder):
         self.tool = "ffmpeg" if shutil.which("ffmpeg") else None
         self.reason = "" if self.tool else NO_FFMPEG
 
+    def _make_reader(self):
+        """Read the camera over MPEG-TS, not raw Annex B.
+
+        This is the reader half of the night-stutter fix. `command()` asks ffmpeg
+        for `-f mpegts`, which keeps the camera's PES timestamps; `TsReader`
+        recovers them so the fMP4 muxer paces on the camera's own clock instead
+        of one this station guessed. See `gsu/media/mpegts.py`.
+        """
+        from ..media.mpegts import TsReader
+
+        return TsReader(self.nal_rules)
+
     def command(self) -> list[str]:
         return [
             "ffmpeg", "-nostdin", "-loglevel", "error",
@@ -638,13 +663,16 @@ class RtspRemuxSource(ProcessEncoder):
             "-i", self.url,
             "-an", "-dn",                      # video only; no audio, no data
             "-c:v", "copy",                    # the whole design: never encode
-            # No h264_mp4toannexb / hevc_mp4toannexb. RTP already delivers both
-            # codecs as Annex B, and the filter refuses a stream that is not in
-            # the MP4 length-prefixed form - "Error initializing output stream
-            # 0:0" against the first real camera this met. The raw `h264` and
-            # `hevc` muxers emit Annex B regardless, which is what AnnexBReader
-            # downstream expects.
-            "-f", self.muxer_format,
+            # MPEG-TS, not the raw `h264`/`hevc` muxer this used to name. The raw
+            # muxers write the elementary stream as Annex B and drop the camera's
+            # RTP timestamps on the floor, which left the fMP4 muxer downstream
+            # inventing a timeline and getting it wrong every way it tried — the
+            # night-stutter, where a 5 fps stream raced then stalled. TS wraps the
+            # same `-c copy` bytes in PES packets that carry those timestamps
+            # forward as PTS, and `TsReader` recovers them (gsu/media/mpegts.py).
+            # No bitstream filter: `-c copy` into TS takes RTP's Annex B as it
+            # arrives, and the muxer adds only the TS framing around it.
+            "-f", "mpegts",
             "pipe:1",
         ]
 

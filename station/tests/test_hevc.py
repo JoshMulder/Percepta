@@ -449,20 +449,21 @@ class RtspCodecTests(unittest.TestCase):
 
         return RtspRemuxSource(url="rtsp://camera/stream", codec=codec)
 
-    def test_hevc_gets_the_hevc_muxer_and_the_hevc_grammar(self):
-        # These two have to move together. `-f h264` around an H.265 stream is
-        # a container that lies, and it is what produced 8 Mbit/s of nothing.
+    def test_hevc_gets_mpegts_and_the_hevc_grammar(self):
+        # The container is MPEG-TS for both codecs now — it carries the camera's
+        # PES timestamps either way — so what still has to move with the codec is
+        # the NAL grammar the reader parses. Reading H.265 with H.264's rule is
+        # what produced 8 Mbit/s of nothing; the grammar, not the container, is
+        # the thing the codec decides.
         source = self.source("hevc")
         command = source.command()
-        self.assertIn("hevc", command)
-        self.assertNotIn("h264", command)
-        self.assertEqual(command[command.index("-f") + 1], "hevc")
+        self.assertEqual(command[command.index("-f") + 1], "mpegts")
         self.assertIs(source.nal_rules, HEVC)
         self.assertIn("HEVC", source.kind)
 
-    def test_h264_is_untouched(self):
+    def test_h264_gets_mpegts_and_the_h264_grammar(self):
         source = self.source("h264")
-        self.assertEqual(source.command()[source.command().index("-f") + 1], "h264")
+        self.assertEqual(source.command()[source.command().index("-f") + 1], "mpegts")
         self.assertIs(source.nal_rules, H264)
 
     def test_it_still_never_transcodes(self):
@@ -491,16 +492,31 @@ class RtspCodecTests(unittest.TestCase):
         ffmpeg — the same trick `test_rtsp.py` uses for the H.264 path.
 
         This is the only test that covers the wiring rather than the parts: the
-        source has to hand its grammar to the reader `ProcessEncoder` builds,
+        source has to hand its grammar to the TS reader `ProcessEncoder` builds,
         and it builds three of them (construction, start, and respawn after a
         lost camera). Miss any one and an HEVC camera silently gets the H.264
-        reader back.
+        reader back. The remux now reads MPEG-TS, so the raw HEVC fixture is
+        wrapped in TS here — the container ffmpeg hands the reader — with a PTS
+        on each access unit, and the pump must recover both grammar and clock.
         """
         from unittest import mock
 
+        from tests.mpegts_stream import build_ts
+
+        # Split the fixture into access units and wrap each in a TS PES with a
+        # known 25 fps PTS, so the pump reads exactly what `-f mpegts` yields.
+        access_units = (lambda r: r.feed(STREAM.read_bytes()) + r.flush())(
+            AnnexBReader(HEVC))
+        pts = [90000 + 3600 * index for index in range(len(access_units))]
+        packed = build_ts([au.data for au in access_units], pts)
+        with tempfile.NamedTemporaryFile(delete=False) as handle:
+            handle.write(packed)
+            path = handle.name
+        self.addCleanup(Path(path).unlink)
+
         with mock.patch("shutil.which", lambda name: "/usr/bin/ffmpeg"):
             source = self.source("hevc")
-        source.command = lambda: ["cat", str(STREAM)]
+        source.command = lambda: ["cat", path]
         source.tool = "cat"
 
         units = []
@@ -510,6 +526,8 @@ class RtspCodecTests(unittest.TestCase):
 
         self.assertEqual(len(units), 10)
         self.assertEqual(sum(unit.keyframe for unit in units), 4)
+        # Grammar and clock both reached the far side of the pump.
+        self.assertEqual([u.pts for u in units], pts)
 
         muxer = Fmp4Muxer(1920, 1080, fps=25, rules=source.nal_rules)
         for unit in units:

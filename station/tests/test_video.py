@@ -1106,36 +1106,149 @@ class H264SequenceParameterSetTests(unittest.TestCase):
         self.assertEqual(muxer.decode_time - base, 9000)
         self.assertNotEqual(9000, muxer.sample_duration)
 
-    def test_ticks_for_rate_clamps_absurd_estimates(self):
-        from gsu.stream import _ticks_for_rate
-        ts = 90000
-        self.assertEqual(_ticks_for_rate(5.0, ts), 18000)         # 5 fps -> 200ms
-        self.assertEqual(_ticks_for_rate(25.0, ts), 3600)         # 25 fps -> 40ms
-        self.assertEqual(_ticks_for_rate(1000.0, ts), ts // 120)  # clumped burst -> floor
-        self.assertEqual(_ticks_for_rate(0.1, ts), ts * 4)        # a stall -> capped
+    def test_pts_duration_is_the_gap_and_guards_discontinuities(self):
+        # The night-stutter fix at the level it decides the timeline: a sample's
+        # duration is the gap between its PES timestamp and the previous one, in
+        # the 90 kHz ticks both the PTS and the muxer use — no scaling, no rate
+        # estimated. This replaced `_smoothed_rate`/`_ticks_for_rate`, which
+        # could not work: they invented a timeline from arrival instead of
+        # reading the one the camera stamped into the stream.
+        from gsu.stream import _pts_duration
 
-    def test_smoothed_rate_rides_over_bursty_arrival(self):
-        # The regression v0.2.1 caused: a low-light camera delivers a whole GOP
-        # in a burst then pauses (~5 fps as ten frames every ~2s). Paced per-gap,
-        # that read as 100+ fps then a stall — jagged. The smoothed rate must sit
-        # near the 5 fps average instead, so the muxer stays uniform and the
-        # player's buffer absorbs the burst.
-        from collections import deque
-        from gsu.stream import _smoothed_rate, RATE_WINDOW_S
+        self.assertIsNone(_pts_duration(None, 1000), "no baseline yet: first frame")
+        self.assertIsNone(_pts_duration(1000, None), "a source with no timestamps")
+        # 0.2s at 90 kHz is 5 fps — the real night rate — and it comes straight
+        # out as 18000 ticks, whatever the arrival jitter was.
+        self.assertEqual(_pts_duration(1000, 19000), 18000)
+        self.assertEqual(_pts_duration(19000, 37000), 18000)
+        self.assertIsNone(_pts_duration(1000, 1000), "a duplicate stamp is not a frame")
+        # The 33-bit PES clock wraps; the frame across the wrap is one small step
+        # forward, not a jump back through the whole clock.
+        wrap = 1 << 33
+        self.assertEqual(_pts_duration(wrap - 6000, 12000), 18000)
+        # A gap too long to be a frame — a stall, a camera resetting its clock —
+        # falls back to the nominal rate rather than stamping it into the clock.
+        self.assertIsNone(_pts_duration(1000, 1000 + 90000 * 20))
 
-        arrivals: deque = deque()
-        t, rates = 0.0, []
-        for _gop in range(12):
-            for _frame in range(10):
-                r = _smoothed_rate(arrivals, t, RATE_WINDOW_S)
-                if r is not None:
-                    rates.append(r)
-                t += 0.01               # ten frames in 0.1s: the burst
-            t += 1.90                   # then the pause — 2.0s per GOP = ~5 fps
-        self.assertTrue(rates, "the window never filled")
-        for r in rates:
-            self.assertGreater(r, 3.5, "smoothed rate collapsed below the 5 fps average")
-            self.assertLess(r, 7.0, "smoothed rate spiked toward the burst")
+
+class MpegTsReaderTests(unittest.TestCase):
+    """The reader that recovers the camera's own clock from MPEG-TS.
+
+    The night-stutter's root cause was reading the camera as raw Annex B, which
+    threw its timestamps away and left the fMP4 muxer inventing a timeline that
+    raced then stalled after dark. The remux now asks ffmpeg for `-f mpegts` and
+    this reader unwraps the PES timestamps. Proven against a synthetic transport
+    stream carrying real synthetic H.264 with known, deliberately non-uniform
+    PTS: the reader has never met a real camera, so the seam is nailed down the
+    way the rest of this pipeline is.
+    """
+
+    def _frames_and_pts(self):
+        from gsu.camera.h264 import StreamSettings
+        from gsu.camera.h264_synthetic import SyntheticH264Source
+
+        source = SyntheticH264Source(
+            StreamSettings(width=320, height=240, fps=5, intra_period=3),
+            station_name="Kaikoura Ridge",
+        )
+        frames = [source.frame() for _ in range(8)]
+        # Non-uniform gaps in 90 kHz ticks — a night camera's long, slightly
+        # irregular exposures: 0.2s, 0.18s, 0.25s, 0.2s, 0.333s, 0.2s, 0.133s.
+        gaps = [18000, 16200, 22500, 18000, 30000, 18000, 12000]
+        pts = [90000]
+        for gap in gaps:
+            pts.append(pts[-1] + gap)
+        return frames, pts, gaps
+
+    def test_it_recovers_the_cameras_own_timestamps(self):
+        from gsu.camera.h264 import split_annexb
+        from gsu.media.mpegts import TsReader
+        from tests.mpegts_stream import build_ts
+
+        frames, pts, gaps = self._frames_and_pts()
+        stream = build_ts([f.data for f in frames], pts)
+
+        reader = TsReader()
+        units = []
+        # Fed in awkward 100-byte slices, so reassembly is proven across both
+        # transport-packet and feed-chunk boundaries — the same fragmentation the
+        # drain thread hands the reader on a real box.
+        for index in range(0, len(stream), 100):
+            units += reader.feed(stream[index:index + 100])
+        units += reader.flush()
+
+        self.assertEqual(len(units), len(frames))
+        self.assertEqual([u.pts for u in units], pts, "a recovered PTS is wrong")
+        # The durations the muxer will see are the exact PTS deltas — the whole
+        # point, and the thing no rate estimate could deliver.
+        recovered = [b.pts - a.pts for a, b in zip(units, units[1:])]
+        self.assertEqual(recovered, gaps)
+        # The picture survives the round trip: same NALs, same keyframe flags.
+        self.assertEqual([u.keyframe for u in units], [f.keyframe for f in frames])
+        for unit, frame in zip(units, frames):
+            self.assertEqual(unit.nals, tuple(split_annexb(frame.data)))
+
+    def test_a_stream_that_begins_mid_pes_waits_for_the_next_start(self):
+        # A reader attaching to a running stream lands inside a PES packet, with
+        # no start marker yet. It must not emit that half frame; the first thing
+        # it returns is the first whole access unit after a payload-unit start.
+        from gsu.media.mpegts import TsReader
+        from tests.mpegts_stream import build_ts
+
+        frames, pts, _ = self._frames_and_pts()
+        stream = build_ts([f.data for f in frames], pts)
+        reader = TsReader()
+        # Drop the first transport packet, so the stream opens mid-PES.
+        units = reader.feed(stream[188:]) + reader.flush()
+        self.assertEqual([u.pts for u in units], pts[1:])
+
+    def test_a_pes_without_a_timestamp_paces_at_the_nominal_rate(self):
+        # Not every PES must carry a PTS. One that does not comes back pts=None,
+        # and `_pts_duration` then leaves that frame at the muxer's nominal rate
+        # rather than inventing a gap for it.
+        from gsu.media.mpegts import TsReader
+        from tests.mpegts_stream import pes_packet, ts_packets
+
+        frames, pts, _ = self._frames_and_pts()
+        data = [f.data for f in frames]
+        stream = (
+            ts_packets(0x100, pes_packet(0xE0, pts[0], data[0]))
+            + ts_packets(0x100, pes_packet(0xE0, None, data[1]))
+            + ts_packets(0x100, pes_packet(0xE0, pts[2], data[2]))
+        )
+        reader = TsReader()
+        units = reader.feed(stream) + reader.flush()
+        self.assertEqual([u.pts for u in units], [pts[0], None, pts[2]])
+
+    def test_it_ignores_the_program_tables_ffmpeg_interleaves(self):
+        # Real ffmpeg carries a PAT on PID 0 and a PMT on PID 0x1000, at the
+        # start and then periodically. Neither is the elementary stream, and the
+        # reader — which locks the video PID by sniffing for a video PES, not by
+        # parsing those tables — must step over them and lock the right PID. The
+        # reader has never met a real camera, so this is where that is proven.
+        from gsu.media.mpegts import TsReader
+        from tests.mpegts_stream import pes_packet, ts_packets
+
+        def psi(pid, table_id):
+            # A program-table packet begins pointer_field(0), table_id, then its
+            # section — so 00 00 <table_id>, never a PES start code (00 00 01).
+            body = bytes((0x00, table_id)) + b"\xff" * 182
+            return bytes((0x47, 0x40 | ((pid >> 8) & 0x1F), pid & 0xFF, 0x10)) + body
+
+        frames, pts, _ = self._frames_and_pts()
+        data = [f.data for f in frames]
+        # PAT, PMT, then the first two frames, with the tables repeated between
+        # them the way ffmpeg re-emits them on a keyframe.
+        stream = (
+            psi(0x0000, 0x00) + psi(0x1000, 0x02)
+            + ts_packets(0x100, pes_packet(0xE0, pts[0], data[0]))
+            + psi(0x0000, 0x00) + psi(0x1000, 0x02)
+            + ts_packets(0x100, pes_packet(0xE0, pts[1], data[1]))
+        )
+        reader = TsReader()
+        units = reader.feed(stream) + reader.flush()
+        self.assertEqual([u.pts for u in units], pts[:2])
+        self.assertEqual(reader._video_pid, 0x100, "locked onto a table, not video")
 
 
 class EncoderTests(unittest.TestCase):
