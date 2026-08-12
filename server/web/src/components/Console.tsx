@@ -1235,7 +1235,6 @@ export function Console({
           me={meWithName}
           stationId={stationId}
           stationName={stations.find((s) => s.id === stationId)?.name ?? null}
-          radio={radio}
           health={health}
           capabilities={caps}
           onClose={() => setSettingsOpen(false)}
@@ -1350,7 +1349,6 @@ export function Console({
           me={meWithName}
           stationId={stationId}
           stationName={stations.find((s) => s.id === stationId)?.name ?? null}
-          radio={radio}
           health={health}
           capabilities={caps}
           onClose={() => setSettingsOpen(false)}
