@@ -42,12 +42,16 @@ RENEW_WINDOW = 300
 
 class Hardware(BaseModel):
     """Inventory, explicitly not trust. Nothing here influences what the station
-    is allowed to do, which is what makes it safe to accept unverified."""
+    is allowed to do, which is what makes it safe to accept unverified.
 
-    model: str | None = None
-    serial: str | None = None
-    os: str | None = None
-    agent_version: str | None = None
+    Bounded anyway: this is unauthenticated (the token is the auth) and the values
+    are stored as-is, so a cap keeps a junk or hostile field from bloating the
+    row. Each is a short label describing a box — generous limits, not tight ones."""
+
+    model: str | None = Field(default=None, max_length=128)
+    serial: str | None = Field(default=None, max_length=128)
+    os: str | None = Field(default=None, max_length=256)
+    agent_version: str | None = Field(default=None, max_length=64)
 
 
 class ClaimRequest(BaseModel):
