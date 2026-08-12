@@ -417,6 +417,24 @@ export interface StationConfig {
   config_version: number;
 }
 
+export interface StationSystemStats {
+  cpu_percent?: number;
+  load_1m?: number;
+  temperature_c?: number;
+  /** Host uptime in seconds — distinct from the agent-process uptime. */
+  uptime_s?: number;
+  memory?: { total_mb?: number; used_mb?: number; used_percent?: number };
+}
+
+/** The selected station's latest host stats, for the settings overview. `system`
+ *  (and each of its fields) is absent until a health frame has been cached, and
+ *  null once the station has been quiet past the snapshot TTL. */
+export interface StationHealth {
+  online: boolean;
+  status?: string | null;
+  system?: StationSystemStats | null;
+}
+
 export interface EnrolmentStatus {
   station_id: string;
   enrolled: boolean;

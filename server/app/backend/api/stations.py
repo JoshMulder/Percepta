@@ -1,3 +1,4 @@
+import json
 import uuid
 
 from zoneinfo import ZoneInfo
@@ -13,7 +14,11 @@ from backend.auth.identity import Identity
 from backend.database.dependencies import get_db
 from backend.database.models.device import Device
 from backend.database.models.ground_station import GroundStation
-from backend.realtime.bus import publish_roster_sync
+from backend.realtime.bus import (
+    health_snapshot_key,
+    publish_roster_sync,
+    read_latest_sync,
+)
 from backend.services.audit import record
 
 router = APIRouter(prefix="/api/stations", tags=["stations"])
@@ -274,6 +279,65 @@ def power_history(
         )
         for r in rows
     ]
+
+
+class StationHealth(BaseModel):
+    """The selected station's latest self-reported host stats, for the settings
+    overview. Null fields mean the station has not reported within the snapshot's
+    lifetime — the panel shows 'no recent telemetry' rather than stale numbers."""
+
+    online: bool
+    #: ok | degraded | failing, when it has reported recently.
+    status: str | None = None
+    #: Host device stats — cpu_percent, load_1m, temperature_c, uptime_s (host),
+    #: memory{total_mb,used_mb,used_percent}. Best-effort on the station, so any
+    #: field may be absent; the whole object is null until a frame is cached.
+    system: dict | None = None
+
+
+@router.get("/{station_id}/health", response_model=StationHealth)
+def station_health(
+    station_id: uuid.UUID,
+    identity: Identity = Depends(get_identity),
+    db: Session = Depends(get_db),
+) -> StationHealth:
+    """The selected station's latest host system stats, for the settings overview.
+
+    Health lives only on the live fan-out; the ingest caches each station's last
+    frame in Redis (`health_snapshot_key`), TTL'd, and this reads that one key.
+    Behind telemetry.view — it is the same self-description the live health panel
+    shows, and the same people should see it. A station that has not reported
+    within the snapshot's lifetime returns nulls, which the panel renders as 'no
+    recent telemetry' rather than stale numbers.
+    """
+    from backend.auth.capabilities import Capability
+
+    granted = capabilities_for(
+        db,
+        user_id=identity.user_id,
+        organization_id=identity.organization_id,
+        ground_station_id=station_id,
+    )
+    if Capability.TELEMETRY_VIEW not in granted:
+        raise HTTPException(status_code=404, detail="Station not available")
+
+    station = db.get(GroundStation, station_id)
+    online = _online(station) if station is not None else False
+
+    blob = next(iter(read_latest_sync([health_snapshot_key(station_id)])), None)
+    if not blob:
+        return StationHealth(online=online)
+    try:
+        frame = json.loads(blob)
+    except (ValueError, TypeError):
+        return StationHealth(online=online)
+    system = frame.get("system")
+    status = frame.get("status")
+    return StationHealth(
+        online=online,
+        status=status if isinstance(status, str) else None,
+        system=system if isinstance(system, dict) and system else None,
+    )
 
 
 @router.get("/{station_id}/weather/history", response_model=list[WeatherPoint])

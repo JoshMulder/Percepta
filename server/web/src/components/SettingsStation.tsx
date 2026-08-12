@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, api } from "../api";
-import type { StationConfig, StationSummary } from "../types";
+import type { StationConfig, StationHealth, StationSummary } from "../types";
 import { SettingsEnrolment } from "./SettingsEnrolment";
 
 /**
@@ -101,6 +101,7 @@ export function SettingsStation({
       <div className="member-detail station-detail">
         {station ? (
           <>
+            <StationStats key={`stats-${station.id}`} stationId={station.id} />
             <StationConfigForm
               key={station.id}
               stationId={station.id}
@@ -248,6 +249,110 @@ function AddStation({
         </div>
       )}
     </>
+  );
+}
+
+function formatUptime(seconds: number): string {
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+
+/**
+ * The selected station's live host stats — uptime, CPU, load, temperature and
+ * memory — read from the platform's cache of the station's last health frame,
+ * and polled while the panel is open. Best-effort on the station, so any single
+ * field may be absent; the panel says so plainly when the station is offline or
+ * has not reported within the snapshot's lifetime.
+ */
+function StationStats({ stationId }: { stationId: string }) {
+  const [health, setHealth] = useState<StationHealth | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setHealth(null);
+    setError(null);
+    const load = () => {
+      api
+        .stationHealth(stationId)
+        .then((h) => {
+          if (!cancelled) {
+            setHealth(h);
+            setError(null);
+          }
+        })
+        .catch((err) => {
+          if (!cancelled) {
+            setError(err instanceof ApiError ? err.message : "Could not load stats.");
+          }
+        });
+    };
+    load();
+    // Health lands about every 30s; refresh at half that so the numbers track
+    // without hammering, and stop when the panel or the station changes.
+    const timer = window.setInterval(load, 15000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [stationId]);
+
+  const sys = health?.system;
+
+  return (
+    <section className="settings-section">
+      <h3>System</h3>
+      {error && <p className="settings-error">{error}</p>}
+      {!health ? (
+        <p className="settings-note">Loading…</p>
+      ) : !health.online ? (
+        <p className="settings-note">This station is offline.</p>
+      ) : !sys ? (
+        <p className="settings-note">No recent telemetry from this station.</p>
+      ) : (
+        <dl className="settings-facts">
+          {sys.uptime_s != null && (
+            <>
+              <dt>Host uptime</dt>
+              <dd>{formatUptime(sys.uptime_s)}</dd>
+            </>
+          )}
+          {sys.cpu_percent != null && (
+            <>
+              <dt>CPU</dt>
+              <dd>{sys.cpu_percent}%</dd>
+            </>
+          )}
+          {sys.load_1m != null && (
+            <>
+              <dt>Load (1 min)</dt>
+              <dd>{sys.load_1m}</dd>
+            </>
+          )}
+          {sys.temperature_c != null && (
+            <>
+              <dt>Temperature</dt>
+              <dd>{sys.temperature_c} °C</dd>
+            </>
+          )}
+          {sys.memory?.used_percent != null && (
+            <>
+              <dt>Memory</dt>
+              <dd>
+                {sys.memory.used_percent}%
+                {sys.memory.used_mb != null && sys.memory.total_mb != null
+                  ? ` (${sys.memory.used_mb} / ${sys.memory.total_mb} MB)`
+                  : ""}
+              </dd>
+            </>
+          )}
+        </dl>
+      )}
+    </section>
   );
 }
 

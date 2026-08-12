@@ -149,6 +149,21 @@ def adsb_snapshot_key(station_id) -> str:
     return f"latest:adsb:{station_id}"
 
 
+#: How long a station's last health snapshot is worth reading. Health arrives
+#: about every 30 s, so this survives a missed frame or two but ages out a
+#: station that has gone quiet, so its stats stop reading as current.
+HEALTH_SNAPSHOT_TTL = 120
+
+
+def health_snapshot_key(station_id) -> str:
+    """Redis key holding one station's most recent health frame. Health exists
+    only on the live per-station fan-out — nothing stores it — so the console's
+    per-station stats view reads the ingest-cached copy here rather than holding
+    a subscription, exactly as the fleet map does for ADS-B. TTL'd so a station
+    gone quiet ages out instead of showing its last stats as current."""
+    return f"latest:health:{station_id}"
+
+
 def read_latest_sync(keys: list[str]) -> list:
     """MGET a batch of snapshot keys for a sync caller. Empty on any failure — a
     dashboard read must not raise because Redis hiccuped, the same fail-soft

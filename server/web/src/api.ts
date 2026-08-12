@@ -14,6 +14,7 @@ import type {
   PlatformUser,
   StationConfig,
   StationDetail,
+  StationHealth,
   StationSummary,
 } from "./types";
 
@@ -263,6 +264,12 @@ export const api = {
 
   stationConfig: (id: string) =>
     request<StationConfig>(`/api/stations/${id}/config`),
+
+  /** The selected station's latest host system stats (uptime, temp, load, …)
+   *  from the ingest-cached last health frame. Nulls when it has not reported
+   *  recently. Needs telemetry.view. */
+  stationHealth: (id: string) =>
+    request<StationHealth>(`/api/stations/${id}/health`),
 
   /** `is_simulated` and `enrolled` are read-only: the first is written from
    *  the station's own health frame, the second is a fact about the record.

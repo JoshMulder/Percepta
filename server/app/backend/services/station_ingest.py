@@ -52,7 +52,13 @@ from sqlalchemy import select, update
 from backend.core.config import settings
 from backend.database.models.ground_station import GroundStation
 from backend.database.session import PrivilegedSessionLocal
-from backend.realtime.bus import ADSB_SNAPSHOT_TTL, adsb_snapshot_key, command_channel
+from backend.realtime.bus import (
+    ADSB_SNAPSHOT_TTL,
+    HEALTH_SNAPSHOT_TTL,
+    adsb_snapshot_key,
+    command_channel,
+    health_snapshot_key,
+)
 from backend.realtime.hub import hub
 from backend.services import geocode, station_events, station_topics
 from backend.services.enrolment import has_valid_credential
@@ -466,6 +472,7 @@ class StationIngest:
             await self._reconcile_simulated(station_id, payload)
             await self._reconcile_position(station_id, payload)
             await self._reconcile_config_version(station_id, payload)
+            await self._cache_health(station_id, payload)
         elif kind == "adsb":
             await self._cache_adsb(station_id, payload)
 
@@ -550,6 +557,24 @@ class StationIngest:
             )
         except Exception:  # noqa: BLE001 - a cache write must never stop ingest
             log.debug("Could not cache ADS-B for %s.", station_id, exc_info=True)
+
+    async def _cache_health(self, station_id: uuid.UUID, payload: dict) -> None:
+        """Keep this station's latest health frame in Redis so the console's
+        per-station stats view can read it without holding a live subscription —
+        the same trick as `_cache_adsb`, TTL'd so a station gone quiet stops
+        showing its last stats as current. Best-effort: a failed write costs a
+        stats read, never a stall in ingest.
+        """
+        if self._redis is None:
+            return
+        try:
+            await self._redis.setex(
+                health_snapshot_key(station_id),
+                HEALTH_SNAPSHOT_TTL,
+                json.dumps(payload),
+            )
+        except Exception:  # noqa: BLE001 - a cache write must never stop ingest
+            log.debug("Could not cache health for %s.", station_id, exc_info=True)
 
     async def _reconcile_simulated(self, station_id: uuid.UUID, payload: dict) -> None:
         """Believe the station about whether its own data is synthetic.
