@@ -245,7 +245,7 @@ REGISTRY: tuple[DeviceType, ...] = (
                            "and out-of-band energy before the envelope detector, "
                            "at the cost of the top of the voice band if taken "
                            "too far. Clamped to 2000–8000."),
-            Parameter("voice_filter", "Voice filter (300–3400 Hz)", "bool",
+            Parameter("voice_filter", "Voice filter (339–5500 Hz)", "bool",
                       True, required=False,
                       help="A band-pass on the demodulated audio, over the comms "
                            "voice band. Lifts speech clear of the hiss above it "
