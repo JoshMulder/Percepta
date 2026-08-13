@@ -134,6 +134,13 @@ export function Login({ onSignedIn }: { onSignedIn: (me: Me) => void }) {
           </button>
         )}
       </form>
+      {/* Plain links, not router state: they are real addresses somebody can be
+          sent, and they work before anyone has signed in. */}
+      <p className="login-legal">
+        <a href="/privacy">Privacy Policy</a>
+        <span aria-hidden="true"> · </span>
+        <a href="/terms">Terms of Use</a>
+      </p>
     </div>
   );
 }

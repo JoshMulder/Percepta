@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, setUnauthorizedHandler } from "./api";
 import { Console } from "./components/Console";
+import { Legal } from "./components/Legal";
 import { Login } from "./components/Login";
 import { PlatformDashboard } from "./components/PlatformDashboard";
 import { ResetPassword } from "./components/ResetPassword";
@@ -35,11 +36,20 @@ function verifyEmailToken(): string | null {
     ?? new URLSearchParams(window.location.search).get("token");
 }
 
+/** The legal pages are plain routes, readable without a session — somebody
+ *  deciding whether to accept the terms has not signed in yet. */
+function legalPage(): "privacy" | "terms" | null {
+  if (window.location.pathname === "/privacy") return "privacy";
+  if (window.location.pathname === "/terms") return "terms";
+  return null;
+}
+
 export function App() {
   const [me, setMe] = useState<Me | null>(null);
   const [checked, setChecked] = useState(false);
   const [token, setToken] = useState<string | null>(resetToken);
   const [verifyToken, setVerifyToken] = useState<string | null>(verifyEmailToken);
+  const [legal, setLegal] = useState<"privacy" | "terms" | null>(legalPage);
 
   // The session lives in an HttpOnly cookie, so the only way to know whether we
   // are signed in is to ask.
@@ -83,6 +93,18 @@ export function App() {
           // still is; clear the route and land on the app, and the session check
           // below shows login only if it was not signed in.
           setVerifyToken(null);
+          window.history.replaceState(null, "", "/");
+        }}
+      />
+    );
+  }
+
+  if (legal) {
+    return (
+      <Legal
+        page={legal}
+        onBack={() => {
+          setLegal(null);
           window.history.replaceState(null, "", "/");
         }}
       />
