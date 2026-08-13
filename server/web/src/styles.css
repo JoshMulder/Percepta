@@ -42,6 +42,14 @@
      does not move the bar. */
   --topbar-h: 3rem;
 
+  /* The y-axis gutter on a trend chart. A token because two rules depend on it
+     agreeing - the gutter's own width and the inset that slides the time axis
+     out from under it - and they were separately hardcoded, which is how they
+     drift. Sized for "1010.8 hPa", the widest label these series produce: ten
+     glyphs of 0.6rem mono is 3.6rem exactly, i.e. touching both edges, which is
+     what the pressure row looked like. */
+  --chart-gutter: 4.2rem;
+
   --brand: #00a0dc;
   --brand-dim: #0b7ba7;
   --accent: #35c48a;
@@ -811,7 +819,7 @@ body {
   gap: var(--s2);
   font: 0.72rem var(--mono);
   color: var(--muted);
-  margin-bottom: 0.2rem;
+  margin-bottom: 0;
 }
 .weather-row-label {
   font-weight: 600;
@@ -831,8 +839,9 @@ body {
   width: 100%;
   /* 4.4rem before, against 11.5rem for the power charts in the same sidebar -
      which is why these were the ones you could not read a shape off. A 2 degree
-     overnight swing needs vertical room to look like anything at all. */
-  height: 7rem;
+     overnight swing needs vertical room to look like anything at all, and four
+     gradations need room to be read as well as drawn. */
+  height: 9rem;
   background: #060a0e;
   border: 1px solid var(--line);
   border-radius: var(--s1);
@@ -1726,7 +1735,7 @@ body {
 .battery-chart svg {
   display: block;
   width: 100%;
-  height: 13rem;
+  height: 15rem;
   background: #060a0e;
   border: 1px solid var(--line);
   border-radius: var(--s1);
@@ -1773,7 +1782,7 @@ body {
 .load-chart svg {
   display: block;
   width: 100%;
-  height: 13rem;
+  height: 15rem;
   background: #060a0e;
   border: 1px solid var(--line);
   border-radius: var(--s1);
@@ -1793,6 +1802,12 @@ body {
   display: flex;
   align-items: stretch;
   gap: 0.35rem;
+  /* Room for the half of the top and bottom gradations that hangs outside the
+     plot. Margin, NOT padding: the gutter stretches to this element's content
+     height and positions its ticks as a percentage of it, so padding here
+     would silently shift every label off its own gridline. More above than
+     below because a heading sits directly on top of it. */
+  margin: 0.5rem 0 0.35rem;
 }
 /* Fixed rather than content-sized, because the ticks inside are absolutely
    positioned and so contribute no width - and because a shared width is what
@@ -1800,8 +1815,8 @@ body {
    enough for "1020 hPa", the longest label any of these series produces. */
 .chart-gutter {
   position: relative;
-  flex: 0 0 3.6rem;
-  min-width: 3.6rem;
+  flex: 0 0 var(--chart-gutter);
+  min-width: var(--chart-gutter);
 }
 .chart-gutter-tick {
   position: absolute;
@@ -1811,6 +1826,7 @@ body {
      axis being wrong. */
   transform: translateY(50%);
   font: 0.6rem var(--mono);
+  font-variant-numeric: tabular-nums;
   line-height: 1;
   color: var(--muted);
   white-space: nowrap;
@@ -1831,9 +1847,10 @@ body {
   stroke-width: 1;
   vector-effect: non-scaling-stroke;
 }
-/* The time axis sits under the plot only, so it is inset by the gutter. */
+/* The time axis sits under the plot only, so it is inset by the gutter and the
+   gap beside it - from the same token, so the two cannot disagree. */
 .chart-x-wrap {
-  margin-left: calc(3.6rem + 0.35rem);
+  margin-left: calc(var(--chart-gutter) + 0.35rem);
 }
 /* The load-shed threshold: an annotation, not a gradation, so it is marked on
    the plot rather than in the gutter - and on the right, clear of the 25% tick
