@@ -91,6 +91,20 @@ export function useFitScale({
     }
     if (!ready) return;
     measure();
+    return () => {
+      // The size solved here is an INLINE style on :root, so it outlives this
+      // component unless it is taken off. It was not, and the console is not the
+      // only view: the platform dashboard renders with no fit-scale of its own
+      // and would inherit whatever the console had last solved for its sidebar.
+      // Every rem in that view — the shared header height, type sizes, chart
+      // gutters — then resolved against a number chosen for a different layout,
+      // so the same markup came out a different size depending on which view had
+      // been open first.
+      //
+      // Removing it hands the next view back the stylesheet's own clamp(), which
+      // is what it was written against.
+      document.documentElement.style.removeProperty("font-size");
+    };
   }, [enabled, ready, measure]);
 
   useEffect(() => {
