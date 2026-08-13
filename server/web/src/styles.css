@@ -34,6 +34,14 @@
   --muted: #7f929f;
   --dim: #4f626f;
 
+  /* The title bar, shared by the console and the platform dashboard.
+     They had drifted to 3rem and 56px respectively, which is not a fixed 8px
+     apart: the root size above is fluid, so the console bar is ~43px at
+     1920x1080 and 37.5px at 1366x768 while the platform bar stayed 56px, and
+     the gap changed with the window. One token, so moving between the two views
+     does not move the bar. */
+  --topbar-h: 3rem;
+
   --brand: #00a0dc;
   --brand-dim: #0b7ba7;
   --accent: #35c48a;
@@ -203,7 +211,7 @@ body {
   align-items: center;
   gap: 1.25rem;
   padding: 0 1rem;
-  height: 3rem;
+  height: var(--topbar-h);
   border-bottom: 1px solid var(--line);
   background: var(--panel-2);
   flex: none;
@@ -3857,12 +3865,18 @@ body {
   color: var(--text);
   font: 14px/1.45 var(--sans);
 }
+/* Same bar as the console's, to the pixel and at every window size - hence the
+   shared token and the rem padding, in a block that is otherwise all px. The
+   rest of this dashboard is deliberately pinned to 14px; the title bar is the
+   one part of it you see immediately before and after switching views, so it is
+   the one part that has to move with the console rather than with the panel
+   below it. */
 .pdash-head {
   display: flex;
   align-items: center;
   gap: 22px;
-  padding: 0 20px;
-  height: 56px;
+  padding: 0 1rem;
+  height: var(--topbar-h);
   flex: 0 0 auto;
   border-bottom: 1px solid var(--line);
   background: var(--panel);
@@ -3875,9 +3889,13 @@ body {
   padding: 2px 6px;
 }
 .pdash-tabs { display: flex; gap: 2px; }
+/* 6px, not 8. The bar is now fluid and bottoms out at 37.5px (3rem at the root
+   clamp's 12.5px floor, i.e. a 1366-wide window); a tab is 14px x 1.45 of text
+   plus its padding plus the 2px underline, which at 8px came to ~38px and
+   overflowed the bar it sits in. */
 .pdash-tab {
   background: none; border: none; color: var(--muted);
-  padding: 8px 14px; font: inherit; cursor: pointer;
+  padding: 6px 14px; font: inherit; cursor: pointer;
   border-bottom: 2px solid transparent;
 }
 .pdash-tab:hover { color: var(--text); }
