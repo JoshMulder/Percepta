@@ -1,14 +1,21 @@
 """A station's identity, position and basemap extent.
 
-Two rules carry most of the weight here, and both are about who owns a fact.
+Three rules carry most of the weight here, and all of them are about who owns a
+fact.
 
-Position and name are settled at enrolment and frozen by it: a box that has
-moved is recommissioned rather than edited, or its history silently describes
-two different places and every bearing it ever reported becomes unattributable.
+**Position** is settled at enrolment and frozen by it: a box that has moved is
+recommissioned rather than edited, or its history silently describes two
+different places and every bearing it ever reported becomes unattributable.
 
-And whether a station's data is synthetic is not settable at all. The station
-reports it per device and the ingest writes it from the health frame, so a
-value typed into the console was overwritten by the box within half a minute —
+**Name and timezone** are the platform's to set, and are deliberately *not*
+frozen. They reach the box in its enrolment record, so an edit here is followed
+by a `config.refresh` nudge that makes the station adopt it now rather than at
+its next scheduled renewal — one owner, and the two ends stay in step without a
+re-enrolment.
+
+And **whether a station's data is synthetic** is not settable at all. The
+station reports it per device and the ingest writes it from the health frame, so
+a value typed into the console was overwritten by the box within half a minute —
 a control that silently did nothing.
 """
 
@@ -16,6 +23,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from unittest import mock
 
 import pytest
 
@@ -175,3 +183,86 @@ class TestBasemapExtent:
             f"/api/stations/{station.id}/config", json=body(timezone="Mars/Olympus"),
         )
         assert response.status_code == 422
+
+
+class TestNamePushesThroughToTheStation:
+    """A rename used to be refused after enrolment, which left the platform's
+    label and the box's own name free to disagree with no way to reconcile them
+    short of re-enrolling. Both live in the enrolment record, so the platform
+    owns them and a `config.refresh` makes the box adopt the change now.
+    """
+
+    def dispatches(self):
+        """Capture the command channel. `publish_roster_sync` is mocked with it
+        because a rename also nudges the consoles, and that is not what these
+        are about."""
+        return (
+            mock.patch("backend.api.station_config.publish_sync", return_value=True),
+            mock.patch("backend.api.station_config.publish_roster_sync"),
+        )
+
+    def test_an_enrolled_station_can_be_renamed(self, client, station, db, org):
+        enrol(db, station, org)
+        publish, roster = self.dispatches()
+        with publish, roster:
+            response = client.put(
+                f"/api/stations/{station.id}/config", json=body(name="Kennels Road"),
+            )
+        assert response.status_code == 200, response.text
+        assert response.json()["name"] == "Kennels Road"
+
+    def test_a_rename_nudges_the_station_to_refresh(self, client, station, db, org):
+        enrol(db, station, org)
+        publish, roster = self.dispatches()
+        with publish as pub, roster:
+            client.put(
+                f"/api/stations/{station.id}/config", json=body(name="Kennels Road"),
+            )
+        _, command = pub.call_args.args
+        assert command == {"kind": "config.refresh"}
+
+    def test_a_timezone_change_nudges_it_too(self, client, station, db, org):
+        enrol(db, station, org)
+        publish, roster = self.dispatches()
+        with publish as pub, roster:
+            client.put(
+                f"/api/stations/{station.id}/config", json=body(timezone="UTC"),
+            )
+        _, command = pub.call_args.args
+        assert command == {"kind": "config.refresh"}
+
+    def test_an_unenrolled_station_is_not_nudged(self, client, station):
+        """There is no box to tell yet — it will read the record when it enrols."""
+        publish, roster = self.dispatches()
+        with publish as pub, roster:
+            client.put(
+                f"/api/stations/{station.id}/config", json=body(name="Not Yet Built"),
+            )
+        pub.assert_not_called()
+
+    def test_an_unrelated_edit_does_not_nudge(self, client, station, db, org):
+        """The basemap extent is the platform's alone; the box has no copy of it
+        to bring into step, and a renewal per zoom edit is noise."""
+        enrol(db, station, org)
+        publish, roster = self.dispatches()
+        with publish as pub, roster:
+            client.put(
+                f"/api/stations/{station.id}/config", json=body(map_radius_km=50.0),
+            )
+        pub.assert_not_called()
+
+    def test_an_offline_station_does_not_fail_the_save(
+        self, client, station, db, org
+    ):
+        """The nudge is an optimisation, not the mechanism: the scheduled
+        renewal still delivers the change. A box that cannot be reached must not
+        turn a saved edit into an error."""
+        enrol(db, station, org)
+        with mock.patch(
+            "backend.api.station_config.publish_sync", return_value=False
+        ), mock.patch("backend.api.station_config.publish_roster_sync"):
+            response = client.put(
+                f"/api/stations/{station.id}/config", json=body(name="Off The Air"),
+            )
+        assert response.status_code == 200, response.text
+        assert response.json()["name"] == "Off The Air"
