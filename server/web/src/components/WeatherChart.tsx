@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { ChartTimeAxis } from "./ChartTimeAxis";
 
 export interface WeatherSample {
   t: number;
@@ -25,6 +26,9 @@ const WEATHER_SERIES = [
 ] as const;
 
 const W = 100;
+/* Only a coordinate space: preserveAspectRatio="none" stretches it to whatever
+   the CSS box is, and every trace here carries non-scaling-stroke, so the drawn
+   height lives in .weather-row svg rather than in this number. */
 const H = 24;
 //: A little headroom top and bottom so a flat-ish trace is not welded to an edge.
 const PAD = 0.1;
@@ -139,6 +143,9 @@ export function WeatherHistory({
           </div>
         </div>
       ))}
+      {/* One axis for the stack. Every row is drawn from the same samples over
+          the same window, so a per-row axis would repeat itself four times. */}
+      <ChartTimeAxis from={samples[0].t} to={samples[samples.length - 1].t} />
     </div>
   );
 }

@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { ChartTimeAxis } from "./ChartTimeAxis";
 
 export interface SocSample {
   t: number;
@@ -22,12 +23,22 @@ const POWER_SERIES = [
   { key: "gen", label: "Generator", colour: "#b98cf0" },
 ] as const;
 
+/** The window the samples actually cover, for the axis. Null until there are
+ *  two of them - one point is an instant, not a span. */
+function span(samples: SocSample[]): { from: number; to: number } | null {
+  if (samples.length < 2) return null;
+  return { from: samples[0].t, to: samples[samples.length - 1].t };
+}
+
 /** Selectable windows. These come from the server's recorded history, not a
  *  browser buffer, so they can outlast the tab - `hours` is what the API takes. */
 export const SOC_WINDOWS = [
   { key: "12h", label: "12h", hours: 12 },
   { key: "1d", label: "1d", hours: 24 },
   { key: "7d", label: "7d", hours: 168 },
+  /* 720h. The recorders keep 31 days for exactly this - see RETENTION in
+     services/power_history.py; the server rejects any window it cannot cover. */
+  { key: "30d", label: "30d", hours: 720 },
 ] as const;
 
 export type SocWindowKey = (typeof SOC_WINDOWS)[number]["key"];
@@ -72,6 +83,7 @@ export function BatteryChart({
     };
   }, [samples]);
 
+  const axis = useMemo(() => span(samples), [samples]);
   const trend = last !== null && first !== null ? last - first : 0;
   const shedY = H - (SHED_PCT / 100) * H;
 
@@ -102,6 +114,7 @@ export function BatteryChart({
         <span className="chart-y shed">{SHED_PCT}%</span>
         <span className="chart-y bot">0%</span>
       </div>
+      {axis && <ChartTimeAxis from={axis.from} to={axis.to} />}
       <div className="chart-foot">
         {line ? (
           <span className={trend >= 0 ? "trend up" : "trend down"}>
@@ -195,6 +208,8 @@ export function PowerFlowHistory({
     return { drawn: drawnSeries, peak: Math.round(max) };
   }, [samples]);
 
+  const axis = useMemo(() => span(samples), [samples]);
+
   return (
     <div className="power-series">
       <div className="chart-plot">
@@ -217,6 +232,7 @@ export function PowerFlowHistory({
           </>
         )}
       </div>
+      {axis && <ChartTimeAxis from={axis.from} to={axis.to} />}
       <div className="series-legend">
         {drawn.length === 0 ? (
           <span className="muted">{loading ? "loading…" : "no history yet"}</span>
@@ -278,6 +294,8 @@ export function LoadHistory({
     return { area, line, last: pts[pts.length - 1].v, peak };
   }, [samples]);
 
+  const axis = useMemo(() => span(samples), [samples]);
+
   return (
     <div className="load-chart">
       <div className="chart-plot">
@@ -296,6 +314,7 @@ export function LoadHistory({
           </>
         )}
       </div>
+      {axis && <ChartTimeAxis from={axis.from} to={axis.to} />}
       <div className="series-legend">
         {last === null ? (
           <span className="muted">{loading ? "loading…" : "no history yet"}</span>

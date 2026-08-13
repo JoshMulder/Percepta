@@ -23,9 +23,12 @@ from backend.services.audit import record
 
 router = APIRouter(prefix="/api/stations", tags=["stations"])
 
-#: Windows the console offers, in hours. Bounded by the recorder's retention -
-#: asking for more than is kept would draw a flat line rather than an error.
-POWER_WINDOWS = {12: 12, 24: 24, 168: 168}
+#: Windows the console offers, in hours. Bounded by the recorders' retention -
+#: asking for more than is kept draws a short trace rather than an error, with
+#: nothing on it to say the rest was never recorded. 720 = 30 days, against the
+#: 31-day RETENTION in services/power_history.py and weather_history.py; the two
+#: move together.
+POWER_WINDOWS = {12: 12, 24: 24, 168: 168, 720: 720}
 
 
 class DeviceSummary(BaseModel):

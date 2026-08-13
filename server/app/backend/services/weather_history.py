@@ -23,9 +23,9 @@ from backend.realtime.groups import station_group_pattern
 
 log = logging.getLogger(__name__)
 
-#: A week plus a day of slack, matching the power recorder so the two windows
-#: line up.
-RETENTION = timedelta(days=8)
+#: A month plus a day of slack, matching the power recorder so the two windows
+#: line up. See its note on why this tracks the longest window on offer.
+RETENTION = timedelta(days=31)
 PRUNE_EVERY = timedelta(hours=6)
 
 TELEMETRY_PATTERN = group_channel(station_group_pattern(stream="telemetry"))

@@ -34,9 +34,14 @@ from backend.realtime.groups import station_group_pattern
 
 log = logging.getLogger(__name__)
 
-#: Samples older than this are dropped. A week of history plus a day of slack,
-#: so the 7-day window is always fully covered.
-RETENTION = timedelta(days=8)
+#: Samples older than this are dropped. The longest window the console offers
+#: plus a day of slack, so that window is always fully covered - asking for 30
+#: days and being served 8 draws a short trace with nothing to say the rest was
+#: never kept. Keep in step with POWER_WINDOWS in api/stations.py.
+#:
+#: One row per station per minute: ~45k rows per station per month, a few tens
+#: of megabytes across a fleet, held flat by the prune below.
+RETENTION = timedelta(days=31)
 PRUNE_EVERY = timedelta(hours=6)
 
 #: The only channels this recorder has any use for. Built from the same group

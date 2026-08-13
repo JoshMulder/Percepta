@@ -66,3 +66,41 @@ def test_an_unfitted_source_is_null_not_zero(client, station, db, org):
     # And the fitted ones are still their real values, 0 W included where real.
     assert point["pv"] == 500.0
     assert point["load"] == 120.0
+
+
+def test_the_thirty_day_window_reaches_past_a_week(client, station, db, org):
+    """The window added for the 30d button, and the reason it needed a retention
+    change: a sample three weeks old is inside it and outside every other one."""
+    db.add(_sample(org, station, minutes_ago=21 * 24 * 60, soc_pct=61.0))
+    db.commit()
+
+    assert client.get(f"/api/stations/{station.id}/power/history?hours=720").json()
+    # The same sample is correctly absent from the shorter windows.
+    for hours in (12, 24, 168):
+        body = client.get(
+            f"/api/stations/{station.id}/power/history?hours={hours}"
+        ).json()
+        assert body == [], hours
+
+
+def test_a_window_the_recorders_do_not_keep_is_refused(client, station):
+    """Whitelisted rather than clamped. A window longer than RETENTION would come
+    back short with nothing on it to say the rest was never recorded, so the
+    honest answer is to refuse it - and that is what stops the console and the
+    recorders drifting apart silently."""
+    for hours in (1, 720 + 1, 8760):
+        r = client.get(f"/api/stations/{station.id}/power/history?hours={hours}")
+        assert r.status_code == 422, (hours, r.status_code)
+
+
+def test_the_thirty_day_window_is_thinned_like_the_others(client, station, db, org):
+    """30 days at a sample a minute is ~43k rows; the chart is a few hundred
+    pixels wide. Everything past the cap is transfer nobody can see."""
+    for minutes in range(0, 900):
+        db.add(_sample(org, station, minutes_ago=minutes))
+    db.commit()
+
+    body = client.get(f"/api/stations/{station.id}/power/history?hours=720").json()
+    assert len(body) <= 400
+    # Both endpoints survive the thinning, so the trend figure stays honest.
+    assert body[0]["t"] < body[-1]["t"]
