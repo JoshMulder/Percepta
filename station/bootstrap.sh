@@ -12,6 +12,30 @@
 # the udev rule and the kernel blacklist the SDR needs, and the SD-wear timers
 # off. Every step checks before it acts, so re-running is safe.
 #
+# It also makes the box able to explain its own death, which it could not before
+# 2026-08-14 — the field Pi 5 stopped dead twice overnight and left nothing at
+# all to work from. Four pieces, all idempotent:
+#
+#   - a PERSISTENT JOURNAL. Pi OS ships Storage=volatile, so the reboot that
+#     revives a hung station also destroys the record of why it hung.
+#   - kernel.panic=10, so a panicked board reboots instead of sitting dead until
+#     somebody drives out to it. The default is 0: hang forever.
+#   - a HEALTH SAMPLER, a line a minute into that journal. Most of it is cheap
+#     curiosity; two fields are not recoverable any other way, because a power
+#     cycle destroys them — vcgencmd's sticky throttle/undervoltage bits, and
+#     the PMIC rail voltages.
+#   - the MEMORY CGROUP, which Pi OS ships disabled. Until it is on, `docker
+#     stats` reports 0B and every mem_limit in docker-compose.yml is silently
+#     ignored — the fences are decorative. Enabling it needs a reboot, and makes
+#     those limits real for the first time, so watch the first transcription
+#     after: the agent's 768m was sized for whisper but never actually enforced.
+#
+# The first three work on any systemd Linux. The cgroup edit is gated on
+# /proc/device-tree/model reporting a Raspberry Pi, because it is a Pi-specific
+# defect with a Pi-specific fix — a normal Debian box has the controller on
+# already, and another board would want a GRUB edit, which is not this script's
+# business.
+#
 # What it still does NOT do is run the agent on the host. The version before
 # last did — five hundred lines of systemd unit and host packages — because the
 # agent ran outside a container and a CSI camera could not run inside one. The
@@ -89,6 +113,9 @@ elif command -v sudo >/dev/null 2>&1; then SUDO="sudo"; can_root=1
 else SUDO=""; can_root=0
 fi
 reboot_wanted=0
+# Reasons accumulate: more than one thing here needs a boot to take effect, and
+# printing whichever fired last would be a lie about the other.
+reboot_why=""
 
 if command -v apt-get >/dev/null 2>&1 && [ "$can_root" -eq 1 ]; then
   pkgs=""
@@ -134,7 +161,13 @@ if command -v apt-get >/dev/null 2>&1 && [ "$can_root" -eq 1 ]; then
   # leaf-first and ask for a reboot only if one is pinned.
   if lsmod 2>/dev/null | grep -q '^dvb_usb_rtl28xxu'; then
     $SUDO modprobe -r rtl2832_sdr dvb_usb_rtl28xxu dvb_usb_v2 rtl2832 rtl2830 dvb_core \
-      2>/dev/null || reboot_wanted=1
+      2>/dev/null || {
+      reboot_wanted=1
+      reboot_why="$reboot_why
+  - The DVB driver is blacklisted but still loaded, so the SDR will not open
+    until you reboot. Everything else works now; reboot before you rely on the
+    radio."
+    }
   fi
 
   # So the container (running as 'gsu' in the plugdev group) can open the raw USB
@@ -152,6 +185,98 @@ if command -v apt-get >/dev/null 2>&1 && [ "$can_root" -eq 1 ]; then
   # pure wear on an appliance: man-db's reindex and apt's daily jobs.
   $SUDO systemctl disable --now man-db.timer apt-daily.timer apt-daily-upgrade.timer >/dev/null 2>&1 || true
 
+  # --- what the box leaves behind when it dies -------------------------------
+  #
+  # Added 2026-08-14, after the field Pi 5 stopped dead twice overnight and left
+  # NOTHING to work from. A station is unattended by definition: if it does not
+  # record why it died while it is dying, nobody will ever know. Each piece below
+  # closes one of the holes that investigation found. See DECISIONS.md item 50.
+
+  # 1. A journal that survives the reboot that revives it. Pi OS ships
+  #    Storage=volatile to spare the card, so every power cycle wiped the
+  #    evidence. The drop-in is 99- for a reason the file itself explains.
+  if [ -d /etc/systemd ] && [ -f deploy/99-percepta-journal.conf ]; then
+    jd=/etc/systemd/journald.conf.d
+    if [ ! -f "$jd/99-percepta-journal.conf" ]; then
+      $SUDO mkdir -p "$jd"
+      $SUDO cp deploy/99-percepta-journal.conf "$jd/"
+      # journald will not create the machine-id directory itself when it has been
+      # running volatile — the boot-time flush that normally makes it never ran.
+      # Without this it keeps writing to /run and the drop-in looks ignored.
+      $SUDO mkdir -p "/var/log/journal/$(cat /etc/machine-id 2>/dev/null)"
+      $SUDO systemd-tmpfiles --create --prefix /var/log/journal >/dev/null 2>&1 || true
+      $SUDO systemctl restart systemd-journald >/dev/null 2>&1 || true
+      $SUDO journalctl --flush >/dev/null 2>&1 || true
+      echo "Journal made persistent (200M cap). Verify: journalctl --list-boots"
+    fi
+  fi
+
+  # 2. Reboot on panic rather than hanging until someone drives out.
+  if [ -d /etc/sysctl.d ] && [ -f deploy/99-percepta-panic.conf ] \
+     && [ ! -f /etc/sysctl.d/99-percepta-panic.conf ]; then
+    $SUDO cp deploy/99-percepta-panic.conf /etc/sysctl.d/
+    $SUDO sysctl --system >/dev/null 2>&1 || true
+    echo "Set kernel.panic=10 (was 0 — hang forever)."
+  fi
+
+  # 3. A sample a minute of memory, load, temperature and — the ones a power
+  #    cycle destroys — the throttle flags and PMIC rails. The script degrades
+  #    to the portable fields on a board without vcgencmd, so it is not gated.
+  if [ -d /etc/systemd/system ] && [ -f deploy/percepta-health-sample ] \
+     && [ ! -f /usr/local/bin/percepta-health-sample ]; then
+    $SUDO install -m 0755 deploy/percepta-health-sample /usr/local/bin/
+    $SUDO cp deploy/percepta-health.service deploy/percepta-health.timer /etc/systemd/system/
+    $SUDO systemctl daemon-reload >/dev/null 2>&1 || true
+    $SUDO systemctl enable --now percepta-health.timer >/dev/null 2>&1 || true
+    echo "Health sampler installed. Read it: journalctl -t percepta-health"
+  fi
+
+  # 4. The memory cgroup, which Raspberry Pi OS ships DISABLED. Without it
+  #    `docker stats` reports 0B and — the part that matters — every mem_limit in
+  #    docker-compose.yml is silently ignored, so the fences that are supposed to
+  #    contain a leak do nothing at all.
+  #
+  #    Gated on the board, because this is a Pi-specific defect with a
+  #    Pi-specific fix: the kernel command line lives in a file on the boot
+  #    partition. A normal Debian box has the controller on already, and if some
+  #    other board ever lacks it, that is a GRUB edit and not this script's job.
+  #
+  #    WARNING, and it is the reason this prints so loudly: enabling the
+  #    controller makes every mem_limit REAL for the first time. The agent's
+  #    768m fence was sized for whisper's decode peak (~650 MB) but has never
+  #    actually been enforced on a Pi. Watch for an OOM kill on the first
+  #    transcription after the reboot — it will now be in the journal.
+  case "$(tr -d '\0' < /proc/device-tree/model 2>/dev/null)" in
+    *"Raspberry Pi"*)
+      if ! grep -qw memory /sys/fs/cgroup/cgroup.controllers 2>/dev/null; then
+        # bookworm moved the boot partition; support both rather than guess.
+        cmdline=""
+        for f in /boot/firmware/cmdline.txt /boot/cmdline.txt; do
+          [ -f "$f" ] && { cmdline="$f"; break; }
+        done
+        if [ -n "$cmdline" ] && ! grep -q "cgroup_enable=memory" "$cmdline"; then
+          $SUDO cp "$cmdline" "$cmdline.bak-percepta"
+          # cmdline.txt MUST stay a single line — a stray newline and the board
+          # does not boot. Appending to line 1 rather than echoing onto the end.
+          $SUDO sed -i '1s/$/ cgroup_enable=memory cgroup_memory=1/' "$cmdline"
+          if [ "$(wc -l < "$cmdline")" -le 1 ]; then
+            echo "Enabled the memory cgroup in $cmdline (backup: $cmdline.bak-percepta)."
+            echo "  NOTE: this makes docker-compose.yml's mem_limit values enforceable"
+            echo "  for the first time on this board. Watch the first transcription."
+            reboot_wanted=1
+            reboot_why="$reboot_why
+  - The memory cgroup was enabled on the kernel command line and only takes
+    effect at boot. Until then every mem_limit in docker-compose.yml stays
+    unenforced and 'docker stats' keeps reporting 0B."
+          else
+            $SUDO cp "$cmdline.bak-percepta" "$cmdline"
+            echo "Refused to edit $cmdline: the result was not a single line. Restored."
+          fi
+        fi
+      fi
+      ;;
+  esac
+
 elif ! command -v docker >/dev/null 2>&1; then
   if [ "$can_root" -eq 0 ]; then
     echo "Docker is missing and this user cannot install it (no sudo, not root)."
@@ -162,9 +287,7 @@ elif ! command -v docker >/dev/null 2>&1; then
 fi
 
 if [ "$reboot_wanted" -eq 1 ]; then
-  printf '\n%s\n' "NOTE: the DVB driver is blacklisted but still loaded, so the SDR will not
-open until you reboot. Everything else can continue now — reboot before you
-rely on the radio."
+  printf '\nNOTE: a reboot is wanted:%s\n' "$reboot_why"
 fi
 
 command -v docker >/dev/null 2>&1 \

@@ -1316,3 +1316,70 @@ real cost — it widens the frozen contract, so it waits on the platform team
 agreeing the shape rather than the station adding a field unilaterally. The
 revocation-visibility half rides entirely on it; there is no separate mechanism
 to design.
+
+## 50. A station that dies unattended must explain itself: persistent journal, a sample a minute, and a real memory cgroup
+
+The field Pi 5 at Kennels Road stopped dead on two consecutive nights in August
+2026 — off the network, agent frozen mid-log-line, nothing but a physical power
+cycle bringing it back. The investigation found no cause, and the reason it found
+no cause is the decision recorded here: **the box was built so that reviving it
+destroyed the evidence of why it needed reviving.**
+
+Three separate holes, each individually defensible, which together made the
+failure permanently undiagnosable:
+
+- **The journal was volatile.** Raspberry Pi OS ships
+  `/usr/lib/systemd/journald.conf.d/40-rpi-volatile-storage.conf` with
+  `Storage=volatile` to spare the SD card. `/var/log/journal` existed but was
+  empty; 8 MB sat in `/run`, in RAM, wiped by every boot. Every kernel message
+  that would have named the failure — undervoltage, thermal, an oops — was
+  discarded by the act of recovery. There was no rsyslog either.
+- **`kernel.panic = 0`**, the Pi OS default: a panicked kernel hangs forever
+  rather than rebooting. On a box on a hill that converts a ten-second blip into
+  a site visit.
+- **The memory cgroup was disabled**, also a Pi OS default. `docker stats`
+  reported `0B`, and — the part that actually bites — **every `mem_limit` in
+  `docker-compose.yml` was silently ignored.** The 768 MB fence this file argues
+  for in item 34 has never once been enforced on the field board. The comment
+  beside it already said as much; nothing acted on it.
+
+The fix is four pieces in `bootstrap.sh`, all idempotent, shipped as files in
+`deploy/`: the journald drop-in (capped at 200 MB, since this overrides a
+deliberate wear decision), the panic sysctl, a `percepta-health` timer sampling a
+line a minute, and the `cgroup_enable=memory` edit to the kernel command line.
+
+**Why a sampler and not just better logging.** Most of what it records is cheap
+curiosity. Two fields are not obtainable any other way: `vcgencmd get_throttled`
+reports undervoltage and thermal events as *sticky since-boot bits* that a power
+cycle clears, and the PMIC rail voltages are instantaneous. Both describe the
+failure and both are destroyed by the recovery, so they have to be written down
+while the box is still alive. A minute is the right resolution because the
+observed failure went from healthy to gone between two 10-second command ticks.
+
+**Gated on the board, deliberately.** The journal, the panic sysctl and the
+sampler work on any systemd Linux — the sampler drops its Pi-only fields when
+`vcgencmd` is absent rather than failing every minute. The cgroup edit is gated
+on `/proc/device-tree/model` reporting a Raspberry Pi, because it is a
+Pi-specific defect with a Pi-specific fix: the kernel command line lives in a
+file on the boot partition (`/boot/firmware/cmdline.txt` on bookworm,
+`/boot/cmdline.txt` before it, both handled). A normal Debian host has the
+controller on already; another board would want a GRUB edit, which does not
+belong in this script. The edit refuses itself and restores a backup if the
+result is not a single line, because a `cmdline.txt` with a stray newline does
+not boot.
+
+**The consequence to watch.** Enabling the controller makes every `mem_limit`
+real for the first time. The agent's 768 MB was sized for whisper's ~650 MB
+decode peak but has only ever run unenforced, so the first transcription after
+that reboot is the first real test of a number chosen on paper. An OOM kill there
+is now visible in the journal and the container restarts under
+`restart: unless-stopped` — which is the point.
+
+*What this does not do:* name the cause. Two theories were tested and both died —
+a thermal critical trip would have unmounted cleanly (the boot shows
+`orphan cleanup`, i.e. it did not), and a kernel panic would have been caught by
+the hardware watchdog, which was measured recovering a deliberately panicked
+board in 25 seconds. What remains is a failure below the level the OS can log:
+the SoC losing its rail while the PHY stayed up, or a watchdog reset that then
+failed to boot. Distinguishing those needs the serial console, and `BOOT_UART=1`
+is already set in the EEPROM.

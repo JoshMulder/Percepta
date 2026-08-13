@@ -1,0 +1,59 @@
+#!/bin/sh
+# One line a minute into the journal, so an unattended death has a run-up.
+#
+# Written 2026-08-14, after the field Pi 5 stopped dead twice overnight and left
+# nothing behind at all. Two reasons it left nothing, both since fixed in
+# bootstrap.sh: the journal was volatile (Raspberry Pi OS ships
+# Storage=volatile), and the memory cgroup was off, so container memory was
+# never measurable. But even with those fixed, the two most useful facts are
+# *destroyed by the recovery*:
+#
+#   - `vcgencmd get_throttled` reports undervoltage and thermal events as sticky
+#     "since boot" bits (16-19). A power cycle clears them. Whatever the board
+#     suffered overnight is gone the moment someone revives it.
+#   - PMIC rail voltages are instantaneous. A sag that killed the board leaves no
+#     trace once it is back.
+#
+# So they are sampled while the box is alive, into a journal that now survives.
+# Everything else here is nearly free to read and is what one wishes for
+# afterwards: memory, swap, the two processes that matter, load, temperature.
+#
+# Deliberately one `logger` line per sample: the journal is indexed by tag, so
+# `journalctl -t percepta-health --since ...` is the whole query interface, and a
+# single line per minute costs about 3 MB a month against the 200 MB cap.
+set -u
+
+# --- portable, works on any Linux -------------------------------------------
+mem=$(awk '/MemAvailable/{a=$2} /MemFree/{f=$2} /^Cached/{c=$2}
+  END{printf "avail=%dM free=%dM cached=%dM", a/1024, f/1024, c/1024}' /proc/meminfo)
+swap=$(awk '/SwapTotal/{t=$2} /SwapFree/{f=$2}
+  END{printf "swap_used=%dM", (t-f)/1024}' /proc/meminfo)
+rss=$(ps -eo rss,comm --no-headers 2>/dev/null | awk '{s[$2]+=$1}
+  END{printf "python=%dM ffmpeg=%dM", s["python"]/1024, s["ffmpeg"]/1024}')
+load=$(cut -d' ' -f1-3 /proc/loadavg)
+up=$(cut -d' ' -f1 /proc/uptime)
+
+# --- Raspberry Pi only ------------------------------------------------------
+# vcgencmd is the firmware mailbox and exists only on Pi hardware. On anything
+# else these stay unset and the line is simply shorter, rather than the sampler
+# failing every minute and filling the journal with its own errors.
+temp=""; thr=""; fan=""; rails=""
+if command -v vcgencmd >/dev/null 2>&1; then
+  temp=$(vcgencmd measure_temp 2>/dev/null | cut -d= -f2 | tr -d "'C")
+  thr=$(vcgencmd get_throttled 2>/dev/null | cut -d= -f2)
+  # vcgencmd prints e.g. "3V3_SYS_V volt(9)=3.31003300V" - the number is after
+  # the "=" WITHIN field 2, not field 2 itself. Reading $2 directly coerces to
+  # 0.000 and looks like a dead rail, which is a memorable way to waste an hour.
+  rails=$(vcgencmd pmic_read_adc 2>/dev/null | awk '
+    /3V3_SYS_V/  {split($2,a,"="); printf "3v3=%.3f ",  a[2]+0}
+    /1V8_SYS_V/  {split($2,a,"="); printf "1v8=%.3f ",  a[2]+0}
+    /VDD_CORE_V/ {split($2,a,"="); printf "core=%.3f ", a[2]+0}
+    /VDD_CORE_A/ {split($2,a,"="); printf "coreA=%.2f ",a[2]+0}')
+fi
+# Present on a Pi with the active cooler, and on plenty of other boards too, so
+# this is gated on the file rather than on the board.
+for f in /sys/class/hwmon/hwmon*/fan1_input; do
+  [ -r "$f" ] && { fan=$(cat "$f" 2>/dev/null); break; }
+done
+
+logger -t percepta-health "$mem $swap $rss load=$load uptime=$up${temp:+ temp=$temp}${thr:+ throttled=$thr}${fan:+ fan=${fan}rpm}${rails:+ $rails}"

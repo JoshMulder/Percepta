@@ -1,0 +1,16 @@
+# Runs percepta-health-sample once. Driven by percepta-health.timer.
+#
+# Type=oneshot with no [Install]: it is started by the timer, never enabled
+# directly, so nothing pulls it in at boot on its own.
+[Unit]
+Description=Sample host health into the journal
+Documentation=file:/usr/local/bin/percepta-health-sample
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/percepta-health-sample
+# It reads /proc, /sys and the firmware mailbox and writes one log line. Nothing
+# it touches is worth a privilege, except vcgencmd, which needs video group
+# membership - root is simpler than a group for a unit that runs for 20ms.
+Nice=10
+IOSchedulingClass=idle

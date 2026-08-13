@@ -1,0 +1,20 @@
+# A sample a minute, for the whole life of the box.
+#
+# One minute is the resolution that matters: the field failure this exists for
+# went from healthy to gone between two 10-second command ticks, so a 5-minute
+# sample would have shown the run-up as a single point. A minute of history
+# costs ~3 MB a month against the journal's 200 MB cap.
+[Unit]
+Description=Sample host health every minute
+
+[Timer]
+# After boot has settled, so the first sample is not competing with startup.
+OnBootSec=30s
+OnUnitActiveSec=60s
+# Lets systemd coalesce the wakeup with others rather than waking the CPU alone
+# every 60s - it matters on a board this small.
+AccuracySec=5s
+Persistent=false
+
+[Install]
+WantedBy=timers.target
