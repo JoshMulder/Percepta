@@ -682,10 +682,26 @@ class ServedPageTests(unittest.TestCase):
             csp, second.getheader("Content-Security-Policy"),
             "a reused nonce is a nonce an injected payload can learn",
         )
-        # Pages without the script advertise no script source at all.
-        response, _ = self.request("GET", "/")
+        # Pages without a script advertise no script source at all. Logging is
+        # the example now that Summary carries one to keep its Device card live.
+        response, _ = self.request("GET", "/logging")
         self.assertNotIn("script-src",
                          response.getheader("Content-Security-Policy") or "")
+
+    def test_the_summary_device_card_is_refreshed_by_its_own_script(self):
+        # CPU, load, temperature and memory are the numbers somebody stands at
+        # the box and watches, and they were rendered once and then frozen for
+        # the life of the page. The card is refreshed from status.json now, so
+        # the page carries a nonce'd script and the card the script targets.
+        response, body = self.request("GET", "/")
+        csp = response.getheader("Content-Security-Policy") or ""
+        self.assertIn("script-src 'nonce-", csp)
+        nonce = csp.split("'nonce-")[1].split("'")[0]
+        self.assertIn(f"<script nonce='{nonce}'>", body)
+        self.assertIn("id=device-card", body)
+        # It reads the same status endpoint every other live reading comes from,
+        # which the CSP's connect-src already bounds to this origin.
+        self.assertIn("/status.json", body)
 
     def test_the_device_form_has_no_save_button(self):
         # There is no Save button on the Devices tab at all — not hidden, not

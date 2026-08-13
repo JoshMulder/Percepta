@@ -946,7 +946,7 @@ class Console:
                 slot = None
                 chosen = None
                 nonce = None
-                if path in ("/devices", "/connection"):
+                if path in ("/", "/devices", "/connection"):
                     # The pages that carry an inline script. Minted here and per
                     # response, so the header and the tag can agree and nothing
                     # injected into rendered content can guess it.
@@ -955,6 +955,11 @@ class Console:
                     # under the coordinate fields that writes back where the pin
                     # sits. Without the script, or without the tiles, the map is
                     # hidden and the fields stand alone exactly as they did.
+                    #
+                    # Summary carries one to keep the Device card live: CPU,
+                    # load, temperature, memory and uptime are the numbers an
+                    # installer watches change, and a card frozen at page-load
+                    # is the one thing on that page that reads as broken.
                     nonce = secrets.token_urlsafe(16)
                 if path == "/devices":
                     # One sub-tab per slot; the query names it and anything
@@ -1778,6 +1783,8 @@ class Console:
             out.append(self._section_events(state, csrf))
         else:
             out.append(self._page_summary(state))
+            if nonce:
+                out.append(self._summary_script(nonce))
         out.append("</main>")
         return "".join(out)
 
@@ -1938,13 +1945,27 @@ class Console:
                 (f"{hours}h " if days or hours else "") + f"{rem // 60}m"
             device_rows.append(("Uptime", up_txt.strip(), "ok"))
         if device_rows:
-            out.append("<h2>Device</h2><div class=card>")
+            # `id=device-card` is what `_summary_script` refreshes in place. The
+            # rows below are the no-script state and stay correct on their own;
+            # with script they are rebuilt from /status.json every few seconds,
+            # which is also how a field absent at render time — CPU needs two
+            # samples for a delta, so it is missing on the first load after a
+            # boot — appears without anybody reloading the page.
+            out.append("<h2 id=device-head>Device</h2><div class=card id=device-card>")
             for label, value, css in device_rows:
                 out.append(
                     f"<div class=row><span class=k>{html.escape(label)}</span>"
                     f"<span class='{css}'>{html.escape(str(value))}</span></div>"
                 )
             out.append("</div>")
+        else:
+            # Nothing to show yet, but the card must still exist for the script
+            # to fill: on a fresh boot the first sample has no CPU delta and may
+            # have nothing else either, and a page that rendered no card at all
+            # would stay empty until somebody reloaded it. Hidden until it has
+            # something in it, so no-script hosts see no empty heading.
+            out.append("<h2 id=device-head hidden>Device</h2>"
+                       "<div class=card id=device-card hidden></div>")
         # One line per slot: the same pill the Devices page shows, without the
         # forms. Intent (the label) and fact (the pill), still never merged.
         out.append("<h2>Slots</h2><div class='card slot-grid'>")
@@ -3195,6 +3216,107 @@ class Console:
         else:
             out.append("<div class=muted id=preview-age></div>")
         return "".join(out)
+
+    @staticmethod
+    def _summary_script(nonce: str) -> str:
+        """Keep the Summary page's Device card live, admitted by the page's nonce.
+
+        The card is CPU, load, temperature, memory and uptime — the numbers an
+        installer stands there and watches — and rendering them once at page load
+        made the one part of the page that is supposed to move look frozen. This
+        re-reads `/status.json` (the same auth gate and the same origin as every
+        page; the CSP's connect-src enforces that nothing goes off-box) and
+        rebuilds the card from `system`.
+
+        Rebuilt rather than patched per field, because a field can *appear*:
+        `cpu_percent` is a delta and has no value until a second sample, so on the
+        first load after a boot it is simply absent, and a script that only
+        updated rows already on the page would never show it. The thresholds and
+        formatting mirror `_page_summary` deliberately — the no-script rendering
+        stays the source of truth for what the card looks like, and this has to
+        agree with it. Built with DOM calls rather than innerHTML: every value
+        here is a number we formatted, and keeping markup out of the string is
+        what makes that stay true.
+        """
+        script = """
+"use strict";
+(function () {
+  var card = document.getElementById("device-card");
+  if (!card) return;
+  var head = document.getElementById("device-head");
+
+  var row = function (label, value, css) {
+    var r = document.createElement("div");
+    r.className = "row";
+    var k = document.createElement("span");
+    k.className = "k";
+    k.textContent = label;
+    var v = document.createElement("span");
+    v.className = css;
+    v.textContent = value;
+    r.appendChild(k);
+    r.appendChild(v);
+    return r;
+  };
+
+  var uptime = function (seconds) {
+    var t = Math.floor(seconds);
+    var d = Math.floor(t / 86400);
+    var h = Math.floor((t % 86400) / 3600);
+    var m = Math.floor((t % 3600) / 60);
+    return (d ? d + "d " : "") + (d || h ? h + "h " : "") + m + "m";
+  };
+
+  var render = function (sys) {
+    var rows = [];
+    if (typeof sys.cpu_percent === "number") {
+      rows.push(row("CPU", Math.round(sys.cpu_percent) + "%",
+                    sys.cpu_percent >= 85 ? "warn" : "ok"));
+    }
+    if (typeof sys.load_1m === "number") {
+      rows.push(row("Load (1 min)", sys.load_1m.toFixed(2), "ok"));
+    }
+    if (typeof sys.temperature_c === "number") {
+      // A Pi throttles around 80-85 C: amber approaching it, red at it.
+      var t = sys.temperature_c;
+      rows.push(row("Temperature", Math.round(t) + " \\u00b0C",
+                    t >= 80 ? "bad" : t >= 70 ? "warn" : "ok"));
+    }
+    var mem = sys.memory || {};
+    if (typeof mem.used_percent === "number") {
+      var detail = Math.round(mem.used_percent) + "%";
+      if (mem.used_mb && mem.total_mb) {
+        detail += " (" + mem.used_mb + " / " + mem.total_mb + " MB)";
+      }
+      rows.push(row("Memory", detail, mem.used_percent >= 90 ? "warn" : "ok"));
+    } else if (mem.total_mb) {
+      rows.push(row("Memory", mem.total_mb + " MB", "ok"));
+    }
+    if (typeof sys.uptime_s === "number") {
+      rows.push(row("Uptime", uptime(sys.uptime_s), "ok"));
+    }
+    // Nothing to say: leave whatever is on the page rather than blanking a card
+    // that was showing real numbers a moment ago.
+    if (!rows.length) return;
+    while (card.firstChild) card.removeChild(card.firstChild);
+    for (var i = 0; i < rows.length; i++) card.appendChild(rows[i]);
+    card.hidden = false;
+    if (head) head.hidden = false;
+  };
+
+  var poll = function () {
+    fetch("/status.json", { credentials: "same-origin" })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (s) { if (s && s.system) render(s.system); })
+      // A failed poll is a blip, not a state: the card keeps its last reading
+      // and the next tick corrects it.
+      .catch(function () {});
+  };
+  poll();
+  setInterval(poll, 2500);
+})();
+"""
+        return f"<script nonce='{nonce}'>{script}</script>"
 
     @staticmethod
     def _devices_script(nonce: str) -> str:
