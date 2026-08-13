@@ -34,12 +34,11 @@ import {
   IconLight,
   IconPower,
   IconRadio,
-  IconSettings,
   IconWind,
 } from "./Icons";
 import { Logo } from "./Logo";
 import { StationPicker } from "./StationPicker";
-import { OrgSwitcher } from "./OrgSwitcher";
+import { UserMenu } from "./UserMenu";
 import { Settings } from "./Settings";
 import { FloodlightPanel, has, NotPermitted, PowerPanel, VideoPanel } from "./Panels";
 import { MapSkeleton, PanelState, panelStatus } from "./PanelState";
@@ -1171,7 +1170,6 @@ export function Console({
         )}
       </div>
       <div className="topbar-right">
-        <OrgSwitcher me={me} />
         <button
           type="button"
           className={`btn ghost alerts-toggle${alertsOpen ? " active" : ""}`}
@@ -1186,17 +1184,12 @@ export function Console({
           <span>Alerts</span>
           {unseen > 0 && <span className="badge">{unseen > 9 ? "9+" : unseen}</span>}
         </button>
-        <button
-          type="button"
-          className={`btn ghost settings-toggle${settingsOpen ? " active" : ""}`}
-          onClick={() => setSettingsOpen(true)}
-          aria-haspopup="dialog"
-          title="Settings"
-        >
-          <IconSettings />
-          <span>Settings</span>
-        </button>
-        <span className="who">{displayName}</span>
+        <UserMenu
+          me={me}
+          displayName={displayName}
+          onSettings={() => setSettingsOpen(true)}
+          onSignOut={signOut}
+        />
       </div>
     </header>
   );

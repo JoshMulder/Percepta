@@ -9,9 +9,9 @@ import type {
   PlatformMapConfig,
 } from "../types";
 import { FleetMap } from "./FleetMap";
-import { OrgSwitcher } from "./OrgSwitcher";
 import { SettingsAccount } from "./SettingsAccount";
 import { SettingsPlatform } from "./SettingsPlatform";
+import { UserMenu } from "./UserMenu";
 import { StationHostShell } from "./StationHostShell";
 
 /**
@@ -145,10 +145,15 @@ export function PlatformDashboard({
           ))}
         </nav>
         <div className="pdash-head-right">
-          <OrgSwitcher me={me} />
-          <button type="button" className="btn ghost" onClick={onSignedOut}>
-            Sign out
-          </button>
+          {/* Same menu and same order as the console, so the two headers do not
+              teach different habits. "Settings" here is this dashboard's own
+              account tab rather than a dialog. */}
+          <UserMenu
+            me={me}
+            displayName={me.display_name}
+            onSettings={() => setTab("account")}
+            onSignOut={onSignedOut}
+          />
         </div>
       </header>
 
