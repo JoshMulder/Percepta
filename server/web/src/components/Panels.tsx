@@ -76,28 +76,34 @@ function VideoPanelInner({
   const surfaceRef = useRef<HTMLDivElement>(null);
   const showingLive = streamState === "playing";
 
-  // Hold a reassuring "waiting for video" for a few seconds when a stream that
-  // WAS live drops, instead of falling straight to the empty state — a ~1-2s
-  // uplink flap otherwise reads as "No video stream attached" the instant it
-  // blips. The stream hook already reconnects forever; this only softens the
-  // message. A first-ever connect (never live) keeps the empty state.
-  const [reconnecting, setReconnecting] = useState(false);
-  const wasLive = useRef(false);
+  // "Waiting for video" while a connect is in flight — but not forever.
+  //
+  // This used to apply only to a stream that had ALREADY been live, so a first
+  // connect (switching station) fell through to "No video stream attached" for
+  // the second or two before the first fragment arrived. That message is a
+  // statement about the station's hardware, not about a request in flight, and
+  // it is the one that would send somebody to check a camera that was seconds
+  // from appearing on its own. Whether we have seen this stream before makes no
+  // difference to what is true right now, so the distinction is gone and with it
+  // the `wasLive` ref that carried it.
+  //
+  // Still bounded, which is why this is state and not just a read of
+  // `streamState`: the stream hook retries forever, so a station whose camera
+  // never publishes would otherwise sit on "waiting for video…" indefinitely,
+  // promising something that is not coming. After the window it falls back to
+  // the empty state, which by then is the truth.
+  const [waiting, setWaiting] = useState(false);
   useEffect(() => {
-    if (streamState === "playing") {
-      wasLive.current = true;
-      setReconnecting(false);
+    if (streamState !== "connecting") {
+      setWaiting(false);
       return;
     }
-    if (streamState === "connecting" && wasLive.current) {
-      setReconnecting(true);
-      const timer = window.setTimeout(() => setReconnecting(false), 6000);
-      return () => window.clearTimeout(timer);
-    }
-    if (streamState === "idle" || streamState === "unavailable") {
-      wasLive.current = false;
-      setReconnecting(false);
-    }
+    setWaiting(true);
+    // Generous against a slow first fragment (a cold start is ~2s; see
+    // useVideoStream) and short enough that a dead camera stops claiming to be
+    // on its way while an operator is still looking at it.
+    const timer = window.setTimeout(() => setWaiting(false), 10000);
+    return () => window.clearTimeout(timer);
   }, [streamState]);
 
   // Adopt the shared element into whichever surface is currently on screen.
@@ -141,14 +147,15 @@ function VideoPanelInner({
             <span className="video-live-dot" />
             live
           </div>
-        ) : reconnecting ? (
-          // A stream that was live and briefly dropped — hold this over the
-          // grace window rather than declaring the stream gone on a flap.
+        ) : waiting ? (
+          // Connecting, first time or after a drop — see the effect above for
+          // why this is bounded rather than a plain read of streamState.
           <div className="video-live">
             <span className="video-live-dot" />
             waiting for video…
           </div>
         ) : (
+          // Genuinely nothing coming: idle or unavailable, with a camera fitted.
           <div className="video-idle">
             {online ? "No video stream attached" : "Station offline"}
           </div>
