@@ -35,12 +35,15 @@
   --dim: #4f626f;
 
   /* The title bar, shared by the console and the platform dashboard.
-     They had drifted to 3rem and 56px respectively, which is not a fixed 8px
-     apart: the root size above is fluid, so the console bar is ~43px at
-     1920x1080 and 37.5px at 1366x768 while the platform bar stayed 56px, and
-     the gap changed with the window. One token, so moving between the two views
-     does not move the bar. */
-  --topbar-h: 3rem;
+     ABSOLUTE, not rem, and that is the point. useFitScale rewrites the inline
+     font-size on :root - between 11px and 30px - so the console's sidebar fills
+     the viewport. The platform dashboard has no fit-scale and sits on the clamp
+     above. So a rem in one view is not a rem in the other, and every attempt to
+     make the two bars agree in rem was matching numbers in two different unit
+     systems. The bar is chrome; chrome holds still while the instrument it
+     frames is scaled to fit. 42px is what 3rem came to at 1920x1080. */
+  --topbar-font: 14px;
+  --topbar-h: 42px;
 
   /* The y-axis gutter on a trend chart. A token because two rules depend on it
      agreeing - the gutter's own width and the inset that slides the time axis
@@ -766,8 +769,10 @@ body {
   .topbar {
     grid-template-columns: 1fr auto;
     height: auto;
-    padding: 0.5rem 0.75rem;
-    gap: 0.5rem 0.75rem;
+    /* em, like the rest of the bar: below the breakpoint it must still not
+       follow a :root the console is rewriting to fit its sidebar. */
+    padding: 0.5em 0.75em;
+    gap: 0.5em 0.75em;
   }
   .topbar > .brand {
     grid-column: 1;
@@ -4018,8 +4023,8 @@ body {
   .pdash-head {
     flex-wrap: wrap;
     height: auto;
-    padding: 0.5rem 0.75rem;
-    gap: 0.75rem;
+    padding: 0.5em 0.75em;
+    gap: 0.75em;
   }
   /* The tabs are the one thing this bar carries that the console's does not, so
      they are what needs the room a wrapped bar gives: they drop to their own
@@ -4413,3 +4418,98 @@ body {
 /* Last, and coloured: the one item here that ends what you were doing. */
 .user-menu-item.sign-out { color: var(--danger); }
 .user-menu-item.sign-out:hover { background: rgba(255, 122, 69, 0.12); }
+
+
+/* ============================================================================
+   HEADER CHROME, ANCHORED — and it must stay at the END of this file.
+   
+   Everything below overrides earlier rules at EQUAL specificity (.topbar vs
+   .topbar, .user-menu-trigger vs .user-menu-trigger), so it wins on source
+   order alone. Written higher up it is silently ignored: that is exactly what
+   happened on the first attempt, where this block sat at byte 78,433 and the
+   rule it meant to override was at 135,731.
+   ========================================================================= */
+
+/* ------------------------------------------------- header chrome, anchored */
+/* Both bars declare their own font-size, and everything inside them is measured
+   in em against it. Nothing in a header reads :root, so the console's fit-scale
+   cannot move it and the two views render the same bar.
+   
+   Scoped overrides rather than edits to the shared rules: .brand also sets the
+   login card's logo, .btn is every button in the product, and .badge is used
+   elsewhere. `.topbar .brand-word` (0,2,0) simply outranks `.brand-word`
+   (0,1,0), so the originals keep serving everyone else unchanged. */
+.topbar,
+.pdash-head {
+  font-size: var(--topbar-font);
+  gap: 1.25em;
+  padding: 0 1em;
+}
+.topbar-right { gap: 0.75em; }
+.pdash-head-right { gap: 0.857em; }
+
+.topbar .brand,
+.pdash-head .brand { gap: 0.562em; }
+.topbar .brand-mark,
+.pdash-head .brand-mark { width: 1.5em; height: 1.5em; }
+.topbar .brand-word,
+.pdash-head .brand-word { font-size: 0.812em; }
+
+/* The Alerts button and its unread count. */
+.topbar .btn {
+  gap: 0.375em;
+  border-radius: 0.375em;
+  padding: 0.438em 0.75em;
+}
+.topbar .badge {
+  min-width: 1.15em;
+  height: 1.15em;
+  padding: 0 0.25em;
+  border-radius: 0.6em;
+  font-size: 0.65em;
+}
+
+/* The station picker: trigger, caret, the list it drops, and the markers in it.
+   Every dimension, not just the obvious ones - a radius left in rem still
+   breathes with the fit-scale, which is the drift this block exists to end. */
+.topbar .station-switch { gap: 0.5em; }
+.topbar .station-switch-label { font-size: 0.75em; }
+.topbar .station-trigger {
+  gap: 0.5em;
+  height: 1.875em;
+  border-radius: 0.375em;
+}
+.topbar .station-caret { font-size: 0.6em; padding: 0 0.312em; }
+.topbar .station-trigger-name { font-size: 0.75em; }
+.topbar .station-list {
+  top: calc(100% + 0.25em);
+  border-radius: 0.25em;
+}
+.topbar .station-option { gap: 0.5em; padding: 0.375em 0.5em; }
+.topbar .station-offline { font-size: 0.65em; padding: 0.05em var(--s2); }
+.topbar .station-status { left: calc(100% + 0.625em); gap: 0.625em; }
+.topbar .link-state { font-size: 0.688em; }
+
+/* The user menu, in both bars. */
+.user-menu-trigger {
+  gap: 0.375em;
+  border-radius: 0.375em;
+  padding: 0.438em 0.75em;
+  font: 0.875em/1.45 var(--ui);
+}
+.user-menu-caret { font-size: 0.7em; }
+.user-menu-panel {
+  font: 1em/1.45 var(--ui);
+  min-width: 13em;
+  border-radius: 0.375em;
+  padding: 0.25em;
+}
+.user-menu-label { font-size: 0.68em; padding: 0.4em 0.5em 0.25em; }
+.user-menu-item { padding: 0.45em 0.5em; border-radius: 0.25em; gap: 0.5em; }
+.user-menu-note { font-size: 0.68em; }
+.user-menu-sep { margin: 0.25em 0; }
+
+/* The tabs were already px against .pdash's 14px, which is now the bar's own
+   font-size - the same number, said relative to the thing it belongs to. */
+.pdash-tab { padding: 0.43em 1em; }
+.pdash-tabs { gap: 0.143em; }
