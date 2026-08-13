@@ -24,19 +24,40 @@ import { Component, type CSSProperties, type ErrorInfo, type ReactNode } from "r
  */
 interface State {
   error: Error | null;
+  /** The React component stack, shown in the panel as well as logged.
+   *
+   *  A production build minifies the message to "Minified React error #300",
+   *  which names no component — and the console line below is easy to miss, or
+   *  gone entirely when the crash is followed by a reload (the org switcher
+   *  reloads deliberately, which was wiping the evidence before anyone could
+   *  read it). Putting the top frames on screen means a photograph of the panel
+   *  is enough to say WHICH component failed. */
+  componentStack: string | null;
 }
 
 export class ErrorBoundary extends Component<{ children: ReactNode }, State> {
-  state: State = { error: null };
+  state: State = { error: null, componentStack: null };
 
   static getDerivedStateFromError(error: Error): State {
-    return { error };
+    return { error, componentStack: null };
   }
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
     // The panel below is for the operator; this line is for whoever they send
     // the screenshot to — it keeps the real stack in the browser console.
     console.error("Console crashed:", error, info.componentStack);
+    this.setState({ componentStack: info.componentStack ?? null });
+  }
+
+  /** The innermost few frames — the component that actually threw and its
+   *  nearest parents. The whole stack reaches the app root and is noise. */
+  private topFrames(): string {
+    const frames = (this.state.componentStack ?? "")
+      .split("\n")
+      .map((f) => f.trim())
+      .filter(Boolean)
+      .slice(0, 5);
+    return frames.join("\n");
   }
 
   render(): ReactNode {
@@ -53,6 +74,9 @@ export class ErrorBoundary extends Component<{ children: ReactNode }, State> {
             sign you out and it changes nothing on the server.
           </p>
           {error.message && <p style={DETAIL}>{error.message}</p>}
+          {this.state.componentStack && (
+            <pre style={STACK}>{this.topFrames()}</pre>
+          )}
           <div style={ROW}>
             <button style={PRIMARY} onClick={() => window.location.reload()}>
               Reload
@@ -105,6 +129,14 @@ const DETAIL: CSSProperties = {
   background: "var(--panel-2, #0d141a)",
   borderRadius: "0.375rem",
   overflowWrap: "anywhere",
+};
+const STACK: CSSProperties = {
+  ...DETAIL,
+  whiteSpace: "pre-wrap",
+  fontSize: "0.72rem",
+  lineHeight: 1.4,
+  maxHeight: "8rem",
+  overflow: "auto",
 };
 const ROW: CSSProperties = { display: "flex", gap: "0.5rem", flexWrap: "wrap" };
 const BUTTON: CSSProperties = {
