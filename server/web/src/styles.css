@@ -4260,7 +4260,15 @@ body {
    body is --ui (system) and .pdash is --sans (Inter). Inter carries a larger
    x-height, so the same 1rem menu read as bigger on the platform dashboard than
    in the console. Family, size and line-height are all stated here now. */
-.user-menu { position: relative; font: 1rem/1.45 var(--ui); }
+.user-menu { position: relative; }
+/* Sized as a sibling of the Alerts button, because that is what it is: the two
+   sit next to each other in the same header and any difference between them
+   reads as one of them being wrong. `.btn` takes 0.875rem and 0.438/0.75 of
+   padding, so this takes the same rather than inheriting - inheriting gave the
+   trigger 1rem while its own label overrode to 0.812rem, which is how it ended
+   up visibly smaller than the button beside it in a box half the padding.
+   Stated absolutely, so it is the same in the console and on the platform
+   dashboard, whose base font differs. */
 .user-menu-trigger {
   display: flex;
   align-items: center;
@@ -4268,10 +4276,17 @@ body {
   background: none;
   border: 1px solid transparent;
   border-radius: 0.375rem;
-  padding: 0.3rem 0.5rem;
+  padding: 0.438rem 0.75rem;
   color: var(--text);
-  font: inherit;
+  font: 0.875rem/1.45 var(--ui);
   cursor: pointer;
+}
+/* The name takes the trigger's size. `.who` carries 0.812rem for its own sake,
+   and that override was the actual shrink. Its colour is left alone: muted
+   normally, amber under .topbar.elevated, which is a warning and not styling. */
+.user-menu-trigger .who {
+  font-size: inherit;
+  line-height: inherit;
 }
 /* Darken whatever is behind it rather than paint a fixed colour. The two bars
    are different shades - the console's is --panel-2 and the platform's is
@@ -4284,6 +4299,10 @@ body {
 .user-menu-trigger:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
 .user-menu-caret { color: var(--muted); font-size: 0.7rem; }
 .user-menu-panel {
+  /* The panel is not a sibling of anything, so it keeps the roomier size
+     settled on earlier - and states it, since the console and the platform
+     dashboard run different base fonts and faces. */
+  font: 1rem/1.45 var(--ui);
   position: absolute;
   top: calc(100% + 0.35rem);
   right: 0;
