@@ -89,6 +89,16 @@ function presetKey(stationId: string) {
   return `percepta.radio.presets.${stationId}`;
 }
 
+/** Drop this browser's copy once the station owns them. Leaving it would make a
+ *  cleared server-side set silently reappear on this machine alone. */
+function forgetLocalPresets(stationId: string): void {
+  try {
+    localStorage.removeItem(presetKey(stationId));
+  } catch {
+    /* storage unavailable; nothing to forget */
+  }
+}
+
 function loadPresets(stationId: string): (Preset | null)[] {
   const empty = (): (Preset | null)[] => Array(PRESET_SLOTS).fill(null);
   try {
@@ -140,8 +150,10 @@ function RadioPanelInner({
   // one value is two places for it to disagree, and this is the one an
   // operator has open while doing something else.
 
+  // Server-owned now, so it starts empty and is filled by the load below rather
+  // than seeded from this browser.
   const [presets, setPresets] = useState<(Preset | null)[]>(() =>
-    loadPresets(stationId),
+    Array(PRESET_SLOTS).fill(null),
   );
   const [editing, setEditing] = useState<number | null>(null);
   const [nameDraft, setNameDraft] = useState("");
@@ -177,7 +189,52 @@ function RadioPanelInner({
   const autoSettle = useRef<number | null>(null);
   const freqInput = useRef<HTMLInputElement>(null);
 
-  useEffect(() => setPresets(loadPresets(stationId)), [stationId]);
+  /**
+   * Presets come from the station now, shared by the whole organisation.
+   *
+   * They used to live in this browser's localStorage, so every operator built
+   * their own set and a phone saw none of them. Anything still stored locally is
+   * pushed up ONCE, and only into a station that has none — so the first person
+   * to open the panel after this change keeps the presets they had, without
+   * their stale copy ever overwriting a set somebody has since made server-side.
+   * The local copy is then dropped, because two homes for one value is two
+   * places for it to disagree.
+   */
+  useEffect(() => {
+    if (!stationId) return;
+    let cancelled = false;
+    api
+      .radioPresets(stationId)
+      .then(async (remote) => {
+        if (cancelled) return;
+        const anyRemote = remote.some((p) => p !== null);
+        const local = loadPresets(stationId);
+        const anyLocal = local.some((p) => p !== null);
+        if (!anyRemote && anyLocal && canControl) {
+          try {
+            const saved = await api.saveRadioPresets(stationId, local);
+            if (!cancelled) setPresets(saved);
+            forgetLocalPresets(stationId);
+            return;
+          } catch {
+            // Not allowed, or offline. Show what this browser had rather than
+            // nothing; the next save will try again.
+            if (!cancelled) setPresets(local);
+            return;
+          }
+        }
+        if (anyRemote) forgetLocalPresets(stationId);
+        setPresets(anyRemote ? remote : local);
+      })
+      .catch(() => {
+        // No server presets available (offline, or no radio.listen). Fall back
+        // to whatever this browser still has so the panel is not empty.
+        if (!cancelled) setPresets(loadPresets(stationId));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [stationId, canControl]);
 
   // Once the station reports the frequency we asked for, stop overriding it.
   useEffect(() => {
@@ -277,13 +334,20 @@ function RadioPanelInner({
     if (digitsOf(shown).length === 6) commitTyped(shown);
   };
 
+  /** Optimistic, then authoritative: show the change at once, then let the
+   *  server's own answer replace it. A refusal (no radio.control) rolls back to
+   *  what the station actually has rather than leaving a preset on screen that
+   *  nobody else will ever see. */
   const persist = (next: (Preset | null)[]) => {
+    const previous = presets;
     setPresets(next);
-    try {
-      localStorage.setItem(presetKey(stationId), JSON.stringify(next));
-    } catch {
-      /* storage unavailable; the preset just does not persist */
-    }
+    api
+      .saveRadioPresets(stationId, next)
+      .then((saved) => setPresets(saved))
+      .catch(() => {
+        setPresets(previous);
+        setError("Presets are shared for this station, and you may not change them.");
+      });
   };
 
   const savePreset = (index: number) => {

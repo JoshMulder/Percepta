@@ -109,3 +109,17 @@ class GroundStation(UUIDMixin, TimestampMixin, Base):
     map_cached_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+    # Airband presets for this station, shared by everyone in the organisation:
+    # a fixed-length list of `{"hz": int, "name": str}` or null per empty slot.
+    #
+    # Here rather than in each browser's localStorage, which is where they
+    # started. The tower, ground and ATIS frequencies for a site are a property
+    # of the site, not of whoever is looking at it — per-browser storage meant
+    # every operator rebuilt the same four presets, a phone saw none of them,
+    # and clearing site data threw them away. On the station row they are
+    # org-wide and no wider, because they inherit its row-level security.
+    #
+    # Null means nobody has set any, which is distinguishable from a set that
+    # was deliberately cleared.
+    radio_presets: Mapped[list | None] = mapped_column(JSONB, nullable=True)

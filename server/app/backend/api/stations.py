@@ -505,6 +505,132 @@ def radio_transcripts(
     ]
 
 
+#: Slots the console renders. A stored list longer than this is truncated rather
+#: than refused — the console has changed this number once already, and an
+#: operator should not get an error because an older build saved five.
+PRESET_SLOTS = 4
+#: Airband, matching the receiver's own limits (api/commands.py).
+PRESET_MIN_HZ = 108_000_000
+PRESET_MAX_HZ = 137_000_000
+
+
+class RadioPreset(BaseModel):
+    hz: int = Field(ge=PRESET_MIN_HZ, le=PRESET_MAX_HZ)
+    #: Short by design — the console's preset buttons ellipsise anything longer.
+    name: str = Field(default="", max_length=12)
+
+
+@router.get("/{station_id}/radio/presets", response_model=list[RadioPreset | None])
+def get_radio_presets(
+    station_id: uuid.UUID,
+    identity: Identity = Depends(get_identity),
+    db: Session = Depends(get_db),
+) -> list[RadioPreset | None]:
+    """This station's airband presets, shared by the whole organisation.
+
+    Behind radio.listen: presets describe what is worth listening to at this
+    site, so anyone who may listen may see them. A slot nobody has set is null,
+    and the list is always PRESET_SLOTS long so the console can index it
+    directly.
+    """
+    from backend.auth.capabilities import Capability
+
+    granted = capabilities_for(
+        db,
+        user_id=identity.user_id,
+        organization_id=identity.organization_id,
+        ground_station_id=station_id,
+    )
+    if Capability.RADIO_LISTEN not in granted:
+        raise HTTPException(status_code=404, detail="Station not available")
+
+    station = db.get(GroundStation, station_id)
+    if station is None:
+        raise HTTPException(status_code=404, detail="Station not available")
+    return _presets_out(station.radio_presets)
+
+
+@router.put("/{station_id}/radio/presets", response_model=list[RadioPreset | None])
+def set_radio_presets(
+    station_id: uuid.UUID,
+    body: list[RadioPreset | None],
+    request: Request,
+    identity: Identity = Depends(get_identity),
+    db: Session = Depends(get_db),
+) -> list[RadioPreset | None]:
+    """Replace this station's presets. Behind radio.control.
+
+    The whole list is sent, not one slot: it is four entries the console already
+    holds, and a read-modify-write of the lot avoids two operators racing on
+    different slots and one of them losing an edit to a stale index.
+
+    radio.control rather than config.write — saving where you just tuned is the
+    same act as tuning, and it is already an actuator capability a viewer can
+    never hold. That these are org-wide is exactly the point: an operator naming
+    the tower frequency once names it for everybody.
+    """
+    from backend.auth.capabilities import Capability
+
+    granted = capabilities_for(
+        db,
+        user_id=identity.user_id,
+        organization_id=identity.organization_id,
+        ground_station_id=station_id,
+    )
+    if Capability.RADIO_LISTEN not in granted:
+        raise HTTPException(status_code=404, detail="Station not available")
+    if Capability.RADIO_CONTROL not in granted:
+        raise HTTPException(status_code=403, detail="Not allowed to change presets")
+
+    station = db.get(GroundStation, station_id)
+    if station is None:
+        raise HTTPException(status_code=404, detail="Station not available")
+
+    trimmed = list(body)[:PRESET_SLOTS]
+    station.radio_presets = [
+        None if p is None else {"hz": p.hz, "name": p.name} for p in trimmed
+    ]
+    # Read back before the commit: the org context is SET LOCAL and lasts one
+    # transaction, so touching the row afterwards reads with no org set.
+    result = _presets_out(station.radio_presets)
+    db.commit()
+
+    record(
+        action="station.radio_presets.updated",
+        organization_id=identity.organization_id,
+        actor_user_id=identity.user_id,
+        target_type="ground_station",
+        target_id=str(station_id),
+        ground_station_id=station_id,
+        ip_address=request.client.host if request.client else None,
+        detail={"set": sum(1 for p in result if p is not None)},
+    )
+    return result
+
+
+def _presets_out(stored: list | None) -> list[RadioPreset | None]:
+    """Stored JSON to exactly PRESET_SLOTS entries.
+
+    Tolerant on the way out: anything unparseable becomes an empty slot rather
+    than a 500. This column is written only by the endpoint above, but it is
+    JSON in a database and the console indexes the result directly.
+    """
+    out: list[RadioPreset | None] = []
+    values = stored if isinstance(stored, list) else []
+    for i in range(PRESET_SLOTS):
+        value = values[i] if i < len(values) else None
+        if isinstance(value, dict) and isinstance(value.get("hz"), int):
+            hz = value["hz"]
+            if PRESET_MIN_HZ <= hz <= PRESET_MAX_HZ:
+                name = value.get("name")
+                out.append(
+                    RadioPreset(hz=hz, name=name[:12] if isinstance(name, str) else "")
+                )
+                continue
+        out.append(None)
+    return out
+
+
 @router.get("/{station_id}", response_model=StationDetail)
 def get_station(
     station_id: uuid.UUID,

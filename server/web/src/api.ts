@@ -127,6 +127,24 @@ export const api = {
       }[]
     >(`/api/stations/${id}/weather/history?hours=${hours}`),
 
+  /** This station's airband presets, shared org-wide. Always PRESET_SLOTS long;
+   *  an unset slot is null. Needs radio.listen. */
+  radioPresets: (id: string) =>
+    request<({ hz: number; name: string } | null)[]>(
+      `/api/stations/${id}/radio/presets`,
+    ),
+
+  /** Replace them. The whole list goes up, so two operators editing different
+   *  slots cannot lose one another's edit to a stale index. Needs radio.control. */
+  saveRadioPresets: (
+    id: string,
+    presets: ({ hz: number; name: string } | null)[],
+  ) =>
+    request<({ hz: number; name: string } | null)[]>(
+      `/api/stations/${id}/radio/presets`,
+      { method: "PUT", body: JSON.stringify(presets) },
+    ),
+
   /** The station's airband transcriptions, newest first. Empty unless on-box
    *  transcription is enabled. */
   radioTranscripts: (id: string) =>
