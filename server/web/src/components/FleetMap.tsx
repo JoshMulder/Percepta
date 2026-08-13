@@ -1,4 +1,5 @@
 import maplibregl from "maplibre-gl";
+import { collapseMapCredit } from "../mapCredit";
 import { memo, useEffect, useRef, useState } from "react";
 import type { FleetAircraft, FleetStation, PlatformMapConfig } from "../types";
 
@@ -108,6 +109,8 @@ function FleetMapInner({
     });
     mapRef.current = map;
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-left");
+    // Same as AdsbMap: compact starts expanded until something moves the map.
+    collapseMapCredit(map);
 
     map.on("load", () => {
       readyRef.current = true;

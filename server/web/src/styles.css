@@ -3476,6 +3476,54 @@ body {
 }
 .maplibregl-ctrl-attrib a { color: var(--dim); }
 
+/* Collapsed, the credit is just the "i" disc, and the padding above would
+   shrink the box out from under it — so put back the room MapLibre reserves.
+   The disc is a background-image on `::after`, absolutely positioned in the
+   corner, which is why the credit looked cut off rather than wrapped: with the
+   24px gone it painted straight over the end of the string. */
+.maplibregl-ctrl-attrib.maplibregl-compact {
+  min-height: 20px;
+  padding: 2px 24px 2px 0;
+  border-radius: 12px;
+  /* Tight into the corner. MapLibre's 10px is sized for a white pill on a
+     full-page map and reads as a floating blob on a small dark panel. */
+  margin: 4px;
+}
+.maplibregl-ctrl-attrib.maplibregl-compact-show { padding: 2px 28px 2px 8px; }
+/* Collapsed, the box is only the disc, so it needs no pill behind it. */
+.maplibregl-ctrl-attrib.maplibregl-compact:not(.maplibregl-compact-show) {
+  background: transparent;
+}
+
+/* The disc itself.
+
+   Not `::after`, despite MapLibre defining a background-image there: that rule
+   sets no `content`, so the pseudo-element never generates a box and never
+   paints (checked - computed content is `none`). The icon you actually see is
+   the background-image on the <summary> button.
+
+   It ships as a BLACK glyph on a translucent white square, which is legible on
+   the light basemaps MapLibre is styled for and invisible on ours - so dropping
+   the white square alone would have quietly deleted the credit rather than
+   restyling it. This substitutes a white glyph on a dark disc: readable over
+   dark ocean and over bright satellite imagery alike, since it carries its own
+   contrast either way.
+
+   Quiet by default, because the obligation is that the credit is reachable, not
+   that it competes with the aircraft; full strength on hover and on keyboard
+   focus, so it still reads as a control. */
+.maplibregl-ctrl-attrib-button {
+  background-color: rgba(11, 15, 19, 0.55);
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 20 20' fill='none' stroke='%23ffffff' stroke-width='1.3'%3E%3Ccircle cx='10' cy='10' r='6'/%3E%3Cpath d='M10 9.2v3.6' stroke-linecap='round'/%3E%3Ccircle cx='10' cy='6.9' r='0.85' fill='%23ffffff' stroke='none'/%3E%3C/svg%3E");
+  opacity: 0.45;
+  transition: opacity 120ms ease;
+}
+.maplibregl-ctrl-attrib-button:hover,
+.maplibregl-ctrl-attrib-button:focus-visible,
+.maplibregl-ctrl-attrib.maplibregl-compact-show .maplibregl-ctrl-attrib-button {
+  opacity: 0.9;
+}
+
 /* The live element sits under the snapshot and shows through once it is
    actually decoding. object-fit: contain for the same reason as the snapshot -
    a security view must not be cropped to fill a panel, because the part cut off

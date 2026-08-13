@@ -1,4 +1,5 @@
 import maplibregl from "maplibre-gl";
+import { collapseMapCredit } from "../mapCredit";
 import { memo, useEffect, useRef, useState } from "react";
 import { iconFor, isRotorcraft } from "../adsbIcons";
 import { cachedAircraftInfo, fetchAircraftInfo } from "../aircraftInfo";
@@ -341,6 +342,8 @@ function AdsbMapInner({
       maxPitch: 0,
     });
     mapRef.current = map;
+    // `compact: true` above is not enough on its own — see collapseMapCredit.
+    collapseMapCredit(map);
 
     // Zoom is handled here rather than by the built-in scroll handler.
     //
