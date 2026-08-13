@@ -1,5 +1,6 @@
 import { useMemo } from "react";
-import { ChartTimeAxis } from "./ChartTimeAxis";
+import { ChartFrame, gridLines } from "./ChartFrame";
+import { niceScale, type Scale } from "../chartScale";
 
 export interface WeatherSample {
   t: number;
@@ -30,8 +31,9 @@ const W = 100;
    the CSS box is, and every trace here carries non-scaling-stroke, so the drawn
    height lives in .weather-row svg rather than in this number. */
 const H = 24;
-//: A little headroom top and bottom so a flat-ish trace is not welded to an edge.
-const PAD = 0.1;
+/* No PAD constant any more. It existed to stop a flat trace welding itself to
+   an edge, which a scale rounded outward to whole gradations does for free -
+   and unlike the fudge, the rounded ends are numbers the axis can label. */
 
 interface Row {
   key: string;
@@ -44,6 +46,7 @@ interface Row {
   last: number;
   min: number;
   max: number;
+  scale: Scale;
 }
 
 /**
@@ -79,9 +82,10 @@ export function WeatherHistory({
         if (p.v < min) min = p.v;
         if (p.v > max) max = p.v;
       }
-      const range = max - min || 1;
-      const y = (v: number) =>
-        H - (PAD + (1 - 2 * PAD) * ((v - min) / range)) * H;
+      // Four gradations, not five: these rows are a third the height of the
+      // power charts and any more reads as a hatch pattern rather than a scale.
+      const scale = niceScale(min, max, 4);
+      const y = (v: number) => H - scale.frac(v) * H;
       const xy = pts.map((p) => ({ x: ((p.t - t0) / span) * W, y: y(p.v) }));
       const line = xy
         .map((p, i) => `${i ? "L" : "M"}${p.x.toFixed(2)} ${p.y.toFixed(2)}`)
@@ -94,6 +98,7 @@ export function WeatherHistory({
         last: pts[pts.length - 1].v,
         min,
         max,
+        scale,
       });
     }
     return out;
@@ -109,7 +114,7 @@ export function WeatherHistory({
 
   return (
     <div className="weather-history">
-      {rows.map((r) => (
+      {rows.map((r, i) => (
         <div className="weather-row" key={r.key}>
           <div className="weather-row-head">
             <span className="weather-row-label" style={{ color: r.colour }}>
@@ -119,8 +124,18 @@ export function WeatherHistory({
               <b>{r.last.toFixed(r.digits)}</b> {r.unit}
             </span>
           </div>
-          <div className="chart-plot">
+          {/* The time axis only under the last row. Every row is drawn from the
+              same samples over the same window, so four of them would be the
+              same axis four times - but each row keeps its OWN gutter, because
+              degrees, per cent, hPa and knots share no scale. */}
+          <ChartFrame
+            scale={r.scale}
+            unit={r.unit}
+            from={i === rows.length - 1 ? samples[0].t : undefined}
+            to={i === rows.length - 1 ? samples[samples.length - 1].t : undefined}
+          >
             <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden>
+              {gridLines(r.scale, H)}
               <path
                 className="weather-area"
                 d={r.area}
@@ -132,20 +147,9 @@ export function WeatherHistory({
                 style={{ stroke: r.colour }}
               />
             </svg>
-            {/* The y-axis: the top and bottom of this series over the window,
-                which is the scale the trace is drawn against. */}
-            <span className="chart-y top">
-              {r.max.toFixed(r.digits)} {r.unit}
-            </span>
-            <span className="chart-y bot">
-              {r.min.toFixed(r.digits)} {r.unit}
-            </span>
-          </div>
+          </ChartFrame>
         </div>
       ))}
-      {/* One axis for the stack. Every row is drawn from the same samples over
-          the same window, so a per-row axis would repeat itself four times. */}
-      <ChartTimeAxis from={samples[0].t} to={samples[samples.length - 1].t} />
     </div>
   );
 }

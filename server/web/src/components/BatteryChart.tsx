@@ -1,5 +1,6 @@
 import { useMemo } from "react";
-import { ChartTimeAxis } from "./ChartTimeAxis";
+import { ChartFrame, gridLines } from "./ChartFrame";
+import { fixedScale, niceScale } from "../chartScale";
 
 export interface SocSample {
   t: number;
@@ -84,6 +85,7 @@ export function BatteryChart({
   }, [samples]);
 
   const axis = useMemo(() => span(samples), [samples]);
+  const socScale = useMemo(() => fixedScale(0, 100), []);
   const trend = last !== null && first !== null ? last - first : 0;
   const shedY = H - (SHED_PCT / 100) * H;
 
@@ -96,26 +98,16 @@ export function BatteryChart({
    * first paint.
    */
   return (
-    <div className="battery-chart">
-      <div className="chart-plot">
-        <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden>
-          <line className="chart-shed" x1="0" y1={shedY} x2={W} y2={shedY} />
-          {line && (
-            <>
-              <path className="chart-area" d={area} />
-              <path className="chart-line" d={line} />
-            </>
-          )}
-        </svg>
-        {/* Fixed 0–100 scale, with the 20% shed line called out — the number
-            that actually matters, since that is where the station starts
-            dropping load. */}
-        <span className="chart-y top">100%</span>
-        <span className="chart-y shed">{SHED_PCT}%</span>
-        <span className="chart-y bot">0%</span>
-      </div>
-      {axis && <ChartTimeAxis from={axis.from} to={axis.to} />}
-      <div className="chart-foot">
+    <ChartFrame
+      className="battery-chart"
+      /* 0-100 because that is what a percentage is, not because that is what
+         the battery did this window. Quarters, so a reader can place a trace
+         at a glance rather than interpolating between two extremes. */
+      scale={socScale}
+      unit="%"
+      from={axis?.from}
+      to={axis?.to}
+      footer={<div className="chart-foot">
         {line ? (
           <span className={trend >= 0 ? "trend up" : "trend down"}>
             {trend >= 0 ? "▲" : "▼"} {Math.abs(trend).toFixed(1)}%
@@ -126,8 +118,25 @@ export function BatteryChart({
         <span className={`muted${!line && !loading ? "" : " hidden"}`}>
           no history yet
         </span>
-      </div>
-    </div>
+      </div>}
+    >
+      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden>
+        {gridLines(socScale, H)}
+        <line className="chart-shed" x1="0" y1={shedY} x2={W} y2={shedY} />
+        {line && (
+          <>
+            <path className="chart-area" d={area} />
+            <path className="chart-line" d={line} />
+          </>
+        )}
+      </svg>
+      {/* The shed threshold is an annotation, not a gradation, so it is marked
+          on the plot rather than in the gutter - and on the right, where it
+          cannot collide with the 25% tick sitting just above it. */}
+      <span className="chart-shed-label" style={{ bottom: `${SHED_PCT}%` }}>
+        {SHED_PCT}% shed
+      </span>
+    </ChartFrame>
   );
 }
 
@@ -156,8 +165,10 @@ export function PowerFlowHistory({
   const W = 100;
   const H = 34;
 
-  const { drawn, peak } = useMemo(() => {
-    if (samples.length < 2) return { drawn: [], peak: 0 };
+  const { drawn, scale } = useMemo(() => {
+    if (samples.length < 2) {
+      return { drawn: [], peak: 0, scale: niceScale(0, 1, 5) };
+    }
     const t0 = samples[0].t;
     const span = Math.max(1, samples[samples.length - 1].t - t0);
     let max = 0;
@@ -177,9 +188,12 @@ export function PowerFlowHistory({
       }
       return { ...s, pts, present: pts.some((p) => p !== null), last };
     });
-    // A touch of headroom so the peak is not welded to the top edge, and never
-    // divide by zero on a window where every source read 0 W.
-    const yMax = Math.max(1, max * 1.08);
+    // Against the rounded top of the axis rather than max * 1.08: the old
+    // headroom fudge existed to stop the peak welding itself to the top edge,
+    // and a rounded scale gives that for free while also putting a gridline
+    // exactly on each label.
+    const scale = niceScale(0, Math.max(1, max), 5);
+    const yMax = scale.max;
     const drawnSeries = raw
       .filter((s) => s.present)
       .map((s) => {
@@ -205,35 +219,21 @@ export function PowerFlowHistory({
           last: s.last,
         };
       });
-    return { drawn: drawnSeries, peak: Math.round(max) };
+    return { drawn: drawnSeries, peak: Math.round(max), scale };
   }, [samples]);
 
   const axis = useMemo(() => span(samples), [samples]);
 
   return (
-    <div className="power-series">
-      <div className="chart-plot">
-        <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden>
-          {drawn.map((s) => (
-            <path
-              key={s.key}
-              className="series-line"
-              d={s.d}
-              stroke={s.colour}
-            />
-          ))}
-        </svg>
-        {drawn.length > 0 && (
-          <>
-            {/* One watt scale shared across all four sources, so their heights
-                compare. */}
-            <span className="chart-y top">{peak} W</span>
-            <span className="chart-y bot">0 W</span>
-          </>
-        )}
-      </div>
-      {axis && <ChartTimeAxis from={axis.from} to={axis.to} />}
-      <div className="series-legend">
+    <ChartFrame
+      className="power-series"
+      /* One watt scale shared across all four sources, so their heights
+         compare against each other and not just against themselves. */
+      scale={scale}
+      unit="W"
+      from={axis?.from}
+      to={axis?.to}
+      footer={<div className="series-legend">
         {drawn.length === 0 ? (
           <span className="muted">{loading ? "loading…" : "no history yet"}</span>
         ) : (
@@ -245,8 +245,15 @@ export function PowerFlowHistory({
             </span>
           ))
         )}
-      </div>
-    </div>
+      </div>}
+    >
+      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden>
+        {gridLines(scale, H)}
+        {drawn.map((s) => (
+          <path key={s.key} className="series-line" d={s.d} stroke={s.colour} />
+        ))}
+      </svg>
+    </ChartFrame>
   );
 }
 
@@ -270,10 +277,15 @@ export function LoadHistory({
   const W = 100;
   const H = 34;
 
-  const { area, line, last, peak } = useMemo(() => {
-    if (samples.length < 2) {
-      return { area: "", line: "", last: null as number | null, peak: 0 };
-    }
+  const { area, line, last, peak, scale } = useMemo(() => {
+    const empty = {
+      area: "",
+      line: "",
+      last: null as number | null,
+      peak: 0,
+      scale: niceScale(0, 1, 5),
+    };
+    if (samples.length < 2) return empty;
     const t0 = samples[0].t;
     const span = Math.max(1, samples[samples.length - 1].t - t0);
     const pts: { x: number; v: number }[] = [];
@@ -281,41 +293,30 @@ export function LoadHistory({
       if (s.load === null || s.load === undefined || Number.isNaN(s.load)) continue;
       pts.push({ x: ((s.t - t0) / span) * W, v: s.load });
     }
-    if (pts.length < 2) {
-      return { area: "", line: "", last: null, peak: 0 };
-    }
+    if (pts.length < 2) return empty;
     const peak = Math.max(1, ...pts.map((p) => p.v));
-    const scale = peak * 1.08;
-    const xy = pts.map((p) => ({ x: p.x, y: H - (p.v / scale) * H }));
+    const scale = niceScale(0, peak, 5);
+    const xy = pts.map((p) => ({ x: p.x, y: H - (p.v / scale.max) * H }));
     const line = xy
       .map((p, i) => `${i ? "L" : "M"}${p.x.toFixed(2)} ${p.y.toFixed(2)}`)
       .join(" ");
     const area = `${line} L${xy[xy.length - 1].x.toFixed(2)} ${H} L${xy[0].x.toFixed(2)} ${H} Z`;
-    return { area, line, last: pts[pts.length - 1].v, peak };
+    return { area, line, last: pts[pts.length - 1].v, peak, scale };
   }, [samples]);
 
   const axis = useMemo(() => span(samples), [samples]);
 
   return (
-    <div className="load-chart">
-      <div className="chart-plot">
-        <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden>
-          {line && (
-            <>
-              <path className="load-area" d={area} />
-              <path className="load-line" d={line} />
-            </>
-          )}
-        </svg>
-        {line && (
-          <>
-            <span className="chart-y top">{Math.round(peak)} W</span>
-            <span className="chart-y bot">0 W</span>
-          </>
-        )}
-      </div>
-      {axis && <ChartTimeAxis from={axis.from} to={axis.to} />}
-      <div className="series-legend">
+    <ChartFrame
+      className="load-chart"
+      /* Its own scale, not the flow chart's: a quiet site drawing a few watts
+         still fills this box rather than lying flat under a scale sized for a
+         generator. */
+      scale={scale}
+      unit="W"
+      from={axis?.from}
+      to={axis?.to}
+      footer={<div className="series-legend">
         {last === null ? (
           <span className="muted">{loading ? "loading…" : "no history yet"}</span>
         ) : (
@@ -328,7 +329,17 @@ export function LoadHistory({
             </span>
           </>
         )}
-      </div>
-    </div>
+      </div>}
+    >
+      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden>
+        {gridLines(scale, H)}
+        {line && (
+          <>
+            <path className="load-area" d={area} />
+            <path className="load-line" d={line} />
+          </>
+        )}
+      </svg>
+    </ChartFrame>
   );
 }

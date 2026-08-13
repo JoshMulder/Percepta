@@ -1726,7 +1726,7 @@ body {
 .battery-chart svg {
   display: block;
   width: 100%;
-  height: 11.5rem;
+  height: 13rem;
   background: #060a0e;
   border: 1px solid var(--line);
   border-radius: var(--s1);
@@ -1773,40 +1773,80 @@ body {
 .load-chart svg {
   display: block;
   width: 100%;
-  height: 11.5rem;
+  height: 13rem;
   background: #060a0e;
   border: 1px solid var(--line);
   border-radius: var(--s1);
 }
-/* A y-axis on any of the popout charts: the top and bottom of the drawn range,
-   labelled in the plot's own corner. The plots stretch (preserveAspectRatio
-   none), so the labels are HTML overlaid on the box rather than SVG text, which
-   would stretch with it. */
+/* ------------------------------------------------------------- chart frame */
+/* A chart is a gutter, a plot and a time axis, and the gutter is the change
+   that matters. The y labels used to be absolutely positioned INSIDE the plot
+   with a text shadow behind them, so the trace ran under the numbers and the
+   numbers sat on the data. That is what made these panes read as cramped:
+   everything was in one box, so nothing had room. Three characters of gutter
+   gives the plot its whole area back and gives the axis somewhere to live. */
+.chart-frame {
+  display: flex;
+  flex-direction: column;
+}
+.chart-body {
+  display: flex;
+  align-items: stretch;
+  gap: 0.35rem;
+}
+/* Fixed rather than content-sized, because the ticks inside are absolutely
+   positioned and so contribute no width - and because a shared width is what
+   lines the plots up with each other when charts are stacked in a popout. Wide
+   enough for "1020 hPa", the longest label any of these series produces. */
+.chart-gutter {
+  position: relative;
+  flex: 0 0 3.6rem;
+  min-width: 3.6rem;
+}
+.chart-gutter-tick {
+  position: absolute;
+  right: 0;
+  /* Centred ON its gridline rather than sitting above it: the label and the
+     line are the same statement, and half a line-height of drift reads as the
+     axis being wrong. */
+  transform: translateY(50%);
+  font: 0.6rem var(--mono);
+  line-height: 1;
+  color: var(--muted);
+  white-space: nowrap;
+}
 .chart-plot {
   position: relative;
-}
-.chart-plot .chart-y {
-  position: absolute;
-  left: 0.3rem;
-  font: 0.6rem var(--mono);
-  color: var(--muted);
-  pointer-events: none;
-  /* Legible wherever the trace happens to pass behind it. */
-  text-shadow: 0 0 0.2rem #060a0e, 0 0 0.2rem #060a0e;
-}
-.chart-plot .chart-y.top {
-  top: 0.2rem;
-}
-.chart-plot .chart-y.bot {
-  bottom: 0.2rem;
-}
-/* The load-shed line at 20%, in the warn colour that marks it on the trace. */
-.chart-plot .chart-y.shed {
-  bottom: 20%;
-  color: var(--warn);
+  flex: 1 1 auto;
+  min-width: 0;
 }
 .chart-plot svg {
   display: block;
+}
+/* The gradations themselves. Behind the trace because the caller renders them
+   first, and hairline at any stretch because of the non-scaling stroke - a
+   horizontal rule in a box squashed to 7rem is otherwise several pixels thick. */
+.chart-grid {
+  stroke: var(--line-soft);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+/* The time axis sits under the plot only, so it is inset by the gutter. */
+.chart-x-wrap {
+  margin-left: calc(3.6rem + 0.35rem);
+}
+/* The load-shed threshold: an annotation, not a gradation, so it is marked on
+   the plot rather than in the gutter - and on the right, clear of the 25% tick
+   that sits just above it. */
+.chart-shed-label {
+  position: absolute;
+  right: 0.35rem;
+  transform: translateY(50%);
+  font: 0.6rem var(--mono);
+  line-height: 1;
+  color: var(--warn);
+  pointer-events: none;
+  text-shadow: 0 0 0.2rem #060a0e, 0 0 0.2rem #060a0e;
 }
 
 /* The time axis under a plot.
@@ -1829,9 +1869,7 @@ body {
 /* Under the weather stack the axis describes four charts at once, so it earns a
    little separation from the last of them. */
 .weather-history .chart-x {
-  margin-top: 0.35rem;
-  padding-top: 0.35rem;
-  border-top: 1px solid var(--line-soft);
+  margin-top: 0.3rem;
 }
 
 /* The dedicated load area — its own scale, so a quiet site still reads. */
@@ -3887,7 +3925,7 @@ body {
 /* Divides the state-of-charge chart above from the flows below, without a
    second header bar competing with the dialog's own. */
 .power-detail-sub {
-  margin: 0.9rem 0 0.4rem;
+  margin: 1.4rem 0 0.5rem;
   font-size: 0.8rem;
   font-weight: 600;
   color: var(--muted);
@@ -4200,7 +4238,12 @@ body {
    smaller in the console. Sizing it here instead means one menu, one size,
    whichever view you opened it from. 1rem tracks the app's fluid root, which at
    the reference 1920x1080 is the 14px the platform view was already using. */
-.user-menu { position: relative; font-size: 1rem; }
+/* The whole shorthand, not just the size. Pinning font-size alone was not
+   enough: the family still inherited, and the two headers run different faces -
+   body is --ui (system) and .pdash is --sans (Inter). Inter carries a larger
+   x-height, so the same 1rem menu read as bigger on the platform dashboard than
+   in the console. Family, size and line-height are all stated here now. */
+.user-menu { position: relative; font: 1rem/1.45 var(--ui); }
 .user-menu-trigger {
   display: flex;
   align-items: center;
