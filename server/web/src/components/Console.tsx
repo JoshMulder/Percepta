@@ -990,6 +990,27 @@ export function Console({
     </div>
   );
 
+  /**
+   * Whether THIS panel's sensor is synthetic.
+   *
+   * Per slot, deliberately, not per station. A deployment is routinely part real
+   * — a live camera beside a simulated weather head — so a station-wide flag
+   * would have to lie about one half of it, and badging every panel because one
+   * is fake is how a demo reading gets mistaken for a real one. `health.devices`
+   * is the station's own structured answer and is the only source that covers
+   * every slot, the camera included: video arrives as a media stream here, not
+   * as a telemetry payload, so it has no `simulated` field to read. Where a live
+   * payload does carry one it wins, because those arrive every second against
+   * health's thirty.
+   */
+  const demoFor = (
+    slot: string,
+    payload?: { simulated?: boolean } | null,
+  ): boolean => {
+    if (payload?.simulated !== undefined) return Boolean(payload.simulated);
+    return Boolean(health?.devices?.find((d) => d.slot === slot)?.simulated);
+  };
+
   // One definition, both layouts. The sidebar and the tab bar render from this
   // same list, so a panel can never appear in one and be forgotten in the other.
   const sections = [
@@ -997,6 +1018,7 @@ export function Console({
       key: "airspace",
       label: "Airspace",
       Icon: IconAirspace,
+      demo: demoFor("adsb", adsb),
       body: renderMap(false),
       fills: true,
     },
@@ -1004,6 +1026,7 @@ export function Console({
       key: "camera",
       label: "Camera",
       Icon: IconCamera,
+      demo: demoFor("camera"),
       // An empty host; the panel is portalled in below. Compact mounts the
       // panel directly, because that layout shows one tab at a time and
       // unmounting a hidden camera is exactly what should happen there.
@@ -1014,6 +1037,7 @@ export function Console({
       key: "radio",
       label: "Radio",
       Icon: IconRadio,
+      demo: demoFor("radio", radio),
       body: (
         <PanelState
           status={
@@ -1042,6 +1066,7 @@ export function Console({
       key: "weather",
       label: "Weather",
       Icon: IconWind,
+      demo: demoFor("weather", weather),
       body: canTelemetry || bootstrapping ? (
         <PanelState
           status={stateFor("weather")}
@@ -1064,6 +1089,7 @@ export function Console({
       key: "light",
       label: "Floodlight",
       Icon: IconLight,
+      demo: demoFor("light", light),
       body: (
         <PanelState
           status={stateFor("light")}
@@ -1083,6 +1109,7 @@ export function Console({
       key: "power",
       label: "Power",
       Icon: IconPower,
+      demo: demoFor("power", power),
       body: canTelemetry || bootstrapping ? (
         <PanelState
           status={stateFor("power")}
@@ -1308,6 +1335,7 @@ export function Console({
             <div className="card-head">
               <preview.Icon />
               <h3>{preview.label}</h3>
+              {preview.demo && <span className="demo-chip">DEMO</span>}
               <span className="muted">click to enlarge</span>
             </div>
             <button
@@ -1325,11 +1353,12 @@ export function Console({
             </button>
           </section>
 
-          {rest.map(({ key, label, Icon, body }) => (
+          {rest.map(({ key, label, Icon, body, demo }) => (
             <section key={key} className="card">
               <div className="card-head">
                 <Icon />
                 <h3>{label}</h3>
+                {demo && <span className="demo-chip">DEMO</span>}
               </div>
               <div className="card-body">{body}</div>
             </section>

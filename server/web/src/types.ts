@@ -202,6 +202,18 @@ export interface Availability {
    *  health, because health is every 30 s and a console that has just switched
    *  station has to show something now. Absent means unknown. */
   unavailable_cause?: "not_fitted" | "not_detected" | "stopped";
+  /** This stream's source is a demo sensor and its readings are synthetic.
+   *
+   *  **Per stream, not per station** — the contract is explicit about this
+   *  ($defs/availability): a deployment is routinely part real, a bench box with
+   *  a live camera and a simulated weather head, and a station-wide flag had to
+   *  be wrong about one of them. So this badges the panel whose data is fake
+   *  rather than everything beside it. Distinct from the per-contact `simulated`
+   *  inside an aircraft, which means a test target injected by a real receiver.
+   *
+   *  Absent means real. It was missing from this file while being defined in the
+   *  contract and sent by the station — the drift this file exists to prevent. */
+  simulated?: boolean;
 }
 
 export interface AdsbPayload extends Availability {
