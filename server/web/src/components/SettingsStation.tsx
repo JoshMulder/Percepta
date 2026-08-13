@@ -100,18 +100,18 @@ export function SettingsStation({
   }
 
   return (
-    <div className="member-layout station-layout">
+    <div className="member-layout station-roster-layout">
       {/* The enrolled stations, scrollable, with Add pinned to the bottom of the
           column — the same list-and-detail shape as People. Picking one is
           independent of the console's own station switcher: you configure
           whichever site needs it, not the one you happen to be watching. */}
-      <div className="station-list-col">
-        <ul className="member-list station-list">
+      <div className="station-roster-col">
+        <ul className="member-list station-roster">
           {stations.length === 0 && (
-            <li className="station-list-empty settings-note">No stations yet.</li>
+            <li className="station-roster-empty settings-note">No stations yet.</li>
           )}
           {stations.map((s) => (
-            <li key={s.id} className="station-row">
+            <li key={s.id} className="station-roster-row">
               <button
                 type="button"
                 className={`member-item${s.id === selected ? " active" : ""}`}
@@ -121,7 +121,7 @@ export function SettingsStation({
                   {s.name}
                   {s.is_simulated && <em> · DEMO</em>}
                 </span>
-                <span className={`member-roles station-status${s.online ? " online" : ""}`}>
+                <span className={`member-roles station-roster-status${s.online ? " online" : ""}`}>
                   {s.online ? "online" : "offline"}
                 </span>
               </button>
@@ -139,7 +139,7 @@ export function SettingsStation({
             </li>
           ))}
         </ul>
-        <div className="station-list-add">
+        <div className="station-roster-add">
           <AddStation
             onCreated={async (id) => {
               // Refresh the list and select the new record in place, so the
@@ -151,7 +151,7 @@ export function SettingsStation({
         </div>
       </div>
 
-      <div className="member-detail station-detail">
+      <div className="member-detail station-roster-detail">
         {station ? (
           <>
             <StationStats key={`stats-${station.id}`} stationId={station.id} />

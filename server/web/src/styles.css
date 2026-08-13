@@ -2666,8 +2666,16 @@ body {
 
 /* Stations pane: the same list-and-detail shape as People. The left column holds
    the scrollable roster with Add pinned to its bottom, so creating a station is
-   the list's footer action rather than a bar floating over the form. */
-.station-list-col {
+   the list's footer action rather than a bar floating over the form.
+
+   **Namespaced `station-roster-*`, not `station-*`.** This stylesheet is global
+   and the console's StationPicker already owns `.station-list` and
+   `.station-status`, both of which are `position: absolute`. Reusing those names
+   here took the roster out of normal flow — the list vanished and "Add station"
+   slid up to where it had been, with the rows absolutely positioned against a
+   distant ancestor. A generic name in a shared stylesheet is a collision waiting
+   to happen; these are prefixed so they cannot be. */
+.station-roster-col {
   flex: 0 0 210px;
   display: flex;
   flex-direction: column;
@@ -2675,22 +2683,22 @@ body {
   min-height: 0;
 }
 /* Flexes to fill the column and scrolls, leaving Add always visible below it. */
-.station-list { flex: 1 1 auto; }
-.station-list-empty { padding: 8px 10px; }
-.station-list-add { flex: 0 0 auto; }
+.station-roster { flex: 1 1 auto; }
+.station-roster-empty { padding: 8px 10px; }
+.station-roster-add { flex: 0 0 auto; }
 /* Pinned Add spans the column so it reads as the list's footer, not a stray
    button beside it. */
-.station-list-add .btn { width: 100%; }
-.station-detail { flex: 1 1 380px; min-width: 0; }
+.station-roster-add .btn { width: 100%; }
+.station-roster-detail { flex: 1 1 380px; min-width: 0; }
 /* The status line inherits .member-roles; online gets the ok colour, offline
    stays muted. Not capitalised — it is a state, not a label. */
-.station-status { text-transform: none; }
-.station-status.online { color: var(--ok, #3fb950); }
+.station-roster-status { text-transform: none; }
+.station-roster-status.online { color: var(--ok, #3fb950); }
 
 /* A station row: the selector button, and an update pill pinned to its right
    when a newer release is published than the version the station is running. */
-.station-row { display: flex; align-items: center; gap: 6px; }
-.station-row .member-item { flex: 1 1 auto; min-width: 0; }
+.station-roster-row { display: flex; align-items: center; gap: 6px; }
+.station-roster-row .member-item { flex: 1 1 auto; min-width: 0; }
 .update-pill {
   flex: 0 0 auto;
   font-size: 11px;
