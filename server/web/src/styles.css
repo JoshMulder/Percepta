@@ -3970,13 +3970,40 @@ body {
 .pdash-head {
   display: flex;
   align-items: center;
-  gap: 22px;
+  /* 1.25rem, matching the console's grid gap, rather than the 22px this block
+     was written in - the whole point is that the two bars are one bar. */
+  gap: 1.25rem;
   padding: 0 1rem;
   height: var(--topbar-h);
   flex: 0 0 auto;
   border-bottom: 1px solid var(--line);
-  background: var(--panel);
+  /* --panel-2, not --panel. The console's header is the darker of the two and
+     this was the lighter, which is visible the instant you switch views. */
+  background: var(--panel-2);
 }
+/* The same narrow-window treatment the console's header gets, and it has to
+   live HERE rather than in that media block: this rule set is 3,000 lines
+   further down the file, and at equal specificity the later rule wins whatever
+   the media query says. Written up there, `height: auto` simply never applied.
+   Breakpoint kept identical to the console's on purpose - two bars that are
+   meant to be one bar must not reflow at different widths. */
+@media (max-width: 56.25rem) {
+  .pdash-head {
+    flex-wrap: wrap;
+    height: auto;
+    padding: 0.5rem 0.75rem;
+    gap: 0.75rem;
+  }
+  /* The tabs are the one thing this bar carries that the console's does not, so
+     they are what needs the room a wrapped bar gives: they drop to their own
+     line rather than squeezing the name out of the corner. flex-wrap does real
+     work here, unlike on .topbar, which is a grid and ignores it. */
+  .pdash-tabs {
+    order: 3;
+    width: 100%;
+  }
+}
+
 .pdash-tabs { display: flex; gap: 2px; }
 /* 6px, not 8. The bar is now fluid and bottoms out at 37.5px (3rem at the root
    clamp's 12.5px floor, i.e. a 1366-wide window); a tab is 14px x 1.45 of text
