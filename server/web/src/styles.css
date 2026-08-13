@@ -752,11 +752,38 @@ body {
     border-right: none;
     border-bottom: 1px solid var(--line);
   }
+  /* The header genuinely reflows here, which `flex-wrap: wrap` never did: this
+     bar is a grid, and grid ignores it. It had been inert since the day the
+     three-column layout replaced the flex row.
+     
+     It stays a grid rather than becoming a flex row, because the centring is
+     the whole reason for the grid (see .topbar above) - a flex row puts the
+     station picker wherever the logo's width leaves it, and moves it again
+     whenever anything on either side changes size. So the grid reflows instead:
+     the logo and the controls share the top line, and the picker takes a full
+     row beneath them, where there is room for it and for the link state that
+     hangs off its right edge. */
   .topbar {
-    flex-wrap: wrap;
+    grid-template-columns: 1fr auto;
     height: auto;
     padding: 0.5rem 0.75rem;
-    gap: 0.75rem;
+    gap: 0.5rem 0.75rem;
+  }
+  .topbar > .brand {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  .topbar > .topbar-right {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  .topbar > .station-select {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    /* Left, not centred: on its own full-width row there is no symmetry left to
+       preserve, and .station-status is absolutely positioned off the picker's
+       right edge - centred, that label would run into the right margin. */
+    justify-self: start;
   }
   .weather-strip {
     order: 3;
