@@ -61,13 +61,17 @@ def effective_roles(
 
     if organization_id == PLATFORM_ORGANIZATION_ID:
         return set()
-    has_platform = (
-        membership_repo.get(
-            user_id=user_id, organization_id=PLATFORM_ORGANIZATION_ID
-        )
-        is not None
+    # The same rule as auth/identity.py's guest path, reached by a different
+    # route, and it has to say the same thing: ADMIN on the platform row, not
+    # merely a row. Changing one without the other leaves the escalation open
+    # through whichever was missed.
+    platform_membership = membership_repo.get(
+        user_id=user_id, organization_id=PLATFORM_ORGANIZATION_ID
     )
-    return {UserRole.ADMIN.value} if has_platform else set()
+    is_platform_admin = platform_membership is not None and UserRole.ADMIN.value in (
+        platform_membership.roles or []
+    )
+    return {UserRole.ADMIN.value} if is_platform_admin else set()
 
 
 def capabilities_for(

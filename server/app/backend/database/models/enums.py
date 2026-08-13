@@ -12,6 +12,12 @@ class UserRole(StrEnum):
     """
 
     ADMIN = "admin"
+    #: Odin watch. Held on the PLATFORM organisation's membership only, where it
+    #: means "may watch every tenant, may change nothing". It is not a role a
+    #: customer org would ever hold: inside a tenant it grants nothing at all,
+    #: which is the point - an operator on shift crosses tenant boundaries to
+    #: read, and must not be able to reach a station's controls to do it.
+    WATCH = "watch"
     """Holds every capability on every station in this org, implicitly. This is
     what DroneOps' require_admin already means, so the inherited checks carry
     across unchanged."""

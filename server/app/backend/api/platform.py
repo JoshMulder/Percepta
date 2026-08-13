@@ -24,7 +24,11 @@ from sqlalchemy.orm import Session
 
 from backend.auth.identity import Identity
 from backend.auth.password import PasswordError, hash_password
-from backend.auth.platform import PLATFORM_ORGANIZATION_ID, require_platform_admin
+from backend.auth.platform import (
+    PLATFORM_ORGANIZATION_ID,
+    require_odin_watch,
+    require_platform_admin,
+)
 from backend.database.dependencies import get_db
 from backend.database.models.enums import UserRole
 from backend.database.models.ground_station import GroundStation
@@ -617,9 +621,14 @@ def remove_membership(
         raise HTTPException(status_code=404, detail="Not a member of that organisation")
 
     if organization_id == PLATFORM_ORGANIZATION_ID:
+        # Count ADMINS, not members. Watch operators hold a platform membership
+        # row too, and counting rows would happily remove the last person who can
+        # administer anything while three people who cannot are still on shift -
+        # leaving nobody able to add one back.
         remaining = db.execute(
             select(func.count(OrganizationMembership.id)).where(
-                OrganizationMembership.organization_id == PLATFORM_ORGANIZATION_ID
+                OrganizationMembership.organization_id == PLATFORM_ORGANIZATION_ID,
+                OrganizationMembership.roles.any(UserRole.ADMIN.value),
             )
         ).scalar_one()
         if remaining <= 1:
@@ -677,7 +686,7 @@ def _station_status(last_seen: datetime | None, now: datetime) -> tuple[str, boo
 
 @router.get("/fleet", response_model=FleetView)
 def fleet(
-    identity: Identity = Depends(require_platform_admin),
+    identity: Identity = Depends(require_odin_watch),
     db: Session = Depends(get_db),
 ) -> FleetView:
     """The whole estate at a glance: every active station across every
@@ -768,7 +777,7 @@ def fleet(
 
 @router.get("/adsb", response_model=FleetAdsb)
 def fleet_adsb(
-    identity: Identity = Depends(require_platform_admin),
+    identity: Identity = Depends(require_odin_watch),
     db: Session = Depends(get_db),
 ) -> FleetAdsb:
     """Conglomerated ADS-B across the whole fleet.

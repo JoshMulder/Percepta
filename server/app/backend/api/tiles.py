@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from backend.auth.capabilities import Capability
 from backend.auth.dependencies import require_capability
 from backend.auth.identity import Identity
-from backend.auth.platform import require_platform_admin
+from backend.auth.platform import require_odin_watch
 from backend.core.config import settings
 from backend.database.dependencies import get_db
 from backend.database.models.ground_station import GroundStation
@@ -147,7 +147,7 @@ def platform_tile(
     z: int,
     x: int,
     y: int,
-    identity: Identity = Depends(require_platform_admin),
+    identity: Identity = Depends(require_odin_watch),
 ) -> Response:
     """A basemap tile for the platform fleet map — wide-area, not bounded to any
     one station's radius. Same shared cache and upstream as the per-station
@@ -165,7 +165,7 @@ class PlatformMapConfig(BaseModel):
 
 @router.get("/platform/map", response_model=PlatformMapConfig)
 def platform_map(
-    identity: Identity = Depends(require_platform_admin),
+    identity: Identity = Depends(require_odin_watch),
 ) -> PlatformMapConfig:
     """Basemap options for the fleet map. Unlike the per-station config there is
     no centre or radius — the map fits itself to the stations it is given — and

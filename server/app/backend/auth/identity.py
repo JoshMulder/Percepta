@@ -95,11 +95,17 @@ def resolve_identity(db: Session, token: str | None) -> Identity | None:
     # its own members. God mode is only ever the platform org itself, below.
     # Anything else would make "switch into a tenant to help them" silently mean
     # "read every tenant at once".
-    platform_access = (
-        membership_repo.get(
-            user_id=user_id, organization_id=PLATFORM_ORGANIZATION_ID
-        )
-        is not None
+    # ADMIN on the platform row, not merely a row. Descending into a customer org
+    # mints an ADMIN identity there (below), so a bare-membership test would hand
+    # every platform member - including an Odin watch operator, whose whole
+    # premise is that they change nothing - light.control, radio.control,
+    # config.write and station.update on that customer's hardware. The support
+    # workflow this exists for is an administrator's, and it stays theirs.
+    platform_membership = membership_repo.get(
+        user_id=user_id, organization_id=PLATFORM_ORGANIZATION_ID
+    )
+    platform_access = platform_membership is not None and UserRole.ADMIN.value in (
+        platform_membership.roles or []
     )
     if membership is None:
         if not platform_access or organization_id == PLATFORM_ORGANIZATION_ID:
