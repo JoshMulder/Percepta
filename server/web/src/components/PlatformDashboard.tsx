@@ -9,6 +9,7 @@ import type {
   PlatformMapConfig,
 } from "../types";
 import { FleetMap } from "./FleetMap";
+import { Logo } from "./Logo";
 import { SettingsAccount } from "./SettingsAccount";
 import { SettingsPlatform } from "./SettingsPlatform";
 import { UserMenu } from "./UserMenu";
@@ -126,10 +127,11 @@ export function PlatformDashboard({
   return (
     <div className="pdash">
       <header className="pdash-head">
-        <div className="pdash-brand">
-          <strong>Percepta</strong>
-          <span>Platform</span>
-        </div>
+        {/* The same mark and wordmark as the console, not a text lockup of its
+            own. No "Platform" chip beside it: the tabs below say what this view
+            is, and the amber header the console shows for an elevated session is
+            the thing that actually warns you where you are. */}
+        <Logo />
         <nav className="pdash-tabs" role="tablist">
           {TABS.map((t) => (
             <button

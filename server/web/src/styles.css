@@ -54,6 +54,12 @@
      fallback face at a different width. Every reading here is a number an
      operator compares against another number, and a proportional face makes
      columns of them ragged and slower to scan. */
+  /* The console's face, and the one the wordmark is set in. Named because it is
+     now used in two places: body, and .brand-word - which sits inside the
+     platform dashboard too, and that container runs --sans. Without pinning it,
+     the same logo came out in a different typeface depending on which view you
+     were looking at. */
+  --ui: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --sans: "Inter Variable", Inter, system-ui, -apple-system, sans-serif;
   --mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, monospace;
 
@@ -99,7 +105,7 @@ body,
 body {
   background: var(--bg);
   color: var(--text);
-  font: 0.875rem/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font: 0.875rem/1.45 var(--ui);
   -webkit-font-smoothing: antialiased;
 }
 
@@ -124,6 +130,10 @@ body {
   flex: none;
 }
 .brand-word {
+  /* Stated, not inherited. A wordmark that changes typeface with its container
+     is not a wordmark - and this one sits in both the console (--ui) and the
+     platform dashboard (--sans). */
+  font-family: var(--ui);
   font-weight: 700;
   letter-spacing: 0.18em;
   font-size: 0.812rem;
@@ -3881,13 +3891,6 @@ body {
   border-bottom: 1px solid var(--line);
   background: var(--panel);
 }
-.pdash-brand { display: flex; align-items: baseline; gap: 8px; }
-.pdash-brand strong { font-size: 16px; letter-spacing: 0.02em; }
-.pdash-brand span {
-  font-size: 10px; text-transform: uppercase; letter-spacing: 0.14em;
-  color: var(--brand); border: 1px solid var(--brand-dim); border-radius: 4px;
-  padding: 2px 6px;
-}
 .pdash-tabs { display: flex; gap: 2px; }
 /* 6px, not 8. The bar is now fluid and bottoms out at 37.5px (3rem at the root
    clamp's 12.5px floor, i.e. a 1366-wide window); a tab is 14px x 1.45 of text
@@ -4160,7 +4163,13 @@ body {
    name in the header. Replaces a standalone organisation <select> that sat
    beside the station picker competing with it, and that most people could never
    use because it renders only for those in more than one organisation. */
-.user-menu { position: relative; }
+/* This menu renders in two headers with different type scales - the console
+   inherits the body's 0.875rem, the platform dashboard is pinned to 14px - so
+   `font: inherit` on the items below made the same menu come out noticeably
+   smaller in the console. Sizing it here instead means one menu, one size,
+   whichever view you opened it from. 1rem tracks the app's fluid root, which at
+   the reference 1920x1080 is the 14px the platform view was already using. */
+.user-menu { position: relative; font-size: 1rem; }
 .user-menu-trigger {
   display: flex;
   align-items: center;
@@ -4173,8 +4182,14 @@ body {
   font: inherit;
   cursor: pointer;
 }
+/* Darken whatever is behind it rather than paint a fixed colour. The two bars
+   are different shades - the console's is --panel-2 and the platform's is
+   --panel - so a flat --panel-2 chip was a recessed control on the platform
+   dashboard and, in the console, exactly the colour it sat on: the hover simply
+   did not appear. This gives the platform's look in both, and still reads on the
+   amber bar of an elevated session. */
 .user-menu-trigger:hover,
-.user-menu-trigger.open { background: var(--panel-2); border-color: var(--line); }
+.user-menu-trigger.open { background: rgba(0, 0, 0, 0.3); border-color: var(--line); }
 .user-menu-trigger:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
 .user-menu-caret { color: var(--muted); font-size: 0.7rem; }
 .user-menu-panel {
