@@ -435,10 +435,23 @@ export interface StationSystemStats {
 /** The selected station's latest host stats, for the settings overview. `system`
  *  (and each of its fields) is absent until a health frame has been cached, and
  *  null once the station has been quiet past the snapshot TTL. */
+export interface StationSoftware {
+  running_version?: string;
+  /** Set only while an update is in flight. */
+  desired_version?: string;
+  /** updated | rolled_back | signature_rejected | rollback_failed | … */
+  update_last_result?: string;
+  update_last_version?: string;
+  update_at?: string;
+}
+
 export interface StationHealth {
   online: boolean;
   status?: string | null;
   system?: StationSystemStats | null;
+  /** The station's own account of what it is running and how the last update
+   *  went — the only place a failed update surfaces. */
+  software?: StationSoftware | null;
 }
 
 /** One published station-image release. `digest` is only present in the

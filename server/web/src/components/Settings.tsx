@@ -1,10 +1,9 @@
 import { useEffect, useState } from "react";
-import type { Capability, HealthPayload, Me } from "../types";
+import type { Me } from "../types";
 import { SettingsAccount } from "./SettingsAccount";
 import { SettingsDisplay } from "./SettingsDisplay";
 import { SettingsOrganization } from "./SettingsOrganization";
 import { SettingsPlatform } from "./SettingsPlatform";
-import { SettingsUpdate } from "./SettingsUpdate";
 
 /**
  * The settings overlay.
@@ -22,26 +21,19 @@ import { SettingsUpdate } from "./SettingsUpdate";
  * unpleasant to use. Different job, different rules.
  */
 
-type Tab = "account" | "display" | "update" | "organization" | "platform";
+type Tab = "account" | "display" | "organization" | "platform";
 
 export function Settings({
   me,
   stationId,
-  stationName,
-  health,
-  capabilities,
   onClose,
   onProfileChanged,
   onStationsChanged,
   onSignOut,
 }: {
   me: Me;
+  /** Only used as the initial selection in Organisation > Stations. */
   stationId: string | null;
-  stationName: string | null;
-  /** Live health telemetry for the watched station. The Update pane reads the
-   *  running/desired version and last update result from `health.software`. */
-  health: HealthPayload | null;
-  capabilities: Capability[];
   onClose: () => void;
   onProfileChanged: (displayName: string) => void;
   onStationsChanged: () => void;
@@ -52,17 +44,11 @@ export function Settings({
   // them to ask why; an absent one says nothing.
   const isAdmin = me.roles.includes("admin");
 
-  // Its own capability (station.update), the most consequential grant. Hidden,
-  // not disabled, when the operator lacks it — a disabled tab advertises a power
-  // they do not have.
-  const canUpdate = capabilities.includes("station.update") && stationId !== null;
-
   const tabs: { id: Tab; label: string }[] = [
     { id: "account", label: "My account" },
     // Available to everyone: these are display choices for the person looking,
     // gated by no capability.
     { id: "display", label: "Map" },
-    ...(canUpdate ? [{ id: "update" as Tab, label: "Software" }] : []),
     ...(isAdmin ? [{ id: "organization" as Tab, label: "Organisation" }] : []),
     // Only while the active org IS the platform org. A platform admin working
     // inside a customer's organisation does not get this.
@@ -135,14 +121,6 @@ export function Settings({
               <SettingsAccount me={me} onProfileChanged={onProfileChanged} />
             )}
             {tab === "display" && <SettingsDisplay />}
-            {tab === "update" && (
-              <SettingsUpdate
-                health={health}
-                caps={capabilities}
-                stationId={stationId}
-                stationName={stationName}
-              />
-            )}
             {tab === "organization" && (
               <SettingsOrganization
                 me={me}

@@ -341,6 +341,12 @@ class StationHealth(BaseModel):
     #: memory{total_mb,used_mb,used_percent}. Best-effort on the station, so any
     #: field may be absent; the whole object is null until a frame is cached.
     system: dict | None = None
+    #: The station's own account of its software: running_version,
+    #: desired_version while an update is in flight, and how the last one went
+    #: (update_last_result / update_last_version / update_at). This is the only
+    #: place a *failed* update surfaces — "rolled_back", "signature_rejected" —
+    #: so the console can say why rather than just showing no change.
+    software: dict | None = None
 
 
 @router.get("/{station_id}/health", response_model=StationHealth)
@@ -381,10 +387,12 @@ def station_health(
         return StationHealth(online=online)
     system = frame.get("system")
     status = frame.get("status")
+    software = frame.get("software")
     return StationHealth(
         online=online,
         status=status if isinstance(status, str) else None,
         system=system if isinstance(system, dict) and system else None,
+        software=software if isinstance(software, dict) and software else None,
     )
 
 

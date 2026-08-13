@@ -1234,9 +1234,6 @@ export function Console({
         <Settings
           me={meWithName}
           stationId={stationId}
-          stationName={stations.find((s) => s.id === stationId)?.name ?? null}
-          health={health}
-          capabilities={caps}
           onClose={() => setSettingsOpen(false)}
           onProfileChanged={setDisplayName}
           onStationsChanged={handleStationsChanged}
@@ -1348,9 +1345,6 @@ export function Console({
         <Settings
           me={meWithName}
           stationId={stationId}
-          stationName={stations.find((s) => s.id === stationId)?.name ?? null}
-          health={health}
-          capabilities={caps}
           onClose={() => setSettingsOpen(false)}
           onProfileChanged={setDisplayName}
           onStationsChanged={handleStationsChanged}

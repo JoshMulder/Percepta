@@ -4,6 +4,7 @@ import type {
   LatestRelease,
   StationConfig,
   StationHealth,
+  StationSoftware,
   StationSummary,
 } from "../types";
 import { SettingsEnrolment } from "./SettingsEnrolment";
@@ -173,6 +174,11 @@ export function SettingsStation({
       <div className="member-detail station-roster-detail">
         {station ? (
           <>
+            <StationSoftwarePanel
+              key={`sw-${station.id}`}
+              station={station}
+              latestTag={latest?.tag ?? null}
+            />
             <StationStats key={`stats-${station.id}`} stationId={station.id} />
             <StationConfigForm
               key={station.id}
@@ -321,6 +327,293 @@ function AddStation({
         </div>
       )}
     </>
+  );
+}
+
+const DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
+
+/** How the last update read. `updated` is the only clean landing; a rollback
+ *  kept the station up on the old image (a caution, not a failure); anything
+ *  else left it needing attention. */
+function resultTone(result: string): "ok" | "warn" | "bad" {
+  if (result === "updated") return "ok";
+  if (result === "rolled_back") return "warn";
+  return "bad";
+}
+
+function resultWords(result: string): string {
+  switch (result) {
+    case "updated":
+      return "updated";
+    case "rolled_back":
+      return "rolled back to the previous image";
+    case "signature_rejected":
+      return "refused — signature did not verify";
+    case "rollback_failed":
+      return "rollback failed — needs attention";
+    case "rollback_impossible":
+      return "failed with no image to roll back to";
+    default:
+      return result;
+  }
+}
+
+const TONE_COLOUR: Record<string, string> = {
+  ok: "var(--ok, #3fb950)",
+  warn: "var(--warn)",
+  bad: "var(--bad, #f85149)",
+};
+
+/**
+ * What this station is running, and — behind Advanced — how to put it on
+ * something else.
+ *
+ * This replaces the old top-level Software tab. That tab was bound to whichever
+ * station the *console* happened to be watching, while everything else about a
+ * station is configured from the roster beside this panel; and the one-click
+ * pill on the roster row now covers the ordinary case entirely. What is left is
+ * the part the pill cannot express: rolling BACK to an older release, re-trying
+ * a digest a previous update rejected (`force`), and — the reason this panel
+ * exists at all rather than being deleted — seeing *why* an update failed.
+ * `update_last_result` is the only place `signature_rejected` or `rolled_back`
+ * ever surfaces; without it a refused update looks identical to nothing
+ * happening.
+ *
+ * Reaching the Organisation tab already requires org admin, and an admin holds
+ * `station.update` implicitly, so the disclosure is the gate rather than a
+ * capability check the console cannot make for a station it is not watching.
+ */
+function StationSoftwarePanel({
+  station,
+  latestTag,
+}: {
+  station: StationSummary;
+  latestTag: string | null;
+}) {
+  const [software, setSoftware] = useState<StationSoftware | null>(null);
+  const [advanced, setAdvanced] = useState(false);
+  const [image, setImage] = useState("registry.percepta.nz/percepta-gsu");
+  const [digest, setDigest] = useState("");
+  const [tag, setTag] = useState("");
+  const [force, setForce] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [requested, setRequested] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setSoftware(null);
+    const load = () =>
+      api
+        .stationHealth(station.id)
+        .then((h) => !cancelled && setSoftware(h.software ?? null))
+        .catch(() => {});
+    load();
+    const timer = window.setInterval(load, 15000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [station.id]);
+
+  // The roster row already carries running/desired; health adds how the last
+  // attempt went, which is the part that cannot be inferred from a version.
+  const running = software?.running_version ?? station.running_version ?? null;
+  const desired = software?.desired_version ?? station.desired_version ?? null;
+  const lastResult = software?.update_last_result ?? null;
+
+  const digestOk = DIGEST_RE.test(digest.trim());
+  const valid = image.trim() !== "" && digestOk;
+  const label = tag.trim() || (digestOk ? `${digest.trim().slice(0, 19)}…` : "");
+  // Any edit re-arms the confirm: you cannot read the confirmation, change the
+  // target, and then send the old one.
+  const edited = () => {
+    setConfirming(false);
+    setRequested(null);
+  };
+
+  function push() {
+    if (!valid) return;
+    setBusy(true);
+    setError(null);
+    api
+      .updateStation(station.id, {
+        image: image.trim(),
+        digest: digest.trim(),
+        tag: tag.trim() || undefined,
+        force: force || undefined,
+      })
+      .then(() => {
+        setRequested(label);
+        setConfirming(false);
+        // Keep the image (the repository rarely changes); clear the digest so
+        // the same push cannot be fired twice by reflex.
+        setDigest("");
+        setTag("");
+        setForce(false);
+      })
+      .catch((e) =>
+        setError(
+          e instanceof ApiError ? e.message : "The station did not accept the update.",
+        ),
+      )
+      .finally(() => setBusy(false));
+  }
+
+  return (
+    <section className="settings-section">
+      <h3>Software</h3>
+      <dl className="settings-facts">
+        <dt>Version</dt>
+        <dd>
+          {running ? <code>{running}</code> : <span className="settings-note">unknown</span>}
+          {latestTag && running === latestTag && " · up to date"}
+        </dd>
+        {desired && (
+          <>
+            <dt>Updating to</dt>
+            <dd>
+              <code>{desired}</code> …
+            </dd>
+          </>
+        )}
+        {lastResult && (
+          <>
+            <dt>Last update</dt>
+            <dd>
+              <b style={{ color: TONE_COLOUR[resultTone(lastResult)] }}>
+                {resultWords(lastResult)}
+              </b>
+              {software?.update_last_version ? ` (${software.update_last_version})` : ""}
+            </dd>
+          </>
+        )}
+      </dl>
+
+      {!advanced ? (
+        <div className="settings-actions">
+          <button type="button" className="btn ghost" onClick={() => setAdvanced(true)}>
+            Advanced…
+          </button>
+          <span className="settings-note">
+            Roll back, or push a specific image.
+          </span>
+        </div>
+      ) : (
+        <>
+          <label className="field">
+            <span>Image</span>
+            <input
+              type="text"
+              value={image}
+              spellCheck={false}
+              autoCapitalize="none"
+              onChange={(e) => {
+                setImage(e.target.value);
+                edited();
+              }}
+            />
+          </label>
+          <label className="field">
+            <span>Digest</span>
+            <input
+              type="text"
+              value={digest}
+              placeholder="sha256:…"
+              spellCheck={false}
+              autoCapitalize="none"
+              aria-invalid={digest.trim().length > 7 && !digestOk}
+              onChange={(e) => {
+                setDigest(e.target.value);
+                edited();
+              }}
+            />
+          </label>
+          <label className="field">
+            <span>Tag (optional)</span>
+            <input
+              type="text"
+              value={tag}
+              placeholder="v0.2.2"
+              spellCheck={false}
+              autoCapitalize="none"
+              onChange={(e) => {
+                setTag(e.target.value);
+                edited();
+              }}
+            />
+          </label>
+          <label className="field checkbox-field">
+            <input
+              type="checkbox"
+              checked={force}
+              onChange={(e) => {
+                setForce(e.target.checked);
+                edited();
+              }}
+            />
+            <span>Force — re-attempt a digest a previous update rejected</span>
+          </label>
+
+          {error && <p className="settings-error">{error}</p>}
+          {requested && !error && (
+            <p className="settings-note">
+              Requested <b>{requested}</b> — the station verifies the signature,
+              swaps the agent, and reports the result above.
+            </p>
+          )}
+
+          <div className="settings-actions">
+            {confirming ? (
+              <>
+                <button
+                  type="button"
+                  className="btn danger"
+                  disabled={busy}
+                  onClick={push}
+                >
+                  {busy ? "Pushing…" : `Confirm: push ${label}`}
+                </button>
+                <button
+                  type="button"
+                  className="btn ghost"
+                  disabled={busy}
+                  onClick={() => setConfirming(false)}
+                >
+                  Cancel
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  className="btn primary"
+                  disabled={!valid || busy}
+                  onClick={() => setConfirming(true)}
+                >
+                  Push update…
+                </button>
+                <button
+                  type="button"
+                  className="btn ghost"
+                  onClick={() => setAdvanced(false)}
+                >
+                  Close
+                </button>
+              </>
+            )}
+          </div>
+          <small>
+            The station runs an image only after it verifies the signature against
+            the keys it was pinned at enrolment, and rolls back on its own if the
+            new one does not come up publishing — so this cannot deploy unsigned or
+            broken code, only ask for a signed one. The digest is the immutable
+            pin; the tag is a label carried through for the record.
+          </small>
+        </>
+      )}
+    </section>
   );
 }
 
