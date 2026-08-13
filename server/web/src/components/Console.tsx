@@ -788,20 +788,6 @@ export function Console({
     setTimeout(() => setLightPending(false), 5000);
   };
 
-  if (socket.revoked) {
-    return (
-      <div className="curtain">
-        <div className="curtain-card">
-          <h2>Session ended</h2>
-          <p>{socket.revoked}</p>
-          <button type="button" className="btn primary" onClick={onSignedOut}>
-            Sign in again
-          </button>
-        </div>
-      </div>
-    );
-  }
-
   /**
    * Nothing is known yet: no station picked, or the server has not said what
    * this user may do there.
@@ -912,8 +898,41 @@ export function Console({
   const streamState = useVideoStream(
     videoElRef,
     stationId,
-    Boolean(canVideo && stationId && (detail?.online ?? true)),
+    // Not on a dead session. `revoked` used to short-circuit the whole render
+    // above this line, so the question never arose; now that the curtain is
+    // rendered below (see there for why), the gate has to say so explicitly or
+    // a signed-out console would keep asking the station to encode.
+    Boolean(canVideo && stationId && !socket.revoked && (detail?.online ?? true)),
   );
+
+  /**
+   * The session ended underneath us - signed out here or elsewhere, or the
+   * server revoked it when the organisation was switched.
+   *
+   * This is deliberately BELOW every hook, and must stay there. It used to sit
+   * up beside the other guards, before `useVideoStream` - so the render that
+   * first saw `revoked` called one hook fewer than the render before it, and
+   * React threw #300 ("Rendered fewer hooks than expected") instead of showing
+   * the curtain. That is the error that flashed on sign-out and on entering the
+   * platform dashboard: both revoke the session, so both hit it every time.
+   *
+   * Everything between the last hook and here is derivation - no effects, no
+   * requests - so running it on a revoked session costs nothing and keeps the
+   * hook list identical in both branches, which is the actual requirement.
+   */
+  if (socket.revoked) {
+    return (
+      <div className="curtain">
+        <div className="curtain-card">
+          <h2>Session ended</h2>
+          <p>{socket.revoked}</p>
+          <button type="button" className="btn primary" onClick={onSignedOut}>
+            Sign in again
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   const renderVideo = (small: boolean) =>
     bootstrapping ? (
