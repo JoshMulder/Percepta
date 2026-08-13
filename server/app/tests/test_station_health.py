@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from unittest import mock
 
 from backend.database.models.ground_station import GroundStation
+from backend.database.models.organization import Organization
 
 FRAME = {
     "kind": "health",
@@ -89,9 +90,14 @@ class TestHealth:
     def test_another_tenants_station_is_not_available(self, client, db):
         """404, the same as everywhere else: the API never distinguishes "not
         yours" from "does not exist"."""
+        # A real organisation, not a made-up id: ground_stations has a foreign
+        # key to it, so a station has to belong to a tenant that exists.
+        other_org = Organization(id=uuid.uuid4(), name="Another Tenant")
+        db.add(other_org)
+        db.flush()
         other = GroundStation(
             id=uuid.uuid4(),
-            organization_id=uuid.uuid4(),
+            organization_id=other_org.id,
             name="Somebody Else's",
             timezone="UTC",
         )

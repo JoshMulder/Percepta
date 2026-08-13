@@ -91,7 +91,8 @@ class TestRequesting:
             display_name="Someone Else",
             first_name="Someone",
             last_name="Else",
-            password_hash=hash_password("irrelevant"),
+            # Long enough for the password policy; never used to sign in here.
+            password_hash=hash_password("also-not-used-by-these-tests"),
         ))
         db.commit()
 
@@ -179,7 +180,8 @@ class TestRedeeming:
             display_name="Got There First",
             first_name="Got",
             last_name="First",
-            password_hash=hash_password("irrelevant"),
+            # Long enough for the password policy; never used to sign in here.
+            password_hash=hash_password("also-not-used-by-these-tests"),
         ))
         db.commit()
 
