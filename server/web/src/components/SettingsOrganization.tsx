@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, api } from "../api";
 import type { Capability, Me, Member, OrganizationDetail } from "../types";
+import { Modal } from "./Modal";
 import { SettingsStation } from "./SettingsStation";
 
 /**
@@ -107,7 +108,7 @@ export function SettingsOrganization({
           className={`org-subtab${section === "people" ? " active" : ""}`}
           onClick={() => setSection("people")}
         >
-          People
+          Users
         </button>
         <button
           type="button"
@@ -167,28 +168,34 @@ export function SettingsOrganization({
 
       {section === "people" && (
       <section className="settings-section">
-        <h3>People</h3>
+        <h3>Users</h3>
 
-        <InviteMember roles={org.roles} onInvited={load} />
-
+        {/* Same shape as Stations: the roster scrolls in its own recessed panel
+            on the left, with its add button pinned beneath it, and the selected
+            member's detail beside it. */}
         <div className="member-layout">
-          <ul className="member-list">
-            {org.members.map((m) => (
-              <li key={m.user_id}>
-                <button
-                  type="button"
-                  className={`member-item${m.user_id === selected ? " active" : ""}`}
-                  onClick={() => setSelected(m.user_id)}
-                >
-                  <span className="member-name">
-                    {m.display_name}
-                    {m.user_id === me.user_id && <em> (you)</em>}
-                  </span>
-                  <span className="member-roles">{m.roles.join(", ") || "no role"}</span>
-                </button>
-              </li>
-            ))}
-          </ul>
+          <div className="roster-col">
+            <ul className="member-list">
+              {org.members.map((m) => (
+                <li key={m.user_id}>
+                  <button
+                    type="button"
+                    className={`member-item${m.user_id === selected ? " active" : ""}`}
+                    onClick={() => setSelected(m.user_id)}
+                  >
+                    <span className="member-name">
+                      {m.display_name}
+                      {m.user_id === me.user_id && <em> (you)</em>}
+                    </span>
+                    <span className="member-roles">{m.roles.join(", ") || "no role"}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+            <div className="roster-add">
+              <InviteMember roles={org.roles} onInvited={load} />
+            </div>
+          </div>
 
           {member && (
             <MemberDetail
@@ -501,7 +508,7 @@ function PasswordReset({ member }: { member: Member }) {
 }
 
 /**
- * Add someone to this organisation.
+ * Add a user to this organisation.
  *
  * No password field, deliberately. They receive a link and choose their own —
  * a password an admin typed here is one two people know before it has been used
@@ -545,71 +552,82 @@ function InviteMember({
     }
   }
 
-  if (!open) {
-    return (
-      <div className="settings-actions">
-        <button
-          type="button"
-          className="btn primary"
-          onClick={() => {
-            setOpen(true);
-            setMessage(null);
-          }}
-        >
-          Add someone
-        </button>
-        {message && <span className="settings-ok">{message}</span>}
-      </div>
-    );
-  }
-
+  // A modal rather than a form opened in place, matching Add station. The button
+  // is pinned under a 210px roster column, and the three fields below cannot be
+  // used at that width.
   return (
-    <form onSubmit={submit}>
-      <div className="field-row">
-        <label className="field">
-          <span>Email</span>
-          <input
-            type="text"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            autoFocus
-            required
-          />
-        </label>
-        <label className="field">
-          <span>Name</span>
-          <input
-            type="text"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            required
-          />
-        </label>
-        <label className="field">
-          <span>Role</span>
-          <select value={role} onChange={(e) => setRole(e.target.value)}>
-            {roles.map((r) => (
-              <option key={r} value={r}>
-                {r}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
-      <div className="settings-actions">
-        <button
-          type="submit"
-          className="btn primary"
-          disabled={busy || !email.trim() || !name.trim()}
-        >
-          {busy ? "Sending…" : "Send invitation"}
-        </button>
-        <button type="button" className="btn ghost" onClick={() => setOpen(false)}>
-          Cancel
-        </button>
-        {error && <span className="settings-error">{error}</span>}
-      </div>
-    </form>
+    <>
+      <button
+        type="button"
+        className="btn primary"
+        onClick={() => {
+          setOpen(true);
+          setMessage(null);
+        }}
+      >
+        Add User
+      </button>
+      {message && <span className="settings-ok">{message}</span>}
+
+      {open && (
+        <Modal title="Add user" onClose={() => setOpen(false)}>
+          <form onSubmit={submit}>
+            <label className="field">
+              <span>Email</span>
+              <input
+                type="text"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                autoFocus
+                required
+              />
+            </label>
+            <label className="field">
+              <span>Name</span>
+              <input
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                required
+              />
+            </label>
+            <label className="field">
+              <span>Role</span>
+              <select value={role} onChange={(e) => setRole(e.target.value)}>
+                {roles.map((r) => (
+                  <option key={r} value={r}>
+                    {r}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <p className="settings-note">
+              No password field: they receive a link and choose their own. A
+              password typed here is one two people know before it has been used
+              once.
+            </p>
+            <div className="settings-actions">
+              <button
+                type="submit"
+                className="btn primary"
+                disabled={busy || !email.trim() || !name.trim()}
+              >
+                {busy ? "Sending…" : "Send invitation"}
+              </button>
+              <button
+                type="button"
+                className="btn ghost"
+                onClick={() => setOpen(false)}
+                disabled={busy}
+              >
+                Cancel
+              </button>
+              {error && <span className="settings-error">{error}</span>}
+            </div>
+          </form>
+        </Modal>
+      )}
+    </>
   );
 }
 

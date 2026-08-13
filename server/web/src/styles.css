@@ -2548,19 +2548,59 @@ body {
 }
 
 .member-layout { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
+/* The roster panel, shared by Users and Stations. Recessed to --bg (a step
+   DARKER than the dialog's --panel) with its own border, so the list reads as a
+   distinct surface rather than floating on the pane. That is also why the
+   selected row lifts to --panel rather than the usual --panel-2: against a
+   recessed list the hover tone alone was too close to read as "selected". */
 .member-list {
   list-style: none;
   margin: 0;
-  padding: 0;
-  flex: 0 0 210px;
+  /* Flexes to fill the roster column so its add button sits at the bottom. */
+  flex: 1 1 auto;
   display: flex;
   flex-direction: column;
   gap: 2px;
-  /* Scrolls independently of the detail beside it, so a long roster does not
-     push the settings dialog taller than the viewport. */
-  max-height: 340px;
+  min-height: 0;
   overflow-y: auto;
+  background: var(--bg);
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  padding: 4px;
+  /* A visible handle, and a reserved gutter so adding one row does not shift
+     the list sideways. */
+  scrollbar-width: thin;
+  scrollbar-color: var(--dim) transparent;
+  scrollbar-gutter: stable;
 }
+.member-list::-webkit-scrollbar { width: 10px; }
+.member-list::-webkit-scrollbar-track { background: transparent; }
+.member-list::-webkit-scrollbar-thumb {
+  background: var(--dim);
+  border-radius: 999px;
+  /* Inset from the track, so the thumb reads as a handle rather than a bar
+     welded to the edge of the panel. */
+  border: 3px solid var(--bg);
+}
+.member-list::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+
+/* One column shape for both rosters: the scrolling list, then its add button
+   pinned beneath it. A definite height is what makes "pinned" mean anything —
+   without it the column is only as tall as its rows and the button rides up
+   under them. */
+.roster-col,
+.station-roster-col {
+  flex: 0 0 210px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  height: min(62vh, 520px);
+}
+.roster-add,
+.station-roster-add { flex: 0 0 auto; }
+.roster-add .btn,
+.station-roster-add .btn { width: 100%; }
 .member-item {
   width: 100%;
   text-align: left;
@@ -2577,6 +2617,13 @@ body {
 }
 .member-item:hover { background: var(--panel-2); }
 .member-item.active { background: var(--panel-2); border-color: var(--line); }
+/* Inside the recessed roster the usual --panel-2 sits too close to the list's
+   own --bg to read as selected, so a selected row lifts a step further. */
+.member-list .member-item.active,
+.member-list .station-roster-row.active {
+  background: var(--panel);
+  border-color: var(--line);
+}
 .member-item:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
 .member-name em { color: var(--dim); font-style: normal; }
 .member-roles { font-size: 12px; color: var(--muted); text-transform: capitalize; }
@@ -2675,20 +2722,9 @@ body {
    slid up to where it had been, with the rows absolutely positioned against a
    distant ancestor. A generic name in a shared stylesheet is a collision waiting
    to happen; these are prefixed so they cannot be. */
-.station-roster-col {
-  flex: 0 0 210px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  min-height: 0;
-}
-/* Flexes to fill the column and scrolls, leaving Add always visible below it. */
-.station-roster { flex: 1 1 auto; }
+/* Column shape and the pinned add button are shared with Users — see
+   `.roster-col` / `.roster-add` above. */
 .station-roster-empty { padding: 8px 10px; }
-.station-roster-add { flex: 0 0 auto; }
-/* Pinned Add spans the column so it reads as the list's footer, not a stray
-   button beside it. */
-.station-roster-add .btn { width: 100%; }
 .station-roster-detail { flex: 1 1 380px; min-width: 0; }
 /* The status line inherits .member-roles; online gets the ok colour, offline
    stays muted. Not capitalised — it is a state, not a label. */
