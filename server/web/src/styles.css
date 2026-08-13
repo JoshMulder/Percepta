@@ -2695,10 +2695,40 @@ body {
 .station-roster-status { text-transform: none; }
 .station-roster-status.online { color: var(--ok, #3fb950); }
 
-/* A station row: the selector button, and an update pill pinned to its right
-   when a newer release is published than the version the station is running. */
-.station-roster-row { display: flex; align-items: center; gap: 6px; }
-.station-roster-row .member-item { flex: 1 1 auto; min-width: 0; }
+/* A station row. The ROW carries the box — hover, selected fill, border — rather
+   than the button inside it, so the update pill sits inside that box with the
+   name instead of floating beside it. The name/status has to stay its own
+   button (a button cannot contain another), so it is styled flat and the row
+   around the pair is what reads as one control. */
+.station-roster-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+.station-roster-row:hover { background: var(--panel-2); }
+.station-roster-row.active { background: var(--panel-2); border-color: var(--line); }
+.station-roster-pick {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: none;
+  border: none;
+  padding: 0;
+  text-align: left;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.station-roster-pick:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
 .update-pill {
   flex: 0 0 auto;
   font-size: 11px;

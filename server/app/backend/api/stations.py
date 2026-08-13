@@ -50,6 +50,11 @@ class StationSummary(BaseModel):
     # frame — for the console's update-available pill. Null when it has not
     # reported, or when the cache is unavailable.
     running_version: str | None = None
+    # The version it is updating TO, while an update is in flight. The station
+    # reports this itself, so "Updating…" survives a page reload — the console
+    # cannot know it from local state alone, and a refresh mid-update otherwise
+    # re-offers an update that is already running.
+    desired_version: str | None = None
 
 
 class PowerPoint(BaseModel):
@@ -108,8 +113,10 @@ def _online(station: GroundStation) -> bool:
 
 
 def _summary(
-    station: GroundStation, running_version: str | None = None
+    station: GroundStation,
+    versions: tuple[str | None, str | None] = (None, None),
 ) -> StationSummary:
+    running, desired = versions
     return StationSummary(
         id=str(station.id),
         name=station.name,
@@ -121,17 +128,25 @@ def _summary(
         else None,
         online=_online(station),
         is_simulated=station.is_simulated,
-        running_version=running_version,
+        running_version=running,
+        desired_version=desired,
     )
 
 
-def _running_versions(station_ids: list[uuid.UUID]) -> dict[uuid.UUID, str]:
-    """Map each station to the version it last reported running, read from the
-    ingest's cached health snapshots in one MGET. Best-effort — a station with no
-    cached frame is simply absent, and the update pill stays off for that row."""
+def _reported_versions(
+    station_ids: list[uuid.UUID],
+) -> dict[uuid.UUID, tuple[str | None, str | None]]:
+    """Map each station to (running, desired) as it last reported them, read from
+    the ingest's cached health snapshots in one MGET.
+
+    `desired` is set only while an update is in flight, and is what lets the
+    console show "Updating…" across a page reload — local state cannot survive
+    one, and without this a refresh mid-update re-offers an update already
+    running. Best-effort: a station with no cached frame is simply absent, and
+    the pill stays off for that row."""
     if not station_ids:
         return {}
-    out: dict[uuid.UUID, str] = {}
+    out: dict[uuid.UUID, tuple[str | None, str | None]] = {}
     keys = [health_snapshot_key(sid) for sid in station_ids]
     for sid, blob in zip(station_ids, read_latest_sync(keys)):
         if not blob:
@@ -141,9 +156,12 @@ def _running_versions(station_ids: list[uuid.UUID]) -> dict[uuid.UUID, str]:
         except (ValueError, TypeError):
             continue
         software = frame.get("software") or {}
-        version = software.get("running_version") or frame.get("agent_version")
-        if isinstance(version, str):
-            out[sid] = version
+        running = software.get("running_version") or frame.get("agent_version")
+        desired = software.get("desired_version")
+        out[sid] = (
+            running if isinstance(running, str) else None,
+            desired if isinstance(desired, str) else None,
+        )
     return out
 
 
@@ -168,8 +186,8 @@ def list_stations(
         .where(GroundStation.id.in_(allowed))
         .order_by(GroundStation.name)
     ).scalars().all()
-    versions = _running_versions([s.id for s in rows])
-    return [_summary(s, versions.get(s.id)) for s in rows]
+    versions = _reported_versions([s.id for s in rows])
+    return [_summary(s, versions.get(s.id, (None, None))) for s in rows]
 
 
 class StationCreate(BaseModel):

@@ -82,6 +82,14 @@ export function SettingsStation({
   const updateAvailable = (s: StationSummary): boolean =>
     Boolean(latest?.tag && s.running_version && s.running_version !== latest.tag);
 
+  /** Mid-update. `desired_version` is the STATION's own account of what it is
+   *  updating to, so this survives a page reload — local state does not, and a
+   *  refresh mid-update was re-offering an update that was already running. The
+   *  local flag still covers the gap between the click and the station's next
+   *  health frame. */
+  const isUpdating = (s: StationSummary): boolean =>
+    Boolean(s.desired_version) || Boolean(updating[s.id]);
+
   async function updateToLatest(id: string) {
     setUpdating((u) => ({ ...u, [id]: true }));
     try {
@@ -111,10 +119,17 @@ export function SettingsStation({
             <li className="station-roster-empty settings-note">No stations yet.</li>
           )}
           {stations.map((s) => (
-            <li key={s.id} className="station-roster-row">
+            // The row itself is the selectable box, so the pill sits INSIDE it
+            // rather than floating beside it. The name/status is its own button
+            // (a button cannot contain another one), styled flat so the box
+            // around both is what reads as the control.
+            <li
+              key={s.id}
+              className={`station-roster-row${s.id === selected ? " active" : ""}`}
+            >
               <button
                 type="button"
-                className={`member-item${s.id === selected ? " active" : ""}`}
+                className="station-roster-pick"
                 onClick={() => setSelected(s.id)}
               >
                 <span className="member-name">
@@ -125,15 +140,19 @@ export function SettingsStation({
                   {s.online ? "online" : "offline"}
                 </span>
               </button>
-              {updateAvailable(s) && (
+              {(updateAvailable(s) || isUpdating(s)) && (
                 <button
                   type="button"
                   className="update-pill"
-                  disabled={Boolean(updating[s.id])}
+                  disabled={isUpdating(s)}
                   onClick={() => void updateToLatest(s.id)}
-                  title={`Update ${s.name} to ${latest?.tag}`}
+                  title={
+                    isUpdating(s)
+                      ? `${s.name} is updating to ${s.desired_version ?? latest?.tag}`
+                      : `Update ${s.name} to ${latest?.tag}`
+                  }
                 >
-                  {updating[s.id] ? "Updating…" : `Update to ${latest?.tag}`}
+                  {isUpdating(s) ? "Updating…" : `Update to ${latest?.tag}`}
                 </button>
               )}
             </li>

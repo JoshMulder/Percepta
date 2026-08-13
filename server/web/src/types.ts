@@ -52,6 +52,9 @@ export interface StationSummary {
   /** The version this station last reported running, for the update-available
    *  pill. Null when it has not reported, or the cache is unavailable. */
   running_version?: string | null;
+  /** What it is updating TO, while an update is in flight — the station's own
+   *  account, so "Updating…" survives a page reload. Null when idle. */
+  desired_version?: string | null;
 }
 
 export interface DeviceSummary {
