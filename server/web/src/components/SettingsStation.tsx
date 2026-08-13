@@ -100,7 +100,7 @@ export function SettingsStation({
   }
 
   return (
-    <div className="member-layout station-roster-layout">
+    <div className="member-layout">
       {/* The enrolled stations, scrollable, with Add pinned to the bottom of the
           column — the same list-and-detail shape as People. Picking one is
           independent of the console's own station switcher: you configure
