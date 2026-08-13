@@ -2434,10 +2434,31 @@ body {
   font-size: 14px;
 }
 .pref-check input {
-  width: 16px;
-  height: 16px;
+  /* 14, not 16: at 16 the boxes out-weighed the 14px labels beside them and the
+     column read as a list of controls rather than a list of choices. */
+  width: 14px;
+  height: 14px;
   accent-color: var(--brand);
   cursor: pointer;
+}
+
+/* The altitude unit selector reuses `.window-switch`/`.window-btn` from the
+   console's chart headers, where they are deliberately tiny because they sit in
+   a panel's title row. In a settings pane that reads as cramped, so the size is
+   lifted HERE ONLY — scoped to `.settings-pane`, because the chart headers still
+   want the small form and share the class. It also stops being pushed right by
+   the header's `margin-left: auto`. */
+.settings-pane .window-switch {
+  margin-left: 0;
+  align-self: flex-start;
+  width: fit-content;
+  border-radius: 6px;
+}
+.settings-pane .window-btn {
+  font: 500 13px var(--sans);
+  padding: 8px 16px;
+  min-width: 64px;
+  text-align: center;
 }
 .pref-fields { display: flex; gap: 18px; flex-wrap: wrap; }
 .pref-field {
@@ -2595,7 +2616,41 @@ body {
   flex-direction: column;
   gap: 10px;
   min-height: 0;
-  height: min(62vh, 520px);
+}
+
+/* The Organisation pane (Users / Stations) fills the dialog rather than being
+   as tall as its content, so the roster runs the full height with its add button
+   pinned at the bottom. The pane stops scrolling as a whole and the two columns
+   scroll independently — which is the point: picking a station no longer means
+   scrolling the roster back into view. Applied by a modifier from Settings.tsx
+   rather than `:has()`, so the rule is explicit about which pane it targets. */
+.settings-pane.pane-fill { display: flex; flex-direction: column; overflow: hidden; }
+.pane-fill > .org-pane { flex: 1 1 auto; min-height: 0; }
+.pane-fill .org-pane > .settings-section { flex: 1 1 auto; min-height: 0; }
+/* Stations renders its layout directly under the pane, Users nests one section
+   deeper; both end at a .member-layout that has to fill what is left. */
+/* `nowrap` is load-bearing, not tidiness. `.member-layout` wraps by default, and
+   in a wrapping flex container the LINE sizes to its content — so `align-items:
+   stretch` stretches the columns to the line rather than constraining them to the
+   container, and the roster grew to its full 16-row height (931px) inside a 461px
+   box instead of scrolling. One line, and stretch means what it says. */
+.pane-fill .member-layout {
+  flex: 1 1 auto;
+  min-height: 0;
+  align-items: stretch;
+  flex-wrap: nowrap;
+}
+.pane-fill .roster-col,
+.pane-fill .station-roster-col { align-self: stretch; min-height: 0; }
+/* The detail scrolls inside its own column now that the pane does not scroll. */
+.pane-fill .member-detail { min-height: 0; overflow-y: auto; }
+
+/* On a narrow viewport the dialog goes full-screen and side-by-side full-height
+   columns stop making sense, so the pane goes back to scrolling as one page. */
+@media (max-width: 780px) {
+  .settings-pane.pane-fill { display: block; overflow-y: auto; }
+  .pane-fill .member-layout { flex-wrap: wrap; }
+  .pane-fill .member-detail { overflow-y: visible; }
 }
 .roster-add,
 .station-roster-add { flex: 0 0 auto; }

@@ -99,7 +99,7 @@ export function SettingsOrganization({
   const member = org.members.find((m) => m.user_id === selected) ?? null;
 
   return (
-    <div className="settings-sections">
+    <div className="settings-sections org-pane">
       <div className="org-subtabs" role="tablist" aria-label="Organisation sections">
         <button
           type="button"
@@ -168,7 +168,7 @@ export function SettingsOrganization({
 
       {section === "people" && (
       <section className="settings-section">
-        <h3>Users</h3>
+
 
         {/* Same shape as Stations: the roster scrolls in its own recessed panel
             on the left, with its add button pinned beneath it, and the selected

@@ -317,10 +317,16 @@ function AdsbMapInner({
       ),
       minZoom: config.min_zoom,
       maxZoom,
-      // On, and not compact: the provider's credit is a licence condition, so it
-      // is shown rather than hidden behind an expandable "i". Fed from each
-      // source's `attribution` above; MapLibre displays only the visible one.
-      attributionControl: { compact: false },
+      // On, and compact. The provider's credit is a licence condition — Esri's
+      // imagery terms and OSM's ODbL both require it — so it is never removed;
+      // compact collapses it to the standard "i" that expands on click, which is
+      // how MapLibre and every major consumer of these tiles present it, and is
+      // what FleetMap already used. This was `compact: false` deliberately, on
+      // the stricter reading that the credit should always be legible; the panel
+      // is small enough that a permanent text box was reading as clutter over
+      // the picture. Fed from each source's `attribution` above; MapLibre
+      // displays only the visible one.
+      attributionControl: { compact: true },
       // Centred on the station, but the operator may drag away to look around;
       // it eases back to centre five seconds after they let go (the dragend
       // handler below). Rotation, pitch and double-click zoom stay off, so a

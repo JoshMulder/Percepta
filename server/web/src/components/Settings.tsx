@@ -127,7 +127,10 @@ export function Settings({
             </button>
           </nav>
 
-          <div className="settings-pane">
+          {/* The Organisation pane fills the dialog instead of scrolling as a
+              whole, so its rosters run full height with the add button pinned.
+              Every other pane keeps the normal scrolling behaviour. */}
+          <div className={`settings-pane${tab === "organization" ? " pane-fill" : ""}`}>
             {tab === "account" && (
               <SettingsAccount me={me} onProfileChanged={onProfileChanged} />
             )}
