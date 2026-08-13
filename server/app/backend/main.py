@@ -5,6 +5,9 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.staticfiles import StaticFiles
+# StaticFiles raises Starlette's HTTPException, of which FastAPI's is a
+# subclass - catching the subclass would not catch it.
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
 from starlette.types import Scope
 
@@ -178,6 +181,18 @@ async def ws(websocket: WebSocket) -> None:
     await websocket_endpoint(websocket)
 
 
+# Top-level paths that are never single-page-app routes. A 404 under any of
+# these stays a 404 rather than becoming the console's index.html.
+_NOT_APP_ROUTES = frozenset({"api", "ws", "assets", "broker", "media", "metrics"})
+
+
+def _is_app_route(path: str, scope: Scope) -> bool:
+    """Whether a path that matched no file should be answered with the console."""
+    if scope.get("method") not in ("GET", "HEAD"):
+        return False
+    return path.split("/", 1)[0] not in _NOT_APP_ROUTES
+
+
 class ConsoleFiles(StaticFiles):
     """Static files with cache headers that suit a hashed-asset build.
 
@@ -204,14 +219,40 @@ class ConsoleFiles(StaticFiles):
             response.headers["Cache-Control"] = "no-cache, must-revalidate"
         return response
 
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        """Serve the app itself for paths that are app routes, not files.
+
+        `html=True` does NOT do this, despite how it reads: it serves index.html
+        for a *directory* request, and answers a missing path with 404. So every
+        deep link 404'd - including /privacy and /terms, which the login page
+        links to and which are therefore reached by full navigation from a
+        signed-out browser.
+
+        The fallback is deliberately narrow. A missing hashed asset must keep
+        404ing, or a half-deployed build answers a stale asset request with HTML
+        and the failure shows up as a syntax error somewhere unrelated. And a
+        mistyped API path must keep 404ing as JSON: this mount catches
+        everything the routers did not, so without the guard `/api/typo` would
+        answer 200 with an HTML page, which is exactly the shape of bug that
+        makes a client retry forever.
+        """
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            # A missing file arrives as a raised 404, not a returned one.
+            if exc.status_code != 404 or not _is_app_route(path, scope):
+                raise
+        return await super().get_response("index.html", scope)
+
 
 # The built console, if it is present. Mounted last so it never shadows /api or
 # /ws, and served same-origin so the HttpOnly session cookie just works and
 # there is no CORS surface at all.
 #
-# html=True makes unknown paths fall back to index.html, which a single-page
-# app needs for deep links. Absent in a backend-only checkout (no `npm run
-# build` yet), in which case the API still serves normally.
+# Deep links fall back to index.html - see ConsoleFiles.get_response, which is
+# where that actually happens; html=True only covers directory requests. Absent
+# in a backend-only checkout (no `npm run build` yet), in which case the API
+# still serves normally.
 _STATIC_DIR = Path("/app/static")
 if _STATIC_DIR.is_dir():
     app.mount("/", ConsoleFiles(directory=_STATIC_DIR, html=True), name="console")
