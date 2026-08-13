@@ -3478,9 +3478,9 @@ body {
 
 /* Collapsed, the credit is just the "i" disc, and the padding above would
    shrink the box out from under it — so put back the room MapLibre reserves.
-   The disc is a background-image on `::after`, absolutely positioned in the
-   corner, which is why the credit looked cut off rather than wrapped: with the
-   24px gone it painted straight over the end of the string. */
+   The disc is the <summary> button, 24px square and absolutely positioned at
+   `right: 0`, which is why the credit looked cut off rather than wrapped: with
+   the 24px gone it painted straight over the end of the string. */
 .maplibregl-ctrl-attrib.maplibregl-compact {
   min-height: 20px;
   padding: 2px 24px 2px 0;
@@ -3497,10 +3497,11 @@ body {
 
 /* The disc itself.
 
-   Not `::after`, despite MapLibre defining a background-image there: that rule
-   sets no `content`, so the pseudo-element never generates a box and never
-   paints (checked - computed content is `none`). The icon you actually see is
-   the background-image on the <summary> button.
+   Styled on the button, not a pseudo-element: 4.7.1's stylesheet carries no
+   `::after` rule for this control at all (checked against the shipped
+   maplibre-gl.css). The icon is the background-image on the <summary> button
+   itself, which the sheet hides by default and shows only under
+   `.maplibregl-compact`.
 
    It ships as a BLACK glyph on a translucent white square, which is legible on
    the light basemaps MapLibre is styled for and invisible on ours - so dropping
