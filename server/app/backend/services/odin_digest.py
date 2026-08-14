@@ -40,6 +40,7 @@ from sqlalchemy import select, text
 
 from backend.database.models.ground_station import GroundStation
 from backend.database.models.organization import Organization
+from backend.services.station_vitals import project_health, project_power
 from backend.database.models.platform_alert import StationMaintenance
 from backend.database.session import PrivilegedSessionLocal
 from backend.realtime.bus import publish_sync
@@ -99,39 +100,17 @@ class OdinDigest:
         self._seen[station_id] = datetime.now(UTC)
         v = self._vitals.setdefault(station_id, {})
 
+        # ONE projection, shared with api/platform.py::_vitals. It used to be a
+        # second hand-written copy, and it had quietly dropped worst_condition,
+        # uplink_offline_seconds and running_version — three fields the preview
+        # drawer renders. Since the wall prefers this feed over the poll whenever
+        # the socket is up, those rows read "—" exactly while the live feed was
+        # healthy. Still trivial and still synchronous: dict lookups and one walk
+        # of a list this branch was already walking to count it.
         if kind == "health":
-            status = payload.get("status")
-            v["health"] = status if isinstance(status, str) else None
-            conditions = payload.get("conditions")
-            v["condition_count"] = len(conditions) if isinstance(conditions, list) else 0
-            uplink = payload.get("uplink")
-            if isinstance(uplink, dict):
-                connected = uplink.get("connected")
-                v["uplink_connected"] = connected if isinstance(connected, bool) else None
-            devices = payload.get("devices")
-            if isinstance(devices, list):
-                slots: dict[str, str] = {}
-                simulated: list[str] = []
-                for d in devices:
-                    if not isinstance(d, dict):
-                        continue
-                    slot = d.get("slot")
-                    if not isinstance(slot, str):
-                        continue
-                    state = d.get("status")
-                    slots[slot] = state if isinstance(state, str) else "unknown"
-                    if d.get("simulated") is True:
-                        simulated.append(slot)
-                v["slots"] = slots
-                v["simulated_slots"] = simulated
+            v.update(project_health(payload))
         elif kind == "power":
-            soc = payload.get("soc_pct")
-            v["soc_pct"] = float(soc) if isinstance(soc, (int, float)) else None
-            load = payload.get("load_w")
-            v["load_w"] = float(load) if isinstance(load, (int, float)) else None
-            mains, gen = payload.get("mains_w"), payload.get("generator_w")
-            if isinstance(mains, (int, float)) or isinstance(gen, (int, float)):
-                v["on_battery"] = (mains or 0) <= 0 and (gen or 0) <= 0
+            v.update(project_power(payload))
 
     def forget(self, station_id: uuid.UUID) -> None:
         self._vitals.pop(station_id, None)

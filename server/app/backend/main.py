@@ -39,6 +39,7 @@ from backend.realtime.endpoint import websocket_endpoint
 from backend.realtime.hub import hub
 from backend.services.power_history import power_history
 from backend.services.weather_history import weather_history
+from backend.services.event_retention import event_retention
 from backend.services.odin_digest import digest as odin_digest
 from backend.services.station_ingest import station_ingest
 
@@ -94,6 +95,10 @@ async def lifespan(app: FastAPI):
     await odin_digest.start()
     await power_history.start()
     await weather_history.start()
+    # The ledger is the only history table that had no retention, and the
+    # one whose size is decided by how much the product is USED rather than
+    # by a sample rate.
+    await event_retention.start()
     # Keeps watched stations streaming. Silence is the stop signal, so this
     # task existing is what makes on-demand video actually stop.
     leases = asyncio.create_task(renew_leases())
@@ -111,6 +116,7 @@ async def lifespan(app: FastAPI):
         leases.cancel()
         audio.cancel()
         dark.cancel()
+        await event_retention.stop()
         await power_history.stop()
         await weather_history.stop()
         await odin_digest.stop()

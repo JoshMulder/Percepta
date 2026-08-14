@@ -50,6 +50,7 @@ from backend.realtime.bus import (
     read_latest_sync,
 )
 from backend.services.audit import record
+from backend.services.station_vitals import project_health, project_power
 from backend.services.station_status import DARK_AFTER, ONLINE_WITHIN, status_for
 
 #: ONLINE_WITHIN and DARK_AFTER are imported above, from
@@ -764,56 +765,11 @@ def _vitals(station_ids: list[uuid.UUID]) -> dict[uuid.UUID, dict]:
             frame = json.loads(blob)
         except (ValueError, TypeError):
             continue
-        v = out[sid]
-        status = frame.get("status")
-        v["health"] = status if isinstance(status, str) else None
-
-        conditions = frame.get("conditions")
-        if isinstance(conditions, list) and conditions:
-            # Ranked by the station's own severity, and the worst one named. The
-            # platform does not re-judge what a station's condition means.
-            order = {"critical": 3, "failing": 3, "warning": 2, "degraded": 2, "info": 1}
-            worst = max(
-                conditions,
-                key=lambda c: order.get(str((c or {}).get("severity", "")), 0),
-            )
-            if isinstance(worst, dict):
-                v["worst_condition"] = (
-                    worst.get("code") or worst.get("name") or worst.get("message")
-                )
-            v["condition_count"] = len(conditions)
-
-        uplink = frame.get("uplink")
-        if isinstance(uplink, dict):
-            connected = uplink.get("connected")
-            v["uplink_connected"] = connected if isinstance(connected, bool) else None
-            offline = uplink.get("offline_seconds")
-            v["uplink_offline_seconds"] = (
-                float(offline) if isinstance(offline, (int, float)) else None
-            )
-
-        devices = frame.get("devices")
-        if isinstance(devices, list):
-            slots: dict[str, str] = {}
-            simulated: list[str] = []
-            for d in devices:
-                if not isinstance(d, dict):
-                    continue
-                slot = d.get("slot")
-                if not isinstance(slot, str):
-                    continue
-                state = d.get("status")
-                slots[slot] = state if isinstance(state, str) else "unknown"
-                if d.get("simulated") is True:
-                    simulated.append(slot)
-            v["slots"] = slots
-            v["simulated_slots"] = sorted(simulated)
-
-        software = frame.get("software")
-        running = (
-            software.get("running_version") if isinstance(software, dict) else None
-        )
-        v["running_version"] = running or frame.get("agent_version")
+        # Projected by services/station_vitals, NOT here. This was a hand-written
+        # copy of the same logic in odin_digest.note, the two had drifted by
+        # three fields, and the copy that was missing them is the one the wall
+        # prefers — so the drawer went blanker when the live feed came UP.
+        out[sid].update(project_health(frame))
 
     for sid, blob in zip(
         station_ids, read_latest_sync([power_snapshot_key(s) for s in station_ids])
@@ -824,18 +780,10 @@ def _vitals(station_ids: list[uuid.UUID]) -> dict[uuid.UUID, dict]:
             frame = json.loads(blob)
         except (ValueError, TypeError):
             continue
-        v = out[sid]
-        soc = frame.get("soc_pct")
-        v["soc_pct"] = float(soc) if isinstance(soc, (int, float)) else None
-        load = frame.get("load_w")
-        v["load_w"] = float(load) if isinstance(load, (int, float)) else None
-        # On battery when neither external source contributes. Null rather than
-        # False when the station reports no figure for either: an off-grid site
-        # has nothing to say here, and guessing would put a battery warning on
-        # every such station in the fleet.
-        mains, gen = frame.get("mains_w"), frame.get("generator_w")
-        if isinstance(mains, (int, float)) or isinstance(gen, (int, float)):
-            v["on_battery"] = (mains or 0) <= 0 and (gen or 0) <= 0
+        # Shared with the digest — see the note on the health half above. The
+        # "on battery" rule (null, not False, when the station reports neither
+        # source) lives in station_vitals with the reason it exists.
+        out[sid].update(project_power(frame))
     return out
 
 
