@@ -3376,9 +3376,11 @@ body {
   height: 30px;
   margin: -15px 0 0 -15px;
   pointer-events: none;
-  /* Spun fast enough that the two blades read as a disc rather than a slow
-     propeller, which is the look FR24 has. */
-  animation: helo-rotor 0.32s linear infinite;
+  /* Fast enough that the two blades read as a rotor rather than a windmill,
+     slow enough to sit quietly on a map somebody is reading. Halved from 0.32s:
+     at that rate the disc was the busiest thing on screen and pulled the eye
+     away from the contacts it was meant to describe. */
+  animation: helo-rotor 0.64s linear infinite;
 }
 .map-contact.rotorcraft .rotor ellipse {
   fill: rgba(232, 238, 245, 0.5);
