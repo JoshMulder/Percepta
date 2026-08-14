@@ -37,7 +37,7 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, tuple_
 from sqlalchemy.orm import Session
 
 from backend.api.platform import NOT_A_FAULT
@@ -200,8 +200,15 @@ def odin_events(
         # cursor at all. SQLAlchemy renders this as a row-value comparison,
         # which Postgres can drive from an index on (received_at, id) and which
         # is exactly "strictly older than the last row I showed".
+        # `tuple_()`, NOT a plain Python tuple of columns.
+        #
+        # `(StationEvent.received_at, StationEvent.id) < (a, b)` is Python's own tuple
+        # comparison over SQLAlchemy objects, and it does not build the row-value
+        # SQL it looks like it builds. It compiled, the request answered 200, and
+        # the second page came back EMPTY — paging that stops after one page and
+        # reports no error, which reads as "there was only one page".
         statement = statement.where(
-            (StationEvent.received_at, StationEvent.id) < (cursor_at, cursor_id)
+            tuple_(StationEvent.received_at, StationEvent.id) < tuple_(cursor_at, cursor_id)
         )
 
     # Ordered by the same tuple the cursor compares on. An ORDER BY that did not

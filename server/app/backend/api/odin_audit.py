@@ -43,7 +43,7 @@ from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import Select, select
+from sqlalchemy import Select, select, tuple_
 from sqlalchemy.orm import Session
 
 from backend.auth.identity import Identity
@@ -262,8 +262,15 @@ def odin_audit(
             # server produced, so a client sending a broken one has
             # corrupted it rather than discovered something.
             raise HTTPException(status_code=400, detail="bad cursor")
+        # `tuple_()`, NOT a plain Python tuple of columns.
+        #
+        # `(AuditLog.created_at, AuditLog.id) < (a, b)` is Python's own tuple
+        # comparison over SQLAlchemy objects, and it does not build the row-value
+        # SQL it looks like it builds. It compiled, the request answered 200, and
+        # the second page came back EMPTY — paging that stops after one page and
+        # reports no error, which reads as "there was only one page".
         statement = statement.where(
-            (AuditLog.created_at, AuditLog.id) < (cursor_at, cursor_id)
+            tuple_(AuditLog.created_at, AuditLog.id) < tuple_(cursor_at, cursor_id)
         )
 
     statement = statement.order_by(
