@@ -29,6 +29,7 @@ from backend.auth.identity import Identity
 from backend.auth.password import hash_password
 from backend.auth.platform import PLATFORM_ORGANIZATION_ID
 from backend.database.models.audit_log import AuditLog
+from backend.database.models.auth_session import AuthSession
 from backend.database.models.enums import UserRole
 from backend.database.models.ground_station import GroundStation
 from backend.database.models.organization import Organization
@@ -77,17 +78,96 @@ def _operator(db: Session, roles: list[str], email: str) -> User:
     return user
 
 
-def _conn(user: User) -> Connection:
+def _conn(db: Session, user: User) -> Connection:
+    """A connection with a REAL auth session behind it.
+
+    `hub.revalidate` checks the session is live before it looks at anything
+    else, so a connection whose session_id names no row is revoked on the first
+    sweep — and every assertion about attaches and groups below would then be
+    testing the session check instead of the thing it names.
+    """
+    session = AuthSession(
+        id=uuid.uuid4(),
+        user_id=user.id,
+        organization_id=PLATFORM_ORGANIZATION_ID,
+        expires_at=datetime.now(UTC) + timedelta(hours=8),
+    )
+    db.add(session)
+    db.commit()
     return Connection(
         ws=_FakeWS(),
         identity=Identity(
             user_id=user.id,
             organization_id=PLATFORM_ORGANIZATION_ID,
-            session_id=uuid.uuid4(),
+            session_id=session.id,
             roles=(UserRole.WATCH.value,),
             is_platform_admin=True,
         ),
     )
+
+
+def _client_as(user_id: uuid.UUID, roles: tuple[str, ...]):
+    """A TestClient whose session is active in the PLATFORM org with `roles`.
+
+    Same shape as test_odin_isolation's, repeated rather than imported: a
+    fixture shared between suites by import is a fixture whose failure blames
+    the wrong file.
+    """
+    from fastapi import Depends
+
+    from backend.auth.dependencies import get_identity
+    from backend.database.dependencies import get_db
+    from backend.database.session import set_request_org_context
+    from backend.main import app
+    from fastapi.testclient import TestClient
+
+    identity = Identity(
+        user_id=user_id,
+        organization_id=PLATFORM_ORGANIZATION_ID,
+        session_id=uuid.uuid4(),
+        roles=roles,
+        is_platform_admin=True,
+    )
+
+    def _identity(session: Session = Depends(get_db)) -> Identity:
+        set_request_org_context(
+            session, organization_id=PLATFORM_ORGANIZATION_ID, bypass=True
+        )
+        return identity
+
+    app.dependency_overrides[get_identity] = _identity
+    client = TestClient(app)
+    client.__enter__()
+    return client
+
+
+@pytest.fixture()
+def watch(db: Session):
+    """An operator on shift: platform access, watch role, nothing else."""
+    from backend.auth.dependencies import get_identity
+    from backend.main import app
+
+    user = _operator(db, [UserRole.WATCH.value], "p5-client-watch@example.test")
+    client = _client_as(user.id, (UserRole.WATCH.value,))
+    try:
+        yield client, user
+    finally:
+        client.__exit__(None, None, None)
+        app.dependency_overrides.pop(get_identity, None)
+
+
+@pytest.fixture()
+def platform_admin(db: Session):
+    from backend.auth.dependencies import get_identity
+    from backend.main import app
+
+    user = _operator(db, [UserRole.ADMIN.value], "p5-client-admin@example.test")
+    client = _client_as(user.id, (UserRole.ADMIN.value,))
+    try:
+        yield client, user
+    finally:
+        client.__exit__(None, None, None)
+        app.dependency_overrides.pop(get_identity, None)
 
 
 @pytest.fixture()
@@ -110,7 +190,7 @@ def _telemetry_groups(hub: Hub, conn: Connection) -> set[str]:
 def test_attach_joins_the_tenants_own_telemetry_group(
     db: Session, hub: Hub, watcher: User, station: GroundStation
 ) -> None:
-    conn = _conn(watcher)
+    conn = _conn(db, watcher)
     assert asyncio.run(hub.attach_station(conn, station.id)) == station.id
     assert _telemetry_groups(hub, conn) == {
         f"org:{station.organization_id}:gsu:{station.id}:telemetry"
@@ -132,7 +212,7 @@ def test_attaching_elsewhere_leaves_the_previous_station(
     db.add(second)
     db.commit()
 
-    conn = _conn(watcher)
+    conn = _conn(db, watcher)
     asyncio.run(hub.attach_station(conn, station.id))
     asyncio.run(hub.attach_station(conn, second.id))
 
@@ -144,7 +224,7 @@ def test_attaching_elsewhere_leaves_the_previous_station(
 def test_attaching_none_detaches(
     db: Session, hub: Hub, watcher: User, station: GroundStation
 ) -> None:
-    conn = _conn(watcher)
+    conn = _conn(db, watcher)
     asyncio.run(hub.attach_station(conn, station.id))
     assert asyncio.run(hub.attach_station(conn, None)) is None
     assert _telemetry_groups(hub, conn) == set()
@@ -156,7 +236,7 @@ def test_a_deactivated_station_cannot_be_attached(
 ) -> None:
     station.is_active = False
     db.commit()
-    conn = _conn(watcher)
+    conn = _conn(db, watcher)
     with pytest.raises(AuthorizationError):
         asyncio.run(hub.attach_station(conn, station.id))
 
@@ -204,7 +284,7 @@ def test_the_tenant_can_reach_an_attached_connection(
     """An operator with a drawer open and NO audio guarded has an empty watch
     set. Revocation walks connections_for_station, so without an explicit branch
     the tenant's own stop lever would miss them entirely."""
-    conn = _conn(watcher)
+    conn = _conn(db, watcher)
     asyncio.run(hub.register(conn))
     asyncio.run(hub.attach_station(conn, station.id))
 
@@ -222,7 +302,7 @@ def test_revalidation_drops_an_attach_and_leaves_the_group(
     counting as a subscriber while it went on receiving a deactivated tenant's
     telemetry — so this asserts on GROUP MEMBERSHIP, not on the field.
     """
-    conn = _conn(watcher)
+    conn = _conn(db, watcher)
     asyncio.run(hub.register(conn))
     asyncio.run(hub.attach_station(conn, station.id))
 
@@ -239,7 +319,7 @@ def test_revalidation_drops_an_attach_and_leaves_the_group(
 def test_losing_the_watch_role_drops_the_attach(
     db: Session, hub: Hub, watcher: User, station: GroundStation
 ) -> None:
-    conn = _conn(watcher)
+    conn = _conn(db, watcher)
     asyncio.run(hub.register(conn))
     asyncio.run(hub.attach_station(conn, station.id))
 
@@ -261,7 +341,7 @@ def test_a_healthy_attach_survives_revalidation(
 ) -> None:
     """A sweep that quietly drops every attach reads exactly like one that
     works, until somebody notices the drawer has stopped updating."""
-    conn = _conn(watcher)
+    conn = _conn(db, watcher)
     asyncio.run(hub.register(conn))
     asyncio.run(hub.attach_station(conn, station.id))
 
