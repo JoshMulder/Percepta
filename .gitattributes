@@ -1,0 +1,27 @@
+# Shell scripts are LF in the working tree, always, on every platform.
+#
+# Git already STORED them as LF — that was never the problem. The problem is the
+# checkout: on Windows, core.autocrlf rewrites them to CRLF on the way out, and
+# bash then reads `set -o pipefail\r` and answers
+#
+#     set: pipefail
+#     : invalid option name
+#
+# ...which failed ten tests in station/tests/test_gsu_update.py on every run of
+# the suite from a Windows checkout. Nothing was wrong with the script, the test
+# or the change being tested, so the failures became background noise — and ten
+# permanently-red tests are how a real failure gets waved past.
+#
+# It is not only a dev-environment annoyance. These scripts are copied into the
+# station image; an image built from a checkout with CRLF endings would ship a
+# `gsu-update.sh` that cannot run at all, on hardware in the field, where the
+# thing it cannot run is the updater. Releases are built on Linux today, so this
+# has never bitten — "today" being the operative word.
+*.sh text eol=lf
+
+# Same argument, same blast radius: these are read by a shell or by systemd on
+# the station, and neither tolerates a stray carriage return.
+*.service text eol=lf
+*.timer text eol=lf
+*.conf text eol=lf
+Dockerfile text eol=lf
