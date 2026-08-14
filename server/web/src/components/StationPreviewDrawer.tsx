@@ -1,4 +1,5 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { ApiError, api } from "../api";
 import type { FleetStation } from "../types";
 
 /**
@@ -144,9 +145,13 @@ const SLOT_FAULTS = new Set(["configured_absent", "stalled", "unsupported"]);
 export function StationPreviewDrawer({
   station,
   onClose,
+  onMaintenanceDeclared,
 }: {
   station: FleetStation | null;
   onClose: () => void;
+  /** Called after a window is declared, so the wall re-reads rather than
+   *  waiting out the slow roster cycle to show the station as silenced. */
+  onMaintenanceDeclared?: () => void;
 }) {
   const closeRef = useRef<HTMLButtonElement>(null);
   // Hooks run on every render including the closed one, so the early return
@@ -413,7 +418,99 @@ export function StationPreviewDrawer({
               scanning for the first. */}
           <Row label="Station id">{station.id}</Row>
         </Section>
+
+        <Maintenance station={station} onDeclared={onMaintenanceDeclared} />
       </div>
     </aside>
+  );
+}
+
+/**
+ * Declare that this station is expected to misbehave, and stop asking about it.
+ *
+ * Suppression happens at RAISE time on the server, so a silenced site produces
+ * no alert rows at all — it cannot fill the rail, cannot chime, and is not
+ * counted as a fault. When the window ends, the next occurrence opens a fresh
+ * alert with an honest first_seen_at rather than one dated to the middle of the
+ * maintenance.
+ *
+ * The reason is required and it is not paperwork. A silenced station with no
+ * stated reason is indistinguishable from a forgotten one, and the next shift
+ * has no way to judge whether the silence is still deliberate — at which point
+ * somebody either drives out to a site that is fine, or leaves a broken one
+ * quiet for a week.
+ */
+function Maintenance({
+  station,
+  onDeclared,
+}: {
+  station: FleetStation;
+  onDeclared?: () => void;
+}) {
+  const [hours, setHours] = useState(4);
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const active = station.maintenance_until
+    ? new Date(station.maintenance_until)
+    : null;
+
+  const declare = async () => {
+    if (!reason.trim()) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.declareMaintenance(station.id, hours * 60, reason.trim());
+      setReason("");
+      onDeclared?.();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Could not start the window.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Section title="Maintenance">
+      {active && (
+        <p className="odin-drawer-note warn">
+          Silenced until {active.toLocaleString()} — {station.maintenance_reason}
+        </p>
+      )}
+      <div className="odin-maint">
+        <label>
+          <span className="pref-label">For</span>
+          <select
+            value={hours}
+            onChange={(e) => setHours(Number(e.target.value))}
+            disabled={busy}
+          >
+            <option value={1}>1 hour</option>
+            <option value={4}>4 hours</option>
+            <option value={12}>12 hours</option>
+            <option value={24}>1 day</option>
+            <option value={72}>3 days</option>
+          </select>
+        </label>
+        <input
+          type="text"
+          value={reason}
+          maxLength={200}
+          placeholder="Reason — required"
+          onChange={(e) => setReason(e.target.value)}
+          disabled={busy}
+        />
+        <button
+          type="button"
+          className="btn ghost"
+          disabled={busy || !reason.trim()}
+          onClick={() => void declare()}
+        >
+          {active ? "Extend" : "Silence"}
+        </button>
+      </div>
+      {error && <p className="odin-drawer-note warn">{error}</p>}
+    </Section>
   );
 }

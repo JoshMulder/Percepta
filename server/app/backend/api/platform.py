@@ -33,6 +33,7 @@ from backend.database.dependencies import get_db
 from backend.database.models.enums import UserRole
 from backend.database.models.ground_station import GroundStation
 from backend.database.models.organization import Organization
+from backend.database.models.platform_alert import StationMaintenance
 from backend.database.models.organization_membership import OrganizationMembership
 from backend.database.models.station_event import StationEvent
 from backend.database.models.station_grant import StationGrant
@@ -178,6 +179,12 @@ class FleetStation(BaseModel):
     #: real. The station is authoritative about this; the platform is not.
     simulated_slots: list[str] = []
     running_version: str | None = None
+    #: An active maintenance window, if any. Present on BOTH this and the pushed
+    #: digest: the client swaps between the two sources, and a field in one and
+    #: not the other is not a gap, it is a crash — see the position fields, which
+    #: taught that lesson the expensive way.
+    maintenance_until: str | None = None
+    maintenance_reason: str | None = None
 
 
 class FleetEvent(BaseModel):
@@ -851,6 +858,21 @@ def fleet(
 
     vitals = _vitals([station.id for station, _ in rows])
 
+    # Active suppression windows, one query for the fleet.
+    windows: dict[uuid.UUID, tuple[str, str]] = {
+        sid: (until.isoformat(), reason)
+        for sid, until, reason in db.execute(
+            select(
+                StationMaintenance.ground_station_id,
+                StationMaintenance.until_at,
+                StationMaintenance.reason,
+            ).where(
+                StationMaintenance.from_at <= now,
+                StationMaintenance.until_at > now,
+            )
+        ).all()
+    }
+
     stations: list[FleetStation] = []
     for station, org_name in rows:
         status, dark = _station_status(station.last_seen_at, now)
@@ -885,6 +907,8 @@ def fleet(
             slots=v.get("slots", {}),
             simulated_slots=v.get("simulated_slots", []),
             running_version=v.get("running_version"),
+            maintenance_until=windows.get(station.id, (None, None))[0],
+            maintenance_reason=windows.get(station.id, (None, None))[1],
         ))
 
     org_flags = db.execute(select(Organization.is_active)).scalars().all()

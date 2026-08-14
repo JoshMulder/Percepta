@@ -398,7 +398,18 @@ export function StationTile({
             synthetic, while this only says the record was created as a demo.
             Same marker, and its placement is its scope — here it covers the
             station, on a glyph it covers that one device. */}
-        {station.is_simulated && (
+        {station.maintenance_until && (
+        // Deliberately quiet, not healthy. A silenced station raises nothing,
+        // so without this marker it looks exactly like a site with nothing
+        // wrong — and "we know about it" is not "it is fine".
+        <span
+          className="odin-tile-maint"
+          title={`Silenced: ${station.maintenance_reason ?? "no reason given"}`}
+        >
+          HUSH
+        </span>
+      )}
+      {station.is_simulated && (
           // Spelled out. It was an empty span styled for text, which measured
           // 10x2px — an amber sliver nobody would read at three metres, guarding
           // the one rule that says a wall must never show synthetic numbers as

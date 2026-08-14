@@ -190,7 +190,11 @@ export function OdinWall({
         )}
       </div>
 
-      <StationPreviewDrawer station={selected} onClose={close} />
+      <StationPreviewDrawer
+        station={selected}
+        onClose={close}
+        onMaintenanceDeclared={refreshAlerts}
+      />
     </div>
   );
 }

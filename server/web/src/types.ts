@@ -654,6 +654,12 @@ export interface FleetStation {
    *  real. The station is authoritative about this; the platform is not. */
   simulated_slots?: string[];
   running_version?: string | null;
+  /** An active maintenance window. A station inside one raises nothing, so
+   *  without this the wall would show a deliberately-silenced site exactly like
+   *  a healthy one — and "we know about it" and "it is fine" are not the same
+   *  thing to the person on shift. */
+  maintenance_until?: string | null;
+  maintenance_reason?: string | null;
 }
 
 export interface FleetEvent {

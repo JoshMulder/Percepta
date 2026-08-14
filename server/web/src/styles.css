@@ -4730,6 +4730,47 @@ body {
   background: var(--odin-warn);
 }
 
+/* Deliberately silenced. Neutral rather than amber: a maintenance window is a
+   decision somebody made, not a fault, and spending an attention colour on it
+   would make the wall shout about its own paperwork. */
+.odin-tile-maint {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 0 0.25rem;
+  border: 1px solid #46586a;
+  border-radius: 2px;
+  color: #8fa3b3;
+  font: 700 8px/1.05rem var(--mono);
+  letter-spacing: 0.08em;
+}
+
+/* The drawer's maintenance control. */
+.odin-maint {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.35rem;
+}
+.odin-maint select,
+.odin-maint input {
+  background: #0b1016;
+  border: 1px solid var(--odin-line);
+  border-radius: 2px;
+  color: #dde6ed;
+  font: 12px var(--sans);
+  padding: 0.2rem 0.35rem;
+}
+.odin-maint input { flex: 1 1 8rem; min-width: 0; }
+.odin-drawer-note {
+  margin: 0.25rem 0 0;
+  font-size: 11px;
+  color: #6c8092;
+}
+.odin-drawer-note.warn { color: var(--odin-warn); }
+
 /* Something about this station changed in the last minute. Motion is the alarm
    channel on a wall nobody is staring at, so it is spent only on change and it
    decays on its own rather than needing to be dismissed. */

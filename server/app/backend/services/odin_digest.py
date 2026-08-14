@@ -40,6 +40,7 @@ from sqlalchemy import select, text
 
 from backend.database.models.ground_station import GroundStation
 from backend.database.models.organization import Organization
+from backend.database.models.platform_alert import StationMaintenance
 from backend.database.session import PrivilegedSessionLocal
 from backend.realtime.bus import publish_sync
 from backend.realtime.odin import WALL_CHANNEL
@@ -227,6 +228,33 @@ class OdinDigest:
                     GroundStation.is_active.is_(True), Organization.is_active.is_(True)
                 )
             ).all()
+        # Active maintenance, in the same slow cycle. A suppressed station must
+        # read as DELIBERATELY quiet rather than as healthy: a silenced site
+        # raises nothing, so without this the wall shows it exactly like a site
+        # with nothing wrong, and the difference between "we know" and "we are
+        # fine" is the whole reason the window was declared.
+        windows: dict[uuid.UUID, tuple[str, str]] = {}
+        with PrivilegedSessionLocal() as db2:
+            db2.execute(
+                text(
+                    "SELECT set_config('app.current_org', :org, true), "
+                    "set_config('app.bypass', 'on', true)"
+                ),
+                {"org": str(uuid.UUID(int=0))},
+            )
+            now = datetime.now(UTC)
+            for sid, until, reason in db2.execute(
+                select(
+                    StationMaintenance.ground_station_id,
+                    StationMaintenance.until_at,
+                    StationMaintenance.reason,
+                ).where(
+                    StationMaintenance.from_at <= now,
+                    StationMaintenance.until_at > now,
+                )
+            ).all():
+                windows[sid] = (until.isoformat(), reason)
+
         out: dict[uuid.UUID, dict] = {}
         for (
             sid, name, org_id, org_name, simulated, last_seen,
@@ -243,6 +271,8 @@ class OdinDigest:
                 "region": region,
                 "model": None,
                 "config_version": config_version,
+                "maintenance_until": windows.get(sid, (None, None))[0],
+                "maintenance_reason": windows.get(sid, (None, None))[1],
             }
             # Seed liveness from the database for stations that have not sent a
             # frame since this process started. Without it a wall that comes up
