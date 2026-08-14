@@ -51,7 +51,10 @@ from sqlalchemy import select, update
 
 from backend.core.config import settings
 from backend.database.models.ground_station import GroundStation
-from backend.database.session import PrivilegedSessionLocal
+from backend.database.session import (
+    PrivilegedSessionLocal,
+    set_request_org_context,
+)
 from backend.realtime.bus import (
     ADSB_SNAPSHOT_TTL,
     HEALTH_SNAPSHOT_TTL,
@@ -63,6 +66,7 @@ from backend.realtime.bus import (
 )
 from backend.realtime.hub import hub
 from backend.services import geocode, station_events, station_topics
+from backend.services import alert_engine
 from backend.services.enrolment import has_valid_credential
 from backend.services.odin_digest import digest
 
@@ -579,14 +583,71 @@ class StationIngest:
         """
         if self._redis is None:
             return
+        key = health_snapshot_key(station_id)
+        # Read the frame we are ABOUT to replace. The alert engine needs the
+        # difference between this health frame and the last one — a condition
+        # appearing is a fault starting, a condition disappearing is one ending
+        # — and this is the only place the previous frame still exists. Asking
+        # the database instead would put a round trip on the ingest loop for
+        # every health frame from every station.
+        previous = None
         try:
-            await self._redis.setex(
-                health_snapshot_key(station_id),
-                HEALTH_SNAPSHOT_TTL,
-                json.dumps(payload),
-            )
+            raw = await self._redis.get(key)
+            if raw:
+                previous = json.loads(raw)
+        except Exception:  # noqa: BLE001
+            previous = None
+
+        try:
+            await self._redis.setex(key, HEALTH_SNAPSHOT_TTL, json.dumps(payload))
         except Exception:  # noqa: BLE001 - a cache write must never stop ingest
             log.debug("Could not cache health for %s.", station_id, exc_info=True)
+
+        await self._alert_on_health(station_id, previous, payload)
+
+    async def _alert_on_health(
+        self, station_id: uuid.UUID, previous: dict | None, current: dict
+    ) -> None:
+        """Hand the condition diff to the alert engine, off this loop.
+
+        On a thread because it opens a transaction, and the ingest loop carries
+        every frame from every station. Skipped entirely when nothing changed,
+        which is the overwhelmingly common case: a station reports the same
+        (usually empty) condition set every thirty seconds for weeks.
+        """
+        before = {
+            c.get("id") for c in (previous or {}).get("conditions", []) or []
+            if isinstance(c, dict)
+        }
+        after = {
+            c.get("id") for c in current.get("conditions", []) or []
+            if isinstance(c, dict)
+        }
+        if before == after:
+            return
+
+        organization_id = await self._organization(station_id)
+        if organization_id is None:
+            return
+
+        def _run() -> None:
+            with PrivilegedSessionLocal() as db:
+                set_request_org_context(db, organization_id=organization_id, bypass=True)
+                alert_engine.on_health(
+                    db,
+                    organization_id=organization_id,
+                    station_id=station_id,
+                    previous=previous,
+                    current=current,
+                )
+                db.commit()
+
+        try:
+            await asyncio.to_thread(_run)
+        except Exception:  # noqa: BLE001 - alerting must never stall ingest
+            log.warning(
+                "Alert engine failed on health from %s.", station_id, exc_info=True
+            )
 
     async def _cache_power(self, station_id: uuid.UUID, payload: dict) -> None:
         """Keep this station's latest power frame in Redis.

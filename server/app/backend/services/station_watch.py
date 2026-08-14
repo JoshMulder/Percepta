@@ -32,7 +32,11 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 
 from backend.database.models.ground_station import GroundStation
-from backend.database.session import PrivilegedSessionLocal
+from backend.database.session import (
+    PrivilegedSessionLocal,
+    set_request_org_context,
+)
+from backend.services import alert_engine
 from backend.realtime.hub import hub
 from backend.services.station_status import DARK_AFTER
 
@@ -63,9 +67,12 @@ def _active_stations() -> list[tuple[uuid.UUID, uuid.UUID, datetime | None]]:
                 GroundStation.id,
                 GroundStation.organization_id,
                 GroundStation.last_seen_at,
+                GroundStation.name,
             ).where(GroundStation.is_active.is_(True))
         ).all()
-    return [(row.id, row.organization_id, row.last_seen_at) for row in rows]
+    return [
+        (row.id, row.organization_id, row.last_seen_at, row.name) for row in rows
+    ]
 
 
 async def _scan(alerted: set[uuid.UUID]) -> None:
@@ -73,19 +80,38 @@ async def _scan(alerted: set[uuid.UUID]) -> None:
     cutoff = now - timedelta(seconds=DARK_AFTER_SECONDS)
     rows = await asyncio.to_thread(_active_stations)
 
-    dark: dict[uuid.UUID, tuple[uuid.UUID, datetime]] = {
-        station_id: (organization_id, last_seen)
-        for station_id, organization_id, last_seen in rows
+    dark: dict[uuid.UUID, tuple[uuid.UUID, datetime, str]] = {
+        station_id: (organization_id, last_seen, name)
+        for station_id, organization_id, last_seen, name in rows
         # A null last_seen_at is a station that has never once connected — a
         # provisioning state, not a death — so it is left to enrolment rather
         # than announced as gone dark.
         if last_seen is not None and last_seen < cutoff
     }
 
-    for station_id, (organization_id, last_seen) in dark.items():
+    for station_id, (organization_id, last_seen, name) in dark.items():
+        minutes = int((now - last_seen).total_seconds() // 60)
+
+        # Durable first. `open_or_touch` is idempotent on
+        # (station, 'platform.station.dark'), so a station that has been dark
+        # for a week produces ONE row whose occurrence count goes up, and a
+        # restart of this process cannot re-announce it.
+        #
+        # That is the bug this replaces. The `alerted` set below lived in
+        # memory: every deploy forgot it, and every currently-dark station was
+        # announced afresh as though it had just died. On a platform redeployed
+        # several times an afternoon, that is the alarm that teaches everybody
+        # to ignore alarms.
+        try:
+            await asyncio.to_thread(
+                _record_dark, organization_id, station_id, name, minutes
+            )
+        except Exception:  # noqa: BLE001 - never let alerting end the scan
+            log.warning("Could not record a dark alert for %s.", station_id,
+                        exc_info=True)
+
         if station_id in alerted:
             continue
-        minutes = int((now - last_seen).total_seconds() // 60)
         await hub.publish_status(
             organization_id,
             station_id,
@@ -101,11 +127,54 @@ async def _scan(alerted: set[uuid.UUID]) -> None:
             station_id, minutes,
         )
 
-    # Forget any that have since been heard from (or been removed), so a station
-    # that recovers and dies again is announced again rather than swallowed as a
-    # duplicate.
+    # Heard from again, or removed. The in-memory set still exists because it
+    # is what suppresses the repeated LIVE announcement on the org channel;
+    # the durable half is closed here so the rail stops showing a fault that
+    # has ended.
     for station_id in [s for s in alerted if s not in dark]:
         alerted.discard(station_id)
+        try:
+            await asyncio.to_thread(_clear_dark, station_id)
+        except Exception:  # noqa: BLE001
+            log.warning("Could not close the dark alert for %s.", station_id,
+                        exc_info=True)
+
+
+def _record_dark(
+    organization_id: uuid.UUID, station_id: uuid.UUID, name: str, minutes: int
+) -> None:
+    with PrivilegedSessionLocal() as db:
+        set_request_org_context(db, organization_id=organization_id, bypass=True)
+        alert_engine.on_dark(
+            db,
+            organization_id=organization_id,
+            station_id=station_id,
+            station_name=name,
+            minutes=minutes,
+        )
+        db.commit()
+
+
+def _clear_dark(station_id: uuid.UUID) -> None:
+    with PrivilegedSessionLocal() as db:
+        # The station's own organisation, looked up rather than passed in: a
+        # station that has RECOVERED is by definition no longer in the dark map
+        # the caller is iterating, so its org is not to hand. One extra query on
+        # a rare path.
+        #
+        # Not None: set_request_org_context stringifies whatever it is given
+        # into a `::uuid` cast, and "None" is not a uuid — the row-level policy
+        # would error rather than fall through to the bypass clause.
+        organization_id = db.execute(
+            select(GroundStation.organization_id).where(
+                GroundStation.id == station_id
+            )
+        ).scalar_one_or_none()
+        if organization_id is None:
+            return
+        set_request_org_context(db, organization_id=organization_id, bypass=True)
+        alert_engine.on_heard_again(db, station_id=station_id)
+        db.commit()
 
 
 async def watch() -> None:

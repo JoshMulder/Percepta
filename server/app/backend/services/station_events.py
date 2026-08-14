@@ -42,6 +42,8 @@ from backend.database.models.station_event import StationEvent
 
 log = logging.getLogger(__name__)
 
+from backend.services import alert_engine  # noqa: E402  (cycle-free at runtime)
+
 #: Caps from `contract/transport.md`. A batch over any of them is a station
 #: bug; the events are still taken, because dropping a site's history to
 #: punish a formatting error is the wrong trade.
@@ -175,6 +177,40 @@ def accept_batch(
                 constraint="uq_station_event_id"
             )
         )
+
+        # The alert engine sees the same batch, in the SAME transaction as the
+        # rows that caused it: an alert and its evidence commit together or not
+        # at all. It decides for itself what is worth raising — most of these
+        # are not, and the refusals are the point (services/alerts/rules.py).
+        #
+        # Inside the try, and before the commit. An earlier draft put this after
+        # `db.commit()`, where the comment above was simply false: the events
+        # were already durable, and the alerts were left in a transaction
+        # nothing ever committed.
+        # A SAVEPOINT, so the two outcomes are both correct: on success the
+        # alerts commit with their evidence, and on failure only the alerts are
+        # discarded. A plain try/except cannot do that — rolling back the
+        # session would take the events with it, and not rolling back would
+        # leave a poisoned transaction that fails at commit anyway, which is the
+        # same outcome dressed up.
+        #
+        # Alerting must never cost a station its history. The history is the
+        # record; the alert is a convenience built on top of it.
+        try:
+            with db.begin_nested():
+                alert_engine.on_events(
+                    db,
+                    organization_id=organization_id,
+                    station_id=station_id,
+                    events=[e for e in events if isinstance(e, dict)],
+                )
+        except Exception:  # noqa: BLE001
+            log.warning(
+                "Alert engine failed on a batch from %s; the events are kept.",
+                station_id,
+                exc_info=True,
+            )
+
         db.commit()
 
     if refused:

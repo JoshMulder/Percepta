@@ -24,13 +24,35 @@ def _capture(monkeypatch) -> list[tuple]:
 
 
 def _stations(monkeypatch, rows) -> None:
-    monkeypatch.setattr(station_watch, "_active_stations", lambda: rows)
+    """Stand in for the roster query.
+
+    Rows are (station_id, organization_id, last_seen, name). The name was added
+    when dark alerts became durable — the alert's message names the site, since
+    "a station has gone dark" is not actionable and "Kennels Road has gone dark"
+    is. Callers may pass 3-tuples; a name is filled in, so the tests that do not
+    care about it stay readable.
+    """
+    filled = [r if len(r) == 4 else (*r, "Test Station") for r in rows]
+    monkeypatch.setattr(station_watch, "_active_stations", lambda: filled)
+
+
+def _no_database(monkeypatch) -> None:
+    """These tests exercise the LIVE announcement, not the durable alert.
+
+    The durable half opens a real transaction against a station that does not
+    exist in this test's database, and its failure is already swallowed by
+    design (alerting must never end the scan). Stubbing it keeps the failure out
+    of the logs and keeps these tests about the thing they are named for.
+    """
+    monkeypatch.setattr(station_watch, "_record_dark", lambda *a, **k: None)
+    monkeypatch.setattr(station_watch, "_clear_dark", lambda *a, **k: None)
 
 
 def test_a_dark_station_is_announced_once(monkeypatch):
     org, station = uuid.uuid4(), uuid.uuid4()
     dark_since = datetime.now(UTC) - timedelta(minutes=30)
     calls = _capture(monkeypatch)
+    _no_database(monkeypatch)
     _stations(monkeypatch, [(station, org, dark_since)])
 
     alerted: set[uuid.UUID] = set()
@@ -52,6 +74,7 @@ def test_a_live_or_never_seen_station_is_not_announced(monkeypatch):
     recent = (uuid.uuid4(), org, datetime.now(UTC) - timedelta(seconds=30))
     never = (uuid.uuid4(), org, None)  # provisioning, not a death
     calls = _capture(monkeypatch)
+    _no_database(monkeypatch)
     _stations(monkeypatch, [recent, never])
 
     asyncio.run(station_watch._scan(set()))
@@ -62,6 +85,7 @@ def test_a_recovered_station_can_go_dark_again(monkeypatch):
     org, station = uuid.uuid4(), uuid.uuid4()
     dark_since = datetime.now(UTC) - timedelta(minutes=30)
     calls = _capture(monkeypatch)
+    _no_database(monkeypatch)
     alerted: set[uuid.UUID] = set()
 
     _stations(monkeypatch, [(station, org, dark_since)])
