@@ -157,7 +157,12 @@ function FleetMapInner({
     const existing = stationMarkers.current;
     const seen = new Set<string>();
     const located = stations.filter(
-      (s) => s.latitude !== null && s.longitude !== null,
+      // Number.isFinite, not `!== null`. The old test admitted `undefined` and
+      // `NaN` — and when a station arrived without its coordinates at all, both
+      // passed straight through and maplibre threw "Invalid LngLat object:
+      // (NaN, NaN)", taking the entire platform view down with it. A guard for
+      // one particular absent value is not a guard.
+      (s) => Number.isFinite(s.latitude) && Number.isFinite(s.longitude),
     );
 
     for (const s of located) {

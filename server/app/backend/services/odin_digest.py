@@ -67,8 +67,12 @@ class OdinDigest:
         #: by the publisher. No lock: both run on the same event loop, and a
         #: dict assignment is not interruptible by it.
         self._vitals: dict[uuid.UUID, dict[str, Any]] = {}
-        #: station_id -> (name, organisation_id, organisation_name, simulated).
-        self._roster: dict[uuid.UUID, tuple[str, str, str, bool]] = {}
+        #: station_id -> the identity half of a FleetStation: everything the
+        #: wall needs that does not come from telemetry. It must carry the SAME
+        #: field set the polled endpoint returns, because the client swaps
+        #: between the two sources and a field present in one and absent in the
+        #: other is a crash rather than a gap.
+        self._roster: dict[uuid.UUID, dict] = {}
         #: station_id -> last_seen, so the digest can derive liveness without
         #: asking the database for it every frame.
         self._seen: dict[uuid.UUID, datetime] = {}
@@ -147,7 +151,7 @@ class OdinDigest:
 
     # --- the slow paths --------------------------------------------------
 
-    def _read_roster(self) -> dict[uuid.UUID, tuple[str, str, str, bool]]:
+    def _read_roster(self) -> dict[uuid.UUID, dict]:
         with PrivilegedSessionLocal() as db:
             rows = db.execute(
                 select(
@@ -157,15 +161,39 @@ class OdinDigest:
                     Organization.name,
                     GroundStation.is_simulated,
                     GroundStation.last_seen_at,
+                    # Position, and it is not optional decoration: the fleet map
+                    # places a marker per station and a missing coordinate
+                    # becomes NaN rather than "no position". Leaving these out
+                    # of the digest crashed the whole platform view the moment
+                    # the wall switched from the poll to the push.
+                    GroundStation.latitude,
+                    GroundStation.longitude,
+                    GroundStation.locality,
+                    GroundStation.region,
+                    GroundStation.config_version,
                 )
                 .join(Organization, GroundStation.organization_id == Organization.id)
                 .where(
                     GroundStation.is_active.is_(True), Organization.is_active.is_(True)
                 )
             ).all()
-        out: dict[uuid.UUID, tuple[str, str, str, bool]] = {}
-        for sid, name, org_id, org_name, simulated, last_seen in rows:
-            out[sid] = (name, str(org_id), org_name, bool(simulated))
+        out: dict[uuid.UUID, dict] = {}
+        for (
+            sid, name, org_id, org_name, simulated, last_seen,
+            lat, lon, locality, region, config_version,
+        ) in rows:
+            out[sid] = {
+                "name": name,
+                "organization_id": str(org_id),
+                "organization_name": org_name,
+                "is_simulated": bool(simulated),
+                "latitude": lat,
+                "longitude": lon,
+                "locality": locality,
+                "region": region,
+                "model": None,
+                "config_version": config_version,
+            }
             # Seed liveness from the database for stations that have not sent a
             # frame since this process started. Without it a wall that comes up
             # after a restart shows every quiet station as "never seen" until it
@@ -200,17 +228,14 @@ class OdinDigest:
     def _frame(self) -> dict:
         now = datetime.now(UTC)
         stations = []
-        for sid, (name, org_id, org_name, simulated) in self._roster.items():
+        for sid, identity in self._roster.items():
             status, dark = status_for(self._seen.get(sid), now=now)
             last_seen = self._seen.get(sid)
             stations.append({
                 "id": str(sid),
-                "name": name,
-                "organization_id": org_id,
-                "organization_name": org_name,
+                **identity,
                 "status": status,
                 "dark": dark,
-                "is_simulated": simulated,
                 "last_seen_at": last_seen.isoformat() if last_seen else None,
                 **self._vitals.get(sid, {}),
             })
