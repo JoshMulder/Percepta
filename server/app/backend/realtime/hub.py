@@ -131,7 +131,10 @@ class Hub:
         watching = [
             c
             for c in self._connections
-            if c.watch and org_id in self._watch_orgs(c)
+            # `or c.attached` matters: an operator who has opened one station's
+            # drawer without guarding any audio has an EMPTY watch set and a live
+            # telemetry subscription, and would have been missed entirely.
+            if (c.watch or c.attached is not None) and org_id in self._watch_orgs(c)
         ]
         direct = [c for c in self._connections if c.organization_id == org_id]
         return list({id(c): c for c in direct + watching}.values())
@@ -170,6 +173,10 @@ class Hub:
             if c.station_id == station_id
             or station_id in c.visible_stations
             or station_id in c.watch
+            # ...and the same argument for a telemetry attach. A drawer left
+            # open on a station the tenant then deactivates would otherwise go
+            # on receiving its readings, silently, until the sweep noticed.
+            or c.attached == station_id
         ]
 
     def close_connection(self, conn: Connection, *, reason: str) -> None:
@@ -354,6 +361,101 @@ class Hub:
         conn.watch.discard(station_id)
         for group in list(self.groups.groups_of(conn)):
             if group.endswith(f":gsu:{station_id}:audio"):
+                await self._leave(conn, group)
+
+    async def attach_station(
+        self, conn: Connection, station_id: uuid.UUID | None
+    ) -> uuid.UUID | None:
+        """Read live telemetry from ONE station. `None` detaches.
+
+        The deliberate reach. Everything else ODIN does is fleet-wide and
+        pre-computed — a 3-second digest of vitals the ingest already had — and
+        this is the one place an operator spends a real subscription on one site
+        because they have decided to look at it.
+
+        ONE AT A TIME, enforced here rather than asked of the client. The
+        telemetry stream is undifferentiated: adsb, power, radio, light, weather
+        and health all arrive on it, so an attach costs that site's full ADS-B
+        feed at 1 Hz whether or not anybody wanted the aircraft. That is a fair
+        price for the station somebody is actually looking at and an absurd one
+        multiplied by a fleet, which is why the drawer attaches on open and
+        detaches on close rather than accumulating.
+
+        Authorised exactly like `watch_join`, and for the same reason — the
+        station belongs to somebody else. The organisation in the group name is
+        resolved from the station row on an elevated session, never from the
+        client, because a client that could name its own org could name anyone's.
+
+        NOT `select_station` / `subscribe`. Those build the group from
+        `conn.organization_id`, which for an ODIN operator is the platform org —
+        producing `org:{platform}:gsu:{station}:telemetry`, a group nobody
+        publishes to. The failure would be SILENCE, not an error: a drawer that
+        connects, subscribes, reports success and never updates.
+        """
+        from backend.auth.odin import odin_capabilities_for
+
+        # Detach first, always, including when re-attaching elsewhere. Leaving
+        # the old group after joining a new one would briefly bill two stations;
+        # leaving it never is how a wall ends up subscribed to every site an
+        # operator looked at all shift.
+        await self._detach(conn)
+        if station_id is None:
+            return None
+
+        def _resolve() -> tuple[uuid.UUID | None, frozenset]:
+            with SessionLocal() as db:
+                self._bind_org(db, conn)
+                if not self._is_watch_staff(db, conn):
+                    return None, frozenset()
+                # Elevated for these two reads only — see watch_join for the
+                # full note on why this is the one place that asks.
+                set_request_org_context(
+                    db, organization_id=conn.organization_id, bypass=True
+                )
+                caps = odin_capabilities_for(db, station_id=station_id)
+                if not caps:
+                    return None, frozenset()
+                org = db.execute(
+                    select(GroundStation.organization_id).where(
+                        GroundStation.id == station_id
+                    )
+                ).scalar_one_or_none()
+                return org, caps
+
+        organization_id, capabilities = await asyncio.to_thread(_resolve)
+        if organization_id is None or Capability.TELEMETRY_VIEW not in capabilities:
+            raise AuthorizationError("station not available")
+
+        group = station_group(organization_id, station_id, "telemetry")
+        await self._join(conn, group)
+        conn.attached = station_id
+
+        # Audited against the WATCHED tenant, like every other cross-tenant
+        # reach. Reading a customer's live instruments is a smaller thing than
+        # listening to their radio and a larger one than looking at the wall, and
+        # it belongs in the same trail as both.
+        await asyncio.to_thread(
+            audit.record,
+            action="odin.attach.telemetry",
+            organization_id=organization_id,
+            actor_user_id=conn.user_id,
+            target_type="ground_station",
+            target_id=str(station_id),
+            ground_station_id=station_id,
+        )
+        return station_id
+
+    async def _detach(self, conn: Connection) -> None:
+        """Leave whatever telemetry group this connection holds.
+
+        Matches on the SUFFIX rather than rebuilding the group name from
+        `conn.attached`, so a connection cannot be left in a group whose id it has
+        already forgotten — which is the exact shape of the bug that leaves a
+        deactivated tenant's telemetry flowing to somebody who has moved on.
+        """
+        conn.attached = None
+        for group in list(self.groups.groups_of(conn)):
+            if group.endswith(":telemetry") and group.startswith("org:"):
                 await self._leave(conn, group)
 
     async def watch_set(
@@ -567,10 +669,18 @@ class Hub:
         """
         from backend.auth.odin import odin_capabilities_for_all
 
-        was = frozenset(conn.watch)
+        # Both the audio guard set and the telemetry attach, re-checked
+        # together. They are separate fields because they are separate ideas,
+        # but they are revoked by exactly the same two facts — is this person
+        # still watch staff, and is that station still active — so asking twice
+        # would be two chances to answer differently.
+        was = frozenset(conn.watch) | (
+            {conn.attached} if conn.attached is not None else set()
+        )
 
         if not self._is_watch_staff(db, conn):
             conn.watch = set()
+            conn.attached = None
             return was
 
         # RLS BYPASSED, DELIBERATELY AND NARROWLY. The guarded stations belong to
@@ -581,8 +691,11 @@ class Hub:
             db, organization_id=conn.organization_id, bypass=True
         )
         try:
-            allowed = odin_capabilities_for_all(db, station_ids=list(conn.watch))
-            conn.watch = {sid for sid, caps in allowed.items() if caps}
+            allowed = odin_capabilities_for_all(db, station_ids=sorted(was))
+            live = {sid for sid, caps in allowed.items() if caps}
+            conn.watch = conn.watch & live
+            if conn.attached is not None and conn.attached not in live:
+                conn.attached = None
         finally:
             # Put it back before anything else runs on this session. The session
             # closes immediately today; leaving an elevated context behind for
@@ -591,7 +704,10 @@ class Hub:
             set_request_org_context(
                 db, organization_id=conn.organization_id, bypass=False
             )
-        return was - frozenset(conn.watch)
+        still = frozenset(conn.watch) | (
+            {conn.attached} if conn.attached is not None else frozenset()
+        )
+        return was - still
 
     def _revalidate_one(
         self, conn: Connection
@@ -618,7 +734,7 @@ class Hub:
                     organization_id=conn.organization_id,
                 )
             )
-            if conn.watch:
+            if conn.watch or conn.attached is not None:
                 dropped = self._revalidate_watch(db, conn)
                 return True, frozenset(), dropped
 
@@ -657,7 +773,12 @@ class Hub:
         # receiving the audio — the fan-out is driven by group membership, not by
         # that set.
         for station_id in dropped_watch:
+            # Both, unconditionally. Each is a no-op for a station it does not
+            # apply to, and calling only the one the code THINKS applies is how
+            # a group outlives the field that recorded it.
             await self.watch_leave(conn, station_id)
+            if conn.attached == station_id or conn.attached is None:
+                await self._detach(conn)
         if dropped_watch:
             conn.enqueue({
                 "type": "watch_revoked",

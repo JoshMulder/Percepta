@@ -131,7 +131,11 @@ describe("UserMenu", () => {
     await waitFor(() => expect(switchOrganization).toHaveBeenCalledWith("o2"));
   });
 
-  it("says which organisations are somebody else's", async () => {
+  it("says which organisations are somebody else's, before the click", async () => {
+    // The visible "platform" pill was removed: it shared a corner with the
+    // current-org tick, so three marks were competing to say two things. The
+    // warning itself is not gone — it moved to the row's title, which is where
+    // a caution about what a click will DO belongs.
     orgs.mockResolvedValue([
       { id: "o1", name: "Kennels Road", is_member: true },
       { id: "o2", name: "Another Tenant", is_member: false },
@@ -140,10 +144,28 @@ describe("UserMenu", () => {
     await click(screen.getByRole("button", { name: /Pilot/ }));
     await waitFor(() => expect(items().length).toBe(4));
 
-    const notes = Array.from(document.querySelectorAll(".user-menu-note")).map(
-      (e) => e.textContent,
-    );
-    expect(notes).toEqual(["platform"]);
+    const foreign = screen.getByRole("menuitem", { name: /Another Tenant/ });
+    expect(foreign.getAttribute("title")).toMatch(/platform administrator/i);
+    const own = screen.getByRole("menuitem", { name: /Kennels Road/ });
+    expect(own.getAttribute("title")).toBeNull();
+  });
+
+  it("marks the organisation you are in with the row itself", async () => {
+    // A darker box rather than a tick: the row is already a box in a list of
+    // boxes, so shading the one you are in needs no legend.
+    orgs.mockResolvedValue([
+      { id: "o1", name: "Kennels Road", is_member: true },
+      { id: "o2", name: "Second Site", is_member: true },
+    ]);
+    open();
+    await click(screen.getByRole("button", { name: /Pilot/ }));
+    await waitFor(() => expect(items().length).toBe(4));
+
+    const current = screen.getByRole("menuitem", { name: /Kennels Road/ });
+    expect(current.className).toContain("current");
+    expect(
+      screen.getByRole("menuitem", { name: /Second Site/ }).className,
+    ).not.toContain("current");
   });
 
   it("lists no organisations when there is no choice to make", async () => {

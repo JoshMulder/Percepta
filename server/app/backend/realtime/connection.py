@@ -59,6 +59,20 @@ class Connection:
     #: station_id would trade that property away for the convenience of one
     #: field.
     watch: set = field(default_factory=set)
+
+    #: The ONE station this connection is reading live telemetry from, if any.
+    #:
+    #: A separate field from `watch`, and separate on purpose. `watch` is the
+    #: audio guard set and `watch_set` REPLACES it wholesale — so folding an
+    #: attach into it would mean that guarding a different channel silently
+    #: dropped the operator's live telemetry, or that releasing the last channel
+    #: took the drawer's readings with it. Two ideas, two fields.
+    #:
+    #: Singular because the product is: telemetry is attached for the station an
+    #: operator has deliberately opened in the drawer, one at a time. That is
+    #: what keeps the cost bounded — the stream is undifferentiated, so an attach
+    #: carries that site's whole ADS-B feed as well as its readings.
+    attached: uuid.UUID | None = None
     closed: bool = False
 
     @property

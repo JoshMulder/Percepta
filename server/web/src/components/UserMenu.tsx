@@ -116,11 +116,12 @@ export function UserMenu({
                       : "You would be working inside this organisation as a platform administrator"
                   }
                 >
+                  {/* Nothing beside the name. Where you ARE is said by the
+                      row's own background (styles.css), and that a tenancy is
+                      reached through platform access is said by the title
+                      attribute above — a pill and a tick in the same corner
+                      were three marks competing to say two things. */}
                   <span className="user-menu-name">{o.name}</span>
-                  {/* Somebody else's tenancy, reached through platform access
-                      rather than a membership. Worth saying before the click,
-                      not after. */}
-                  {!o.is_member && <em className="user-menu-note">platform</em>}
                 </button>
               ))}
               <div className="user-menu-sep" />

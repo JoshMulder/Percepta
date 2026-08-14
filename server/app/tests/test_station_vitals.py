@@ -150,12 +150,12 @@ def test_every_projected_key_is_a_field_the_wall_can_render() -> None:
     reaches the pushed feed (a hand-built dict) and is dropped from the polled
     one (a Pydantic model), reintroducing the same asymmetry from the other end.
     """
-    from backend.api.platform import FleetStationOut
+    from backend.api.platform import FleetStation
 
     projected = set(project_health(_health_frame())) | set(
         project_power({"soc_pct": 74.0, "load_w": 12.0, "mains_w": 0})
     )
-    declared = set(FleetStationOut.model_fields)
+    declared = set(FleetStation.model_fields)
     assert projected <= declared, (
         f"projected but undeclared: {sorted(projected - declared)}"
     )

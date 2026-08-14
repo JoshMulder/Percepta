@@ -29,8 +29,10 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from backend.auth.authorization import capabilities_for
+from backend.database.models.ground_station import GroundStation
+from backend.services import audit
 from backend.auth.capabilities import Capability
-from backend.auth.dependencies import require_capability
+from backend.auth.dependencies import get_identity
 from backend.auth.identity import Identity
 from backend.database.dependencies import get_db
 from backend.database.session import PrivilegedSessionLocal
@@ -79,23 +81,89 @@ def _prune() -> None:
         _tickets.pop(key, None)
 
 
+def _station_org(db: Session, station_id: uuid.UUID):
+    """The organisation a station belongs to. For the audit row, which is filed
+    against the WATCHED tenant rather than against the platform."""
+    from sqlalchemy import select
+
+    return db.execute(
+        select(GroundStation.organization_id).where(GroundStation.id == station_id)
+    ).scalar_one_or_none()
+
+
+def _odin_may_view(db: Session, identity: Identity, station_id: uuid.UUID) -> bool:
+    """May this caller watch a station in somebody else's organisation?
+
+    The same ceiling as the listening watch (auth/odin.py): platform watch staff,
+    an ACTIVE station, and a read-only capability set that contains no actuator
+    and never will. Deactivating a station is how a tenant stops being watched,
+    and odin_capabilities_for checks that on every call rather than trusting a
+    roster that may be half a minute old.
+    """
+    from backend.auth.odin import odin_capabilities_for
+    from backend.auth.platform import PLATFORM_ORGANIZATION_ID, WATCH_ROLES
+
+    if identity.organization_id != PLATFORM_ORGANIZATION_ID:
+        return False
+    if not WATCH_ROLES.intersection(identity.roles):
+        return False
+    return Capability.VIDEO_VIEW in odin_capabilities_for(db, station_id=station_id)
+
+
 @router.post(
     "/api/stations/{station_id}/stream-ticket", response_model=StreamTicket
 )
 def stream_ticket(
     station_id: uuid.UUID,
-    identity: Identity = Depends(require_capability(Capability.VIDEO_VIEW)),
+    identity: Identity = Depends(get_identity),
     db: Session = Depends(get_db),
 ) -> StreamTicket:
     """Authorise this user to watch this station, for the next minute.
 
     Single use: redeemed at attach and discarded, so a ticket that leaks into a
     proxy log or a browser history is already spent.
+
+    TWO WAYS TO BE ALLOWED, and the guard is inside the function rather than on
+    the dependency because they are genuinely different questions:
+
+      - A TENANT'S OWN VIEWER holds video.view on that station, resolved through
+        `capabilities_for` exactly as before. Nothing about this path changed.
+      - AN ODIN OPERATOR holds no grant on it at all — it is somebody else's
+        station — and is allowed by the cross-tenant read ceiling instead, the
+        same one the listening watch uses. That path is audited; a tenant
+        watching their own camera is not, because it is their camera.
+
+    `require_capability(VIDEO_VIEW)` used to be the dependency, which is why an
+    ODIN operator could not get a ticket for a customer's camera: their org is
+    the platform org, and capabilities_for returns nothing for a station outside
+    it. Widening capabilities_for instead would have handed every platform member
+    an actuator on every tenant's hardware — the escalation auth/odin.py exists
+    to refuse.
     """
+    odin = False
+    granted = capabilities_for(
+        db,
+        user_id=identity.user_id,
+        organization_id=identity.organization_id,
+        ground_station_id=station_id,
+    )
+    if Capability.VIDEO_VIEW not in granted:
+        odin = _odin_may_view(db, identity, station_id)
+        if not odin:
+            # 404, not 403. Telling a caller that a station exists but is not
+            # theirs is the leak; the rest of the platform answers the same way.
+            raise HTTPException(status_code=404, detail="Station not available")
+
     _prune()
     ticket = uuid.uuid4().hex
     _tickets[ticket] = {
         "user_id": identity.user_id,
+        # Carried so redemption and the revalidation sweep ask the SAME question
+        # this mint answered. Without it they would fall back to capabilities_for
+        # and refuse the ticket they had just issued — the picture appears and
+        # dies within one revalidation interval, which reads as a flaky camera
+        # rather than as an authorisation bug.
+        "odin": odin,
         # Kept so the viewer socket can re-check that the session behind it is
         # still live. Capabilities alone do not cover signing out, a password
         # change, or a session an admin revoked — all of which must stop the
@@ -105,6 +173,20 @@ def stream_ticket(
         "station_id": station_id,
         "expires_at": datetime.now(UTC) + timedelta(seconds=TICKET_SECONDS),
     }
+    if odin:
+        # Audited against the WATCHED tenant, like every other cross-tenant
+        # reach. Opening a customer's camera is the most intrusive thing ODIN
+        # can do, and docs/ODIN.md records that the audit row is the ONLY
+        # control on it — the decision was silent-but-accountable, so the row
+        # existing is the whole of the accountability.
+        audit.record(
+            action="odin.attach.video",
+            organization_id=_station_org(db, station_id),
+            actor_user_id=identity.user_id,
+            target_type="ground_station",
+            target_id=str(station_id),
+            ground_station_id=station_id,
+        )
     return StreamTicket(
         ticket=ticket,
         expires_in=TICKET_SECONDS,
@@ -247,12 +329,22 @@ async def media_view(websocket: WebSocket, ticket: str = Query(...)) -> None:
     # the seconds between asking for a ticket and using it, and this is the last
     # point at which that can still be caught.
     with PrivilegedSessionLocal() as db:
-        granted = capabilities_for(
-            db,
-            user_id=claim["user_id"],
-            organization_id=organization_id,
-            ground_station_id=station_id,
-        )
+        if claim.get("odin"):
+            # An ODIN ticket is re-checked against the ODIN ceiling, not against
+            # capabilities_for — which would return nothing for a station outside
+            # the caller's org and refuse a ticket this same process had just
+            # issued. What IS re-checked is the thing that can change in the
+            # sixty seconds a ticket lives: the station still being active.
+            from backend.auth.odin import odin_capabilities_for
+
+            granted = odin_capabilities_for(db, station_id=station_id)
+        else:
+            granted = capabilities_for(
+                db,
+                user_id=claim["user_id"],
+                organization_id=organization_id,
+                ground_station_id=station_id,
+            )
     if Capability.VIDEO_VIEW not in granted:
         await websocket.close(code=4403)
         return
@@ -285,11 +377,26 @@ async def media_view(websocket: WebSocket, ticket: str = Query(...)) -> None:
                 await websocket.send_bytes(chunk)
 
     def _viewer_still_allowed() -> bool:
-        """The same two questions the console's own socket keeps asking."""
+        """The same two questions the console's own socket keeps asking.
+
+        THE THIRD CHECKPOINT, and the one it is easiest to forget. Mint and
+        redemption both happen inside a second; this runs every
+        `stream_revalidate_seconds` for as long as the picture is up, so getting
+        the first two right and this one wrong produces video that plays for
+        exactly one interval and then stops — indistinguishable from a camera
+        dropping out, and blamed on the station for as long as it takes somebody
+        to read this file.
+        """
         with PrivilegedSessionLocal() as db:
             if AuthSessionRepository(db).get_active(
                     session_id=claim["session_id"]) is None:
                 return False
+            if claim.get("odin"):
+                from backend.auth.odin import odin_capabilities_for
+
+                return Capability.VIDEO_VIEW in odin_capabilities_for(
+                    db, station_id=station_id
+                )
             return Capability.VIDEO_VIEW in capabilities_for(
                 db,
                 user_id=claim["user_id"],

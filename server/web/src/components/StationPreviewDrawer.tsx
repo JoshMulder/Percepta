@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ApiError, api } from "../api";
 import type { FleetStation } from "../types";
+import { useOdinAttach } from "../useOdinAttach";
+import { DrawerVideo } from "./DrawerVideo";
 
 /**
  * One station opened out beside the wall, and nothing more.
@@ -192,6 +194,15 @@ export function StationPreviewDrawer({
     closeRef.current?.focus();
     return () => document.body.focus();
   }, [id]);
+
+  // Live telemetry for whatever is open. ABOVE the early return, like every
+  // other hook here: hooks run on the closed render too, and moving one below
+  // `if (!station)` changes the hook order between renders — which React
+  // detects as a different component and hookOrder.test.ts exists to catch.
+  //
+  // `enabled` is `id !== null`, so closing the drawer detaches rather than
+  // leaving a subscription open on a station nobody is looking at.
+  const attach = useOdinAttach(id, id !== null);
 
   if (!station) return null;
 
@@ -445,6 +456,30 @@ export function StationPreviewDrawer({
           <Row label="Station id">{station.id}</Row>
         </Section>
 
+        <Section title="Live" tone="neutral">
+          {/* The one place on the wall that costs a real subscription, so it
+              says what it is. Everything above this line is the 3-second fleet
+              digest; this is that station's own stream, taken because somebody
+              opened this panel and given back when they close it. */}
+          <Row label="Feed">
+            {attach.link === "denied" ? (
+              "not permitted"
+            ) : attach.attached === station.id && attach.lastFrameAt ? (
+              <Fresh at={attach.lastFrameAt} />
+            ) : attach.link === "open" ? (
+              "attaching…"
+            ) : (
+              "reconnecting…"
+            )}
+          </Row>
+          {Object.keys(attach.live).length > 0 && (
+            <Row label="Streams">
+              {Object.keys(attach.live).sort().join(", ")}
+            </Row>
+          )}
+          <DrawerVideo stationId={station.id} />
+        </Section>
+
         <Maintenance station={station} onDeclared={onMaintenanceDeclared} />
       </div>
     </aside>
@@ -538,5 +573,30 @@ function Maintenance({
       </div>
       {error && <p className="odin-drawer-note warn">{error}</p>}
     </Section>
+  );
+}
+
+
+/**
+ * How long ago the last live frame arrived.
+ *
+ * Counted on its own clock rather than rendered once, because the failure worth
+ * showing is the ABSENCE of frames — and no new frame means no re-render, so a
+ * static "2s ago" would freeze at two seconds precisely when the feed died.
+ * This is the same argument the wall's status bar makes about its poll, applied
+ * one level down.
+ */
+function Fresh({ at }: { at: number }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+  const seconds = Math.max(0, Math.round((now - at) / 1000));
+  // Over ten seconds on a 1 Hz stream is not jitter, it is a gap.
+  return (
+    <span className={seconds > 10 ? "warn" : undefined}>
+      {seconds === 0 ? "live" : `${seconds}s ago`}
+    </span>
   );
 }

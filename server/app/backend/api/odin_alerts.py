@@ -26,7 +26,7 @@ from backend.auth.identity import Identity
 from backend.auth.platform import require_odin_watch
 from backend.database.dependencies import get_db
 from backend.database.models.ground_station import GroundStation
-from backend.database.models.platform_alert import StationMaintenance
+from backend.database.models.platform_alert import PlatformAlert, StationMaintenance
 from backend.services.alerts import store
 from backend.services.audit import record
 
@@ -72,6 +72,83 @@ def _out(alert) -> AlertOut:
         snooze_until=(
             alert.snooze_until.isoformat() if alert.snooze_until else None
         ),
+    )
+
+
+class AlertMetrics(BaseModel):
+    """How long the centre takes to notice and to fix, over a window."""
+
+    window_days: int
+    #: Alerts raised in the window. The denominator for nothing — reported
+    #: because a mean over three alerts and a mean over three hundred are
+    #: different claims and the number is the only way to tell.
+    raised: int
+    #: Mean seconds from first_seen_at to acked_at, over ACKED alerts only.
+    #: Null when nothing was acked.
+    mtta_seconds: float | None
+    acked: int
+    #: Mean seconds from first_seen_at to closed_at, over CLOSED alerts only.
+    mttr_seconds: float | None
+    closed: int
+    #: Still open at the end of the window. Not a failure — a genuinely ongoing
+    #: fault belongs here — but a number that only grows is the one worth
+    #: looking at.
+    still_open: int
+
+
+@router.get("/alerts/metrics", response_model=AlertMetrics)
+def alert_metrics(
+    days: int = 30,
+    identity: Identity = Depends(require_odin_watch),
+    db: Session = Depends(get_db),
+) -> AlertMetrics:
+    """Mean time to acknowledge and to resolve, straight out of platform_alerts.
+
+    No new columns and no new writes: `first_seen_at`, `acked_at` and
+    `closed_at` have been recorded since the alert store was built, so this is
+    arithmetic over rows that already exist.
+
+    MTTA IS OVER ACKED ALERTS ONLY, and MTTR over closed ones, counted
+    separately rather than averaged into one figure. An alert can go straight
+    from open to closed without ever being acknowledged — a fault that fixed
+    itself while nobody was looking, which the store handles explicitly — so
+    treating unacked alerts as "acked at close time" would report a centre that
+    responds instantly to the things it never noticed.
+
+    BOUNDED BY THE WINDOW, always. Both indexes on platform_alerts are PARTIAL,
+    `WHERE state <> 'closed'`, so an aggregate over closed rows has no index
+    behind it at all; without a floor this walks the whole table.
+    """
+    window = max(1, min(365, days))
+    since = datetime.now(UTC) - timedelta(days=window)
+
+    rows = db.execute(
+        select(
+            PlatformAlert.first_seen_at,
+            PlatformAlert.acked_at,
+            PlatformAlert.closed_at,
+            PlatformAlert.state,
+        ).where(PlatformAlert.first_seen_at >= since)
+    ).all()
+
+    acked = [
+        (r.acked_at - r.first_seen_at).total_seconds()
+        for r in rows
+        if r.acked_at is not None
+    ]
+    closed = [
+        (r.closed_at - r.first_seen_at).total_seconds()
+        for r in rows
+        if r.closed_at is not None
+    ]
+    return AlertMetrics(
+        window_days=window,
+        raised=len(rows),
+        mtta_seconds=(sum(acked) / len(acked)) if acked else None,
+        acked=len(acked),
+        mttr_seconds=(sum(closed) / len(closed)) if closed else None,
+        closed=len(closed),
+        still_open=sum(1 for r in rows if r.state != "closed"),
     )
 
 

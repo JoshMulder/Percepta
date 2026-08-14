@@ -1,6 +1,13 @@
 import maplibregl from "maplibre-gl";
 import { collapseMapCredit } from "../mapCredit";
 import { memo, useEffect, useRef, useState } from "react";
+import {
+  AIRCRAFT_ICON,
+  AIRCRAFT_LAYER,
+  AIRCRAFT_SOURCE,
+  aircraftFeatures,
+  chevronImage,
+} from "../fleetAircraftLayer";
 import type { FleetAircraft, FleetStation, PlatformMapConfig } from "../types";
 
 /**
@@ -55,7 +62,6 @@ function FleetMapInner({
   /** Station markers by id, and aircraft markers by ICAO — reused across
    *  updates so a refresh moves a dot rather than recreating the DOM. */
   const stationMarkers = useRef(new Map<string, maplibregl.Marker>());
-  const aircraftMarkers = useRef(new Map<string, maplibregl.Marker>());
   const fittedRef = useRef(false);
   const [style, setStyle] = useState(config.default_basemap);
 
@@ -114,12 +120,47 @@ function FleetMapInner({
 
     map.on("load", () => {
       readyRef.current = true;
+      // Built here, synchronously, because a source added before `load` is
+      // discarded and one added later races the first data effect — which
+      // fails as an empty map rather than as an error.
+      if (!map.hasImage(AIRCRAFT_ICON)) {
+        const image = chevronImage(CONTACT_COLOUR);
+        // Null where there is no 2D context. Skipping the layer leaves a wall
+        // with no aircraft, which is degraded; throwing here would leave no map.
+        if (image) map.addImage(AIRCRAFT_ICON, image, { pixelRatio: 2 });
+      }
+      if (!map.getSource(AIRCRAFT_SOURCE)) {
+        map.addSource(AIRCRAFT_SOURCE, {
+          type: "geojson",
+          data: { type: "FeatureCollection", features: [] },
+        });
+      }
+      if (!map.getLayer(AIRCRAFT_LAYER) && map.hasImage(AIRCRAFT_ICON)) {
+        map.addLayer({
+          id: AIRCRAFT_LAYER,
+          type: "symbol",
+          source: AIRCRAFT_SOURCE,
+          layout: {
+            "icon-image": AIRCRAFT_ICON,
+            // Read straight off the feature: rotation is per-contact data now
+            // rather than a CSS transform written per element.
+            "icon-rotate": ["get", "track"],
+            // Rotate with the MAP, not with the screen. A track is a bearing
+            // over the ground, so it has to follow the map when it rotates or
+            // every aircraft points the wrong way the moment somebody drags.
+            "icon-rotation-alignment": "map",
+            // Contacts are the data; letting the placer hide overlapping ones
+            // would silently thin exactly the busy airspace worth looking at.
+            "icon-allow-overlap": true,
+            "icon-ignore-placement": true,
+          },
+        });
+      }
     });
 
     return () => {
       readyRef.current = false;
       stationMarkers.current.clear();
-      aircraftMarkers.current.clear();
       map.remove();
       mapRef.current = null;
     };
@@ -219,47 +260,24 @@ function FleetMapInner({
     }
   }, [stations]);
 
-  // Aircraft — the conglomerated ADS-B. Small chevrons, rotated to track.
+  // Aircraft — the conglomerated ADS-B, as MAP DATA rather than as DOM.
+  //
+  // This was one MapLibre Marker per contact, reconciled against a Map keyed by
+  // ICAO on every poll. Fine at three stations; at fleet scale it is thousands
+  // of elements created, positioned and swept every six seconds, and MapLibre
+  // DOM markers cannot cluster or cull. One `setData` hands the whole set to the
+  // GPU and the cost stops scaling with contact count.
+  //
+  // See fleetAircraftLayer.ts for what was given up (native tooltips) and why
+  // there are no labels (the style ships no glyphs).
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !readyRef.current) return;
-    const existing = aircraftMarkers.current;
-    const seen = new Set<string>();
-
-    for (const a of aircraft) {
-      seen.add(a.icao);
-      const pos: [number, number] = [a.longitude, a.latitude];
-      let marker = existing.get(a.icao);
-      if (!marker) {
-        const el = document.createElement("div");
-        el.className = "fleet-ac";
-        // A minimal chevron — a fleet view wants density, not the per-shape
-        // silhouettes the single-station map draws.
-        el.innerHTML =
-          "<svg viewBox='-6 -6 12 12' width='13' height='13'>" +
-          "<path d='M0,-5 L4,4 L0,2 L-4,4 Z' fill='" +
-          CONTACT_COLOUR +
-          "' stroke='#0b1220' stroke-width='0.8'/></svg>";
-        marker = new maplibregl.Marker({ element: el, subpixelPositioning: true })
-          .setLngLat(pos)
-          .addTo(map);
-        existing.set(a.icao, marker);
-      } else {
-        marker.setLngLat(pos);
-      }
-      const el = marker.getElement();
-      const svg = el.querySelector("svg");
-      if (svg) svg.style.transform = `rotate(${a.track_deg ?? 0}deg)`;
-      el.title = `${a.callsign?.trim() || a.icao}${
-        a.heard_by > 1 ? ` · heard by ${a.heard_by}` : ""
-      }`;
-    }
-
-    for (const [icao, marker] of existing) {
-      if (seen.has(icao)) continue;
-      marker.remove();
-      existing.delete(icao);
-    }
+    const source = map.getSource(AIRCRAFT_SOURCE) as
+      | maplibregl.GeoJSONSource
+      | undefined;
+    if (!source) return;
+    source.setData(aircraftFeatures(aircraft) as unknown as GeoJSON.FeatureCollection);
   }, [aircraft]);
 
   if (!config.basemaps.length) {

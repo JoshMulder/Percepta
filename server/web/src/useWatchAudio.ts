@@ -67,7 +67,13 @@ export function useWatchAudio(enabled: boolean): WatchApi {
 
   const send = useCallback((stationIds: string[]) => {
     const socket = socketRef.current;
-    if (socket?.readyState !== WebSocket.OPEN) return;
+    // `!socket` explicitly, not just the optional chain. `socket?.readyState`
+    // on a null socket is `undefined`, and if `WebSocket.OPEN` is also
+    // undefined — which it is under a stubbed WebSocket, and would be in any
+    // environment without the global — the comparison is FALSE and execution
+    // falls straight through to `null.send`. The chain reads like a guard and
+    // is not one.
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
     socket.send(JSON.stringify({ type: "watch_set", stations: stationIds }));
   }, []);
 

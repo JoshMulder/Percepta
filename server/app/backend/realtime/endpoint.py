@@ -7,6 +7,7 @@ client -> server (JSON text frames):
     {"type": "subscribe",      "stream": "status|telemetry|video|audio"}
     {"type": "unsubscribe",    "stream": "..."}
     {"type": "watch_set",      "stations": ["<uuid>", ...]}   (Odin watch only)
+    {"type": "attach_station", "ground_station_id": "<uuid>"|null}  (Odin watch)
     {"type": "ping"}
 
 server -> client:
@@ -18,6 +19,7 @@ server -> client:
     {"type": "status",           "station_id", "payload"}
     {"type": "station_revoked",  "reason"}
     {"type": "watching",         "stations": [...]}
+    {"type": "attached",         "ground_station_id": <uuid>|null}
     {"type": "watch_revoked",    "stations": [...]}
     {"type": "revoked",          "reason"}
     {"type": "error",            "code", "message"}
@@ -170,6 +172,37 @@ async def _handle_message(conn: Connection, message: dict) -> None:
         # to be guarded because the request was accepted in bulk.
         conn.enqueue(
             {"type": "watching", "stations": sorted(str(s) for s in guarded)}
+        )
+        return
+
+    if kind == "attach_station":
+        raw = message.get("ground_station_id")
+        station_id = None
+        if raw is not None:
+            try:
+                station_id = uuid.UUID(str(raw))
+            except (TypeError, ValueError):
+                conn.enqueue(
+                    {"type": "error", "code": "bad_request",
+                     "message": "ground_station_id must be a uuid or null"}
+                )
+                return
+        try:
+            attached = await hub.attach_station(conn, station_id)
+        except AuthorizationError:
+            # Deliberately the same answer as an unknown station, for the same
+            # reason select_station gives: telling them apart would leak the
+            # existence of another tenant's hardware.
+            conn.enqueue(
+                {"type": "error", "code": "not_available",
+                 "message": "station not available"}
+            )
+            return
+        conn.enqueue(
+            {
+                "type": "attached",
+                "ground_station_id": str(attached) if attached else None,
+            }
         )
         return
 

@@ -4402,17 +4402,25 @@ body {
 .user-menu-item:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
 .user-menu-name { flex: 1 1 auto; min-width: 0; }
 /* The organisation you are already in, marked rather than hidden: the list
-   should say where you are, not only where you could go. */
-.user-menu-item.current { color: var(--brand); }
-.user-menu-item.current::after { content: "✓"; color: var(--brand); }
-/* Somebody else's tenancy, reached through platform access. */
-.user-menu-note {
-  font-style: normal;
-  font-size: 0.68rem;
-  color: var(--warn);
-  border: 1px solid var(--warn);
-  border-radius: 0.25rem;
-  padding: 0 0.25rem;
+   should say where you are, not only where you could go.
+
+   A darker box, not a tick and a colour. The row is already a box in a list of
+   boxes, so shading the one you are in reads instantly and needs no legend —
+   whereas a ✓ and a coloured word were two marks saying the same thing, in a
+   menu where a third mark (the "platform" pill) was also competing for the same
+   corner. Depth, not decoration.
+
+   The panel sits on --panel and hover uses --panel-2, so this goes DOWN rather
+   than up — a plain black wash, which stays darker than both and does not need
+   a fourth surface colour inventing for one row. */
+.user-menu-item.current {
+  background: rgba(0, 0, 0, 0.35);
+  box-shadow: inset 0 0 0 1px var(--line-soft);
+}
+/* Hover must not lift it back to the ordinary surface, or the row you are in
+   stops looking different the moment you point at it. */
+.user-menu-item.current:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.35);
 }
 .user-menu-sep { height: 1px; background: var(--line-soft); margin: 0.25rem 0; }
 /* Last, and coloured: the one item here that ends what you were doing. */
@@ -4933,13 +4941,41 @@ body {
 .odin-drawer-close { margin-left: auto; }
 .odin-drawer-body { padding: 0.75rem; }
 .odin-drawer-section { margin-bottom: 1rem; }
-.odin-drawer-section h4 {
+/* `h3`, not `h4`. This selector said h4 and the component has always rendered
+   h3, so every section heading in the drawer has been unstyled since the panel
+   shipped — browser-default bold at browser-default size, inside a panel whose
+   whole design is small monospace labels. It looked like a choice. */
+.odin-drawer-section h3 {
   margin: 0 0 0.35rem;
   font: 11px/1 var(--mono);
   text-transform: uppercase;
   letter-spacing: 0.1em;
   color: #6c8092;
 }
+
+/* The tone a section carries. `Section` has emitted these class names since the
+   drawer was written and not one of them had a rule, so a section reporting a
+   critical condition rendered identically to one reporting nothing — which is
+   the exact failure the wall's colour rationing exists to prevent, arriving by
+   omission rather than by overuse.
+
+   A left edge rather than a fill: it reads from across a room, and it does not
+   fight the values inside the section for attention. Nominal stays uncoloured,
+   because on this wall "fine" is the absence of colour. */
+.odin-drawer-section.warn,
+.odin-drawer-section.bad,
+.odin-drawer-section.neutral {
+  border-left: 2px solid transparent;
+  padding-left: 0.5rem;
+  margin-left: -0.5rem;
+}
+.odin-drawer-section.warn { border-left-color: var(--odin-warn); }
+.odin-drawer-section.bad { border-left-color: var(--odin-bad); }
+.odin-drawer-section.neutral { border-left-color: var(--odin-line); }
+.odin-drawer-section.warn h3 { color: var(--odin-warn); }
+.odin-drawer-section.bad h3 { color: var(--odin-bad); }
+/* An inline value that has gone stale, inside an otherwise nominal row. */
+.odin-drawer-section dd .warn { color: var(--odin-warn); }
 .odin-drawer-section dl {
   display: grid;
   grid-template-columns: auto 1fr;
@@ -5081,6 +5117,27 @@ body {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .odin-tx-what { min-width: 0; overflow-wrap: anywhere; }
+
+/* ------------------------------------------------ the deliberate live look */
+.odin-drawer-video { margin-top: 0.5rem; grid-column: 1 / -1; }
+.odin-drawer-video-head {
+  display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.35rem;
+}
+.odin-drawer-video-el {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  background: #000;
+  border: 1px solid var(--odin-line);
+  border-radius: 3px;
+  display: block;
+}
+/* Collapsed, NOT unmounted. The stream hook reads the element once when it
+   starts, so mounting it at the same moment as enabling the stream is a race
+   the hook loses about half the time — silently, with no picture and no error.
+   It stays in the tree and takes no space until it is wanted. */
+.odin-drawer-video-el.idle {
+  height: 0; aspect-ratio: auto; border: 0;
+}
 
 /* ============================================================================
    HEADER CHROME, ANCHORED — and it must stay at the END of this file.
