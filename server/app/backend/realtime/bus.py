@@ -164,6 +164,28 @@ def health_snapshot_key(station_id) -> str:
     return f"latest:health:{station_id}"
 
 
+#: Power is published once a second, so a stale frame is worthless and a short
+#: TTL is the honest failure: an Odin tile with no battery reading says "unknown"
+#: rather than a number from twenty minutes ago. Longer than health's cadence
+#: gap, short enough that a station gone quiet stops claiming a state of charge.
+POWER_SNAPSHOT_TTL = 90
+
+
+def power_snapshot_key(station_id) -> str:
+    """Redis key holding one station's most recent power frame.
+
+    Power, like health, lives only on the live per-station fan-out — the
+    power_samples table is a minute-resolution HISTORY, written by the recorder,
+    and reading the newest row from it to fill a tile would be a query per
+    station per poll to learn something a cache already knows.
+
+    Odin's wall needs a state of charge for every station at once without
+    subscribing to any of them. That is the same problem health and ADS-B solved,
+    so it gets the same answer rather than a new one.
+    """
+    return f"percepta:power:{station_id}"
+
+
 def read_latest_sync(keys: list[str]) -> list:
     """MGET a batch of snapshot keys for a sync caller. Empty on any failure — a
     dashboard read must not raise because Redis hiccuped, the same fail-soft

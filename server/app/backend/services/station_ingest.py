@@ -55,9 +55,11 @@ from backend.database.session import PrivilegedSessionLocal
 from backend.realtime.bus import (
     ADSB_SNAPSHOT_TTL,
     HEALTH_SNAPSHOT_TTL,
+    POWER_SNAPSHOT_TTL,
     adsb_snapshot_key,
     command_channel,
     health_snapshot_key,
+    power_snapshot_key,
 )
 from backend.realtime.hub import hub
 from backend.services import geocode, station_events, station_topics
@@ -475,6 +477,8 @@ class StationIngest:
             await self._cache_health(station_id, payload)
         elif kind == "adsb":
             await self._cache_adsb(station_id, payload)
+        elif kind == "power":
+            await self._cache_power(station_id, payload)
 
         # Onto the internal fan-out, where authorisation and per-subscriber
         # delivery already apply. Nothing downstream needs to know the frame
@@ -575,6 +579,27 @@ class StationIngest:
             )
         except Exception:  # noqa: BLE001 - a cache write must never stop ingest
             log.debug("Could not cache health for %s.", station_id, exc_info=True)
+
+    async def _cache_power(self, station_id: uuid.UUID, payload: dict) -> None:
+        """Keep this station's latest power frame in Redis.
+
+        Added for Odin: a wall showing every station at once needs a state of
+        charge per tile, and on a solar site in a wilderness it is the number
+        that decides whether anything else on the tile will still be true in six
+        hours. Same trick, same TTL discipline and same best-effort failure as
+        `_cache_health` — a failed write costs a tile reading, never a stall in
+        ingest.
+        """
+        if self._redis is None:
+            return
+        try:
+            await self._redis.setex(
+                power_snapshot_key(station_id),
+                POWER_SNAPSHOT_TTL,
+                json.dumps(payload),
+            )
+        except Exception:  # noqa: BLE001 - a cache write must never stop ingest
+            log.debug("Could not cache power for %s.", station_id, exc_info=True)
 
     async def _reconcile_simulated(self, station_id: uuid.UUID, payload: dict) -> None:
         """Believe the station about whether its own data is synthetic.

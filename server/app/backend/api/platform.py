@@ -43,6 +43,11 @@ from backend.realtime.bus import (
     read_latest_sync,
 )
 from backend.realtime.revocation import organization_changed, revoke_user
+from backend.realtime.bus import (
+    health_snapshot_key,
+    power_snapshot_key,
+    read_latest_sync,
+)
 from backend.services.audit import record
 from backend.services.station_status import DARK_AFTER, ONLINE_WITHIN, status_for
 
@@ -106,6 +111,19 @@ class FleetStats(BaseModel):
     faults_warning_24h: int
 
 
+#: Event types that are NOT faults, however they are graded.
+#:
+#: `adsb.proximity` is emitted at warning severity on every close-and-low
+#: contact (station/gsu/agent.py:1891). Measured on the live fleet, it was 46 of
+#: the 71 warnings in 24 hours - so a KPI labelled "Faults 24h" was
+#: two-thirds an aircraft counter, and one busy circuit could fill all 20 rows
+#: of the attention feed with aeroplanes doing exactly what aeroplanes do.
+#:
+#: It is excluded here rather than downgraded at the station, because it IS a
+#: warning to the tenant watching their own airspace. It is simply not a fault
+#: in the fleet's health, which is the only question this endpoint asks.
+NOT_A_FAULT = ("adsb.proximity", "radio.transmission")
+
 class FleetStation(BaseModel):
     id: str
     name: str
@@ -123,6 +141,43 @@ class FleetStation(BaseModel):
     is_simulated: bool
     model: str | None
     config_version: int
+
+    # --- tile vitals ------------------------------------------------------
+    # Read from the ingest's Redis snapshots in two bulk MGETs for the whole
+    # fleet, never per station and never from the database. All optional, and
+    # null means "not known right now" rather than a value: a station that has
+    # gone quiet stops having a state of charge, and a tile saying "unknown" is
+    # worth more than one showing a number from twenty minutes ago.
+    #
+    # Radio squelch and camera stream state are deliberately NOT here, because
+    # nothing caches them - only health, power and ADS-B frames are cached
+    # (services/station_ingest.py); radio and camera exist solely on the live
+    # per-station fan-out. The tile says whether those devices are FITTED and
+    # well, which is what a wall can honestly know without subscribing to every
+    # station at once.
+    #: "ok" | "degraded" | "failing", as the station reports itself.
+    health: str | None = None
+    #: The worst open condition and how many there are. The station names its
+    #: own conditions; the platform does not invent thresholds for them.
+    worst_condition: str | None = None
+    condition_count: int = 0
+    #: The station's own view of its link home. Not the same question as
+    #: `status` above - that is whether WE have heard from it, this is whether
+    #: IT believes it is connected, and they disagree in the interesting cases.
+    uplink_connected: bool | None = None
+    uplink_offline_seconds: float | None = None
+    #: State of charge: the number that decides whether anything else on the
+    #: tile will still be true in six hours, on a solar site nobody visits.
+    soc_pct: float | None = None
+    #: Running on stored power - no mains and no generator contributing.
+    on_battery: bool | None = None
+    load_w: float | None = None
+    #: What the station reports fitted, by slot, with its own device status.
+    slots: dict[str, str] = {}
+    #: Slots reporting synthetic data, so a wall never shows demo numbers as
+    #: real. The station is authoritative about this; the platform is not.
+    simulated_slots: list[str] = []
+    running_version: str | None = None
 
 
 class FleetEvent(BaseModel):
@@ -681,6 +736,102 @@ def _station_status(last_seen: datetime | None, now: datetime) -> tuple[str, boo
     return status_for(last_seen, now=now)
 
 
+def _vitals(station_ids: list[uuid.UUID]) -> dict[uuid.UUID, dict]:
+    """Tile vitals for the whole fleet, in two bulk reads.
+
+    Two MGETs in total, not two per station - the same pattern api/stations.py
+    uses for reported versions. Fail-soft by construction: read_latest_sync
+    returns empty on a Redis failure, every field is optional, and a wall with no
+    vitals still shows liveness rather than going blank.
+    """
+    if not station_ids:
+        return {}
+    out: dict[uuid.UUID, dict] = {sid: {} for sid in station_ids}
+
+    for sid, blob in zip(
+        station_ids, read_latest_sync([health_snapshot_key(s) for s in station_ids])
+    ):
+        if not blob:
+            continue
+        try:
+            frame = json.loads(blob)
+        except (ValueError, TypeError):
+            continue
+        v = out[sid]
+        status = frame.get("status")
+        v["health"] = status if isinstance(status, str) else None
+
+        conditions = frame.get("conditions")
+        if isinstance(conditions, list) and conditions:
+            # Ranked by the station's own severity, and the worst one named. The
+            # platform does not re-judge what a station's condition means.
+            order = {"critical": 3, "failing": 3, "warning": 2, "degraded": 2, "info": 1}
+            worst = max(
+                conditions,
+                key=lambda c: order.get(str((c or {}).get("severity", "")), 0),
+            )
+            if isinstance(worst, dict):
+                v["worst_condition"] = (
+                    worst.get("code") or worst.get("name") or worst.get("message")
+                )
+            v["condition_count"] = len(conditions)
+
+        uplink = frame.get("uplink")
+        if isinstance(uplink, dict):
+            connected = uplink.get("connected")
+            v["uplink_connected"] = connected if isinstance(connected, bool) else None
+            offline = uplink.get("offline_seconds")
+            v["uplink_offline_seconds"] = (
+                float(offline) if isinstance(offline, (int, float)) else None
+            )
+
+        devices = frame.get("devices")
+        if isinstance(devices, list):
+            slots: dict[str, str] = {}
+            simulated: list[str] = []
+            for d in devices:
+                if not isinstance(d, dict):
+                    continue
+                slot = d.get("slot")
+                if not isinstance(slot, str):
+                    continue
+                state = d.get("status")
+                slots[slot] = state if isinstance(state, str) else "unknown"
+                if d.get("simulated") is True:
+                    simulated.append(slot)
+            v["slots"] = slots
+            v["simulated_slots"] = sorted(simulated)
+
+        software = frame.get("software")
+        running = (
+            software.get("running_version") if isinstance(software, dict) else None
+        )
+        v["running_version"] = running or frame.get("agent_version")
+
+    for sid, blob in zip(
+        station_ids, read_latest_sync([power_snapshot_key(s) for s in station_ids])
+    ):
+        if not blob:
+            continue
+        try:
+            frame = json.loads(blob)
+        except (ValueError, TypeError):
+            continue
+        v = out[sid]
+        soc = frame.get("soc_pct")
+        v["soc_pct"] = float(soc) if isinstance(soc, (int, float)) else None
+        load = frame.get("load_w")
+        v["load_w"] = float(load) if isinstance(load, (int, float)) else None
+        # On battery when neither external source contributes. Null rather than
+        # False when the station reports no figure for either: an off-grid site
+        # has nothing to say here, and guessing would put a battery warning on
+        # every such station in the fleet.
+        mains, gen = frame.get("mains_w"), frame.get("generator_w")
+        if isinstance(mains, (int, float)) or isinstance(gen, (int, float)):
+            v["on_battery"] = (mains or 0) <= 0 and (gen or 0) <= 0
+    return out
+
+
 @router.get("/fleet", response_model=FleetView)
 def fleet(
     identity: Identity = Depends(require_odin_watch),
@@ -698,9 +849,12 @@ def fleet(
         .order_by(Organization.name, GroundStation.name)
     ).all()
 
+    vitals = _vitals([station.id for station, _ in rows])
+
     stations: list[FleetStation] = []
     for station, org_name in rows:
         status, dark = _station_status(station.last_seen_at, now)
+        v = vitals.get(station.id, {})
         model = None
         if isinstance(station.hardware, dict):
             candidate = station.hardware.get("model")
@@ -720,13 +874,27 @@ def fleet(
             is_simulated=station.is_simulated,
             model=model,
             config_version=station.config_version,
+            health=v.get("health"),
+            worst_condition=v.get("worst_condition"),
+            condition_count=v.get("condition_count", 0),
+            uplink_connected=v.get("uplink_connected"),
+            uplink_offline_seconds=v.get("uplink_offline_seconds"),
+            soc_pct=v.get("soc_pct"),
+            on_battery=v.get("on_battery"),
+            load_w=v.get("load_w"),
+            slots=v.get("slots", {}),
+            simulated_slots=v.get("simulated_slots", []),
+            running_version=v.get("running_version"),
         ))
 
     org_flags = db.execute(select(Organization.is_active)).scalars().all()
     since = now - timedelta(hours=24)
     severity_counts = dict(db.execute(
         select(StationEvent.severity, func.count(StationEvent.id))
-        .where(StationEvent.received_at >= since)
+        .where(
+            StationEvent.received_at >= since,
+            StationEvent.type.notin_(NOT_A_FAULT),
+        )
         .group_by(StationEvent.severity)
     ).all())
 
@@ -751,7 +919,14 @@ def fleet(
         select(StationEvent, GroundStation.name, Organization.name)
         .join(GroundStation, StationEvent.ground_station_id == GroundStation.id)
         .join(Organization, StationEvent.organization_id == Organization.id)
-        .where(StationEvent.severity.in_(("warning", "critical")))
+        .where(
+            StationEvent.severity.in_(("warning", "critical")),
+            StationEvent.type.notin_(NOT_A_FAULT),
+            # Bounded. Without a floor this walks backwards through the whole
+            # table whenever the fleet is quiet, and a feed of month-old
+            # warnings is not an attention feed.
+            StationEvent.received_at >= now - timedelta(days=7),
+        )
         .order_by(StationEvent.received_at.desc())
         .limit(20)
     ).all()
