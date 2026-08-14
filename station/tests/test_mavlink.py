@@ -8,7 +8,12 @@ value worked out by hand from the message definition, not against the code.
 import unittest
 
 from gsu.devices import mavlink
-from gsu.devices.pingrx import PingRxAdsb, SimulatedPingRx
+from gsu.devices.pingrx import (
+    PingRxAdsb,
+    SimulatedPingRx,
+    is_closing,
+    relative_bearing,
+)
 
 
 class _Source:
@@ -492,3 +497,98 @@ class ReceiverLivenessTests(unittest.TestCase):
         parser = mavlink.MavlinkParser()
         self.assertEqual(list(parser.feed(bytes(bad))), [])
         self.assertGreater(parser.false_starts, 0)
+
+
+class ClosingTrackTests(unittest.TestCase):
+    """The proximity alert only fires for traffic actually coming this way.
+
+    Range and altitude answer "is something near me", which is not the question
+    an operator wants answered. An aircraft that has already passed sits inside
+    the ring for exactly as long as one that is inbound, and used to raise the
+    identical alert — so on a site under a transit lane about half of every
+    alert was about an aircraft that had already gone.
+
+    The geometry is the whole risk here, and it fails QUIETLY: comparing the
+    track against the outbound bearing rather than its reciprocal inverts the
+    feature, alerting on everything departing and staying silent for everything
+    inbound. That still produces alerts, at about the same rate, so it looks
+    like a filter that works.
+    """
+
+    def test_the_smallest_angle_wraps_around_north(self):
+        # `abs(a - b)` is right for 350 against 340 and says 340 for 350
+        # against 10 — so anything crossing north would fail every test.
+        self.assertEqual(relative_bearing(350.0, 10.0), 20.0)
+        self.assertEqual(relative_bearing(10.0, 350.0), 20.0)
+        self.assertEqual(relative_bearing(0.0, 180.0), 180.0)
+        self.assertEqual(relative_bearing(90.0, 90.0), 0.0)
+
+    def test_an_aircraft_flying_straight_at_us_is_closing(self):
+        # Contact due NORTH of the station (bearing 0), tracking due SOUTH.
+        self.assertTrue(is_closing(0.0, 180.0))
+        # ...and due EAST, tracking WEST.
+        self.assertTrue(is_closing(90.0, 270.0))
+
+    def test_an_aircraft_flying_directly_away_is_not(self):
+        # This is the case the whole change exists for: north of us, going north.
+        self.assertFalse(is_closing(0.0, 0.0))
+        self.assertFalse(is_closing(90.0, 90.0))
+
+    def test_the_tolerance_is_thirty_degrees_either_side(self):
+        # North of the station: a direct course home is 180.
+        self.assertTrue(is_closing(0.0, 150.0))    # 30 off, one side
+        self.assertTrue(is_closing(0.0, 210.0))    # 30 off, the other
+        self.assertFalse(is_closing(0.0, 149.0))
+        self.assertFalse(is_closing(0.0, 211.0))
+
+    def test_the_tolerance_wraps_around_north(self):
+        # Contact SOUTH of the station (bearing 180) tracks NORTH to reach it,
+        # so its window straddles 0/360 — the arithmetic most likely to be wrong.
+        self.assertTrue(is_closing(180.0, 0.0))
+        self.assertTrue(is_closing(180.0, 355.0))
+        self.assertTrue(is_closing(180.0, 25.0))
+        self.assertFalse(is_closing(180.0, 90.0))
+
+    def test_a_contact_with_no_heading_still_alerts(self):
+        # Heading is optional on the wire. Treating "unknown" as "not coming
+        # this way" would turn a missing field into silence, which is the one
+        # answer a proximity alert must never give by accident.
+        self.assertTrue(is_closing(0.0, None))
+
+    def test_a_wide_tolerance_restores_the_old_behaviour(self):
+        # 180 either side is every direction, which is what the alert did before
+        # this existed — the escape hatch for a site that wants it back.
+        self.assertTrue(is_closing(0.0, 0.0, tolerance_deg=180.0))
+
+    def _contact(self, *, heading_cdeg: int, lat_e7: int, lon_e7: int):
+        payload = mavlink.encode_adsb_vehicle(
+            icao=0x7C1B2D,
+            flags=ALL_VALID,
+            lat_e7=lat_e7, lon_e7=lon_e7,
+            altitude_mm=500_000,      # 500 m, inside the 1500 m ceiling
+            heading_cdeg=heading_cdeg,
+            hor_cms=12000,
+            callsign="TEST12",
+        )
+        source = _Source(mavlink.build_frame(mavlink.MSG_ADSB_VEHICLE, payload))
+        driver = PingRxAdsb(source, latitude=-43.5, longitude=172.6)
+        return driver.poll(1.0)[0]
+
+    def test_the_driver_alerts_on_inbound_traffic(self):
+        # ~5 km NORTH of the station and tracking south, at 500 m: inside both
+        # rings and coming this way.
+        contact = self._contact(
+            heading_cdeg=18000, lat_e7=-434550000, lon_e7=1726000000
+        )
+        self.assertLess(contact.range_km, 12.0)
+        self.assertTrue(contact.alert)
+
+    def test_the_driver_stays_quiet_for_traffic_that_has_passed(self):
+        # The same position and altitude — still near, still low — tracking
+        # NORTH, away from the site. Identical to the case above in every
+        # respect the old alert looked at.
+        contact = self._contact(
+            heading_cdeg=0, lat_e7=-434550000, lon_e7=1726000000
+        )
+        self.assertLess(contact.range_km, 12.0)
+        self.assertFalse(contact.alert)

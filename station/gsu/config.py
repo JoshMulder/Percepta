@@ -440,6 +440,12 @@ class SiteConfig:
     #: the site (contract/schemas/telemetry.schema.json, aircraft.alert).
     alert_range_km: float = 12.0
     alert_altitude_m: float = 1500.0
+    #: Degrees either side of a direct course for the site. A contact that is
+    #: near and low but tracking AWAY is not a proximity event, and counting it
+    #: as one means roughly half the alerts under a transit lane are about
+    #: aircraft that have already gone. Widen it toward 180 to get the old
+    #: behaviour back — every contact in the ring, whichever way it is pointing.
+    alert_track_tolerance_deg: float = 30.0
 
     #: Transcribe airband transmissions into the event log. The setup page's
     #: switch, live: the agent reads it every sub-tick, so turning it on or off

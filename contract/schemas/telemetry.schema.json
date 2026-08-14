@@ -181,7 +181,7 @@
         },
         "alert": {
           "type": "boolean",
-          "description": "Close and low enough to be worth flagging. The station decides, because the threshold belongs with the site."
+          "description": "Close, low, AND tracking toward the site - all three. The station decides, because the thresholds belong with the site. Closing is judged from the contact's own track against the reciprocal of its bearing, within a configurable tolerance (30 degrees either side by default); a contact reporting no track counts as closing, so a missing field can never become silence. Range and altitude alone would flag an aircraft that has already passed for exactly as long as one inbound."
         },
         "altitude_type": {
           "type": [

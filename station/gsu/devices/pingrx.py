@@ -63,6 +63,60 @@ CONTACT_TTL_SECONDS = 60.0
 #: The ping RX Pro emits a heartbeat, so silence is a real symptom.
 SILENT_AFTER_SECONDS = 10.0
 
+#: How far off a direct course for the station a contact may be and still count
+#: as closing. Degrees, either side.
+#:
+#: Range and altitude alone answer "is something near me", which is not the
+#: question. An aircraft that has already passed and is opening is inside the
+#: ring for exactly as long as one that is inbound, and it raises exactly the
+#: same alert — so on any site under a transit lane, half of every alert is
+#: about an aircraft that is leaving. That is the fastest way to teach an
+#: operator that this alert means nothing.
+#:
+#: Thirty degrees is a course, not a pinpoint. It admits an aircraft tracking a
+#: little wide of the site — which is most of them, since nothing flies exactly
+#: at a point on the ground — and excludes the ones crossing or departing.
+ALERT_TRACK_TOLERANCE_DEG = 30.0
+
+
+def relative_bearing(from_deg: float, to_deg: float) -> float:
+    """Smallest angle between two compass bearings, 0-180.
+
+    The `((a - b + 180) % 360) - 180` fold is the whole trick, and it is here
+    rather than inline because getting it wrong is invisible: a naive
+    `abs(a - b)` is correct for 350° against 340° and says 340 for 350° against
+    10°, so an aircraft crossing north would fail every test that used it while
+    behaving perfectly everywhere else on the compass.
+    """
+    return abs((from_deg - to_deg + 180.0) % 360.0 - 180.0)
+
+
+def is_closing(
+    bearing_from_station: float,
+    track_deg: float | None,
+    tolerance_deg: float = ALERT_TRACK_TOLERANCE_DEG,
+) -> bool:
+    """Is a contact on `track_deg` heading toward the station?
+
+    `bearing_from_station` is what `bearing_to` returns — the bearing FROM the
+    station TO the aircraft. What the aircraft's track has to be compared
+    against is the RECIPROCAL of that: the bearing from the aircraft back to the
+    station. Comparing the track against the outbound bearing instead is the
+    obvious mistake and it inverts the whole feature — it would alert on
+    everything departing and stay silent for everything inbound, which is worse
+    than no filter at all because it looks like one that works.
+
+    A CONTACT THAT REPORTS NO TRACK STILL ALERTS. Heading is optional on the
+    wire and plenty of transponders omit it; treating "unknown" as "not coming
+    this way" would turn a missing field into silence, and silence is the one
+    answer a proximity alert must never give by accident. The filter removes
+    contacts KNOWN to be leaving, never contacts merely unaccounted for.
+    """
+    if track_deg is None:
+        return True
+    to_station = (bearing_from_station + 180.0) % 360.0
+    return relative_bearing(track_deg, to_station) <= tolerance_deg
+
 
 class PingRxAdsb:
     def __init__(
@@ -72,6 +126,7 @@ class PingRxAdsb:
         longitude: float = 0.0,
         alert_range_km: float = 12.0,
         alert_altitude_m: float = 1500.0,
+        alert_track_tolerance_deg: float = ALERT_TRACK_TOLERANCE_DEG,
         port: str = "",
         label: str = "uAvionix ping RX Pro",
     ) -> None:
@@ -80,6 +135,7 @@ class PingRxAdsb:
         self.lon = longitude
         self.alert_range_km = alert_range_km
         self.alert_altitude_m = alert_altitude_m
+        self.alert_track_tolerance_deg = alert_track_tolerance_deg
         self.port = port
         self.label = label
         self._parser = mavlink.MavlinkParser()
@@ -97,9 +153,20 @@ class PingRxAdsb:
         self.lat = latitude
         self.lon = longitude
 
-    def set_thresholds(self, range_km: float, altitude_m: float) -> None:
+    def set_thresholds(
+        self,
+        range_km: float,
+        altitude_m: float,
+        track_tolerance_deg: float | None = None,
+    ) -> None:
         self.alert_range_km = range_km
         self.alert_altitude_m = altitude_m
+        # Optional, so the agent's existing two-argument call keeps working:
+        # this is called through getattr on a driver that may be any of several,
+        # and a signature change that broke one of them would take the alert out
+        # entirely rather than fail loudly.
+        if track_tolerance_deg is not None:
+            self.alert_track_tolerance_deg = track_tolerance_deg
 
     # --- reading --------------------------------------------------------
 
@@ -183,6 +250,15 @@ class PingRxAdsb:
                         range_km < self.alert_range_km
                         and vehicle.altitude_m is not None
                         and vehicle.altitude_m < self.alert_altitude_m
+                        # Near and low is not the question — near, low and
+                        # COMING THIS WAY is. Without this an aircraft that has
+                        # already passed raises the same alert as one inbound,
+                        # for as long as it takes to leave the ring.
+                        and is_closing(
+                            bearing,
+                            vehicle.heading_deg,
+                            self.alert_track_tolerance_deg,
+                        )
                     ),
                     # Everything below is passed through from the decoder
                     # untouched. Each is either what the receiver said or None
@@ -510,11 +586,13 @@ class SimulatedPingRx(PingRxAdsb):
         longitude: float = 172.6,
         alert_range_km: float = 12.0,
         alert_altitude_m: float = 1500.0,
+        alert_track_tolerance_deg: float = ALERT_TRACK_TOLERANCE_DEG,
     ) -> None:
         source = _SimulatedPingSource(latitude, longitude)
         super().__init__(
             source, latitude=latitude, longitude=longitude,
             alert_range_km=alert_range_km, alert_altitude_m=alert_altitude_m,
+            alert_track_tolerance_deg=alert_track_tolerance_deg,
             label="simulated ADS-B receiver (MAVLink)",
         )
         self._source = source

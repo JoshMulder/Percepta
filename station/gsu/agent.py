@@ -570,6 +570,7 @@ class Agent:
             "sensor_lease": self.sensor_lease,
             "alert_range_km": self.site.alert_range_km,
             "alert_altitude_m": self.site.alert_altitude_m,
+            "alert_track_tolerance_deg": self.site.alert_track_tolerance_deg,
             "traffic": self.config.airband_traffic,
         }
 
@@ -1150,7 +1151,11 @@ class Agent:
         for driver in (self.adsb,):
             set_thresholds = getattr(driver, "set_thresholds", None)
             if set_thresholds:
-                set_thresholds(self.site.alert_range_km, self.site.alert_altitude_m)
+                set_thresholds(
+                    self.site.alert_range_km,
+                    self.site.alert_altitude_m,
+                    self.site.alert_track_tolerance_deg,
+                )
         return f"version {self.site.version}, changed {changed or 'nothing'}"
 
     def _renew_from_command(self) -> str:
