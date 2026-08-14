@@ -143,6 +143,22 @@ export function OdinWall({
    *  one poll. Selecting it anyway is right: the drawer renders nothing until
    *  the station appears, rather than the click doing nothing at all. */
   const select = useCallback((id: string) => setSelectedId(id), []);
+
+  /** Guard or release from anywhere on the wall. The whole set is sent, because
+   *  that is the only message the watch socket has — toggling and reconnecting
+   *  are deliberately the same operation. */
+  const toggleGuard = useCallback(
+    (stationId: string) => {
+      const held = watch.guarded.includes(stationId);
+      watch.setGuarded(
+        held
+          ? watch.guarded.filter((s) => s !== stationId)
+          : [...watch.guarded, stationId],
+      );
+      if (held && watch.priority === stationId) watch.setPriority(null);
+    },
+    [watch],
+  );
   const close = useCallback(() => setSelectedId(null), []);
 
   // Escape closes the drawer from anywhere on the wall, including from a tile
@@ -200,12 +216,18 @@ export function OdinWall({
       </div>
 
       <WatchStrip stations={stations} watch={watch} />
-      <TranscriptFeed guarded={watch.guarded} stations={stations} />
+      <TranscriptFeed
+        guarded={watch.guarded}
+        stations={stations}
+        onSelectStation={select}
+      />
 
       <StationPreviewDrawer
         station={selected}
         onClose={close}
         onMaintenanceDeclared={refreshAlerts}
+        guarded={selectedId !== null && watch.guarded.includes(selectedId)}
+        onToggleGuard={toggleGuard}
       />
     </div>
   );

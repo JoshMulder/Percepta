@@ -144,6 +144,16 @@ The headline operational requirement: an operator guards up to 8 airband channel
 7. 'Add to watch' from the alert drawer and from a transcript row; clicking a transcript row guards that station and scrolls its strip into view.
 8. components/TranscriptFeed.tsx in the drawer — the text companion to the audio, tinted to match each guarded channel's strip.
 
+**AS BUILT (2026-08-14).** Four differences from the plan above, all deliberate.
+
+*The protocol is one message, not two.* `watch_set {stations: [...]}` replaces the whole guard set rather than `guard`/`unguard` pairs. The plan already required the set to REPLACE on reconnect, and one message makes toggling and reconnecting literally the same code path instead of two paths that have to agree. What comes back is `watching` carrying the SERVER'S set, never an echo, so a refused station simply is not lit.
+
+*The watch is its own socket, `/api/odin/watch`.* It runs the ordinary console lifecycle (`realtime/endpoint.serve`), so registration, revocation push, the revalidation sweep and the bounded queue all apply unchanged — but it is separate from the wall socket, which is one-way and identical for every viewer. Keeping the surface that takes messages and crosses tenants apart from the one that does neither is worth an extra connection.
+
+*Our own stop lever was added.* The plan covered the TENANT'S levers (item 7). The sweep also re-reads the operator's platform membership row, because a socket outlives a shift and taking somebody off the rota has to stop the audio they are already hearing. It leaves the groups as well as clearing the set: clearing alone would stop the connection COUNTING as a listener while it went on receiving, which is the worst of both.
+
+*Fixed pan, no frequency in the label.* Item 5 asks for 'Kennels Road @ 118.900'. The wall's roster has no frequency — radio state is not cached server-side and exists only on the live per-station fan-out (see the note on `FleetStation`) — so the strip shows the station and its organisation, and states the pan position instead. Adding the frequency means caching radio state in the digest, which is a phase 5 question.
+
 **Risk.** This is the cross-tenant leak surface, and it is guarded entirely by hand-written code. The org id in the joined group name must be resolved from the privileged station row and never from a request body; a future refactor that lets it come from client input puts a connection into a group it was never authorised into, and the publish path performs no authorisation at all by design (hub.py:222-251). Extend test_odin_isolation.py before this ships: a watch connection never lands in an org status group, unguard actually leaves the group, deactivating a station push-stops the listen, and revocation clears the whole guard set.
 
 ### Phase 5 — Deliberate reach, and what a month of running teaches
@@ -190,6 +200,10 @@ The one-station-at-a-time deep look, plus the hygiene ODIN's own load forces. Wo
 
 *Why it matters:* It is a contractual question wearing a UI costume, and the honest engineering position is that an audit trail makes cross-tenant listening accountable but not disclosed. If the answer is disclosed or opt-in it changes phase 4's scope — a tenant-facing indicator, an org flag checked at watch_join — and it must be decided before the tier is built, not after operators are using it.
 
+**DECIDED 2026-08-14: SILENT. Do not show the tenant.** Against the recommendation above, and taken deliberately. What shipped in phase 4 is the audit row and nothing else: every `watch_join` writes `odin.watch.join` against the WATCHED organisation with the operator as actor (`realtime/hub.py`), so the fact is recorded in the customer's own trail and is there if they look. No live indicator on their console, no org flag gating the join.
+
+Stated plainly so nobody has to reconstruct it: cross-tenant listening is **accountable, not disclosed**. Anyone re-opening this should re-open the decision rather than reading the audit row as though it were disclosure — it is a record, and a record nobody is prompted to read is not a notification. The opt-in flag remains cheap to add now that the capability tier exists, and is the thing to reach for if a customer asks.
+
 ### 3. Is on-box airband transcription turned on fleet-wide?
 
 - Yes, fleet-wide — the talk log and the fleet transcript feed cover every station
@@ -197,6 +211,8 @@ The one-station-at-a-time deep look, plus the hygiene ODIN's own load forces. Wo
 - No change — transcripts stay a per-site opt-in and the transcript features are cut from phases 4 and 5
 
 *Recommendation:* Selected stations, expanding after a CPU and power measurement on the Pi 5. GSU_RADIO_TRANSCRIBE is off by default (station/gsu/config.py:449), and turning it on fleet-wide is a real per-box CPU and solar-budget decision, not a platform setting.
+
+**STILL OPEN after phase 4.** The transcript feed shipped built for the "selected stations" answer and behaves honestly under it: it is a companion to the audio, never a substitute, nothing on the wall alerts from it, and "Nothing transcribed" is presented as the normal state rather than a fault — because on most stations it is. Whether transcription goes fleet-wide is a per-box CPU and solar decision on real hardware, and it changes nothing already built; it only widens what the feed covers.
 
 *Why it matters:* The transcript feed is one of the cheapest features in the plan because radio.transmission rows already land in the table ODIN queries — but it is only as wide as the stations with transcription enabled. If the answer is 'no change', the fleet transcript feed and the per-channel transcript lines come out of phases 4 and 5, and the talk log stops being a navigation surface. It also sets the growth rate of station_events, which drives the retention work in phase 5.
 

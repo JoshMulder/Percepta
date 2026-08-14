@@ -146,12 +146,20 @@ export function StationPreviewDrawer({
   station,
   onClose,
   onMaintenanceDeclared,
+  guarded,
+  onToggleGuard,
 }: {
   station: FleetStation | null;
   onClose: () => void;
   /** Called after a window is declared, so the wall re-reads rather than
    *  waiting out the slow roster cycle to show the station as silenced. */
   onMaintenanceDeclared?: () => void;
+  /** Whether this station's airband is on the watch. Passed in rather than read
+   *  here so there is one guard set on the wall: a drawer with its own idea of
+   *  what is guarded is a second source of truth for a thing the operator can
+   *  also see on the strip. */
+  guarded?: boolean;
+  onToggleGuard?: (stationId: string) => void;
 }) {
   const closeRef = useRef<HTMLButtonElement>(null);
   // Hooks run on every render including the closed one, so the early return
@@ -263,6 +271,24 @@ export function StationPreviewDrawer({
         {/* Decorative: the word it stands for is the first row below, so
             nothing is lost by hiding a coloured dot from a screen reader. */}
         <span className={`odin-pip ${pipTone}`} aria-hidden="true" />
+        {/* Guarding from here closes the loop the other way round from the
+            transcript feed: an operator who opened a site because something
+            looked wrong should be able to listen to it without hunting for it
+            again in the strip's picker. */}
+        {onToggleGuard && (
+          <button
+            type="button"
+            className={`odin-chan-act${guarded ? " on" : ""}`}
+            onClick={() => onToggleGuard(station.id)}
+            title={
+              guarded
+                ? "Stop guarding this station's airband"
+                : "Guard this station's airband on the watch"
+            }
+          >
+            {guarded ? "guarding" : "guard"}
+          </button>
+        )}
         <button
           ref={closeRef}
           type="button"

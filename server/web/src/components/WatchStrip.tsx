@@ -3,6 +3,12 @@ import { useMemo, useState } from "react";
 import type { FleetStation } from "../types";
 import type { WatchApi } from "../useWatchAudio";
 import { panFor } from "../watchAudio";
+import {
+  deleteWatchSet,
+  loadWatchSets,
+  saveWatchSet,
+  type WatchSet,
+} from "../watchSets";
 
 /**
  * The listening watch, along the bottom of the wall.
@@ -47,6 +53,8 @@ export function WatchStrip({
   watch: WatchApi;
 }) {
   const [adding, setAdding] = useState(false);
+  const [sets, setSets] = useState<WatchSet[]>(() => loadWatchSets());
+  const [naming, setNaming] = useState(false);
 
   const byId = useMemo(() => {
     const out: Record<string, FleetStation> = {};
@@ -113,6 +121,66 @@ export function WatchStrip({
         )}
         {watch.link === "closed" && (
           <span className="odin-watch-note warn">reconnecting…</span>
+        )}
+
+        {/* Shift watches. One action to get a set of channels back, because the
+            alternative is eight clicks at the start of every shift and an
+            operator who stops bothering. */}
+        {naming ? (
+          <input
+            className="odin-watch-name"
+            autoFocus
+            placeholder="Name this watch…"
+            onBlur={() => setNaming(false)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") setNaming(false);
+              if (e.key !== "Enter") return;
+              setSets(saveWatchSet(e.currentTarget.value, watch.guarded));
+              setNaming(false);
+            }}
+            aria-label="Name this watch"
+          />
+        ) : (
+          <button
+            type="button"
+            className="odin-watch-act"
+            disabled={watch.guarded.length === 0}
+            onClick={() => setNaming(true)}
+            title="Save these channels as a shift watch"
+          >
+            save
+          </button>
+        )}
+
+        {sets.length > 0 && (
+          <select
+            className="odin-watch-load"
+            value=""
+            onChange={(e) => {
+              const [action, name] = e.target.value.split(":");
+              const found = sets.find((s) => s.name === name);
+              if (action === "load" && found) {
+                // Capped here as well as on the server: a set saved before the
+                // limit, or edited by hand, should load its first eight rather
+                // than have the whole load silently refused.
+                watch.setGuarded(found.stations.slice(0, MAX_CHANNELS));
+              }
+              if (action === "del") setSets(deleteWatchSet(name));
+            }}
+            aria-label="Load a saved watch"
+          >
+            <option value="">watches…</option>
+            {sets.map((s) => (
+              <option key={`load-${s.name}`} value={`load:${s.name}`}>
+                {s.name} ({s.stations.length})
+              </option>
+            ))}
+            {sets.map((s) => (
+              <option key={`del-${s.name}`} value={`del:${s.name}`}>
+                delete “{s.name}”
+              </option>
+            ))}
+          </select>
         )}
 
         <span className="odin-watch-count">

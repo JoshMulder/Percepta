@@ -28,12 +28,17 @@ const POLL_MS = 10_000;
 export function TranscriptFeed({
   guarded,
   stations,
+  onSelectStation,
 }: {
   /** The guard set, so the feed follows the strip. Also the authorisation
    *  boundary the server enforces — it will not return a station that is not
    *  active, whatever is asked for. */
   guarded: string[];
   stations: FleetStation[];
+  /** Clicking a line opens that site. The path from "I read something odd" to
+   *  "I can see that site" is the reason to have the feed on the wall at all,
+   *  and it should not go via finding the tile by hand. */
+  onSelectStation?: (stationId: string) => void;
 }) {
   const [rows, setRows] = useState<OdinTranscript[]>([]);
   const [failed, setFailed] = useState(false);
@@ -99,13 +104,23 @@ export function TranscriptFeed({
           <div className="odin-rail-empty">Nothing transcribed</div>
         ) : (
           rows.map((r, i) => (
-            <div key={`${r.ground_station_id}-${r.t}-${i}`} className="odin-tx-row">
+            <button
+              type="button"
+              key={`${r.ground_station_id}-${r.t}-${i}`}
+              className="odin-tx-row"
+              onClick={() => onSelectStation?.(r.ground_station_id)}
+              title={
+                onSelectStation
+                  ? `Open ${names[r.ground_station_id] ?? "this station"}`
+                  : undefined
+              }
+            >
               <span className="odin-tx-when">{r.clock ?? shortTime(r.t)}</span>
               <span className="odin-tx-who">
                 {names[r.ground_station_id] ?? "unknown"}
               </span>
               <span className="odin-tx-what">{r.message}</span>
-            </div>
+            </button>
           ))
         )}
       </div>

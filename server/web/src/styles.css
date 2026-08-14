@@ -4985,6 +4985,17 @@ body {
 .odin-watch-note { font-size: 11px; color: var(--odin-nominal); }
 .odin-watch-note.warn { color: var(--odin-warn); }
 .odin-watch-count { margin-left: auto; font-size: 11px; color: var(--odin-nominal); }
+.odin-watch-act, .odin-watch-load, .odin-watch-name {
+  font: inherit; font-size: 11px;
+  background: transparent; color: var(--odin-nominal);
+  border: 1px solid var(--odin-line); border-radius: 3px;
+  padding: 0.15rem 0.45rem;
+}
+.odin-watch-act { cursor: pointer; }
+.odin-watch-act:hover:not(:disabled) { color: #dde6ed; }
+.odin-watch-act:disabled { opacity: 0.4; cursor: default; }
+.odin-watch-load { cursor: pointer; max-width: 11rem; }
+.odin-watch-name { width: 10rem; color: #dde6ed; }
 
 .odin-watch-channels {
   display: flex; gap: 1px; padding: 1px;
@@ -5053,10 +5064,17 @@ body {
 .odin-chan-act.on { color: var(--odin-warn); border-color: var(--odin-warn); }
 
 .odin-tx-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 0.25rem 0; }
+/* A button, because clicking a line opens that site — so it has to be reachable
+   from a keyboard and announced as something that does something. Styled back
+   down to a row: the affordance is the hover, not a button that looks like one
+   in a list of forty. */
 .odin-tx-row {
   display: grid; grid-template-columns: 4.2rem 6.5rem 1fr; gap: 0.5rem;
-  padding: 0.2rem 0.75rem; font-size: 12px; align-items: baseline;
+  padding: 0.2rem 0.75rem; font: inherit; font-size: 12px; align-items: baseline;
+  width: 100%; text-align: left; cursor: pointer;
+  background: none; border: 0; color: inherit;
 }
+.odin-tx-row:hover { background: #0e141b; }
 .odin-tx-when { color: var(--odin-nominal); font-variant-numeric: tabular-nums; }
 .odin-tx-who {
   color: var(--odin-nominal);
