@@ -753,3 +753,19 @@ export interface OdinAlert {
   acked_by_user_id: string | null;
   snooze_until: string | null;
 }
+
+/** One transmission on a guarded channel.
+ *
+ *  A COMPANION to the audio, never a substitute for it: transcription is off on
+ *  most stations, imperfect on the rest, and produced after the over ends rather
+ *  than alongside it. Nothing on the wall alerts from these. */
+export interface OdinTranscript {
+  ground_station_id: string;
+  /** When the transmission happened, ISO. */
+  t: string;
+  /** The station's own wall-clock rendering, kept because an operator comparing
+   *  a transcript against a recording compares against what the STATION said,
+   *  not what the server inferred. */
+  clock: string | null;
+  message: string;
+}

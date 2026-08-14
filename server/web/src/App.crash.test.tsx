@@ -71,6 +71,12 @@ const apiStub = {
   weatherHistory: vi.fn(async () => []),
   radioPresets: vi.fn(async () => [null, null, null, null]),
   radioTranscripts: vi.fn(async () => []),
+  // Odin's own reads. Missing, these threw straight out of an effect as an
+  // unhandled rejection: the assertions still passed, because the crash
+  // happened after the render they were checking, and the suite reported green
+  // with a live TypeError in it.
+  odinAlerts: vi.fn(async () => []),
+  odinTranscripts: vi.fn(async () => []),
   releases: vi.fn(async () => []),
   latestRelease: vi.fn(async () => ({
     tag: null, image: null, notes: null, published_at: null,

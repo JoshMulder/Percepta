@@ -19,6 +19,7 @@ import type {
   StationHealth,
   StationSummary,
   OdinAlert,
+  OdinTranscript,
 } from "./types";
 
 /** Thrown for any non-2xx. `status` is carried so callers can tell an expired
@@ -415,6 +416,14 @@ export const api = {
    *  when the socket is down, and the read after an action so the operator who
    *  clicked sees their own change without waiting for the next frame. */
   odinAlerts: () => request<OdinAlert[]>("/api/odin/alerts"),
+  /** Transcripts across the guarded channels. `stations` is the comma-separated
+   *  guard set — the server refuses more than eight and returns nothing for a
+   *  station that has been deactivated, so the feed goes quiet on its own when a
+   *  tenant pulls their stop lever. */
+  odinTranscripts: (stations: string) =>
+    request<OdinTranscript[]>(
+      `/api/odin/transcripts?stations=${encodeURIComponent(stations)}`,
+    ),
   /** Take ownership. Answers 409 if somebody else already has it — that is the
    *  answer, not a transient failure, and the client must re-render rather than
    *  retry. */

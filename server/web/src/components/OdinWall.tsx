@@ -3,11 +3,14 @@ import { api } from "../api";
 import { chime } from "../chime";
 import type { FleetAdsb, FleetView, OdinAlert, PlatformMapConfig } from "../types";
 import { useOdin } from "../useOdin";
+import { useWatchAudio } from "../useWatchAudio";
 import { AlertRail } from "./AlertRail";
 import { FleetMap } from "./FleetMap";
 import { OdinStatusBar } from "./OdinStatusBar";
 import { StationPreviewDrawer } from "./StationPreviewDrawer";
 import { TileWall } from "./TileWall";
+import { TranscriptFeed } from "./TranscriptFeed";
+import { WatchStrip } from "./WatchStrip";
 
 /**
  * ODIN: every station, every organisation, one screen.
@@ -65,6 +68,12 @@ export function OdinWall({
   // polling still looks alive, and the operator only discovers the difference
   // at the moment they needed it to have been live.
   const { stations: pushed, alerts: pushedAlerts, link, lastFrameAt } = useOdin(true);
+
+  /** The listening watch. Its own socket, deliberately: the wall's is one-way
+   *  and identical for every viewer, and this one takes messages and reaches
+   *  across tenant boundaries. Keeping the surface that can be talked into
+   *  something separate from the one that cannot is worth a second connection. */
+  const watch = useWatchAudio(true);
 
   /** Alerts arrive on the digest. This is the fallback for a dead socket, and
    *  the re-read after an operator acts so they see their own change at once
@@ -189,6 +198,9 @@ export function OdinWall({
           <div className="odin-rail-empty">Map unavailable</div>
         )}
       </div>
+
+      <WatchStrip stations={stations} watch={watch} />
+      <TranscriptFeed guarded={watch.guarded} stations={stations} />
 
       <StationPreviewDrawer
         station={selected}
