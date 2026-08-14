@@ -8,7 +8,7 @@ import type {
   Me,
   PlatformMapConfig,
 } from "../types";
-import { FleetMap } from "./FleetMap";
+import { OdinWall } from "./OdinWall";
 import { Logo } from "./Logo";
 import { SettingsAccount } from "./SettingsAccount";
 import { SettingsPlatform } from "./SettingsPlatform";
@@ -65,6 +65,12 @@ function statusTone(s: FleetStation): string {
   return s.dark ? "bad" : "warn";
 }
 
+/* The KPI row that used to live here went with the Overview it belonged to.
+   Six large numbers across the top cost about 180px to say less than the wall's
+   56px status line does, and a row of big figures with no context is exactly
+   what an eye learns to skip on a screen it looks at all day. The wall's status
+   bar carries the same counts, in one line, with colour only on the ones that
+   are both bad and non-zero. */
 export function PlatformDashboard({
   me,
   onSignedOut,
@@ -75,6 +81,11 @@ export function PlatformDashboard({
   refreshMe: () => void;
 }) {
   const [tab, setTab] = useState<Tab>("overview");
+  /** The moment of the last SUCCESSFUL fleet read. The error alone cannot say
+   *  how old the picture is, and a wall that shows stale data confidently is
+   *  worse than one that goes blank — the operator's certainty is highest
+   *  exactly when the data is worst. Odin's liveness pip counts up from this. */
+  const [lastPollAt, setLastPollAt] = useState<number | null>(null);
   const [fleet, setFleet] = useState<FleetView | null>(null);
   const [adsb, setAdsb] = useState<FleetAdsb | null>(null);
   const [mapConfig, setMapConfig] = useState<PlatformMapConfig | null>(null);
@@ -94,6 +105,7 @@ export function PlatformDashboard({
         .then((f) => {
           if (alive) {
             setFleet(f);
+            setLastPollAt(Date.now());
             setError(null);
           }
         })
@@ -161,7 +173,13 @@ export function PlatformDashboard({
 
       <main className="pdash-main">
         {tab === "overview" && (
-          <Overview fleet={fleet} adsb={adsb} mapConfig={mapConfig} error={error} />
+          <OdinWall
+            fleet={fleet}
+            adsb={adsb}
+            mapConfig={mapConfig}
+            lastPollAt={lastPollAt}
+            error={error}
+          />
         )}
         {tab === "stations" && <StationsTab fleet={fleet} error={error} />}
         {tab === "orgs" && (
@@ -177,150 +195,6 @@ export function PlatformDashboard({
           </div>
         )}
       </main>
-    </div>
-  );
-}
-
-function Kpi({
-  label,
-  value,
-  sub,
-  tone,
-}: {
-  label: string;
-  value: number | string;
-  sub?: string;
-  tone?: string;
-}) {
-  return (
-    <div className={`kpi${tone ? " " + tone : ""}`}>
-      <span className="kpi-value">{value}</span>
-      <span className="kpi-label">{label}</span>
-      {sub && <span className="kpi-sub">{sub}</span>}
-    </div>
-  );
-}
-
-function Overview({
-  fleet,
-  adsb,
-  mapConfig,
-  error,
-}: {
-  fleet: FleetView | null;
-  adsb: FleetAdsb | null;
-  mapConfig: PlatformMapConfig | null;
-  error: string | null;
-}) {
-  const stations = useMemo(() => fleet?.stations ?? [], [fleet]);
-  const attention = useMemo(
-    () =>
-      [...stations]
-        .filter((s) => s.status !== "online")
-        .sort((a, b) => stationRank(a) - stationRank(b))
-        .slice(0, 8),
-    [stations],
-  );
-
-  if (!fleet) {
-    return (
-      <div className="pdash-pane">
-        <p className="settings-note">{error ?? "Loading the fleet…"}</p>
-      </div>
-    );
-  }
-  const s = fleet.stats;
-  const faults = s.faults_critical_24h + s.faults_warning_24h;
-
-  return (
-    <div className="pdash-pane pdash-overview">
-      <div className="kpi-row">
-        <Kpi
-          label="Stations"
-          value={s.stations_total}
-          sub={`${s.stations_total - s.stations_no_location} located`}
-        />
-        <Kpi label="Online" value={s.stations_online} tone="ok" />
-        <Kpi
-          label="Offline"
-          value={s.stations_offline}
-          tone={s.stations_offline ? "warn" : undefined}
-          sub={s.stations_dark ? `${s.stations_dark} dark` : undefined}
-        />
-        <Kpi
-          label="Faults 24h"
-          value={faults}
-          tone={s.faults_critical_24h ? "bad" : faults ? "warn" : undefined}
-          sub={s.faults_critical_24h ? `${s.faults_critical_24h} critical` : undefined}
-        />
-        <Kpi
-          label="Aircraft"
-          value={adsb ? adsb.aircraft.length : "—"}
-          tone="gold"
-          sub={adsb ? `${adsb.contributing_stations} stations` : undefined}
-        />
-        <Kpi
-          label="Organisations"
-          value={s.organizations_active}
-          sub={
-            s.organizations_total !== s.organizations_active
-              ? `${s.organizations_total - s.organizations_active} removed`
-              : undefined
-          }
-        />
-      </div>
-
-      <div className="pdash-overview-grid">
-        <div className="pdash-map-wrap">
-          {mapConfig ? (
-            <FleetMap
-              config={mapConfig}
-              stations={stations}
-              aircraft={adsb?.aircraft ?? []}
-            />
-          ) : (
-            <div className="pdash-map-empty">Map unavailable</div>
-          )}
-        </div>
-
-        <aside className="pdash-attention">
-          <h3>Needs attention</h3>
-          {attention.length === 0 ? (
-            <p className="settings-note">Every station is online.</p>
-          ) : (
-            <ul className="attention-list">
-              {attention.map((st) => (
-                <li key={st.id}>
-                  <span className={`status-dot ${statusTone(st)}`} />
-                  <span className="attention-name">{st.name}</span>
-                  <span className="attention-meta">
-                    {st.organization_name} · {statusLabel(st)} · {ago(st.last_seen_at)}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
-
-          <h3>Recent events</h3>
-          {fleet.recent_events.length === 0 ? (
-            <p className="settings-note">Nothing in the last while.</p>
-          ) : (
-            <ul className="attention-list">
-              {fleet.recent_events.slice(0, 8).map((ev) => (
-                <li key={ev.id}>
-                  <span
-                    className={`status-dot ${ev.severity === "critical" ? "bad" : "warn"}`}
-                  />
-                  <span className="attention-name">{ev.station_name}</span>
-                  <span className="attention-meta">
-                    {ev.message ?? ev.type} · {ago(ev.received_at)}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </aside>
-      </div>
     </div>
   );
 }

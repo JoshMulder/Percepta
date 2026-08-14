@@ -622,6 +622,38 @@ export interface FleetStation {
   is_simulated: boolean;
   model: string | null;
   config_version: number;
+
+  // --- tile vitals, from the ingest's cached snapshots -------------------
+  // All optional, and null means "not known right now" rather than a value. A
+  // station that has gone quiet stops having a state of charge, and a tile
+  // saying "unknown" is worth more than one showing a number from an hour ago.
+  //
+  // Radio squelch and camera stream state are deliberately NOT here: only
+  // health, power and ADS-B frames are cached server-side, and radio and camera
+  // exist solely on the live per-station fan-out. A wall cannot know them
+  // without subscribing to every station at once. What it can know is whether
+  // those devices are fitted and well — see `slots`.
+  /** "ok" | "degraded" | "failing", as the station reports itself. */
+  health?: string | null;
+  /** The worst open condition, named by the station, and how many there are. */
+  worst_condition?: string | null;
+  condition_count?: number;
+  /** The station's own view of its link home. Not the same question as
+   *  `status`: that is whether we have heard from it, this is whether it
+   *  believes it is connected, and they disagree in the interesting cases. */
+  uplink_connected?: boolean | null;
+  uplink_offline_seconds?: number | null;
+  /** The number that decides whether anything else here is still true in six
+   *  hours, on a solar site nobody visits. */
+  soc_pct?: number | null;
+  on_battery?: boolean | null;
+  load_w?: number | null;
+  /** Device status by slot, e.g. { radio: "present", camera: "absent" }. */
+  slots?: Record<string, string>;
+  /** Slots reporting synthetic data, so a wall never shows demo numbers as
+   *  real. The station is authoritative about this; the platform is not. */
+  simulated_slots?: string[];
+  running_version?: string | null;
 }
 
 export interface FleetEvent {

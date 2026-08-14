@@ -4421,6 +4421,441 @@ body {
 
 
 /* ============================================================================
+   ODIN — the operations wall.
+
+   A screen an operator watches for hours and mostly does not touch. Everything
+   below follows from that: it is read at three metres, in a dim room, by
+   somebody whose attention is on something else until it should not be.
+   ========================================================================= */
+
+/* Colour is RATIONED, and this is the whole design rather than a palette.
+
+   Near-black ground. One flat neutral for a station with nothing wrong. Exactly
+   four accents, and green is not one of the station colours: green is the
+   liveness pip and nothing else. A wall where healthy stations are green is a
+   wall of green, and a wall of green teaches an operator within a shift that
+   colour carries no information — at which point the amber you need them to
+   catch is just another light. Fine is the ABSENCE of colour. Any colour at all
+   means look. */
+.odin {
+  --odin-ground: #05080b;
+  --odin-panel: #0b1016;
+  --odin-line: #1b2530;
+  --odin-nominal: #46586a;   /* a station with nothing to say */
+  --odin-warn: #e8b04b;      /* offline, warning */
+  --odin-bad: #ff5c39;       /* dark, critical */
+  --odin-air: #d7b348;       /* aircraft, matching the fleet map's contacts */
+  --odin-live: #35c48a;      /* the pip. Nothing else. */
+
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-columns: 3fr 6fr 3fr;
+  grid-template-rows: auto 1fr;
+  gap: 1px;
+  background: var(--odin-line);
+  color: #dde6ed;
+  font: 14px/1.45 var(--sans);
+  min-height: 0;
+}
+.odin > * { background: var(--odin-ground); min-height: 0; }
+.odin-statusbar { grid-column: 1 / -1; }
+
+/* ------------------------------------------------------------- status bar */
+/* One line, and the only place on the wall where a number is large. */
+.odin-statusbar {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  height: 56px;
+  padding: 0 1rem;
+  background: var(--odin-panel);
+  white-space: nowrap;
+  overflow-x: auto;
+}
+.odin-statusbar-figure {
+  font: 600 20px/1 var(--mono);
+  font-variant-numeric: tabular-nums;
+  /* Neutral by default. A count only takes colour when it is both BAD and
+     non-zero: "0 dark" in red would be a false alarm that never goes away, and
+     an operator learns to ignore a light that is always on. */
+  color: var(--odin-nominal);
+}
+.odin-statusbar-figure.warn { color: var(--odin-warn); }
+.odin-statusbar-figure.bad { color: var(--odin-bad); }
+.odin-statusbar-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: #6c8092;
+  margin-left: 0.35rem;
+  /* Tabular, because the liveness label uses this class and it is the one text
+     on the bar that changes every second. Proportional digits re-measure on
+     every tick and shove both clocks rightward for the length of an outage —
+     movement that means nothing, on a wall where movement is the alarm. */
+  font-variant-numeric: tabular-nums;
+}
+/* The liveness label takes the pip's tone. As a SIBLING of the pip it cannot
+   inherit it, so it carries its own: an amber dot beside grey text reading
+   "stale 47s" is half a warning, and the half that is missing is the half with
+   the number in it. */
+.odin-statusbar-label.warn { color: var(--odin-warn); }
+.odin-statusbar-label.bad { color: var(--odin-bad); }
+.odin-clock {
+  font: 13px/1 var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: #8fa3b3;
+}
+/* The pip. Green here and nowhere else, and it says one thing: this screen is
+   being told the truth right now. Amber the moment it is not. */
+.odin-pip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-left: auto;
+  font: 11px/1 var(--mono);
+  color: #6c8092;
+}
+.odin-pip::before {
+  content: "";
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--odin-live);
+  box-shadow: 0 0 6px rgba(53, 196, 138, 0.7);
+  /* The tick. OdinStatusBar keys this element on the poll timestamp, so a
+     completed poll remounts it and the animation restarts from the top — one
+     beat per poll, driven by the data itself rather than by a timer that could
+     keep beating after the data stopped. A pip with its own interval would go on
+     reassuring the room about a feed that had died. */
+  animation: odin-pip-tick 900ms ease-out;
+}
+@keyframes odin-pip-tick {
+  0% { transform: scale(1.9); opacity: 1; }
+  100% { transform: scale(1); opacity: 0.85; }
+}
+/* `warn`, not a bespoke `stale`: the wall's tone modifiers are ok|warn|bad|
+   neutral everywhere, and a one-off class here would be the sort of small
+   inconsistency that survives for years. */
+/* EVERY tone the component can emit is implemented here, and that is not
+   defensive box-ticking: the base rule below is green, so a tone with no rule
+   does not fall back to something neutral — it falls back to "all is well". A
+   missing selector here is a wall that reports health while it is blind.
+
+   ok is the base: green, one beat per completed poll, nothing else. */
+.odin-pip.warn { color: var(--odin-warn); }
+.odin-pip.warn::before {
+  background: var(--odin-warn);
+  box-shadow: 0 0 6px rgba(232, 176, 75, 0.7);
+  /* Pulsing, because a stale wall must not look like a calm one — and the tick
+     cannot help here: it is driven by a poll timestamp that has stopped
+     changing, which is the whole problem being reported. */
+  animation: odin-pip-pulse 1.4s ease-in-out infinite;
+}
+/* No data at all yet: not healthy, not failing. Grey and still. Green here
+   would claim a poll that has never happened. */
+.odin-pip.neutral { color: #6c8092; }
+.odin-pip.neutral::before {
+  background: #46586a;
+  box-shadow: none;
+  animation: none;
+}
+@keyframes odin-pip-pulse { 50% { opacity: 0.25; } }
+
+/* ------------------------------------------------------------------ tiles */
+.odin-wall-grid {
+  grid-column: 2;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+  grid-auto-rows: min-content;
+  gap: 6px;
+  padding: 8px;
+  overflow-y: auto;
+}
+.odin-tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0;
+  text-align: left;
+  background: var(--odin-panel);
+  border: 1px solid var(--odin-line);
+  border-radius: 3px;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  overflow: hidden;
+}
+/* The tile carries a tone as well as its band. Nothing dramatic - the band is
+   the colour carrier - but a dark station earns a faint wash so a wall of
+   mostly-fine tiles still has shape from across the room. */
+.odin-tile.warn { background: #100e0a; }
+.odin-tile.bad { background: #140a08; }
+.odin-tile.neutral,
+.odin-tile.ok { background: var(--odin-panel); }
+.odin-tile:hover { border-color: #2c3d4b; }
+/* Positioned, so a demo marker inside a glyph resolves against THAT glyph. Left
+   static, every per-slot marker resolved against .odin-tile and stacked in the
+   same corner as the station-level one - four markers in one 4px square, none
+   of them on the thing they described. */
+.odin-tile-glyph { position: relative; }
+.odin-tile-org { position: relative; }
+.odin-tile:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
+.odin-tile.selected { border-color: var(--brand); }
+
+/* The band carries the status, and it is the only thing on a nominal tile with
+   any colour at all — which is to say, none. */
+.odin-tile-band { height: 6px; background: var(--odin-nominal); flex: none; }
+.odin-tile-band.warn { background: var(--odin-warn); }
+.odin-tile-band.bad { background: var(--odin-bad); }
+.odin-tile-band.neutral { background: #2a3542; }
+
+.odin-tile-name {
+  font-size: 15px;          /* legible at three metres, which is the brief */
+  font-weight: 600;
+  padding: 0 0.5rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.odin-tile-org {
+  font-size: 11px;
+  color: #6c8092;
+  padding: 0 0.5rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* A bar, not a number: a bar is read at distance and a two-digit percentage is
+   not. Absent entirely when the station has not reported one — a zero-width bar
+   would read as a flat battery, which is the opposite of "unknown". */
+.odin-tile-soc {
+  height: 4px;
+  margin: 0.15rem 0.5rem;
+  background: #16202a;
+  border-radius: 2px;
+  overflow: hidden;
+}
+.odin-tile-soc-fill { height: 100%; background: var(--odin-nominal); }
+.odin-tile-soc-fill.warn { background: var(--odin-warn); }
+.odin-tile-soc-fill.bad { background: var(--odin-bad); }
+/* Running on stored power. Striped rather than coloured, so it reads at a
+   glance without spending one of the four accents on a normal night-time
+   state — every off-grid site is on battery after dark. */
+/* `.warn` is what StationTile emits for a discharging site; `.on-battery` is
+   what this sheet first called it. Both, because a rename in one half of a pair
+   written by different hands is exactly how the mark silently stopped
+   appearing. */
+.odin-tile-soc.warn .odin-tile-soc-fill,
+.odin-tile-soc.on-battery .odin-tile-soc-fill {
+  background-image: repeating-linear-gradient(
+    45deg, transparent, transparent 3px,
+    rgba(255, 255, 255, 0.22) 3px, rgba(255, 255, 255, 0.22) 6px
+  );
+}
+
+.odin-tile-vitals {
+  display: flex;
+  gap: 0.35rem;
+  padding: 0 0.5rem 0.4rem;
+  font: 10px/1 var(--mono);
+}
+/* Fitted and well: dim. Not fitted: dimmer still, and NOT coloured — a camera
+   that was never installed has not failed, and an operator does something
+   completely different about each. */
+.odin-tile-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.15rem;
+  height: 1.15rem;
+  border-radius: 2px;
+  background: #131c25;
+  color: #55697a;
+}
+.odin-tile-glyph.absent { opacity: 0.28; }
+.odin-tile-glyph.warn { color: var(--odin-warn); background: rgba(232, 176, 75, 0.12); }
+.odin-tile-glyph.bad { color: var(--odin-bad); background: rgba(255, 92, 57, 0.12); }
+
+/* Amber by default and red only when the station calls itself failing. Every
+   badge being red spends the colour reserved for "somebody drives out there" on
+   a single open condition at an otherwise healthy site, and a palette that
+   cries wolf is a palette an operator stops reading. */
+.odin-tile-fault {
+  position: absolute;
+  top: 10px;
+  right: 4px;
+  min-width: 1.05rem;
+  padding: 0 0.25rem;
+  border-radius: 0.55rem;
+  background: var(--odin-warn);
+  color: #241802;
+  font: 700 10px/1.05rem var(--mono);
+  text-align: center;
+}
+.odin-tile-fault.bad { background: var(--odin-bad); color: #150703; }
+/* Synthetic data, marked on the tile itself. A wall that shows demo numbers as
+   real is worse than a wall showing nothing. */
+.odin-tile-demo {
+  position: absolute;
+  top: 0;
+  left: 0;
+  padding: 0 0.25rem;
+  border: 1px solid var(--odin-warn);
+  border-radius: 2px;
+  color: var(--odin-warn);
+  font: 700 8px/1.05rem var(--mono);
+  letter-spacing: 0.08em;
+}
+/* The per-slot variant has no room for a word, so it is a corner pip on the
+   glyph itself — legible as "this reading is synthetic" only because it sits ON
+   the thing it describes, which is what the positioned ancestor above buys. */
+.odin-tile-demo.slot {
+  top: -2px;
+  right: -2px;
+  left: auto;
+  width: 5px;
+  height: 5px;
+  padding: 0;
+  border-radius: 50%;
+  background: var(--odin-warn);
+}
+
+/* Something about this station changed in the last minute. Motion is the alarm
+   channel on a wall nobody is staring at, so it is spent only on change and it
+   decays on its own rather than needing to be dismissed. */
+.odin-tile-halo {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-radius: 3px;
+  /* Toned, because a station RECOVERING and a station failing both changed, and
+     a wall that flashes the same colour for both teaches an operator to walk
+     over and read the tile every time — which is the attention the halo was
+     supposed to save. */
+  box-shadow: inset 0 0 0 2px rgba(70, 88, 106, 0.85);
+  animation: odin-halo-decay 60s linear forwards;
+}
+.odin-tile-halo.warn { box-shadow: inset 0 0 0 2px rgba(232, 176, 75, 0.85); }
+.odin-tile-halo.bad { box-shadow: inset 0 0 0 2px rgba(255, 92, 57, 0.9); }
+.odin-tile-halo.neutral { box-shadow: inset 0 0 0 2px rgba(70, 88, 106, 0.85); }
+@keyframes odin-halo-decay { to { opacity: 0; } }
+
+/* The nominal remainder, once the fleet is too large for one tile each. Past
+   that point a wall you must scroll is a wall you will miss something on, so
+   the stations with nothing to say collapse into a single line and the ones
+   with something keep their tile. */
+.odin-wall-nominal {
+  grid-column: 1 / -1;
+  padding: 0.5rem 0.6rem;
+  background: var(--odin-panel);
+  border: 1px dashed var(--odin-line);
+  border-radius: 3px;
+  color: #6c8092;
+  font: 12px/1 var(--mono);
+}
+
+/* ------------------------------------------------------------- alert rail */
+.odin-rail {
+  grid-column: 1;
+  grid-row: 2;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  background: var(--odin-panel);
+}
+.odin-rail-row {
+  display: grid;
+  grid-template-columns: 3px 1fr auto;
+  gap: 0.5rem;
+  align-items: baseline;
+  width: 100%;
+  padding: 0.5rem 0.6rem;
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--odin-line);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.odin-rail-row:hover { background: #101821; }
+.odin-rail-row:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
+.odin-rail-sev { align-self: stretch; background: var(--odin-warn); border-radius: 2px; }
+.odin-rail-sev.bad,
+.odin-rail-sev.critical { background: var(--odin-bad); }
+.odin-rail-sev.warning { background: var(--odin-warn); }
+/* The row takes the severity too, so the whole line reads at a glance rather
+   than only its 3px spine. AlertRail emits the raw severity word, which is why
+   both vocabularies appear here. */
+.odin-rail-row.critical { background: rgba(255, 92, 57, 0.06); }
+.odin-rail-row.critical:hover { background: rgba(255, 92, 57, 0.1); }
+.odin-rail-where { font-size: 11px; color: #6c8092; }
+.odin-rail-when {
+  font: 11px/1 var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: #6c8092;
+}
+/* An empty rail is the NORMAL state and must not look like a broken one. */
+.odin-rail-empty {
+  padding: 1.5rem 0.75rem;
+  color: #46586a;
+  font-size: 12px;
+  text-align: center;
+}
+
+/* ---------------------------------------------------------------- drawer */
+/* Over the wall, never instead of it: the operator glancing at one site must
+   not lose the thing they were watching. */
+.odin-drawer {
+  position: absolute;
+  top: 56px;
+  right: 0;
+  bottom: 0;
+  width: min(26rem, 40vw);
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  background: var(--odin-panel);
+  border-left: 1px solid var(--odin-line);
+  box-shadow: -1rem 0 2rem rgba(0, 0, 0, 0.55);
+  overflow-y: auto;
+}
+.odin-drawer-head {
+  position: sticky;
+  top: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  background: var(--odin-panel);
+  border-bottom: 1px solid var(--odin-line);
+}
+.odin-drawer-close { margin-left: auto; }
+.odin-drawer-body { padding: 0.75rem; }
+.odin-drawer-section { margin-bottom: 1rem; }
+.odin-drawer-section h4 {
+  margin: 0 0 0.35rem;
+  font: 11px/1 var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: #6c8092;
+}
+.odin-drawer-section dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.2rem 0.75rem;
+  margin: 0;
+  font-size: 12px;
+}
+.odin-drawer-section dt { color: #6c8092; }
+.odin-drawer-section dd { margin: 0; font-variant-numeric: tabular-nums; }
+
+/* The map keeps the third column, under the rail's opposite number. */
+.odin-map { grid-column: 3; grid-row: 2; position: relative; overflow: hidden; }
+
+/* ============================================================================
    HEADER CHROME, ANCHORED — and it must stay at the END of this file.
    
    Everything below overrides earlier rules at EQUAL specificity (.topbar vs
