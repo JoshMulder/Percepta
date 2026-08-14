@@ -8,7 +8,10 @@ value worked out by hand from the message definition, not against the code.
 import unittest
 
 from gsu.devices import mavlink
+from gsu.devices import pingrx
 from gsu.devices.pingrx import (
+    DERIVED_TRACK_MIN_KM,
+    STATIONARY_AFTER_S,
     PingRxAdsb,
     SimulatedPingRx,
     is_closing,
@@ -592,3 +595,213 @@ class ClosingTrackTests(unittest.TestCase):
         )
         self.assertLess(contact.range_km, 12.0)
         self.assertFalse(contact.alert)
+
+
+class _Clock:
+    """A monotonic clock the test drives, so a 40-second wait costs nothing."""
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class SpeedGateTests(unittest.TestCase):
+    """A heading is only a course while something is moving along it.
+
+    A tower, a mast, a parked aircraft or a service vehicle reports whatever
+    direction it last faced. Tested against that heading, roughly one such
+    contact in six sits inside the 30 degree window — permanently, because it
+    will never move — so whether a fixed object alerts for ever comes down to
+    which way it happens to point.
+    """
+
+    def test_a_stationary_contact_does_not_alert_whichever_way_it_points(self):
+        # Every heading on the compass, including the arc that would otherwise
+        # pass the closing test for a contact due north of the station.
+        for heading in range(0, 360, 5):
+            with self.subTest(heading=heading):
+                self.assertFalse(is_closing(0.0, float(heading), speed_kt=0.0))
+
+    def test_the_gate_is_ten_knots(self):
+        self.assertFalse(is_closing(0.0, 180.0, speed_kt=9.9))
+        self.assertTrue(is_closing(0.0, 180.0, speed_kt=10.0))
+
+    def test_a_moving_contact_is_still_judged_on_heading(self):
+        # The speed gate suppresses; it never promotes. Something moving fast
+        # AWAY is still not closing.
+        self.assertTrue(is_closing(0.0, 180.0, speed_kt=300.0))
+        self.assertFalse(is_closing(0.0, 0.0, speed_kt=300.0))
+
+    def test_an_unreported_speed_does_not_suppress(self):
+        # Velocity is optional on the wire. Treating "unknown" as "stopped"
+        # would turn a missing field into silence.
+        self.assertTrue(is_closing(0.0, 180.0, speed_kt=None))
+
+    def test_a_zero_gate_restores_stationary_alerts(self):
+        self.assertTrue(is_closing(0.0, 180.0, speed_kt=0.0, min_speed_kt=0.0))
+
+
+class DerivedCourseTests(unittest.TestCase):
+    """A contact that reports no heading still gets judged on where it is going.
+
+    Heading is optional on the wire, and until this existed every contact
+    omitting it fell through to "unknown, so alert" — which is the behaviour the
+    whole closing filter exists to replace. Two position fixes are all a course
+    needs, and the receiver already holds a position table.
+    """
+
+    STATION = (-43.5, 172.6)
+    ICAO = "7C1B2D"
+
+    def setUp(self):
+        self.clock = _Clock()
+        real = pingrx.time.monotonic
+        pingrx.time.monotonic = self.clock
+        self.addCleanup(setattr, pingrx.time, "monotonic", real)
+
+    def _driver(self):
+        self.source = _Source()
+        return PingRxAdsb(
+            self.source, latitude=self.STATION[0], longitude=self.STATION[1]
+        )
+
+    def _report(self, driver, *, lat, lon, heading_cdeg=None):
+        """One position report with NO velocity and, by default, no heading."""
+        flags = mavlink.FLAG_VALID_COORDS | mavlink.FLAG_VALID_ALTITUDE
+        extra = {}
+        if heading_cdeg is not None:
+            # The validity flag is not enough on its own: heading_cdeg
+            # defaults to INVALID_U16 and the decoder requires both, so a
+            # test setting only the flag would exercise the no-heading path
+            # while claiming to test the other one.
+            flags |= mavlink.FLAG_VALID_HEADING
+            extra["heading_cdeg"] = heading_cdeg
+        payload = mavlink.encode_adsb_vehicle(
+            icao=0x7C1B2D, flags=flags,
+            lat_e7=int(lat * 1e7), lon_e7=int(lon * 1e7),
+            altitude_mm=500_000, callsign="NOHDG", **extra,
+        )
+        self.source.data = mavlink.build_frame(
+            mavlink.MSG_ADSB_VEHICLE, payload
+        )
+        return driver.poll(1.0)[0]
+
+    def test_a_course_is_measured_from_movement_and_alerts_when_inbound(self):
+        driver = self._driver()
+        # Starts ~11 km north of the station, then closes to ~5 km. Tracking
+        # south, straight at us — but the wire reports no heading at all.
+        first = self._report(driver, lat=-43.40, lon=172.6)
+        self.assertGreater(first.range_km, 11.0)
+
+        self.clock.advance(30.0)
+        second = self._report(driver, lat=-43.455, lon=172.6)
+        self.assertLess(second.range_km, 12.0)
+        self.assertTrue(second.alert)
+
+    def test_a_measured_course_away_from_the_station_stays_quiet(self):
+        driver = self._driver()
+        # Inside the ring throughout, moving NORTH — away. Range and altitude
+        # both say alert; the derived course is the only thing that knows better.
+        self._report(driver, lat=-43.45, lon=172.6)
+        self.clock.advance(30.0)
+        contact = self._report(driver, lat=-43.40, lon=172.6)
+        self.assertLess(contact.range_km, 12.0)
+        self.assertFalse(contact.alert)
+
+    def test_the_baseline_is_not_reset_every_poll(self):
+        """The anchor stays put until the contact has actually moved.
+
+        Re-anchoring each poll would measure the bearing between two fixes a
+        second apart — metres, at 1 Hz — which is almost entirely position noise
+        pointing somewhere new every time. That is the same randomness the speed
+        gate exists to remove, reintroduced one layer down.
+        """
+        driver = self._driver()
+        start = (-43.45, 172.6)
+        self._report(driver, lat=start[0], lon=start[1])
+        anchor = driver._anchors[self.ICAO]
+
+        # Several polls of creeping movement, none of them crossing the baseline.
+        for step in range(1, 5):
+            self.clock.advance(1.0)
+            self._report(driver, lat=start[0] - 0.0002 * step, lon=start[1])
+        self.assertEqual(
+            driver._anchors[self.ICAO], anchor,
+            "the anchor moved before the baseline was crossed",
+        )
+
+        # ...and once it IS crossed, the far end becomes the new anchor.
+        self.clock.advance(1.0)
+        self._report(driver, lat=start[0] - 0.01, lon=start[1])
+        self.assertNotEqual(driver._anchors[self.ICAO], anchor)
+
+    def test_sitting_still_is_measured_as_stopped_not_as_unknown(self):
+        """The hole the speed gate alone would leave.
+
+        A contact reporting neither heading nor velocity that never moves passes
+        both gates on "unknown" for ever — a mast alerting permanently, which is
+        precisely what gating on speed was meant to stop. Not moving for long
+        enough is a measurement, and this asserts it is treated as one.
+        """
+        driver = self._driver()
+        stuck = (-43.45, 172.6)   # ~5.5 km north, inside both rings
+        contact = self._report(driver, lat=stuck[0], lon=stuck[1])
+        self.assertTrue(contact.alert, "unknown must not start out suppressed")
+
+        self.clock.advance(STATIONARY_AFTER_S + 1.0)
+        contact = self._report(driver, lat=stuck[0], lon=stuck[1])
+        self.assertLess(contact.range_km, 12.0)
+        self.assertFalse(contact.alert)
+
+    def test_the_payload_never_carries_a_derived_heading(self):
+        """The contract with the console: a field the receiver's validity flag
+        says is absent stays None from the wire to the payload. A console cannot
+        tell a derived heading from a reported one, and this file does not get to
+        blur that — the derivation is for the alert decision alone."""
+        driver = self._driver()
+        self._report(driver, lat=-43.40, lon=172.6)
+        self.clock.advance(30.0)
+        contact = self._report(driver, lat=-43.455, lon=172.6)
+
+        self.assertTrue(contact.alert)          # the derivation was used...
+        self.assertIsNone(contact.track)        # ...and is not on the wire
+        self.assertIsNone(contact.speed)
+
+    def test_a_reported_heading_always_wins(self):
+        driver = self._driver()
+        # The wire says due NORTH while the movement says due south. The wire
+        # wins — this fills gaps, it does not correct anybody — so nothing
+        # alerts even though the derived course points straight at us.
+        self._report(driver, lat=-43.40, lon=172.6, heading_cdeg=0)
+        self.clock.advance(30.0)
+        contact = self._report(driver, lat=-43.455, lon=172.6, heading_cdeg=0)
+        self.assertEqual(contact.track, 0.0)
+        self.assertFalse(contact.alert)
+
+    def test_the_derivation_state_is_released_with_the_contact(self):
+        """Otherwise a receiver in a busy circuit accumulates an entry per
+        aircraft it has ever heard and never gives one back."""
+        driver = self._driver()
+        self._report(driver, lat=-43.45, lon=172.6)
+        self.assertIn(self.ICAO, driver._anchors)
+
+        # Past the contact TTL with nothing further heard.
+        self.clock.advance(pingrx.CONTACT_TTL_SECONDS + 1.0)
+        driver._last_frame = self.clock.now      # keep it "streaming"
+        driver.poll(1.0)
+        self.assertNotIn(self.ICAO, driver._anchors)
+        self.assertNotIn(self.ICAO, driver._derived)
+
+    def test_the_stationary_window_agrees_with_the_speed_gate(self):
+        """The two constants say the same thing, so they cannot drift apart:
+        the window is exactly how long the slowest interesting contact takes to
+        cross the baseline."""
+        crossed_km = (
+            pingrx.ALERT_MIN_SPEED_KT * 0.514444 * STATIONARY_AFTER_S / 1000.0
+        )
+        self.assertAlmostEqual(crossed_km, DERIVED_TRACK_MIN_KM, places=6)

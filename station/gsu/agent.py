@@ -571,6 +571,7 @@ class Agent:
             "alert_range_km": self.site.alert_range_km,
             "alert_altitude_m": self.site.alert_altitude_m,
             "alert_track_tolerance_deg": self.site.alert_track_tolerance_deg,
+            "alert_min_speed_kt": self.site.alert_min_speed_kt,
             "traffic": self.config.airband_traffic,
         }
 
@@ -1155,6 +1156,7 @@ class Agent:
                     self.site.alert_range_km,
                     self.site.alert_altitude_m,
                     self.site.alert_track_tolerance_deg,
+                    self.site.alert_min_speed_kt,
                 )
         return f"version {self.site.version}, changed {changed or 'nothing'}"
 

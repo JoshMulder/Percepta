@@ -78,6 +78,39 @@ SILENT_AFTER_SECONDS = 10.0
 #: at a point on the ground — and excludes the ones crossing or departing.
 ALERT_TRACK_TOLERANCE_DEG = 30.0
 
+#: Below this ground speed a contact is not going anywhere, and its heading
+#: means nothing. Knots.
+#:
+#: A track is only a course while something is moving along it. A parked
+#: aircraft, a service vehicle, a tower or a mast reports whatever heading it
+#: was last pointing, and the +/-30 degree test then admits it about one time in
+#: six — at random, permanently, for a thing that will never move. That is worse
+#: than either always alerting or never alerting, because whether a fixed object
+#: alarms for ever comes down to which way it happens to face.
+#:
+#: Ten knots is under any airspeed an aircraft can hold and comfortably above
+#: the wander a GPS fix shows while sitting still.
+ALERT_MIN_SPEED_KT = 10.0
+
+#: How far a contact must move between two fixes before a course derived from
+#: them is worth believing. Kilometres.
+#:
+#: A bearing between two points a few metres apart is mostly position noise: at
+#: a 20 m baseline an ADS-B fix's own error swings the answer through most of
+#: the compass. Two hundred metres puts that error a couple of degrees at worst,
+#: which is well inside a 30 degree gate.
+DERIVED_TRACK_MIN_KM = 0.2
+
+#: How long a contact may sit inside that radius before it is judged STOPPED
+#: rather than merely unmeasured. Seconds.
+#:
+#: DERIVED, not chosen, and that is the point: it is exactly the time the
+#: slowest contact this alert cares about takes to cross the baseline above. So
+#: "has not moved 200 m in this long" and "is slower than ten knots" are the
+#: same statement, and the three constants cannot drift into disagreeing with
+#: each other. Change either of the two above and this follows.
+STATIONARY_AFTER_S = (DERIVED_TRACK_MIN_KM * 1000.0) / (ALERT_MIN_SPEED_KT * 0.514444)
+
 
 def relative_bearing(from_deg: float, to_deg: float) -> float:
     """Smallest angle between two compass bearings, 0-180.
@@ -95,6 +128,8 @@ def is_closing(
     bearing_from_station: float,
     track_deg: float | None,
     tolerance_deg: float = ALERT_TRACK_TOLERANCE_DEG,
+    speed_kt: float | None = None,
+    min_speed_kt: float = ALERT_MIN_SPEED_KT,
 ) -> bool:
     """Is a contact on `track_deg` heading toward the station?
 
@@ -106,12 +141,22 @@ def is_closing(
     everything departing and stay silent for everything inbound, which is worse
     than no filter at all because it looks like one that works.
 
-    A CONTACT THAT REPORTS NO TRACK STILL ALERTS. Heading is optional on the
-    wire and plenty of transponders omit it; treating "unknown" as "not coming
-    this way" would turn a missing field into silence, and silence is the one
-    answer a proximity alert must never give by accident. The filter removes
-    contacts KNOWN to be leaving, never contacts merely unaccounted for.
+    SPEED FIRST, because a heading is only a course while something is moving
+    along it. A stationary contact reports whatever direction it last faced, so
+    testing that heading is a coin toss weighted six to one — and it lands the
+    same way for ever, since the thing never moves. A tower, a mast, a parked
+    aircraft: not approaching, whichever way they point.
+
+    UNKNOWN IS NOT ZERO, for either field. Both heading and velocity are
+    optional on the wire and plenty of transponders omit them. Treating a
+    missing field as "not coming this way" would turn silence in the data into
+    silence in the alert, which is the one failure a proximity alert must never
+    have. Both gates remove contacts KNOWN to be harmless and never contacts
+    merely unaccounted for — and `PingRxAdsb._course_of` narrows "unknown" by
+    measuring what the wire did not say, rather than by assuming it.
     """
+    if speed_kt is not None and speed_kt < min_speed_kt:
+        return False
     if track_deg is None:
         return True
     to_station = (bearing_from_station + 180.0) % 360.0
@@ -127,6 +172,7 @@ class PingRxAdsb:
         alert_range_km: float = 12.0,
         alert_altitude_m: float = 1500.0,
         alert_track_tolerance_deg: float = ALERT_TRACK_TOLERANCE_DEG,
+        alert_min_speed_kt: float = ALERT_MIN_SPEED_KT,
         port: str = "",
         label: str = "uAvionix ping RX Pro",
     ) -> None:
@@ -136,10 +182,18 @@ class PingRxAdsb:
         self.alert_range_km = alert_range_km
         self.alert_altitude_m = alert_altitude_m
         self.alert_track_tolerance_deg = alert_track_tolerance_deg
+        self.alert_min_speed_kt = alert_min_speed_kt
         self.port = port
         self.label = label
         self._parser = mavlink.MavlinkParser()
         self._vehicles: dict[str, tuple[mavlink.AdsbVehicle, float]] = {}
+        #: icao -> (lat, lon, monotonic) of the fix a derived course measures
+        #: FROM. Deliberately not the previous poll's position — see _course_of.
+        self._anchors: dict[str, tuple[float, float, float]] = {}
+        #: icao -> (course, ground speed kt) last measured from movement. Held
+        #: between legs so a derived heading does not flicker off in the polls
+        #: between one baseline being crossed and the next.
+        self._derived: dict[str, tuple[float | None, float | None]] = {}
         self._last_frame: float | None = None
         self._failed = False
         self.positionless = 0
@@ -158,6 +212,7 @@ class PingRxAdsb:
         range_km: float,
         altitude_m: float,
         track_tolerance_deg: float | None = None,
+        min_speed_kt: float | None = None,
     ) -> None:
         self.alert_range_km = range_km
         self.alert_altitude_m = altitude_m
@@ -167,6 +222,8 @@ class PingRxAdsb:
         # entirely rather than fail loudly.
         if track_tolerance_deg is not None:
             self.alert_track_tolerance_deg = track_tolerance_deg
+        if min_speed_kt is not None:
+            self.alert_min_speed_kt = min_speed_kt
 
     # --- reading --------------------------------------------------------
 
@@ -213,6 +270,72 @@ class PingRxAdsb:
                 f"{extra} tslc {vehicle.tslc_s}s"
             )
 
+    def _course_of(
+        self, vehicle: mavlink.AdsbVehicle, now: float
+    ) -> tuple[float | None, float | None]:
+        """(track, ground speed) for the ALERT, measured when the wire is silent.
+
+        A transponder that reports no heading is common, and that made the
+        closing test unanswerable — so every such contact fell through to
+        alerting on range and altitude alone, which is the behaviour the whole
+        filter exists to replace. Two position fixes are all a course needs, and
+        this receiver already holds a position table.
+
+        HOW THE BASELINE WORKS. One anchor fix is kept per contact and is NOT
+        replaced every poll. Replacing it each time would measure the bearing
+        between two points a second apart — at 1 Hz that is metres — and the
+        answer would be almost entirely position noise, pointing somewhere new
+        every second. That is the same randomness the speed gate exists to
+        remove, reintroduced one layer down. Instead the anchor stays put until
+        the contact has moved DERIVED_TRACK_MIN_KM from it, and only then does
+        the far end become the new anchor. The baseline grows until it is long
+        enough to mean something, however slowly the contact is moving.
+
+        NOT MOVING IS A MEASUREMENT, NOT AN ABSENCE. A contact reporting neither
+        heading nor velocity that never crosses the baseline would pass both
+        gates for ever on "unknown" — a mast alerting permanently, the exact case
+        gating on speed was meant to stop. So once it has sat inside that radius
+        for STATIONARY_AFTER_S, this reports a ground speed of zero: we did not
+        fail to learn its speed, we watched it not move.
+
+        The derived values feed the alert decision ONLY and are never written
+        into the payload. This module's contract with the console is that a
+        field the receiver's validity flag says is absent stays None from the
+        wire to the payload — a console cannot tell a derived heading from a
+        reported one, and this file does not get to blur that.
+        """
+        icao = vehicle.icao
+        lat, lon = vehicle.latitude, vehicle.longitude
+        anchor = self._anchors.get(icao)
+        if anchor is None:
+            self._anchors[icao] = (lat, lon, now)
+            return vehicle.heading_deg, vehicle.speed_kt
+
+        anchor_lat, anchor_lon, anchor_at = anchor
+        moved_km, course = bearing_to(anchor_lat, anchor_lon, lat, lon)
+        elapsed = max(now - anchor_at, 1e-6)
+
+        if moved_km >= DERIVED_TRACK_MIN_KM:
+            # A real leg. Both answers come out of it, and the far end anchors
+            # the next one.
+            self._derived[icao] = (course, moved_km / (elapsed / 3600.0) / 1.852)
+            self._anchors[icao] = (lat, lon, now)
+        elif elapsed >= STATIONARY_AFTER_S:
+            # Long enough inside the radius to call it stopped. The course is
+            # left at whatever was last measured: a contact that stops has not
+            # acquired a new heading, and inventing one out of noise is the
+            # thing this method exists to avoid.
+            previous = self._derived.get(icao, (None, None))
+            self._derived[icao] = (previous[0], 0.0)
+            self._anchors[icao] = (lat, lon, now)
+
+        track, speed = self._derived.get(icao, (None, None))
+        # The wire always wins. This fills gaps; it does not correct anybody.
+        return (
+            vehicle.heading_deg if vehicle.heading_deg is not None else track,
+            vehicle.speed_kt if vehicle.speed_kt is not None else speed,
+        )
+
     def poll(self, dt: float) -> list[Aircraft] | None:
         """Contacts, or None when the receiver is not talking to us."""
         self.pump()
@@ -223,6 +346,11 @@ class PingRxAdsb:
         for icao, (_, seen) in list(self._vehicles.items()):
             if now - seen > CONTACT_TTL_SECONDS:
                 del self._vehicles[icao]
+                # The derivation state goes with it, or a receiver under a busy
+                # circuit accumulates an entry per aircraft it has ever heard
+                # and never gives one back.
+                self._anchors.pop(icao, None)
+                self._derived.pop(icao, None)
 
         contacts: list[Aircraft] = []
         positionless = 0
@@ -235,6 +363,9 @@ class PingRxAdsb:
             range_km, bearing = bearing_to(
                 self.lat, self.lon, vehicle.latitude, vehicle.longitude
             )
+            # For the alert only. The payload below still carries exactly what
+            # the receiver said, including None where it said nothing.
+            track, speed = self._course_of(vehicle, now)
             contacts.append(
                 Aircraft(
                     icao=vehicle.icao,
@@ -256,8 +387,10 @@ class PingRxAdsb:
                         # for as long as it takes to leave the ring.
                         and is_closing(
                             bearing,
-                            vehicle.heading_deg,
+                            track,
                             self.alert_track_tolerance_deg,
+                            speed,
+                            self.alert_min_speed_kt,
                         )
                     ),
                     # Everything below is passed through from the decoder
@@ -587,12 +720,14 @@ class SimulatedPingRx(PingRxAdsb):
         alert_range_km: float = 12.0,
         alert_altitude_m: float = 1500.0,
         alert_track_tolerance_deg: float = ALERT_TRACK_TOLERANCE_DEG,
+        alert_min_speed_kt: float = ALERT_MIN_SPEED_KT,
     ) -> None:
         source = _SimulatedPingSource(latitude, longitude)
         super().__init__(
             source, latitude=latitude, longitude=longitude,
             alert_range_km=alert_range_km, alert_altitude_m=alert_altitude_m,
             alert_track_tolerance_deg=alert_track_tolerance_deg,
+            alert_min_speed_kt=alert_min_speed_kt,
             label="simulated ADS-B receiver (MAVLink)",
         )
         self._source = source

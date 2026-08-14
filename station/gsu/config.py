@@ -446,6 +446,11 @@ class SiteConfig:
     #: aircraft that have already gone. Widen it toward 180 to get the old
     #: behaviour back — every contact in the ring, whichever way it is pointing.
     alert_track_tolerance_deg: float = 30.0
+    #: Knots. Below this a contact is judged parked rather than approaching and
+    #: its heading is not consulted at all — a tower or a mast reports whatever
+    #: direction it last faced, and testing that is a coin toss that lands the
+    #: same way for ever. Set to 0 to alert on stationary contacts again.
+    alert_min_speed_kt: float = 10.0
 
     #: Transcribe airband transmissions into the event log. The setup page's
     #: switch, live: the agent reads it every sub-tick, so turning it on or off
