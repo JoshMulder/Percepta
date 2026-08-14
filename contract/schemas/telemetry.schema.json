@@ -181,7 +181,7 @@
         },
         "alert": {
           "type": "boolean",
-          "description": "Close, low, AND tracking toward the site - all three. The station decides, because the thresholds belong with the site. Closing is judged from the contact's own track against the reciprocal of its bearing, within a configurable tolerance (30 degrees either side by default); a contact reporting no track counts as closing, so a missing field can never become silence. Range and altitude alone would flag an aircraft that has already passed for exactly as long as one inbound."
+          "description": "Close, low, moving, AND tracking toward the site - all four. The station decides, because the thresholds belong with the site. Closing is judged from the contact's own track against the reciprocal of its bearing, within a configurable tolerance (30 degrees either side by default), and only for a contact above a minimum ground speed - below that it is parked, and the direction it happens to face is not a course. A field the receiver omits never counts against a contact: where heading or velocity is absent the station measures both from successive position fixes, and treats a contact that has demonstrably not moved as stopped rather than as unknown. Those measured values are used for this flag only and are never written into `track` or `speed`, which carry what the receiver said and nothing else. Range and altitude alone would flag an aircraft that has already passed for exactly as long as one inbound, and a mast for ever."
         },
         "altitude_type": {
           "type": [
