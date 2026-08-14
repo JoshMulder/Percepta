@@ -4447,8 +4447,16 @@ body {
   --odin-air: #d7b348;       /* aircraft, matching the fleet map's contacts */
   --odin-live: #35c48a;      /* the pip. Nothing else. */
 
-  position: absolute;
-  inset: 0;
+  /* RELATIVE, and a flex child. It was `position: absolute; inset: 0`, and the
+     nearest positioned ancestor is .pdash (position: fixed) rather than
+     .pdash-main — so the wall was inset against the whole viewport and painted
+     over the header, taking the tabs and the user menu with it. There was then
+     no way back to the organisation view at all.
+     
+     Positioned only so the preview drawer has something to anchor to. */
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
   display: grid;
   grid-template-columns: 3fr 6fr 3fr;
   grid-template-rows: auto 1fr;
@@ -4810,6 +4818,8 @@ body {
    not lose the thing they were watching. */
 .odin-drawer {
   position: absolute;
+  /* Below the wall's status bar, which is now the wall's own first row rather
+     than something at the top of the viewport. */
   top: 56px;
   right: 0;
   bottom: 0;
