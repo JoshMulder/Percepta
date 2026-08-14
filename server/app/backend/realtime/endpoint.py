@@ -6,6 +6,7 @@ client -> server (JSON text frames):
     {"type": "select_station", "ground_station_id": "<uuid>"}
     {"type": "subscribe",      "stream": "status|telemetry|video|audio"}
     {"type": "unsubscribe",    "stream": "..."}
+    {"type": "watch_set",      "stations": ["<uuid>", ...]}   (Odin watch only)
     {"type": "ping"}
 
 server -> client:
@@ -16,6 +17,8 @@ server -> client:
     {"type": "event",            "stream", "station_id", "payload"}
     {"type": "status",           "station_id", "payload"}
     {"type": "station_revoked",  "reason"}
+    {"type": "watching",         "stations": [...]}
+    {"type": "watch_revoked",    "stations": [...]}
     {"type": "revoked",          "reason"}
     {"type": "error",            "code", "message"}
     {"type": "pong"}
@@ -144,25 +147,47 @@ async def _handle_message(conn: Connection, message: dict) -> None:
         conn.enqueue({"type": "subscribed", "stream": stream})
         return
 
+    if kind == "watch_set":
+        raw = message.get("stations")
+        if not isinstance(raw, list):
+            conn.enqueue(
+                {"type": "error", "code": "bad_request",
+                 "message": "stations must be a list of uuids"}
+            )
+            return
+        try:
+            station_ids = [uuid.UUID(str(r)) for r in raw]
+        except (TypeError, ValueError):
+            conn.enqueue(
+                {"type": "error", "code": "bad_request",
+                 "message": "stations must be a list of uuids"}
+            )
+            return
+        guarded = await hub.watch_set(conn, station_ids)
+        # Always the SERVER'S set, never an echo of what was asked for. A station
+        # that was refused simply is not in it, and the client reconciles its
+        # strip from this — so a channel the operator may not have cannot appear
+        # to be guarded because the request was accepted in bulk.
+        conn.enqueue(
+            {"type": "watching", "stations": sorted(str(s) for s in guarded)}
+        )
+        return
+
     conn.enqueue(
         {"type": "error", "code": "bad_request", "message": "unknown message type"}
     )
 
 
-async def websocket_endpoint(ws: WebSocket) -> None:
-    token = _extract_token(ws)
-    identity = await asyncio.to_thread(_authenticate, token)
+async def serve(ws: WebSocket, identity) -> None:
+    """Run an already-accepted, already-authenticated socket.
 
-    if identity is None:
-        # Accept then close, rather than rejecting the handshake: browsers give
-        # scripts no useful detail about a failed WebSocket handshake, so a
-        # close code is the only way the client can tell "log in again" from
-        # "the server is down".
-        await ws.accept()
-        await ws.close(code=CLOSE_UNAUTHENTICATED, reason="authentication required")
-        return
-
-    await ws.accept()
+    Split out of `websocket_endpoint` so the Odin watch can be a route of its own
+    — refusing non-watch staff at the handshake, where a refusal is legible to
+    the client — without a second copy of the register/sender/receive/unregister
+    lifecycle. Two copies of that is two places for a connection to be left in
+    the registry after its socket has gone, and the registry is what the fan-out
+    walks.
+    """
     conn = Connection(ws=ws, identity=identity)
     await hub.register(conn)
 
@@ -201,3 +226,20 @@ async def websocket_endpoint(ws: WebSocket) -> None:
             pass
         if ws.client_state is WebSocketState.CONNECTED:
             await ws.close(code=CLOSE_REVOKED if conn.closed else 1000)
+
+
+async def websocket_endpoint(ws: WebSocket) -> None:
+    token = _extract_token(ws)
+    identity = await asyncio.to_thread(_authenticate, token)
+
+    if identity is None:
+        # Accept then close, rather than rejecting the handshake: browsers give
+        # scripts no useful detail about a failed WebSocket handshake, so a
+        # close code is the only way the client can tell "log in again" from
+        # "the server is down".
+        await ws.accept()
+        await ws.close(code=CLOSE_UNAUTHENTICATED, reason="authentication required")
+        return
+
+    await ws.accept()
+    await serve(ws, identity)

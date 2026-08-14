@@ -75,8 +75,9 @@ AUDIO_WINDOW_S = 30.0
 #: console closes, crashes or is signed out — the same "most listeners never say
 #: goodbye" problem the audio and video leases exist for. A gate held open is
 #: not a cosmetic state: it reports squelch_open, so audio flows continuously
-#: at ~512 kbit/s from an unattended site on a metered link, for as long as
-#: nobody notices.
+#: from an unattended site on a metered link for as long as nobody notices —
+#: ~21.7 kbit/s of Opus now rather than the ~512 kbit/s of raw PCM this was
+#: written against, which changes the size of the bill and not the argument.
 #:
 #: Five minutes is far longer than any real use — setting a level against the
 #: noise takes seconds — and short enough that a forgotten press costs a few

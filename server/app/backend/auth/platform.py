@@ -34,7 +34,11 @@ PLATFORM_ORGANIZATION_NAME = "Platform"
 
 #: Platform roles that may WATCH every tenant: read the fleet, hear a radio, see
 #: a camera. Deliberately not the same set that may change anything.
-_WATCH_ROLES = frozenset({UserRole.ADMIN.value, UserRole.WATCH.value})
+#:
+#: Public because the socket layer re-checks it on every revalidation sweep, not
+#: only at the door: a watch position lasts a shift, and taking somebody off the
+#: rota has to stop the audio they are already hearing.
+WATCH_ROLES = frozenset({UserRole.ADMIN.value, UserRole.WATCH.value})
 
 
 def require_platform_admin(
@@ -69,6 +73,6 @@ def require_odin_watch(
     A watch operator gets these and nothing else - see the isolation suite in
     tests/test_odin_isolation.py, which asserts both directions.
     """
-    if not identity.is_platform_admin or not _WATCH_ROLES.intersection(identity.roles):
+    if not identity.is_platform_admin or not WATCH_ROLES.intersection(identity.roles):
         raise HTTPException(status_code=403, detail="Platform watch access required")
     return identity

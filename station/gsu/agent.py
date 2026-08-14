@@ -1641,11 +1641,12 @@ class Agent:
 
         if audio is None:
             return None
-        # Published only while somebody is listening. 24 kHz of 16-bit mono is
-        # 384 kbit/s, and base64 in a JSON envelope makes it 512 — the largest
-        # thing this station sends, and it used to go up on every over whether
-        # or not a console existed to hear it. The platform asks and renews;
-        # silence stops it. See `RadioController.want_audio`.
+        # Published only while somebody is listening. Opus, so 21.7 kbit/s
+        # measured (`radio/opus.py:126-140`) — not the 384/512 kbit/s of raw
+        # PCM base64'd into JSON that this comment quoted before the encoder
+        # existed. It used to go up on every over whether or not a console
+        # existed to hear it. The platform asks and renews; silence stops it.
+        # See `RadioController.want_audio`.
         if self.radio.audio_wanted:
             self._publish(AUDIO, audio)
         return audio

@@ -100,3 +100,44 @@ async def odin_wall(websocket: WebSocket) -> None:
                 await websocket.close()
             except Exception:
                 pass
+
+
+@router.websocket("/api/odin/watch")
+async def odin_watch(websocket: WebSocket) -> None:
+    """The listening watch: a hub connection that may guard other tenants' audio.
+
+    A SECOND socket, not a second protocol on the wall socket, and the split is
+    the point. The wall is one-way and identical for every viewer — it relays a
+    frame computed elsewhere and queries nothing. This one takes messages, joins
+    groups and reaches across tenant boundaries. Keeping the surface that can be
+    talked into something separate from the surface that cannot is worth one
+    extra connection.
+
+    It runs the ORDINARY console socket lifecycle (realtime/endpoint.serve), so
+    registration, revocation push, the revalidation sweep and the bounded send
+    queue all apply unchanged. What is different is only this door, and
+    hub.watch_join behind it.
+
+    Refused HERE as well as in the hub. The hub's check is the one that is
+    load-bearing — it is re-read per join, from the membership row — but a socket
+    that can never do anything should be told so at the handshake rather than
+    left open, accepting messages and silently refusing every one.
+    """
+    from backend.realtime.endpoint import _authenticate, _extract_token, serve
+
+    await websocket.accept()
+
+    token = _extract_token(websocket)
+    identity = None
+    if token:
+        identity = await asyncio.to_thread(_authenticate, token)
+    if identity is None:
+        await websocket.close(code=CLOSE_UNAUTHENTICATED)
+        return
+
+    watch_roles = {UserRole.ADMIN.value, UserRole.WATCH.value}
+    if not identity.is_platform_admin or not watch_roles.intersection(identity.roles):
+        await websocket.close(code=CLOSE_FORBIDDEN)
+        return
+
+    await serve(websocket, identity)

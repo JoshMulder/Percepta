@@ -22,6 +22,7 @@ from backend.api.host import router as host_router
 from backend.api.media import renew_leases, router as media_router
 from backend.api.odin import router as odin_router
 from backend.api.odin_alerts import router as odin_alerts_router
+from backend.api.odin_transcripts import router as odin_transcripts_router
 from backend.services import audio_demand, station_watch
 from backend.api.organization import router as organization_router
 from backend.api.platform import router as platform_router
@@ -130,6 +131,7 @@ app.include_router(host_router)
 app.include_router(media_router)
 app.include_router(odin_router)
 app.include_router(odin_alerts_router)
+app.include_router(odin_transcripts_router)
 app.include_router(organization_router)
 app.include_router(platform_router)
 app.include_router(releases_router)

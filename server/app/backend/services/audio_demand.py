@@ -1,10 +1,22 @@
 """Airband audio goes up the link only while somebody is listening.
 
-Audio is the largest thing a station sends. 24 kHz of 16-bit mono is
-384 kbit/s, and base64 inside a JSON envelope makes it **512 kbit/s** for as
-long as an over lasts — on a metered Starlink link shared with video, per
-transmitting station. It used to be sent whenever the squelch opened, whether
-or not a console existed to hear it.
+Audio used to be the largest thing a station sends. Raw, it was: 24 kHz of
+16-bit mono is 384 kbit/s, and base64 inside a JSON envelope made it
+**512 kbit/s** for as long as an over lasted — on a metered Starlink link
+shared with video, per transmitting station. It went up whenever the squelch
+opened, whether or not a console existed to hear it.
+
+**It is Opus now, and the number is 21.7 kbit/s** — measured, 400 ms of speech
+at the encoder's default rate (`station/gsu/radio/opus.py:126-140`), inside the
+contract's stated 16-24. Roughly 15x cheaper than the figure this file was
+written against, and the correction matters in one direction: 512 kbit/s is
+large enough to make guarding several channels at once look plainly
+unaffordable, and 21.7 is not. A capacity argument built on the old number
+would reject a feature the link can comfortably carry.
+
+None of which retires the lease. Demand-driven is still right — an unattended
+site should send nothing at all, and "cheap" is not "free" on a metered link
+shared with video.
 
 The spectrum has been demand-driven since it was written, for a cost two
 orders of magnitude smaller (`radio/receiver.want_spectrum`: 241 floats at

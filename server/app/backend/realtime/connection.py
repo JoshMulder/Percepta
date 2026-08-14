@@ -48,6 +48,17 @@ class Connection:
     send_queue: asyncio.Queue = field(
         default_factory=lambda: asyncio.Queue(maxsize=SEND_QUEUE_MAX)
     )
+    #: Stations this connection is guarding on an Odin watch, if any.
+    #:
+    #: SEPARATE from `station_id` and it must stay separate. The one-station pin
+    #: is what leaves the fan-out hot path with no authorisation decision to get
+    #: wrong: hub.select_station drops the previous station's groups in the SAME
+    #: operation, so "this connection is in exactly one station's groups" is true
+    #: at every instant rather than eventually. A watch is a different thing —
+    #: several stations, read-only, across tenants — and folding it into
+    #: station_id would trade that property away for the convenience of one
+    #: field.
+    watch: set = field(default_factory=set)
     closed: bool = False
 
     @property
