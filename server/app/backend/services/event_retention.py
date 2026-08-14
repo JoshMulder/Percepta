@@ -97,6 +97,18 @@ class EventRetention:
         if self._task is not None:
             return
         self._task = asyncio.create_task(self._run())
+        # Said out loud, with the horizons in it, because every other recorder
+        # announces itself and because "is the prune actually running?" is the
+        # question somebody asks in six months when the table looks large. A
+        # service whose only evidence of life is the absence of old rows cannot
+        # be distinguished from one that never started.
+        log.info(
+            "Event retention started: info %d days, everything else %d days, "
+            "first pass in %d minutes.",
+            INFO_RETENTION.days,
+            LONG_RETENTION.days,
+            FIRST_PRUNE_AFTER.total_seconds() // 60,
+        )
 
     async def stop(self) -> None:
         if self._task is None:
