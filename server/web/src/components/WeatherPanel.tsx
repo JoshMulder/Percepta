@@ -5,6 +5,8 @@ import { NoSource } from "./PanelState";
 import { Popout } from "./Popout";
 import { WeatherHistory, type WeatherSample } from "./WeatherChart";
 import type { WeatherPayload } from "../types";
+import { useDisplayPrefs } from "../displayPrefs";
+import { weatherDisplay } from "../format";
 
 const POINTS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
 
@@ -39,6 +41,14 @@ function WeatherPanelInner({
   const has = weather !== null;
   const from = weather?.wind_dir_deg ?? 0;
   const gusting = has && weather.gust_kt > weather.wind_kt + 3;
+  // The reader's units, for display only. Every threshold in this component -
+  // the gust bands below, the "level" that colours the dial - is judged on the
+  // KNOTS the station reported, because those numbers are Beaufort-derived and
+  // stop meaning anything the moment they are converted.
+  const prefs = useDisplayPrefs();
+  const windU = weatherDisplay("wind", prefs);
+  const tempU = weatherDisplay("temp", prefs);
+  const pressU = weatherDisplay("pressure", prefs);
   // Beaufort-ish banding, chosen for what matters at a remote mast: settled,
   // brisk, then strong enough to worry about the structure and any airframe.
   // Met thresholds: light below 2.5 mm/h, heavy above 10.
@@ -78,7 +88,7 @@ function WeatherPanelInner({
         <svg viewBox="0 0 120 120" className="rose" role="img"
              aria-label={
                has
-                 ? `Wind ${weather.wind_kt.toFixed(0)} knots from ${cardinal(from)}`
+                 ? `Wind ${windU.convert(weather.wind_kt).toFixed(windU.digits)} ${windU.suffix} from ${cardinal(from)}`
                  : "Wind, no reading"
              }>
           <circle cx="60" cy="60" r="52" className="rose-ring" />
@@ -131,8 +141,10 @@ function WeatherPanelInner({
                 themselves. Centring digits-plus-unit as one lump left the
                 number half a unit-width off the centreline of the rose row,
                 which the eye reads long before it works out why. */}
-            <span className="num">{has ? weather.wind_kt.toFixed(0) : "--"}</span>
-            <span className="unit">kt</span>
+            <span className="num">
+              {has ? windU.convert(weather.wind_kt).toFixed(windU.digits) : "--"}
+            </span>
+            <span className="unit">{windU.suffix}</span>
           </div>
           <div className="wind-from">
             {has ? `from ${cardinal(from)} ${from.toFixed(0)}°` : "no reading"}
@@ -141,7 +153,8 @@ function WeatherPanelInner({
               and go changed the panel's height, which rescaled the entire
               sidebar every time the wind eased. */}
           <div className={`wind-gust ${level}${gusting ? "" : " hidden"}`}>
-            gusting {has ? weather.gust_kt.toFixed(0) : "--"} kt
+            gusting {has ? windU.convert(weather.gust_kt).toFixed(windU.digits) : "--"}{" "}
+            {windU.suffix}
           </div>
           {/* The sky in words, here rather than under its icon. Under the icon
               it cost the row twice its own height — once for itself and once
@@ -167,7 +180,11 @@ function WeatherPanelInner({
       <dl className="stats weather-stats">
         <div>
           <dt>Temp</dt>
-          <dd>{has ? `${weather.temperature_c.toFixed(1)} °C` : "--"}</dd>
+          <dd>
+            {has
+              ? `${tempU.convert(weather.temperature_c).toFixed(tempU.digits)} ${tempU.suffix}`
+              : "--"}
+          </dd>
         </div>
         <div>
           <dt>Humidity</dt>
@@ -192,7 +209,7 @@ function WeatherPanelInner({
             ) : weather.pressure_hpa === undefined || weather.pressure_hpa === null ? (
               <NoSource what="pressure" />
             ) : (
-              `${weather.pressure_hpa.toFixed(0)} hPa`
+              `${pressU.convert(weather.pressure_hpa).toFixed(pressU.digits)} ${pressU.suffix}`
             )}
           </dd>
         </div>

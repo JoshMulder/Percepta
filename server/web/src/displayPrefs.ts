@@ -1,5 +1,11 @@
 import { useSyncExternalStore } from "react";
-import { FEET_PER_METRE, type AltitudeUnit } from "./format";
+import {
+  FEET_PER_METRE,
+  type AltitudeUnit,
+  type PressureUnit,
+  type TemperatureUnit,
+  type WindUnit,
+} from "./format";
 
 /**
  * Per-operator display preferences, held in localStorage.
@@ -18,6 +24,10 @@ import { FEET_PER_METRE, type AltitudeUnit } from "./format";
 
 /** The fields a marker's label can carry, in the fixed order they render. Only
  *  callsign is on by default, which is what the label always showed. */
+const TEMPERATURE_UNITS: string[] = ["c", "f"];
+const PRESSURE_UNITS: string[] = ["hpa", "inhg", "mb"];
+const WIND_UNITS: string[] = ["kt", "kmh", "mph", "ms"];
+
 export const LABEL_FIELDS = [
   { key: "callsign", label: "Flight number" },
   { key: "registration", label: "Registration" },
@@ -30,6 +40,13 @@ export type LabelField = (typeof LABEL_FIELDS)[number]["key"];
 
 export interface DisplayPrefs {
   altitudeUnit: AltitudeUnit;
+  /** Weather units. Display only: the station reports Celsius, hectopascals and
+   *  knots whatever these say, and the history, the thresholds and the station's
+   *  own logs are all stored in those. Converting anywhere but at the point of
+   *  drawing would make two screens disagree about the same reading. */
+  temperatureUnit: TemperatureUnit;
+  pressureUnit: PressureUnit;
+  windUnit: WindUnit;
   /** Which fields to show on an unselected contact's map label. */
   labelFields: LabelField[];
   /** What the operator considers a close contact worth flagging red: within
@@ -47,6 +64,13 @@ const KEY = "percepta.display";
  *  5,000 ft is that altitude rounded to a figure an operator recognises. */
 const DEFAULTS: DisplayPrefs = {
   altitudeUnit: "both",
+  temperatureUnit: "c",
+  pressureUnit: "hpa",
+  // Knots by default because this is an aviation product: the airband, the
+  // ADS-B and the aerodromes all speak knots, and a wind in km/h beside an
+  // aircraft's groundspeed in knots is a conversion somebody has to do in their
+  // head at the worst possible moment.
+  windUnit: "kt",
   labelFields: ["callsign"],
   criticalRangeKm: 12,
   criticalAltitudeFt: 5000,
@@ -70,6 +94,18 @@ function load(): DisplayPrefs {
       altitudeUnit: UNITS.includes(parsed.altitudeUnit)
         ? parsed.altitudeUnit
         : DEFAULTS.altitudeUnit,
+      // Each validated against its own vocabulary rather than trusted: this is
+      // localStorage, which anything on the machine can write, and an unknown
+      // unit reaching a formatter would render every reading as "undefined".
+      temperatureUnit: TEMPERATURE_UNITS.includes(parsed.temperatureUnit)
+        ? parsed.temperatureUnit
+        : DEFAULTS.temperatureUnit,
+      pressureUnit: PRESSURE_UNITS.includes(parsed.pressureUnit)
+        ? parsed.pressureUnit
+        : DEFAULTS.pressureUnit,
+      windUnit: WIND_UNITS.includes(parsed.windUnit)
+        ? parsed.windUnit
+        : DEFAULTS.windUnit,
       // Filtered against the known keys and kept in the canonical order, so a
       // stored field that has since been removed cannot break the label and the
       // order does not depend on the order they were clicked.

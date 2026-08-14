@@ -22,6 +22,9 @@ function contact(over: Partial<Aircraft> = {}): Aircraft {
 function prefs(over: Partial<DisplayPrefs> = {}): DisplayPrefs {
   return {
     altitudeUnit: "both",
+    temperatureUnit: "c",
+    pressureUnit: "hpa",
+    windUnit: "kt",
     labelFields: ["callsign"],
     criticalRangeKm: 12,
     criticalAltitudeFt: 5000,

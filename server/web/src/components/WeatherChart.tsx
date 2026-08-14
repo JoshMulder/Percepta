@@ -1,5 +1,7 @@
 import { useMemo } from "react";
 import { ChartFrame, gridLines } from "./ChartFrame";
+import { useDisplayPrefs } from "../displayPrefs";
+import { weatherDisplay } from "../format";
 import { niceScale, type Scale } from "../chartScale";
 
 export interface WeatherSample {
@@ -63,17 +65,21 @@ export function WeatherHistory({
   samples: WeatherSample[];
   loading?: boolean;
 }) {
+  const prefs = useDisplayPrefs();
   const rows = useMemo<Row[]>(() => {
     if (samples.length < 2) return [];
     const t0 = samples[0].t;
     const span = Math.max(1, samples[samples.length - 1].t - t0);
     const out: Row[] = [];
     for (const series of WEATHER_SERIES) {
+      // The reader's units, applied to every sample BEFORE the scale is built,
+      // so the gradations are round numbers in what they are labelled as.
+      const display = weatherDisplay(series.key, prefs);
       const pts: { t: number; v: number }[] = [];
       for (const sample of samples) {
         const v = sample[series.key];
         if (v === null || v === undefined || Number.isNaN(v)) continue;
-        pts.push({ t: sample.t, v });
+        pts.push({ t: sample.t, v: display.convert(v) });
       }
       if (pts.length < 2) continue;
       let min = Infinity;
@@ -93,6 +99,8 @@ export function WeatherHistory({
       const area = `${line} L${xy[xy.length - 1].x.toFixed(2)} ${H} L${xy[0].x.toFixed(2)} ${H} Z`;
       out.push({
         ...series,
+        unit: display.suffix,
+        digits: display.digits,
         line,
         area,
         last: pts[pts.length - 1].v,
@@ -102,7 +110,7 @@ export function WeatherHistory({
       });
     }
     return out;
-  }, [samples]);
+  }, [samples, prefs]);
 
   if (rows.length === 0) {
     return (
