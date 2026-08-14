@@ -31,6 +31,7 @@ exactly the events worth browsing. Unknown types simply match nothing.
 
 from __future__ import annotations
 
+import base64
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -90,11 +91,26 @@ class OdinEventPage(BaseModel):
 
 
 def _encode(received_at: datetime, row_id: uuid.UUID) -> str:
-    return f"{received_at.isoformat()}|{row_id}"
+    """Opaque, and URL-SAFE, which is not the same thing.
+
+    The obvious cursor is `f"{iso}|{id}"` and it is broken in a way that only
+    shows up once a second page is actually requested: an ISO timestamp carries
+    its UTC offset as `+00:00`, and `+` in a query string decodes to a SPACE.
+    The server then reads back "…52.648565 00:00", cannot parse it, and answers
+    400 — so paging works perfectly until the moment there is a second page.
+
+    base64url has no `+` and no `/`, and it also makes the cursor genuinely
+    opaque rather than merely described as such: nothing outside these two
+    functions can come to depend on its shape.
+    """
+    raw = f"{received_at.isoformat()}|{row_id}".encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
 
 def _decode(cursor: str) -> tuple[datetime, uuid.UUID]:
-    when, _, row_id = cursor.partition("|")
+    # Padding is stripped on the way out, so it is restored on the way in.
+    padded = cursor + "=" * (-len(cursor) % 4)
+    when, _, row_id = base64.urlsafe_b64decode(padded).decode().partition("|")
     return datetime.fromisoformat(when), uuid.UUID(row_id)
 
 
@@ -175,7 +191,10 @@ def odin_events(
     if cursor:
         try:
             cursor_at, cursor_id = _decode(cursor)
-        except (ValueError, AttributeError):
+        except Exception:
+            # Any shape of malformed cursor is one answer: it is a value this
+            # server produced, so a client sending a broken one has
+            # corrupted it rather than discovered something.
             raise HTTPException(status_code=400, detail="bad cursor")
         # The tuple comparison, and the reason this endpoint has a compound
         # cursor at all. SQLAlchemy renders this as a row-value comparison,
