@@ -44,14 +44,12 @@ from backend.realtime.bus import (
 )
 from backend.realtime.revocation import organization_changed, revoke_user
 from backend.services.audit import record
+from backend.services.station_status import DARK_AFTER, ONLINE_WITHIN, status_for
 
-#: A station is online if it was heard within this window — the same rule and
-#: constant the per-org station list uses (api/stations.py), reproduced here for
-#: the cross-org fleet view rather than importing across API modules.
-ONLINE_WITHIN = timedelta(seconds=120)
-#: Past this, an offline station is not merely between frames — it has gone dark
-#: (matches services/station_watch.py's alarm threshold).
-DARK_AFTER = timedelta(minutes=15)
+#: ONLINE_WITHIN and DARK_AFTER are imported above, from
+#: services/station_status. They used to be defined here as well, and the local
+#: definition would have shadowed the import — which is the same class of bug as
+#: the three independent copies this consolidation removed, only quieter.
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/platform", tags=["platform"])
@@ -674,14 +672,13 @@ def remove_membership(
 
 
 def _station_status(last_seen: datetime | None, now: datetime) -> tuple[str, bool]:
-    """(status, dark) from last contact — the derivation the per-org station
-    list uses (api/stations.py), extended with a dark tier. Never stored."""
-    if last_seen is None:
-        return "never", False
-    age = now - last_seen
-    if age < ONLINE_WITHIN:
-        return "online", False
-    return "offline", age >= DARK_AFTER
+    """(status, dark) from last contact. Never stored.
+
+    Thin wrapper kept for the call sites; the rule itself lives in
+    services/station_status.py, which the per-org list, the dark alarm and Odin
+    all read. Three copies of it used to exist, agreeing by luck.
+    """
+    return status_for(last_seen, now=now)
 
 
 @router.get("/fleet", response_model=FleetView)

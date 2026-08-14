@@ -34,6 +34,7 @@ from sqlalchemy import select
 from backend.database.models.ground_station import GroundStation
 from backend.database.session import PrivilegedSessionLocal
 from backend.realtime.hub import hub
+from backend.services.station_status import DARK_AFTER
 
 log = logging.getLogger(__name__)
 
@@ -41,7 +42,10 @@ log = logging.getLogger(__name__)
 #: offline window (api/stations.OFFLINE_AFTER_SECONDS), so an ordinary Starlink
 #: obstruction dropout — the thing that window exists to tolerate — never trips
 #: it. This is for a box that is not coming back on its own.
-DARK_AFTER_SECONDS = 15 * 60
+#: Kept as a name for this module's own readability; the value is the shared one
+#: in services/station_status.py, so the alarm cannot drift from the tile and the
+#: map marker describing the same station on the same screen.
+DARK_AFTER_SECONDS = int(DARK_AFTER.total_seconds())
 
 #: How often the scan runs. Coarse on purpose: a site going dark is a slow, rare
 #: condition an operator does not need to the second, and each scan reads every

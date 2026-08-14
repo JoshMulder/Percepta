@@ -20,6 +20,7 @@ from backend.realtime.bus import (
     read_latest_sync,
 )
 from backend.services.audit import record
+from backend.services.station_status import is_online
 
 router = APIRouter(prefix="/api/stations", tags=["stations"])
 
@@ -98,21 +99,12 @@ class StationDetail(StationSummary):
     devices: list[DeviceSummary]
 
 
-# A station is considered offline once it has missed this much contact. The
-# onboard computer reports far more often than this; the window is generous
-# because a Starlink obstruction dropout is normal and should not flap the
-# status of every station on the map.
-OFFLINE_AFTER_SECONDS = 120
-
-
+# The window itself lives in services/station_status.py, shared with the fleet
+# view and the dark alarm. It used to be defined here, in api/platform.py and in
+# services/station_watch.py independently — three constants that agreed by luck,
+# describing the same station on three screens at once.
 def _online(station: GroundStation) -> bool:
-    if station.last_seen_at is None:
-        return False
-    from datetime import UTC, datetime
-
-    return (
-        datetime.now(UTC) - station.last_seen_at
-    ).total_seconds() < OFFLINE_AFTER_SECONDS
+    return is_online(station.last_seen_at)
 
 
 def _summary(

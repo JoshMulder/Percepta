@@ -125,7 +125,13 @@ async def _handle_message(conn: Connection, message: dict) -> None:
     if kind in ("subscribe", "unsubscribe"):
         stream = str(message.get("stream", ""))
         if kind == "unsubscribe":
-            hub.unsubscribe(conn, stream)
+            # `await`, because hub.unsubscribe is async (hub.py:213). Without it
+            # the coroutine was created and dropped: the connection never left
+            # the group, and the line below cheerfully told the client it had.
+            # Latent so far only because the console never unsubscribes — it
+            # becomes load-bearing the moment a client guards and releases
+            # channels, which is exactly what an Odin listening watch does.
+            await hub.unsubscribe(conn, stream)
             conn.enqueue({"type": "unsubscribed", "stream": stream})
             return
         try:
