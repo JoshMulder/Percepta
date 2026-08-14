@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FleetAdsb, FleetView, PlatformMapConfig } from "../types";
+import { useOdin } from "../useOdin";
 import { AlertRail } from "./AlertRail";
 import { FleetMap } from "./FleetMap";
 import { OdinStatusBar } from "./OdinStatusBar";
@@ -57,7 +58,17 @@ export function OdinWall({
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  const stations = useMemo(() => fleet?.stations ?? [], [fleet]);
+  // The push feed, with the poll behind it. `link` is surfaced on the status
+  // bar rather than kept internal: a wall that quietly drops from live to
+  // polling still looks alive, and the operator only discovers the difference
+  // at the moment they needed it to have been live.
+  const { stations: pushed, link, lastFrameAt } = useOdin(true);
+
+  const polled = useMemo(() => fleet?.stations ?? [], [fleet]);
+  /** Push when it is arriving, poll when it is not. Never a merge of the two:
+   *  two sources of truth for one wall is how a station appears twice, or
+   *  appears healthy in one and dark in the other. */
+  const stations = link === "live" && pushed ? pushed : polled;
   const events = useMemo(() => fleet?.recent_events ?? [], [fleet]);
 
   const selected = useMemo(
@@ -91,9 +102,18 @@ export function OdinWall({
       <OdinStatusBar
         stations={stations}
         unacked={events.length}
-        lastPollAt={lastPollAt}
+        // The freshest thing the wall has: a digest frame if the socket is up,
+        // otherwise the last successful poll. The pip counts from whichever is
+        // actually feeding the screen, which is the only honest answer to "how
+        // old is this".
+        lastPollAt={link === "live" ? lastFrameAt : lastPollAt}
         polling={error === null}
-        error={error}
+        error={
+          error ??
+          (link === "live"
+            ? null
+            : "live feed down — polling every 15s")
+        }
       />
 
       <AlertRail events={events} onSelectStation={select} />

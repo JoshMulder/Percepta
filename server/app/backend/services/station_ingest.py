@@ -64,6 +64,7 @@ from backend.realtime.bus import (
 from backend.realtime.hub import hub
 from backend.services import geocode, station_events, station_topics
 from backend.services.enrolment import has_valid_credential
+from backend.services.odin_digest import digest
 
 log = logging.getLogger(__name__)
 
@@ -479,6 +480,13 @@ class StationIngest:
             await self._cache_adsb(station_id, payload)
         elif kind == "power":
             await self._cache_power(station_id, payload)
+
+        # The Odin digest, for every kind it cares about. A dict assignment and
+        # nothing more — see services/odin_digest.py on why this must not grow
+        # an await: this line runs once per frame per station on the one loop
+        # that carries the whole fleet, and it is the ceiling on how many
+        # stations the platform holds.
+        digest.note(station_id, kind, payload)
 
         # Onto the internal fan-out, where authorisation and per-subscriber
         # delivery already apply. Nothing downstream needs to know the frame

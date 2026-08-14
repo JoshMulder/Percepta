@@ -20,6 +20,7 @@ from backend.api.console import router as console_router
 from backend.api.enrolment import router as enrolment_router
 from backend.api.host import router as host_router
 from backend.api.media import renew_leases, router as media_router
+from backend.api.odin import router as odin_router
 from backend.services import audio_demand, station_watch
 from backend.api.organization import router as organization_router
 from backend.api.platform import router as platform_router
@@ -36,6 +37,7 @@ from backend.realtime.endpoint import websocket_endpoint
 from backend.realtime.hub import hub
 from backend.services.power_history import power_history
 from backend.services.weather_history import weather_history
+from backend.services.odin_digest import digest as odin_digest
 from backend.services.station_ingest import station_ingest
 
 logger = logging.getLogger(__name__)
@@ -82,6 +84,12 @@ async def lifespan(app: FastAPI):
     # Ingest before history: history reads what the ingest republishes, so
     # starting it first only means it sits idle for a moment.
     await station_ingest.start()
+    # Hosted beside the ingest so its single-instance property comes from the
+    # lease that already elects one ingest, rather than from a new assumption.
+    # Two publishers would put two frames per interval on the wall channel and
+    # every operator would see the fleet render twice a tick — a failure that
+    # looks like flapping data rather than like duplicate processes.
+    await odin_digest.start()
     await power_history.start()
     await weather_history.start()
     # Keeps watched stations streaming. Silence is the stop signal, so this
@@ -103,6 +111,7 @@ async def lifespan(app: FastAPI):
         dark.cancel()
         await power_history.stop()
         await weather_history.stop()
+        await odin_digest.stop()
         await station_ingest.stop()
         await hub.stop()
 
@@ -118,6 +127,7 @@ app.include_router(console_router)
 app.include_router(enrolment_router)
 app.include_router(host_router)
 app.include_router(media_router)
+app.include_router(odin_router)
 app.include_router(organization_router)
 app.include_router(platform_router)
 app.include_router(releases_router)

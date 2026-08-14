@@ -234,6 +234,13 @@ class RedisBus:
         # Subscribe to revocation first so the pubsub connection is never empty -
         # get_message() on a pubsub with no subscriptions is not useful.
         await self._pubsub.subscribe(REVOKE_CHANNEL)
+        # And the Odin wall. Subscribed unconditionally, like revocation, rather
+        # than on demand: it is ONE channel carrying one frame every few seconds
+        # for the entire product, and making it conditional would add a
+        # subscribe/unsubscribe dance to save nothing measurable.
+        from backend.realtime.odin import WALL_CHANNEL
+
+        await self._pubsub.subscribe(WALL_CHANNEL)
         self._running = True
         self._reader = asyncio.create_task(self._read_loop())
         log.info("Realtime bus connected (%s).", redacted_url(self.url))
@@ -340,6 +347,16 @@ class RedisBus:
             from backend.realtime.revocation import apply_revocation
 
             await apply_revocation(self.hub, payload)
+            return
+
+        from backend.realtime.odin import WALL_CHANNEL, wall
+
+        if channel == WALL_CHANNEL:
+            # Straight to this worker's own wall sockets. Not through the hub:
+            # a wall connection has no group membership by construction, which
+            # is what stops the cross-tenant fan-out and the per-tenant one
+            # sharing a mechanism they could ever be confused between.
+            wall.broadcast(payload)
             return
 
         if channel.startswith("rt:g:"):
