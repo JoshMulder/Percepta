@@ -4775,7 +4775,10 @@ body {
 }
 .odin-rail-row {
   display: grid;
-  grid-template-columns: 3px 1fr auto;
+  /* spine | body | age | actions. The actions column is fixed so the ages line
+     up down the rail: a ragged right edge on a column of numbers is read as
+     data rather than as layout. */
+  grid-template-columns: 3px 1fr auto auto;
   gap: 0.5rem;
   align-items: baseline;
   width: 100%;
@@ -4805,6 +4808,50 @@ body {
   font-variant-numeric: tabular-nums;
   color: #6c8092;
 }
+/* The row body is the click target for the station; the actions sit outside it
+   so acking never navigates and navigating never acks. */
+.odin-rail-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+  padding: 0;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.odin-rail-title {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.odin-rail-count { color: #6c8092; font-variant-numeric: tabular-nums; }
+.odin-rail-actions { display: flex; gap: 0.25rem; }
+.odin-rail-act {
+  padding: 0.1rem 0.35rem;
+  background: #16202a;
+  border: 1px solid var(--odin-line);
+  border-radius: 2px;
+  color: #8fa3b3;
+  font: 10px/1.4 var(--mono);
+  cursor: pointer;
+}
+.odin-rail-act:hover:not(:disabled) { color: #dde6ed; border-color: #2c3d4b; }
+.odin-rail-act:disabled { opacity: 0.4; cursor: wait; }
+/* Acked: dimmed, but still present and still coloured by severity. It is being
+   dealt with, not gone — the station keeps its attention colour until CLOSED. */
+.odin-rail-row.acked { opacity: 0.62; }
+.odin-rail-held {
+  grid-column: 2 / -1;
+  font: 10px/1.4 var(--mono);
+  color: #6c8092;
+}
+.odin-rail-held.warn { color: var(--odin-warn); }
+
 /* An empty rail is the NORMAL state and must not look like a broken one. */
 .odin-rail-empty {
   padding: 1.5rem 0.75rem;

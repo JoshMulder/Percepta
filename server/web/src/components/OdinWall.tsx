@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { FleetAdsb, FleetView, PlatformMapConfig } from "../types";
+import { api } from "../api";
+import { chime } from "../chime";
+import type { FleetAdsb, FleetView, OdinAlert, PlatformMapConfig } from "../types";
 import { useOdin } from "../useOdin";
 import { AlertRail } from "./AlertRail";
 import { FleetMap } from "./FleetMap";
@@ -62,14 +64,65 @@ export function OdinWall({
   // bar rather than kept internal: a wall that quietly drops from live to
   // polling still looks alive, and the operator only discovers the difference
   // at the moment they needed it to have been live.
-  const { stations: pushed, link, lastFrameAt } = useOdin(true);
+  const { stations: pushed, alerts: pushedAlerts, link, lastFrameAt } = useOdin(true);
+
+  /** Alerts arrive on the digest. This is the fallback for a dead socket, and
+   *  the re-read after an operator acts so they see their own change at once
+   *  rather than waiting out the next frame. */
+  const [polledAlerts, setPolledAlerts] = useState<OdinAlert[]>([]);
+  const refreshAlerts = useCallback(() => {
+    void api.odinAlerts().then(setPolledAlerts).catch(() => {});
+  }, []);
+  useEffect(() => {
+    if (link === "live") return;
+    refreshAlerts();
+    const id = window.setInterval(refreshAlerts, 15000);
+    return () => window.clearInterval(id);
+  }, [link, refreshAlerts]);
+
+  const alerts = link === "live" && pushedAlerts ? pushedAlerts : polledAlerts;
 
   const polled = useMemo(() => fleet?.stations ?? [], [fleet]);
   /** Push when it is arriving, poll when it is not. Never a merge of the two:
    *  two sources of truth for one wall is how a station appears twice, or
    *  appears healthy in one and dark in the other. */
   const stations = link === "live" && pushed ? pushed : polled;
-  const events = useMemo(() => fleet?.recent_events ?? [], [fleet]);
+  const stationNames = useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const s of stations) out[s.id] = s.name;
+    return out;
+  }, [stations]);
+
+  /** Unacked criticals: the only thing on this wall that makes a noise. */
+  const unackedCritical = useMemo(
+    () => alerts.filter((a) => a.severity === "critical" && a.state === "open"),
+    [alerts],
+  );
+  const unacked = useMemo(
+    () => alerts.filter((a) => a.state === "open").length,
+    [alerts],
+  );
+
+  // Sound on a NEW unacked critical, never on a re-render and never on one that
+  // was already there. The chime rate-limits itself, so a comms outage that
+  // raises a dozen stations at once makes one noise rather than twelve.
+  const heard = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const fresh = unackedCritical.filter((a) => !heard.current.has(a.id));
+    // Rebuilt rather than added to, so an alert that is acked and later
+    // re-opened can sound again — and the set cannot grow without bound.
+    heard.current = new Set(unackedCritical.map((a) => a.id));
+    if (fresh.length > 0) chime();
+  }, [unackedCritical]);
+
+  // The count in the tab title, for the operator watching a second monitor.
+  useEffect(() => {
+    const base = "Percepta";
+    document.title = unacked > 0 ? `(${unacked}) ${base}` : base;
+    return () => {
+      document.title = base;
+    };
+  }, [unacked]);
 
   const selected = useMemo(
     () => stations.find((s) => s.id === selectedId) ?? null,
@@ -101,7 +154,7 @@ export function OdinWall({
     <div className="odin">
       <OdinStatusBar
         stations={stations}
-        unacked={events.length}
+        unacked={unacked}
         // The freshest thing the wall has: a digest frame if the socket is up,
         // otherwise the last successful poll. The pip counts from whichever is
         // actually feeding the screen, which is the only honest answer to "how
@@ -116,7 +169,12 @@ export function OdinWall({
         }
       />
 
-      <AlertRail events={events} onSelectStation={select} />
+      <AlertRail
+        alerts={alerts}
+        stationNames={stationNames}
+        onSelectStation={select}
+        onChanged={refreshAlerts}
+      />
 
       <TileWall stations={stations} selectedId={selectedId} onSelect={select} />
 

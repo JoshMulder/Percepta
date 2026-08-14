@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { FleetStation } from "./types";
+import type { FleetStation, OdinAlert } from "./types";
 
 /**
  * The Odin wall's live feed.
@@ -34,10 +34,16 @@ interface DigestFrame {
   type: string;
   at: string;
   stations: FleetStation[];
+  /** Open alerts, on the SAME frame as the stations rather than a second feed.
+   *  One operator's ack has to repaint on every other desk within a frame, and
+   *  two channels with two timings is how two people end up believing they each
+   *  hold the same fault. */
+  alerts?: OdinAlert[];
 }
 
 export function useOdin(enabled: boolean) {
   const [stations, setStations] = useState<FleetStation[] | null>(null);
+  const [alerts, setAlerts] = useState<OdinAlert[] | null>(null);
   const [link, setLink] = useState<OdinLink>("connecting");
   const [lastFrameAt, setLastFrameAt] = useState<number | null>(null);
 
@@ -89,6 +95,7 @@ export function useOdin(enabled: boolean) {
         }
         if (frame.type !== "odin.digest" || !Array.isArray(frame.stations)) return;
         setStations(frame.stations);
+        if (Array.isArray(frame.alerts)) setAlerts(frame.alerts);
         setLastFrameAt(Date.now());
         setLink("live");
       };
@@ -137,7 +144,7 @@ export function useOdin(enabled: boolean) {
     return () => window.clearInterval(id);
   }, [link, lastFrameAt]);
 
-  return { stations, link, lastFrameAt };
+  return { stations, alerts, link, lastFrameAt };
 }
 
 declare global {

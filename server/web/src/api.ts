@@ -18,6 +18,7 @@ import type {
   StationDetail,
   StationHealth,
   StationSummary,
+  OdinAlert,
 } from "./types";
 
 /** Thrown for any non-2xx. `status` is carried so callers can tell an expired
@@ -409,6 +410,37 @@ export const api = {
   platformFleet: () => request<FleetView>("/api/platform/fleet"),
   /** Conglomerated ADS-B across the whole fleet. */
   platformAdsb: () => request<FleetAdsb>("/api/platform/adsb"),
+
+  /** Odin's alerts. Normally arrives on the digest socket; this is the fallback
+   *  when the socket is down, and the read after an action so the operator who
+   *  clicked sees their own change without waiting for the next frame. */
+  odinAlerts: () => request<OdinAlert[]>("/api/odin/alerts"),
+  /** Take ownership. Answers 409 if somebody else already has it — that is the
+   *  answer, not a transient failure, and the client must re-render rather than
+   *  retry. */
+  ackAlert: (id: string, note?: string) =>
+    request<OdinAlert>(`/api/odin/alerts/${id}/ack`, {
+      method: "POST",
+      body: JSON.stringify({ note: note ?? null }),
+    }),
+  closeAlert: (id: string, reason?: string) =>
+    request<OdinAlert>(`/api/odin/alerts/${id}/close`, {
+      method: "POST",
+      body: JSON.stringify({ reason: reason ?? null }),
+    }),
+  snoozeAlert: (id: string, minutes: number) =>
+    request<OdinAlert>(`/api/odin/alerts/${id}/snooze`, {
+      method: "POST",
+      body: JSON.stringify({ minutes }),
+    }),
+  /** Expect this station to misbehave, and stop asking about it. The reason is
+   *  required: a silenced station with no stated reason is indistinguishable
+   *  from a forgotten one. */
+  declareMaintenance: (stationId: string, minutes: number, reason: string) =>
+    request<{ until: string; reason: string }>(
+      `/api/odin/stations/${stationId}/maintenance`,
+      { method: "POST", body: JSON.stringify({ minutes, reason }) },
+    ),
   /** Single-use, 60s, station-bound ticket for a host-shell terminal socket.
    *  A browser cannot set headers on a WebSocket, so — like the media ticket —
    *  this is how the terminal socket is authorised. Asking for it also tells the

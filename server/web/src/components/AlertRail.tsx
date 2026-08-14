@@ -1,195 +1,188 @@
-import { useEffect, useMemo, useState } from "react";
-import type { FleetEvent } from "../types";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { ApiError, api } from "../api";
+import type { OdinAlert } from "../types";
 
 /**
- * The standing queue of things the wall wants somebody to look at, down the
- * left of the screen and never hidden.
+ * The queue down the left of the wall, and the surface an operator works.
  *
- * It is a QUEUE, not a feed, and the sort order is the whole argument.
- * Severity first, then oldest-first within each severity, so the top row is
- * the worst thing that has been waiting longest. A feed sorts newest-first,
- * which reads well for somebody already watching; nobody is already watching
- * this wall, and newest-first pushes the alert that has gone unattended for
- * three hours off the bottom of the rail — the one item whose entire problem
- * is that it has been forgotten. Here the queue ages upward, and the forgotten
- * thing rises to meet the operator.
+ * A QUEUE, NOT A FEED. Critical above warning, and OLDEST FIRST within a
+ * severity. A queue ages upward; newest-first is a social feed, and it buries
+ * the thing that has been waiting longest — which on a wall is precisely the
+ * thing most likely to have been forgotten. Unacked sorts above acked for the
+ * same reason: what nobody has taken belongs at the top.
  *
- * Read-only, deliberately. There is no acknowledgement endpoint yet, and the
- * tempting local version — a set of dismissed ids held in component state —
- * would be worse than none at all: it would teach an operator that the wall
- * remembers what has been dealt with, then lose the lot on the next reload, or
- * overnight when the browser restarts itself. A queue that forgets quietly is
- * how an alarm goes unanswered. Until the platform can remember, the rail does
- * not claim to.
+ * ACK IS NOT CLOSE, and keeping them apart is the whole design.
  *
- * Nothing is truncated here. Whatever the caller hands over is drawn, because
- * a cap applied inside the rail would silently drop rows that a caller had
- * chosen to pass, and under this sort the rows a cap drops are the oldest or
- * the newest — never the unimportant ones. The rail scrolls instead, and how
- * much history reaches it stays the caller's decision.
+ *   Ack   "I have seen this and I am dealing with it." It stops a second
+ *         operator picking up the same fault, and it is also the assignment —
+ *         there is no separate assignee, because two concepts where one will do
+ *         is how a queue stops being read.
+ *   Close "It stopped being true."
  *
- * Colour is rationed the same way as the rest of ODIN: critical is `bad`,
- * warning is `warn`, and everything else — info, and any severity a future
- * station invents — is `neutral` and carries no colour whatsoever. The `ok`
- * tone exists in the vocabulary but is never used on this rail: green belongs
- * to the liveness pip and to nothing else, and a rail that turned green for
- * "seen to" would be training the operator to stop reading colour.
+ * The station keeps its attention colour on the wall until the alert is CLOSED,
+ * so acknowledging never hides a site that is still broken. Command centres lose
+ * faults exactly where those two actions are merged into one button.
+ *
+ * One click, no modal, no confirmation. A dialog between an operator and an ack
+ * is a dialog they will learn to dismiss without reading, and it costs the
+ * seconds where the fault is newest.
+ *
+ * ANOTHER OPERATOR'S ACK ARRIVES ON THE DIGEST. The list is a prop, refreshed
+ * on the same frame as the stations, so two desks cannot disagree about who
+ * holds something. A 409 from the server is not an error to retry: it is the
+ * answer, and it means somebody else got there first.
  */
 
-/** Lowest sorts highest up the rail. Anything unrecognised ranks with info
- *  rather than above critical: the station vocabulary is normalised server-side
- *  to info/warning/critical, so a value outside that set is a station saying
- *  something this console does not understand yet, and an unread word is not
- *  grounds for promoting a row over a stated critical. */
-const SEVERITY_RANK: Record<string, number> = { critical: 0, warning: 1 };
+const SEVERITY_RANK: Record<string, number> = { critical: 0, warning: 1, info: 2 };
 
-function rank(severity: string): number {
-  return SEVERITY_RANK[severity] ?? 2;
-}
-
-function tone(severity: string): string {
-  if (severity === "critical") return "bad";
-  if (severity === "warning") return "warn";
-  return "neutral";
-}
-
-/** Stands in for a timestamp that would not parse. A sentinel rather than
- *  Infinity because the comparator subtracts one age from another, and
- *  Infinity minus Infinity is NaN, which leaves the sort order arbitrary.
- *  Far-future, so an unreadable event sinks to the bottom of its severity
- *  group instead of claiming to be the oldest thing on the wall and camping at
- *  the top of the rail. */
-const UNDATED = Number.MAX_SAFE_INTEGER;
-
-function receivedMs(ev: FleetEvent): number {
-  const t = Date.parse(ev.received_at);
-  return Number.isNaN(t) ? UNDATED : t;
-}
-
-function age(at: number, now: number): string {
-  if (at === UNDATED) return "—";
-  // Clamped at zero. The station's clock and the platform's need not agree to
-  // the second, and a row reading "-2s" looks like a broken display rather
-  // than like the small skew it actually is.
-  const s = Math.max(0, (now - at) / 1000);
-  // Floored, never rounded. Rounding turns thirty-one seconds into "1m" and
-  // overstates how long the queue has gone unattended, which is the one number
-  // this rail exists to state honestly. Flooring can only ever understate it.
-  if (s < 60) return `${Math.floor(s)}s`;
-  if (s < 3600) return `${Math.floor(s / 60)}m`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h`;
-  return `${Math.floor(s / 86400)}d`;
-}
-
-const SPOKEN_UNITS: Record<string, string> = {
-  s: "seconds",
-  m: "minutes",
-  h: "hours",
-  d: "days",
-};
-
-/** The age again, in words, for the row's accessible name. The visible token is
- *  compressed to keep the column narrow and the digits still; read aloud, "4m"
- *  is not a duration. */
-function spokenAge(token: string): string {
-  const unit = SPOKEN_UNITS[token.slice(-1)];
-  return unit ? `${token.slice(0, -1)} ${unit} ago` : "age unknown";
-}
-
-/** The exact time, for the hover. The rail states ages because an age is what
- *  an operator acts on, but the moment is what they write down afterwards, and
- *  a relative age cannot be recovered from a screen photographed an hour on. */
-function exactly(ev: FleetEvent): string | undefined {
-  const t = Date.parse(ev.received_at);
-  return Number.isNaN(t) ? undefined : new Date(t).toLocaleString();
+function ago(iso: string, now: number): string {
+  const s = Math.max(0, (now - new Date(iso).getTime()) / 1000);
+  if (s < 60) return `${Math.round(s)}s`;
+  if (s < 3600) return `${Math.round(s / 60)}m`;
+  if (s < 86400) return `${Math.round(s / 3600)}h`;
+  return `${Math.round(s / 86400)}d`;
 }
 
 export function AlertRail({
-  events,
+  alerts,
+  stationNames,
   onSelectStation,
+  onChanged,
 }: {
-  events: FleetEvent[];
-  /** A row click is a request to look at that station. What looking means
-   *  belongs to the wall, not to the rail. */
+  alerts: OdinAlert[];
+  /** id -> name, so a row can say where it is without another lookup. */
+  stationNames: Record<string, string>;
   onSelectStation: (stationId: string) => void;
+  /** Called after an action lands, so the caller can re-read rather than wait
+   *  out the digest cycle — the operator who clicked should see their own
+   *  change immediately even though everyone else sees it on the next frame. */
+  onChanged: () => void;
 }) {
-  // Ages have to keep counting on their own. The fleet is polled on a slow
-  // interval because station state moves in minutes, and an age frozen between
-  // polls is a wall that looks stopped — on a screen where stillness is the
-  // normal state, a stopped clock is indistinguishable from a dead browser.
-  // One second is the finest resolution the rail displays, so it is the rate
-  // the rail recalculates at; anything slower would show ages that skip.
+  // Ages have to keep counting while no new props arrive: a quiet fleet sends
+  // no frames worth re-rendering for, and "4m" frozen at 4m is a lie that grows.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const id = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(id);
   }, []);
 
-  // Keyed on the events alone, not on the tick: the order depends on when each
-  // event arrived, which the passing of time does not change. Re-sorting every
-  // second would be work done to reach the same answer.
-  const queue = useMemo(() => {
-    return events
-      .map((ev) => ({ ev, at: receivedMs(ev) }))
-      .sort(
-        (a, b) =>
-          rank(a.ev.severity) - rank(b.ev.severity) ||
-          a.at - b.at ||
-          // Two events recorded in the same instant, which happens when one
-          // fault raises several. Broken by id so the pair cannot swap places
-          // between renders: a row that moves under a pointer on the way to a
-          // click is a mis-click, and on this wall any movement at all reads
-          // as something happening.
-          a.ev.id.localeCompare(b.ev.id),
+  /** Which rows are mid-request. Keyed by id rather than a single boolean so one
+   *  slow ack does not freeze the whole rail. */
+  const [busy, setBusy] = useState<Record<string, boolean>>({});
+  const [conflict, setConflict] = useState<Record<string, boolean>>({});
+
+  const ordered = useMemo(() => {
+    return [...alerts].sort((a, b) => {
+      // Unacked first: what nobody has taken is what needs somebody.
+      const takenA = a.state === "acked" ? 1 : 0;
+      const takenB = b.state === "acked" ? 1 : 0;
+      if (takenA !== takenB) return takenA - takenB;
+      const sevA = SEVERITY_RANK[a.severity] ?? 3;
+      const sevB = SEVERITY_RANK[b.severity] ?? 3;
+      if (sevA !== sevB) return sevA - sevB;
+      // Oldest first. The queue ages upward.
+      return (
+        new Date(a.first_seen_at).getTime() - new Date(b.first_seen_at).getTime()
       );
-  }, [events]);
+    });
+  }, [alerts]);
+
+  const act = useCallback(
+    async (id: string, what: "ack" | "close") => {
+      setBusy((b) => ({ ...b, [id]: true }));
+      setConflict((c) => ({ ...c, [id]: false }));
+      try {
+        if (what === "ack") await api.ackAlert(id);
+        else await api.closeAlert(id);
+        onChanged();
+      } catch (e) {
+        // 409 means another operator holds it. NOT retried: it is the answer,
+        // and the row is marked so the person who clicked learns why nothing
+        // happened rather than clicking again.
+        if (e instanceof ApiError && e.status === 409) {
+          setConflict((c) => ({ ...c, [id]: true }));
+          onChanged();
+        }
+      } finally {
+        setBusy((b) => ({ ...b, [id]: false }));
+      }
+    },
+    [onChanged],
+  );
+
+  if (ordered.length === 0) {
+    return (
+      <div className="odin-rail">
+        {/* The normal state, and it must not look like a broken one. */}
+        <div className="odin-rail-empty">Nothing waiting</div>
+      </div>
+    );
+  }
 
   return (
-    <section className="odin-rail" aria-label="Alert queue">
-      {queue.length === 0 ? (
-        // The normal state, and it must not look like a failure to load. No
-        // glyph, no reassuring green badge, no "all clear" — a wall that
-        // decorates its own quiet is a wall with something on it to ignore.
-        <p className="odin-rail-empty">Nothing waiting.</p>
-      ) : (
-        queue.map(({ ev, at }) => {
-          const token = age(at, now);
-          const severity = tone(ev.severity);
-          // An event may be stored with no message, or with a message that is
-          // only whitespace. Its type is the least the rail can honestly say,
-          // and it is worth more than a row that is blank where the sentence
-          // should be.
-          const said = ev.message?.trim() || ev.type;
-          return (
+    <div className="odin-rail">
+      {ordered.map((a) => {
+        const taken = a.state === "acked";
+        return (
+          <div
+            key={a.id}
+            className={`odin-rail-row ${a.severity}${taken ? " acked" : ""}`}
+          >
+            <span className={`odin-rail-sev ${a.severity}`} aria-hidden="true" />
+
             <button
-              key={ev.id}
               type="button"
-              className={`odin-rail-row ${severity}`}
-              onClick={() => onSelectStation(ev.station_id)}
-              title={exactly(ev)}
-              // The severity reaches a sighted reader as colour and position,
-              // neither of which survives being read aloud, so the accessible
-              // name carries it in words and the marker itself is hidden.
-              aria-label={`${ev.severity}, ${spokenAge(token)}: ${ev.station_name}, ${
-                ev.organization_name
-              }. ${said}`}
+              className="odin-rail-body"
+              onClick={() => onSelectStation(a.ground_station_id)}
+              title={a.message ?? a.title}
             >
-              <span className={`odin-rail-sev ${severity}`} aria-hidden="true" />
-              {/* Tabular figures, set in the stylesheet: this digit changes
-                  every second on the newest row, and a proportional 1 next to a
-                  proportional 8 would shuffle the whole line each tick. */}
-              <span className="odin-rail-when">{token}</span>
+              <span className="odin-rail-title">{a.title}</span>
               <span className="odin-rail-where">
-                {ev.station_name} · {ev.organization_name}
+                {stationNames[a.ground_station_id] ?? "unknown station"}
+                {a.occurrences > 1 && (
+                  // One row per fact, so this is how often it has happened
+                  // rather than how many rows it earned.
+                  <span className="odin-rail-count"> ×{a.occurrences}</span>
+                )}
               </span>
-              {/* The message is the row's own text rather than a span of its
-                  own, which is why there is no class for it. It is what the row
-                  says; everything wrapped above is furniture around it. */}
-              {said}
             </button>
-          );
-        })
-      )}
-    </section>
+
+            <span className="odin-rail-when">{ago(a.first_seen_at, now)}</span>
+
+            <span className="odin-rail-actions">
+              {!taken && (
+                <button
+                  type="button"
+                  className="odin-rail-act"
+                  disabled={busy[a.id]}
+                  onClick={() => void act(a.id, "ack")}
+                  title="Take ownership. Stops anyone else picking this up."
+                >
+                  ack
+                </button>
+              )}
+              <button
+                type="button"
+                className="odin-rail-act"
+                disabled={busy[a.id]}
+                onClick={() => void act(a.id, "close")}
+                title="It stopped being true. Removes the station's attention colour."
+              >
+                close
+              </button>
+            </span>
+
+            {taken && (
+              <span className="odin-rail-held" title="Acknowledged">
+                held
+              </span>
+            )}
+            {conflict[a.id] && (
+              <span className="odin-rail-held warn">taken by someone else</span>
+            )}
+          </div>
+        );
+      })}
+    </div>
   );
 }

@@ -12,7 +12,29 @@
  */
 let ctx: AudioContext | null = null;
 
+/** The last time a chime actually sounded. */
+let lastAt = 0;
+
+/**
+ * One chime per this window, however many alerts arrive.
+ *
+ * A comms outage raises a dozen stations at once, and a dozen chimes in three
+ * seconds is not twelve times the information — it is a noise an operator
+ * silences, after which the one that mattered arrives in silence too. The count
+ * is on the screen; the sound only has to say "look".
+ */
+const MIN_GAP_MS = 10_000;
+
+/** Whether enough time has passed to sound again. Exported for the caller that
+ *  wants to know without making a noise to find out. */
+export function chimeReady(now = Date.now()): boolean {
+  return now - lastAt >= MIN_GAP_MS;
+}
+
 export function chime(): void {
+  const now = Date.now();
+  if (!chimeReady(now)) return;
+  lastAt = now;
   try {
     ctx =
       ctx ??

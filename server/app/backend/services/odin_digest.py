@@ -36,13 +36,14 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from backend.database.models.ground_station import GroundStation
 from backend.database.models.organization import Organization
 from backend.database.session import PrivilegedSessionLocal
 from backend.realtime.bus import publish_sync
 from backend.realtime.odin import WALL_CHANNEL
+from backend.services.alerts import store as alert_store
 from backend.services.station_status import status_for
 
 log = logging.getLogger(__name__)
@@ -73,6 +74,10 @@ class OdinDigest:
         #: between the two sources and a field present in one and absent in the
         #: other is a crash rather than a gap.
         self._roster: dict[uuid.UUID, dict] = {}
+        #: Open alerts, refreshed beside the roster and published every frame so
+        #: one operator's ack reaches every other screen in the next three
+        #: seconds rather than on their own next poll.
+        self._alerts: list[dict] = []
         #: station_id -> last_seen, so the digest can derive liveness without
         #: asking the database for it every frame.
         self._seen: dict[uuid.UUID, datetime] = {}
@@ -151,6 +156,51 @@ class OdinDigest:
 
     # --- the slow paths --------------------------------------------------
 
+    def _read_alerts(self) -> list[dict]:
+        """Every open alert, for every tenant, worst first.
+
+        Read on the SLOW cycle beside the roster rather than every frame. An
+        alert changes when a human clicks or a station's condition set moves,
+        both of which are rare next to three seconds, and this is a cross-tenant
+        query — the one kind worth doing as seldom as it can honestly be done.
+        """
+        with PrivilegedSessionLocal() as db:
+            # Bypass: the digest serves every tenant at once by design, and has
+            # no session org of its own. Nothing here is filtered by the caller
+            # afterwards, so the read is bounded instead — an operator cannot be
+            # helped by the four-hundredth open alert.
+            db.execute(
+                text(
+                    "SELECT set_config('app.current_org', :org, true), "
+                    "set_config('app.bypass', 'on', true)"
+                ),
+                {"org": str(uuid.UUID(int=0))},
+            )
+            alerts = alert_store.open_alerts(db, limit=200)
+            return [
+                {
+                    "id": str(a.id),
+                    "ground_station_id": str(a.ground_station_id),
+                    "organization_id": str(a.organization_id),
+                    "source": a.source,
+                    "type": a.type,
+                    "severity": a.severity,
+                    "title": a.title,
+                    "message": a.message,
+                    "first_seen_at": a.first_seen_at.isoformat(),
+                    "last_seen_at": a.last_seen_at.isoformat(),
+                    "occurrences": a.occurrences,
+                    "state": a.state,
+                    "acked_by_user_id": (
+                        str(a.acked_by_user_id) if a.acked_by_user_id else None
+                    ),
+                    "snooze_until": (
+                        a.snooze_until.isoformat() if a.snooze_until else None
+                    ),
+                }
+                for a in alerts
+            ]
+
     def _read_roster(self) -> dict[uuid.UUID, dict]:
         with PrivilegedSessionLocal() as db:
             rows = db.execute(
@@ -202,7 +252,20 @@ class OdinDigest:
                 self._seen[sid] = last_seen
         return out
 
+    async def refresh_alerts(self) -> None:
+        """Re-read the alerts now, out of cycle.
+
+        Called when something has just changed one — an ack, a close, a raise —
+        so the operator who clicked does not wait out the slow cycle to see
+        their own action land.
+        """
+        try:
+            self._alerts = await asyncio.to_thread(self._read_alerts)
+        except Exception:
+            log.warning("Odin digest could not refresh alerts.", exc_info=True)
+
     async def _refresh_roster(self) -> None:
+        await self.refresh_alerts()
         try:
             self._roster = await asyncio.to_thread(self._read_roster)
         except Exception:
@@ -243,6 +306,7 @@ class OdinDigest:
             "type": "odin.digest",
             "at": now.isoformat(),
             "stations": stations,
+            "alerts": self._alerts,
         }
 
     async def _publish(self) -> None:

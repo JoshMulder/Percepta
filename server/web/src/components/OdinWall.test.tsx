@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AlertRail } from "./AlertRail";
 import { OdinStatusBar } from "./OdinStatusBar";
 import { TileWall } from "./TileWall";
-import type { FleetEvent, FleetStation } from "../types";
+import type { FleetStation, OdinAlert } from "../types";
 
 /**
  * The rules the wall is FOR, as opposed to how it happens to look.
@@ -37,16 +37,22 @@ function station(over: Partial<FleetStation> = {}): FleetStation {
   };
 }
 
-function event(over: Partial<FleetEvent> = {}): FleetEvent {
+function alert(over: Partial<OdinAlert> = {}): OdinAlert {
   return {
     id: Math.random().toString(36).slice(2),
-    station_id: "s1",
-    station_name: "Kennels Road",
-    organization_name: "SPS",
+    ground_station_id: "s1",
+    organization_id: "o1",
+    source: "condition",
     type: "uplink.down",
     severity: "warning",
+    title: "uplink down",
     message: "Uplink lost",
-    received_at: new Date().toISOString(),
+    first_seen_at: new Date().toISOString(),
+    last_seen_at: new Date().toISOString(),
+    occurrences: 1,
+    state: "open",
+    acked_by_user_id: null,
+    snooze_until: null,
     ...over,
   };
 }
@@ -149,12 +155,14 @@ describe("the alert rail", () => {
       new Date(Date.now() - mins * 60_000).toISOString();
     render(
       <AlertRail
-        events={[
-          event({ message: "recent warning", received_at: t(1) }),
-          event({ message: "old warning", received_at: t(90) }),
-          event({ message: "recent critical", severity: "critical", received_at: t(2) }),
+        alerts={[
+          alert({ title: "recent warning", first_seen_at: t(1) }),
+          alert({ title: "old warning", first_seen_at: t(90) }),
+          alert({ title: "recent critical", severity: "critical", first_seen_at: t(2) }),
         ]}
+        stationNames={{ s1: "Kennels Road" }}
         onSelectStation={() => {}}
+        onChanged={() => {}}
       />,
     );
     const rows = Array.from(document.querySelectorAll(".odin-rail-row")).map(
@@ -168,8 +176,52 @@ describe("the alert rail", () => {
     expect(rows[2]).toContain("recent warning");
   });
 
+  it("puts what nobody has taken above what somebody has", () => {
+    // An acked alert is being dealt with; an open one is not. The queue is for
+    // things that still need a person, so ownership outranks even severity.
+    render(
+      <AlertRail
+        alerts={[
+          alert({ title: "held critical", severity: "critical", state: "acked" }),
+          alert({ title: "open warning", severity: "warning", state: "open" }),
+        ]}
+        stationNames={{ s1: "Kennels Road" }}
+        onSelectStation={() => {}}
+        onChanged={() => {}}
+      />,
+    );
+    const rows = Array.from(document.querySelectorAll(".odin-rail-row")).map(
+      (e) => e.textContent ?? "",
+    );
+    expect(rows[0]).toContain("open warning");
+  });
+
+  it("offers close on an acked alert but not ack", () => {
+    // Ack is not close: a fault somebody owns is still a fault, and the station
+    // keeps its colour until the fault stops being true.
+    render(
+      <AlertRail
+        alerts={[alert({ state: "acked" })]}
+        stationNames={{ s1: "Kennels Road" }}
+        onSelectStation={() => {}}
+        onChanged={() => {}}
+      />,
+    );
+    const acts = Array.from(document.querySelectorAll(".odin-rail-act")).map(
+      (e) => e.textContent,
+    );
+    expect(acts).toEqual(["close"]);
+  });
+
   it("says nothing is waiting, calmly", () => {
-    render(<AlertRail events={[]} onSelectStation={() => {}} />);
+    render(
+      <AlertRail
+        alerts={[]}
+        stationNames={{}}
+        onSelectStation={() => {}}
+        onChanged={() => {}}
+      />,
+    );
     expect(document.querySelector(".odin-rail-empty")).not.toBeNull();
   });
 });

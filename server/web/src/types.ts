@@ -717,3 +717,33 @@ export interface LoginChallenge {
 export function isChallenge(v: Me | LoginChallenge): v is LoginChallenge {
   return "status" in v;
 }
+
+
+/**
+ * An alert, as the wall sees it.
+ *
+ * `state` is the thing to read carefully. ACKED IS NOT CLOSED: acked means an
+ * operator has taken ownership and is dealing with it, closed means the fault
+ * stopped being true. A station keeps its attention colour on the wall until
+ * CLOSED — acknowledging must never hide a site that is still broken, and
+ * conflating the two is how a command centre loses a fault.
+ */
+export interface OdinAlert {
+  id: string;
+  ground_station_id: string;
+  organization_id: string;
+  source: string;
+  type: string;
+  severity: "info" | "warning" | "critical";
+  title: string;
+  message: string | null;
+  first_seen_at: string;
+  last_seen_at: string;
+  /** How many times this same fact has been reported. One row per fact, so a
+   *  station flapping its uplink is a rising count rather than a wall of rows. */
+  occurrences: number;
+  state: "open" | "acked" | "closed";
+  /** Ack IS assignment. There is no separate assignee. */
+  acked_by_user_id: string | null;
+  snooze_until: string | null;
+}
