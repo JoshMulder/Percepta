@@ -8,6 +8,7 @@ import {
   aircraftFeatures,
   chevronImage,
 } from "../fleetAircraftLayer";
+import { fitKey } from "../fleetStationFit";
 import type { FleetAircraft, FleetStation, PlatformMapConfig } from "../types";
 
 /**
@@ -62,7 +63,12 @@ function FleetMapInner({
   /** Station markers by id, and aircraft markers by ICAO — reused across
    *  updates so a refresh moves a dot rather than recreating the DOM. */
   const stationMarkers = useRef(new Map<string, maplibregl.Marker>());
-  const fittedRef = useRef(false);
+  //: The set of placeable stations the view was last fitted to. A KEY, not a
+  //: boolean — the boolean was set on the first batch and never cleared, while
+  //: the effect that builds the map re-runs on a new config identity, so a
+  //: refetched config rebuilt the map at the default view and the fit never
+  //: ran again. Nothing looked broken; the map was just always zoomed out.
+  const fittedKeyRef = useRef<string | null>(null);
   const [style, setStyle] = useState(config.default_basemap);
 
   const basemap =
@@ -241,9 +247,12 @@ function FleetMapInner({
       existing.delete(id);
     }
 
-    // Fit to the fleet once, on the first batch that has any located station.
-    if (!fittedRef.current && located.length) {
-      fittedRef.current = true;
+    // Re-fit whenever the SET of placeable stations changes — a station
+    // enrolled, removed, or given a position for the first time. Not on every
+    // poll: that would yank the view back while somebody was panning.
+    const key = fitKey(stations);
+    if (key && key !== fittedKeyRef.current && located.length) {
+      fittedKeyRef.current = key;
       if (located.length === 1) {
         map.easeTo({
           center: [located[0].longitude as number, located[0].latitude as number],

@@ -137,3 +137,56 @@ def project_power(frame: dict) -> dict:
         # report where its power comes from, and those are different claims.
         out["on_battery"] = (mains or 0) <= 0 and (gen or 0) <= 0
     return out
+
+
+def project_weather(frame: dict) -> dict:
+    """The vitals a weather frame carries. Keys match FleetStation exactly.
+
+    WEATHER HAS BEEN ARRIVING HERE ALL ALONG AND FALLING ON THE FLOOR. The
+    ingest calls `digest.note()` for every kind, `"weather"` is a known kind, and
+    `note()` branched on health and power only — so every weather frame was
+    parsed, handed over, and dropped. Adding this costs the field NOTHING: the
+    station publishes weather at 0.2 Hz whether anybody reads it or not, so these
+    are bytes already paid for on the Starlink link.
+
+    FIVE FIELDS, chosen for a wall rather than for completeness:
+
+      wind_kt / gust_kt   the two that decide whether somebody can fly, work at
+                          height, or should be sent home. Gust separately from
+                          mean because the gust is what hurts.
+      temperature_c       frost and heat, and the number every operator reaches
+                          for first.
+      visibility_km       the one that closes a site. Nothing else on the wall
+                          answers "can they see".
+      sky                 one word of context that stops the numbers being read
+                          in a vacuum.
+
+    Deliberately NOT carried: humidity, pressure, wind direction, rain rate and
+    daily rain total. Each is real and each is on the station's own page — but a
+    tile has room for a glance, and a wall that shows everything shows nothing.
+    Direction in particular is a rose, not a number, and it does not survive
+    being shrunk to a tile.
+
+    NO UNIT CONVERSION HERE. These are the station's own units, exactly as the
+    contract states them, and the client converts through `weatherDisplay()`
+    against each operator's preferences. Converting server-side would bake one
+    viewer's choice into a frame every viewer shares.
+    """
+    out: dict = {}
+    if not isinstance(frame, dict):
+        return out
+
+    # `available: false` means the station is declaring a weather head it does
+    # not currently have. There are no readings behind it, and projecting the
+    # absent fields as nulls would render as "reporting, but blank" rather than
+    # "not fitted".
+    if frame.get("available") is False:
+        return out
+
+    for key in ("wind_kt", "gust_kt", "temperature_c", "visibility_km"):
+        value = frame.get(key)
+        out[key] = float(value) if isinstance(value, (int, float)) else None
+
+    sky = frame.get("sky")
+    out["sky"] = sky if isinstance(sky, str) else None
+    return out

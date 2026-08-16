@@ -654,6 +654,19 @@ export interface FleetStation {
    *  real. The station is authoritative about this; the platform is not. */
   simulated_slots?: string[];
   running_version?: string | null;
+
+  // --- weather, in the STATION'S own units -------------------------------
+  // Never converted server-side: one frame is shared by every viewer, and each
+  // operator has their own unit preferences. Render through weatherDisplay().
+  /** Mean and gust separately — the gust is the one that hurts. */
+  wind_kt?: number | null;
+  gust_kt?: number | null;
+  temperature_c?: number | null;
+  /** The reading that closes a site. */
+  visibility_km?: number | null;
+  /** The station's own present-weather word, not inferred from the numbers. */
+  sky?: string | null;
+
   /** An active maintenance window. A station inside one raises nothing, so
    *  without this the wall would show a deliberately-silenced site exactly like
    *  a healthy one — and "we know about it" and "it is fine" are not the same

@@ -75,14 +75,82 @@ const LOW_SOC_PCT = 30;
  */
 const byText = new Intl.Collator("en", { numeric: true, sensitivity: "base" });
 
-/** How worrying a station is, lowest first. Mirrors the rank the platform
- *  station list sorts by, so the wall and the list never disagree about which
- *  station is in the most trouble. */
-function rank(s: FleetStation): number {
+/**
+ * How worrying a station is, lowest first.
+ *
+ * REACHABILITY FIRST, THEN TROUBLE. A station we cannot hear from outranks one
+ * that is shouting, because a dark site may be shouting too and we would not
+ * know. That ordering is the original and it survives.
+ *
+ * What is new is everything below rank 2: this used to return 3 for every
+ * station that was merely online, so a site with five open criticals sorted
+ * identically to a nominal one and landed wherever its organisation's name fell
+ * alphabetically. "Trouble is top-left" was true only for stations that had
+ * stopped talking.
+ *
+ * UNACKED BEATS ACKED, and that is the whole point of acking: taking an alert
+ * says somebody is dealing with it, so the tile steps aside for the ones nobody
+ * has picked up. It does NOT leave the trouble tiers — a station stays above the
+ * nominal ones until its alerts are closed, because acking is not fixing.
+ *
+ * A station under a maintenance window cannot be promoted here, and needs no
+ * special case: suppression happens at raise time on the server, so a silenced
+ * site has no open alerts to promote it.
+ */
+function rank(s: FleetStation, alerts?: StationAlertSummary): number {
   if (s.dark) return 0;
   if (s.status === "offline") return 1;
   if (s.status === "never") return 2;
-  return 3;
+  if (alerts) {
+    if (alerts.unackedCritical > 0) return 3;
+    if (alerts.critical > 0) return 4;
+    if (alerts.unackedWarning > 0) return 5;
+    if (alerts.warning > 0) return 6;
+  }
+  // The station's own account of itself, for a site with no platform alert
+  // raised against it yet — a condition it is reporting is still trouble.
+  // `?? 0` because the field is optional on the wire: a station that has not
+  // reported health yet has no count, and an absent count is not a fault.
+  if ((s.condition_count ?? 0) > 0) return 7;
+  return 8;
+}
+
+/** What the rail knows about one station, reduced to what the sort needs. */
+export interface StationAlertSummary {
+  critical: number;
+  unackedCritical: number;
+  warning: number;
+  unackedWarning: number;
+}
+
+/**
+ * Index the alert list by station.
+ *
+ * Built once per render of the wall rather than scanned per station inside the
+ * comparator — a sort is O(n log n) comparisons and a linear scan inside one
+ * makes the wall quadratic in the fleet just as it gets big enough to matter.
+ */
+export function alertIndex(
+  alerts: { ground_station_id: string; severity: string; state: string }[],
+): Record<string, StationAlertSummary> {
+  const out: Record<string, StationAlertSummary> = {};
+  for (const a of alerts) {
+    const e = (out[a.ground_station_id] ??= {
+      critical: 0,
+      unackedCritical: 0,
+      warning: 0,
+      unackedWarning: 0,
+    });
+    const unacked = a.state === "open";
+    if (a.severity === "critical") {
+      e.critical += 1;
+      if (unacked) e.unackedCritical += 1;
+    } else if (a.severity === "warning") {
+      e.warning += 1;
+      if (unacked) e.unackedWarning += 1;
+    }
+  }
+  return out;
 }
 
 /**
@@ -131,11 +199,16 @@ export function TileWall({
   stations,
   selectedId,
   onSelect,
+  alerts,
 }: {
   stations: FleetStation[];
   /** The station whose drawer is open, or null. */
   selectedId: string | null;
   onSelect: (id: string) => void;
+  /** Open alerts per station, from `alertIndex`. Optional so the wall still
+   *  sorts sensibly on reachability alone if the rail has not loaded — a tile
+   *  in the wrong order is better than a wall that does not render. */
+  alerts?: Record<string, StationAlertSummary>;
 }) {
   // Two memos rather than one, and the split is the point: the comparator runs
   // over the whole fleet and must not be re-run because somebody clicked a tile.
@@ -147,7 +220,7 @@ export function TileWall({
       // is handed to the map and the rail as well; sorting in place would reorder
       // what they are rendering from, mid-poll, from inside a memo.
       [...stations].sort((a, b) => {
-        const byRank = rank(a) - rank(b);
+        const byRank = rank(a, alerts?.[a.id]) - rank(b, alerts?.[b.id]);
         if (byRank !== 0) return byRank;
         const byOrg = byText.compare(a.organization_name, b.organization_name);
         if (byOrg !== 0) return byOrg;
@@ -158,7 +231,7 @@ export function TileWall({
         // on every poll, which is the exact flicker the sort exists to prevent.
         return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
       }),
-    [stations],
+    [stations, alerts],
   );
 
   const { tiled, collapsed } = useMemo(() => {

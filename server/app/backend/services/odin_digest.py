@@ -40,7 +40,11 @@ from sqlalchemy import select, text
 
 from backend.database.models.ground_station import GroundStation
 from backend.database.models.organization import Organization
-from backend.services.station_vitals import project_health, project_power
+from backend.services.station_vitals import (
+    project_health,
+    project_power,
+    project_weather,
+)
 from backend.database.models.platform_alert import StationMaintenance
 from backend.database.session import PrivilegedSessionLocal
 from backend.realtime.bus import publish_sync
@@ -111,6 +115,12 @@ class OdinDigest:
             v.update(project_health(payload))
         elif kind == "power":
             v.update(project_power(payload))
+        elif kind == "weather":
+            # Weather frames have ALWAYS arrived here — the ingest calls note()
+            # for every kind and "weather" is a known one — and fell through
+            # both branches unread. Free bytes: the station publishes weather at
+            # 0.2 Hz whether or not anybody is looking.
+            v.update(project_weather(payload))
 
     def forget(self, station_id: uuid.UUID) -> None:
         self._vitals.pop(station_id, None)

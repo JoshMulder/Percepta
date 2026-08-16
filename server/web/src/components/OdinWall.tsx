@@ -8,7 +8,7 @@ import { AlertRail } from "./AlertRail";
 import { FleetMap } from "./FleetMap";
 import { OdinStatusBar } from "./OdinStatusBar";
 import { StationPreviewDrawer } from "./StationPreviewDrawer";
-import { TileWall } from "./TileWall";
+import { TileWall, alertIndex } from "./TileWall";
 import { TranscriptFeed } from "./TranscriptFeed";
 import { WatchStrip } from "./WatchStrip";
 
@@ -107,6 +107,10 @@ export function OdinWall({
     () => alerts.filter((a) => a.severity === "critical" && a.state === "open"),
     [alerts],
   );
+  /** Open alerts indexed by station, so the tile sort can read them without a
+   *  linear scan inside the comparator. */
+  const alertsByStation = useMemo(() => alertIndex(alerts), [alerts]);
+
   const unacked = useMemo(
     () => alerts.filter((a) => a.state === "open").length,
     [alerts],
@@ -201,7 +205,12 @@ export function OdinWall({
         onChanged={refreshAlerts}
       />
 
-      <TileWall stations={stations} selectedId={selectedId} onSelect={select} />
+      <TileWall
+        stations={stations}
+        selectedId={selectedId}
+        onSelect={select}
+        alerts={alertsByStation}
+      />
 
       <div className="odin-map">
         {mapConfig ? (

@@ -59,10 +59,12 @@ from backend.realtime.bus import (
     ADSB_SNAPSHOT_TTL,
     HEALTH_SNAPSHOT_TTL,
     POWER_SNAPSHOT_TTL,
+    WEATHER_SNAPSHOT_TTL,
     adsb_snapshot_key,
     command_channel,
     health_snapshot_key,
     power_snapshot_key,
+    weather_snapshot_key,
 )
 from backend.realtime.hub import hub
 from backend.services import geocode, station_events, station_topics
@@ -484,6 +486,8 @@ class StationIngest:
             await self._cache_adsb(station_id, payload)
         elif kind == "power":
             await self._cache_power(station_id, payload)
+        elif kind == "weather":
+            await self._cache_weather(station_id, payload)
 
         # The Odin digest, for every kind it cares about. A dict assignment and
         # nothing more — see services/odin_digest.py on why this must not grow
@@ -669,6 +673,24 @@ class StationIngest:
             )
         except Exception:  # noqa: BLE001 - a cache write must never stop ingest
             log.debug("Could not cache power for %s.", station_id, exc_info=True)
+
+    async def _cache_weather(self, station_id: uuid.UUID, payload: dict) -> None:
+        """Keep the newest weather frame where a fleet-wide read can reach it.
+
+        Same trick, same TTL discipline and same best-effort failure as
+        `_cache_power`: a failed write costs a tile reading, never a stall in
+        ingest.
+        """
+        if self._redis is None:
+            return
+        try:
+            await self._redis.setex(
+                weather_snapshot_key(station_id),
+                WEATHER_SNAPSHOT_TTL,
+                json.dumps(payload),
+            )
+        except Exception:  # noqa: BLE001 - a cache write must never stop ingest
+            log.debug("Could not cache weather for %s.", station_id, exc_info=True)
 
     async def _reconcile_simulated(self, station_id: uuid.UUID, payload: dict) -> None:
         """Believe the station about whether its own data is synthetic.

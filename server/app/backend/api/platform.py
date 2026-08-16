@@ -47,10 +47,15 @@ from backend.realtime.revocation import organization_changed, revoke_user
 from backend.realtime.bus import (
     health_snapshot_key,
     power_snapshot_key,
+    weather_snapshot_key,
     read_latest_sync,
 )
 from backend.services.audit import record
-from backend.services.station_vitals import project_health, project_power
+from backend.services.station_vitals import (
+    project_health,
+    project_power,
+    project_weather,
+)
 from backend.services.station_status import DARK_AFTER, ONLINE_WITHIN, status_for
 
 #: ONLINE_WITHIN and DARK_AFTER are imported above, from
@@ -180,6 +185,19 @@ class FleetStation(BaseModel):
     #: real. The station is authoritative about this; the platform is not.
     simulated_slots: list[str] = []
     running_version: str | None = None
+
+    # --- weather, for the wall's tiles and its map preview ------------------
+    # The station's OWN units, never converted here: the client renders through
+    # each operator's unit preferences, and converting server-side would bake
+    # one viewer's choice into a frame every viewer shares.
+    #: Mean and gust are separate because the gust is the one that hurts.
+    wind_kt: float | None = None
+    gust_kt: float | None = None
+    temperature_c: float | None = None
+    #: The reading that closes a site. Nothing else here answers "can they see".
+    visibility_km: float | None = None
+    #: The station's own present-weather word, not inferred from the numbers.
+    sky: str | None = None
     #: An active maintenance window, if any. Present on BOTH this and the pushed
     #: digest: the client swaps between the two sources, and a field in one and
     #: not the other is not a gap, it is a crash — see the position fields, which
@@ -784,6 +802,21 @@ def _vitals(station_ids: list[uuid.UUID]) -> dict[uuid.UUID, dict]:
         # "on battery" rule (null, not False, when the station reports neither
         # source) lives in station_vitals with the reason it exists.
         out[sid].update(project_power(frame))
+
+    # Weather, from the same cache and by the same rule: both feeds or neither.
+    # A field on the pushed digest and not on the poll is not a gap, it is a
+    # wall that shows less while its socket is healthy — which is the exact
+    # asymmetry station_vitals exists to make impossible.
+    for sid, blob in zip(
+        station_ids, read_latest_sync([weather_snapshot_key(s) for s in station_ids])
+    ):
+        if not blob:
+            continue
+        try:
+            frame = json.loads(blob)
+        except (ValueError, TypeError):
+            continue
+        out[sid].update(project_weather(frame))
     return out
 
 

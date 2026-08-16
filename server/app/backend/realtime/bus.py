@@ -167,6 +167,31 @@ def health_snapshot_key(station_id) -> str:
 #: Power is published once a second, so a stale frame is worthless and a short
 #: TTL is the honest failure: an Odin tile with no battery reading says "unknown"
 #: rather than a number from twenty minutes ago. Longer than health's cadence
+#: Weather is published at 0.2 Hz, so a frame is at most five seconds old and a
+#: gap of two minutes means the head has stopped rather than that the wind has.
+#: Longer than the power TTL for that reason: a slower sensor needs a wider
+#: window before its silence means anything.
+WEATHER_SNAPSHOT_TTL = 150
+
+
+def weather_snapshot_key(station_id) -> str:
+    """Redis key holding one station's most recent weather frame.
+
+    Added so the wall's POLLED feed can show weather at all. The pushed digest
+    reads weather live off the ingest hot path, and if only that path had it,
+    the wall would show wind and visibility while its socket was up and drop
+    them the moment it fell back to polling — the exact asymmetry
+    `services/station_vitals` exists to make impossible, arriving from the other
+    direction.
+
+    Cached rather than read from `weather_samples`, for the same reason power is:
+    that table is a downsampled HISTORY written by the recorder, and reading its
+    newest row per station per poll is a query to learn something a cache
+    already holds.
+    """
+    return f"percepta:weather:{station_id}"
+
+
 #: gap, short enough that a station gone quiet stops claiming a state of charge.
 POWER_SNAPSHOT_TTL = 90
 
