@@ -151,6 +151,11 @@ class Agent:
             binary=config.radio_whisper_bin,
             model=config.radio_whisper_model,
             prompt=config.radio_whisper_prompt,
+            # Capped below the core count on purpose: whisper on every core
+            # takes this SoC to its maximum for the length of each over, and
+            # that is the load the board's supply could not hold. See
+            # transcribe.DEFAULT_THREADS.
+            threads=config.radio_whisper_threads,
             # The env override or the site toggle; the site one is the setup
             # page's switch and is re-read live in `_pump_radio`.
             enabled=config.radio_transcribe or self.site.radio_transcribe,

@@ -105,3 +105,70 @@ def _rooted(root):
         return real(arg)
 
     return factory
+
+
+# ---------------------------------------------------------- the thread cap
+
+def test_whisper_is_capped_below_the_core_count(tmp_path):
+    """The other half of the undervoltage story.
+
+    whisper.cpp defaults to every core. On a Pi 5 that takes the SoC to its
+    maximum for the length of each over, and at three or four overs a minute the
+    board sits at maximum nearly continuously — which is the load that pulled the
+    core rail to 7.7 A and browned the board out. Capping the threads is what
+    keeps transcription off that ceiling.
+
+    Asserted on the ARGV rather than on a constant, because the constant being
+    right is worth nothing if it never reaches the command line.
+    """
+    from gsu.radio import transcribe
+
+    seen: dict = {}
+
+    def fake_run(command, **kwargs):
+        seen["command"] = command
+        raise RuntimeError("not actually running whisper")
+
+    import subprocess
+
+    real = subprocess.run
+    subprocess.run = fake_run
+    try:
+        transcribe.whisper_transcribe(
+            "whisper-cli", "model.bin", tmp_path / "over.wav", threads=2
+        )
+    except Exception:
+        pass
+    finally:
+        subprocess.run = real
+
+    command = seen.get("command") or []
+    assert "-t" in command, "the thread cap never reached whisper's argv"
+    assert command[command.index("-t") + 1] == "2"
+
+
+def test_zero_threads_restores_whispers_own_default(tmp_path):
+    # `-t 0` is not the same as omitting the flag: the binary would have to
+    # decide what zero means. Omission is the honest way to say "your choice".
+    from gsu.radio import transcribe
+
+    seen: dict = {}
+
+    def fake_run(command, **kwargs):
+        seen["command"] = command
+        raise RuntimeError("stop")
+
+    import subprocess
+
+    real = subprocess.run
+    subprocess.run = fake_run
+    try:
+        transcribe.whisper_transcribe(
+            "whisper-cli", "model.bin", tmp_path / "over.wav", threads=0
+        )
+    except Exception:
+        pass
+    finally:
+        subprocess.run = real
+
+    assert "-t" not in (seen.get("command") or [])

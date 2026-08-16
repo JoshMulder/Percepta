@@ -152,6 +152,24 @@ class AgentConfig:
     #: than an error — the station image ships both when the feature is wanted.
     radio_whisper_bin: str = "whisper-cli"
     radio_whisper_model: str | None = None
+    #: How many CPU threads whisper.cpp may use.
+    #:
+    #: TWO, not all of them, and this is a POWER setting rather than a
+    #: performance one. whisper.cpp defaults to every core; on a Pi 5 that takes
+    #: the SoC to its maximum for the length of each over, and at three or four
+    #: overs a minute the board sits at maximum nearly continuously. On
+    #: 2026-08-15 Kennels Road logged `Undervoltage detected!` with the core rail
+    #: at 7.7 A and stopped executing in the same second — that current is simply
+    #: a BCM2712 with four cores saturated, and the supply could not hold it.
+    #:
+    #: `nice` does NOT help here and the comment in transcribe.py that implies it
+    #: does is about latency: a niced process on four cores draws exactly the
+    #: same current, it just yields sooner.
+    #:
+    #: Tunable rather than hard-coded because the right answer is per board — a
+    #: box with a bigger supply, or one not also running video and an SDR, can
+    #: afford more. 0 restores whisper's own default.
+    radio_whisper_threads: int = 2
     #: An initial prompt biasing whisper toward what this channel carries. Empty
     #: uses the built-in aviation vocabulary (`transcribe.AVIATION_PROMPT`); set
     #: GSU_WHISPER_PROMPT to add local aerodrome names and based-aircraft
@@ -248,6 +266,7 @@ class AgentConfig:
             radio_whisper_bin=_env("GSU_WHISPER_BIN", "whisper-cli"),
             radio_whisper_model=_env("GSU_WHISPER_MODEL"),
             radio_whisper_prompt=_env("GSU_WHISPER_PROMPT", ""),
+            radio_whisper_threads=int(_env("GSU_WHISPER_THREADS", "2")),
             stream_sink=_env("GSU_STREAM_SINK"),
             video_keep_warm=_env("GSU_VIDEO_KEEP_WARM", "0")
             not in ("0", "false", "no", ""),

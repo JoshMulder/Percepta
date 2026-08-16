@@ -47,7 +47,39 @@ QUEUE_MAX = 8
 
 #: `nice` increment for the subprocess — below the audio threads without
 #: starving on an otherwise-idle box.
+#:
+#: WORTH BEING CLEAR ABOUT WHAT THIS DOES NOT DO: `nice` is a scheduling
+#: priority, not a power budget. A niced process running on every core draws
+#: exactly the same current as an un-niced one; it simply yields sooner when
+#: something else wants the CPU. It protects the audio path's LATENCY and does
+#: nothing whatever for the board's supply. See THREADS.
 NICE = 10
+
+#: How many CPU threads whisper.cpp may use. Overridden from the site config.
+#:
+#: whisper.cpp defaults to every core, and on a Pi 5 that takes the SoC to its
+#: maximum for the length of each over. At three or four overs a minute the
+#: board sits at maximum nearly continuously — which is how Kennels Road came to
+#: log `Undervoltage detected!` with the core rail at 7.7 A, and stop executing
+#: in the same second. That current is not anomalous; it is a BCM2712 with four
+#: cores saturated. The supply could not hold it.
+#:
+#: TWO IS A REAL TRADE, not a free win, and the arithmetic is worth stating
+#: because it decides how a busy channel behaves. small.en measured 12.9 s per
+#: over on four threads. Whisper does not scale linearly, but roughly halving
+#: the threads roughly doubles the time — which puts a 30 s window near
+#: MAX_WINDOW_PROCESS_S. So on a busy circuit one of two things happens, and
+#: BOTH are the system working as designed:
+#:
+#:   - the selector below measures the slower time and steps down to a smaller
+#:     model, trading some accuracy for keeping up; or
+#:   - it stays on small.en and the queue absorbs bursts, dropping the OLDEST
+#:     over when a sustained run outpaces it (QUEUE_MAX) — a stale transcript
+#:     being worth less than a fresh one.
+#:
+#: What does not happen is the board browning out because transcription decided
+#: to use every core it could see.
+DEFAULT_THREADS = 2
 
 #: Shorter than this is a squelch tail or a click, not speech worth the CPU.
 MIN_OVER_SECONDS = 0.6
@@ -117,6 +149,7 @@ class Transcriber:
         on_text: OnText,
         *,
         binary: str = "whisper-cli",
+        threads: int = DEFAULT_THREADS,
         model: str | None = None,
         prompt: str = "",
         enabled: bool = False,
@@ -128,6 +161,11 @@ class Transcriber:
         #: configured one wins; otherwise the built-in aviation phraseology,
         #: because a station with transcription on is one listening to aircraft.
         self._prompt = prompt or AVIATION_PROMPT
+        #: Passed to every whisper run INCLUDING the selector's benchmark, so
+        #: the model it picks is the largest this board can keep up with at the
+        #: thread budget it will actually run at. Benchmarking on four cores and
+        #: then running on two would choose a model that cannot keep up.
+        self._threads = threads
         self._queue: "queue.Queue[_Over]" = queue.Queue(maxsize=QUEUE_MAX)
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -313,7 +351,8 @@ class Transcriber:
                     handle.writeframes(b"\x00\x00" * WHISPER_RATE)  # 1 s of silence
                 start = time.monotonic()
                 _, error = whisper_transcribe(
-                    self._binary, model, wav_path, self._prompt)
+                    self._binary, model, wav_path, self._prompt,
+                    threads=self._threads)
         except Exception as exc:  # noqa: BLE001 - benchmarking must never crash the worker
             return None, str(exc)
         return (None, error) if error else (time.monotonic() - start, "")
@@ -332,7 +371,10 @@ class Transcriber:
                 handle.setsampwidth(2)
                 handle.setframerate(WHISPER_RATE)
                 handle.writeframes(pcm)
-            return run_whisper(self._binary, self._model or "", wav_path, self._prompt)
+            return run_whisper(
+                self._binary, self._model or "", wav_path, self._prompt,
+                threads=self._threads,
+            )
 
     def shutdown(self) -> None:
         self._stop.set()
@@ -437,18 +479,32 @@ def bandpass_voice(
     return out.tobytes()
 
 
-def run_whisper(binary: str, model: str, wav_path: Path, prompt: str = "") -> str:
+def run_whisper(
+    binary: str,
+    model: str,
+    wav_path: Path,
+    prompt: str = "",
+    *,
+    threads: int = DEFAULT_THREADS,
+) -> str:
     """The transcript for a WAV, or empty on any failure. Logs *why* on a
     failure — that this used to swallow was the reason a broken model or a wrong
     flag looked exactly like a quiet channel from the outside."""
-    text, error = whisper_transcribe(binary, model, wav_path, prompt)
+    text, error = whisper_transcribe(
+        binary, model, wav_path, prompt, threads=threads
+    )
     if error:
         log.warning("Airband transcription failed: %s", error)
     return text
 
 
 def whisper_transcribe(
-    binary: str, model: str, wav_path: Path, prompt: str = ""
+    binary: str,
+    model: str,
+    wav_path: Path,
+    prompt: str = "",
+    *,
+    threads: int = DEFAULT_THREADS,
 ) -> tuple[str, str]:
     """Run whisper.cpp over a WAV. Returns (transcript, error): the error is a
     human string on any failure — a missing binary, a non-zero exit carrying
@@ -465,6 +521,11 @@ def whisper_transcribe(
         "-otxt",
         "-of", str(output),
     ]
+    if threads > 0:
+        # Omitted entirely at 0, which restores whisper's own default (every
+        # core) rather than passing `-t 0` and letting the binary decide what
+        # that means.
+        command += ["-t", str(threads)]
     if prompt:
         # whisper's initial prompt: it conditions on this as though it were text
         # already spoken, so the vocabulary in it wins over near-homophones when
