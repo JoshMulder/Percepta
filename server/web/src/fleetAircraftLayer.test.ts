@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { FleetAircraft } from "./types";
-import { aircraftFeatures } from "./fleetAircraftLayer";
+import { aircraftFeatures, aircraftTrails } from "./fleetAircraftLayer";
 
 /**
  * The pure half of the DOM-markers-to-symbol-layer conversion.
@@ -79,5 +79,47 @@ describe("aircraftFeatures", () => {
       type: "FeatureCollection",
       features: [],
     });
+  });
+});
+
+describe("aircraftTrails", () => {
+  it("builds a LineString per contact with a track", () => {
+    const { features } = aircraftTrails([
+      contact({ trail: [[172.6, -43.5], [172.7, -43.5]] }),
+    ]);
+    expect(features).toHaveLength(1);
+    expect((features[0] as any).geometry).toEqual({
+      type: "LineString",
+      coordinates: [[172.6, -43.5], [172.7, -43.5]],
+    });
+  });
+
+  it("drops a contact with fewer than two points", () => {
+    // A one-point "line" renders as nothing, correctly — but still costs a
+    // feature and a buffer upload per frame, and on a busy circuit most
+    // contacts are newly heard.
+    expect(aircraftTrails([contact({ trail: [[172.6, -43.5]] })]).features).toHaveLength(0);
+    expect(aircraftTrails([contact({ trail: [] })]).features).toHaveLength(0);
+    expect(aircraftTrails([contact()]).features).toHaveLength(0);
+  });
+
+  it("strips a hole in the trail rather than passing NaN to the map", () => {
+    // Same guard as the positions and for the same reason: one NaN throws
+    // "Invalid LngLat object" and takes the whole map down.
+    const { features } = aircraftTrails([
+      contact({
+        trail: [[172.6, -43.5], [NaN, -43.5], [172.8, -43.5]],
+      }),
+    ]);
+    expect((features[0] as any).geometry.coordinates).toEqual([
+      [172.6, -43.5],
+      [172.8, -43.5],
+    ]);
+  });
+
+  it("drops a trail that is all holes", () => {
+    expect(
+      aircraftTrails([contact({ trail: [[NaN, NaN], [NaN, NaN]] })]).features,
+    ).toHaveLength(0);
   });
 });

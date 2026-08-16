@@ -702,6 +702,15 @@ export interface FleetAircraft {
   ground_speed_kt: number | null;
   /** How many stations are currently hearing this contact. */
   heard_by: number;
+  /** Recent positions as [longitude, latitude] pairs, oldest first — GeoJSON
+   *  order, so they drop straight into a LineString.
+   *
+   *  Built server-side on the ingest, which receives every frame whether or not
+   *  anybody has a map open. That is the point: a map that has just loaded
+   *  draws the track an aircraft has ALREADY flown, rather than starting from a
+   *  single dot and growing a tail over the next two minutes. Optional, because
+   *  a contact heard for the first time this second genuinely has no track. */
+  trail?: number[][];
 }
 
 export interface FleetAdsb {

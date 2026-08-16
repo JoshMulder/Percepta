@@ -233,6 +233,17 @@ class FleetAircraft(BaseModel):
     ground_speed_kt: float | None = None
     #: How many stations in the fleet are currently hearing this contact.
     heard_by: int
+    #: Recent positions as `[longitude, latitude]` pairs, oldest first, ready to
+    #: drop into a GeoJSON LineString.
+    #:
+    #: Present so a map that has just opened draws the track an aircraft has
+    #: ALREADY flown, rather than starting from a single dot and growing a tail
+    #: over the next two minutes. The frames were arriving the whole time; only
+    #: the previous ones were being discarded.
+    #:
+    #: From the station that has heard it LONGEST — see the merge, which keeps
+    #: the better trail rather than the first one seen.
+    trail: list[list[float]] = []
 
 
 class FleetAdsb(BaseModel):
@@ -981,9 +992,14 @@ def fleet_adsb(
         if not blob:
             continue
         try:
-            aircraft = (json.loads(blob) or {}).get("aircraft") or []
+            snapshot = json.loads(blob) or {}
         except (ValueError, TypeError):
             continue
+        aircraft = snapshot.get("aircraft") or []
+        # Trails are per station, because each station only knows what it has
+        # heard. Absent on a snapshot written before this shipped — an empty
+        # trail is a contact with no track yet, which is exactly right.
+        trails = snapshot.get("trails") or {}
         contributed = False
         for contact in aircraft:
             icao = contact.get("icao")
@@ -993,6 +1009,7 @@ def fleet_adsb(
                 continue
             contributed = True
             total += 1
+            trail = trails.get(icao) or []
             seen = merged.get(icao)
             if seen is None:
                 merged[icao] = FleetAircraft(
@@ -1004,9 +1021,21 @@ def fleet_adsb(
                     track_deg=contact.get("track_deg"),
                     ground_speed_kt=contact.get("speed_kt"),
                     heard_by=1,
+                    trail=trail,
                 )
             else:
                 seen.heard_by += 1
+                # Two stations hearing one aircraft have two partial tracks of
+                # it — whichever came into range first has the longer one. Keep
+                # that, rather than whichever station this loop happened to read
+                # first, which would make the drawn track depend on station id
+                # order and change when a station is added.
+                #
+                # Not merged: the two are the same aircraft sampled by different
+                # receivers at different instants, and interleaving them by
+                # position would draw a zigzag between two views of one path.
+                if len(trail) > len(seen.trail):
+                    seen.trail = trail
         if contributed:
             contributing += 1
 

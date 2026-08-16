@@ -5,7 +5,10 @@ import {
   AIRCRAFT_ICON,
   AIRCRAFT_LAYER,
   AIRCRAFT_SOURCE,
+  TRAIL_LAYER,
+  TRAIL_SOURCE,
   aircraftFeatures,
+  aircraftTrails,
   chevronImage,
 } from "../fleetAircraftLayer";
 import { fitKey } from "../fleetStationFit";
@@ -134,6 +137,30 @@ function FleetMapInner({
         // Null where there is no 2D context. Skipping the layer leaves a wall
         // with no aircraft, which is degraded; throwing here would leave no map.
         if (image) map.addImage(AIRCRAFT_ICON, image, { pixelRatio: 2 });
+      }
+      if (!map.getSource(TRAIL_SOURCE)) {
+        map.addSource(TRAIL_SOURCE, {
+          type: "geojson",
+          data: { type: "FeatureCollection", features: [] },
+        });
+      }
+      // Added BEFORE the symbol layer so trails draw underneath the chevrons —
+      // a line over the aircraft it belongs to reads as a different contact.
+      if (!map.getLayer(TRAIL_LAYER)) {
+        map.addLayer({
+          id: TRAIL_LAYER,
+          type: "line",
+          source: TRAIL_SOURCE,
+          layout: { "line-cap": "round", "line-join": "round" },
+          paint: {
+            "line-color": CONTACT_COLOUR,
+            "line-width": 1.2,
+            // Faint: the trail is context for the chevron, not a thing to read
+            // in its own right. At fleet scale a wall of full-strength lines
+            // becomes the loudest thing on the map.
+            "line-opacity": 0.35,
+          },
+        });
       }
       if (!map.getSource(AIRCRAFT_SOURCE)) {
         map.addSource(AIRCRAFT_SOURCE, {
@@ -287,6 +314,14 @@ function FleetMapInner({
       | undefined;
     if (!source) return;
     source.setData(aircraftFeatures(aircraft) as unknown as GeoJSON.FeatureCollection);
+    const trails = map.getSource(TRAIL_SOURCE) as
+      | maplibregl.GeoJSONSource
+      | undefined;
+    if (trails) {
+      trails.setData(
+        aircraftTrails(aircraft) as unknown as GeoJSON.FeatureCollection,
+      );
+    }
   }, [aircraft]);
 
   if (!config.basemaps.length) {

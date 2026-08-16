@@ -51,6 +51,7 @@ from sqlalchemy import select, update
 
 from backend.core.config import settings
 from backend.database.models.ground_station import GroundStation
+from backend.services import adsb_trails
 from backend.database.session import (
     PrivilegedSessionLocal,
     set_request_org_context,
@@ -206,6 +207,12 @@ class StationIngest:
         #: in-flight guard: a second frame arriving mid-lookup is inside the
         #: cooldown and spawns nothing.
         self._geocode_after: dict[uuid.UUID, float] = {}
+        #: station -> icao -> [[lon, lat, seen_at], ...]. Bounded per contact
+        #: and pruned of contacts gone quiet, so it cannot grow without end —
+        #: see services/adsb_trails. Held here rather than read back from Redis
+        #: each tick: this process is the single ingest leader and already has
+        #: every frame.
+        self._adsb_trails: dict[uuid.UUID, dict[str, list[list[float]]]] = {}
         #: Locality lookups in flight. Held so the event loop cannot garbage
         #: collect a running task, and so `stop` can cancel them.
         self._locality_tasks: set[asyncio.Task] = set()
@@ -569,11 +576,36 @@ class StationIngest:
             return
         if self._redis is None:
             return
+        # Where each contact has just been, folded in before the write.
+        #
+        # Held in this process rather than read back from Redis each tick: the
+        # leader is a single process by construction (LEADER_KEY), it already has
+        # every frame, and a read-modify-write per station per second to rebuild
+        # state it is holding anyway would be pure round trips. If the leader
+        # moves, trails start again — which is correct, not a loss: they describe
+        # the last two minutes, and nobody is owed continuity across a failover.
+        trails = adsb_trails.update(
+            self._adsb_trails.setdefault(station_id, {}), aircraft
+        )
+        if not trails:
+            # Empty sky over this station: drop the entry rather than keep a
+            # dict per station that ever had traffic. The other per-station maps
+            # here are a tuple each and are left to accumulate; a trail store is
+            # heavier than that and is worth giving back. (A station that stops
+            # sending ENTIRELY keeps its last trails, since this never runs
+            # again for it — bounded by fleet size, like everything else here.)
+            self._adsb_trails.pop(station_id, None)
         try:
             await self._redis.setex(
                 adsb_snapshot_key(station_id),
                 ADSB_SNAPSHOT_TTL,
-                json.dumps({"aircraft": aircraft}),
+                json.dumps({
+                    "aircraft": aircraft,
+                    "trails": {
+                        icao: adsb_trails.geometry(points)
+                        for icao, points in trails.items()
+                    },
+                }),
             )
         except Exception:  # noqa: BLE001 - a cache write must never stop ingest
             log.debug("Could not cache ADS-B for %s.", station_id, exc_info=True)

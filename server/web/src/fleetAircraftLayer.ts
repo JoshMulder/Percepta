@@ -31,6 +31,8 @@ import type { FleetAircraft } from "./types";
 export const AIRCRAFT_SOURCE = "fleet-aircraft";
 export const AIRCRAFT_LAYER = "fleet-aircraft-symbols";
 export const AIRCRAFT_ICON = "fleet-aircraft-chevron";
+export const TRAIL_SOURCE = "fleet-aircraft-trails";
+export const TRAIL_LAYER = "fleet-aircraft-trails-lines";
 
 export interface AircraftFeatureCollection {
   type: "FeatureCollection";
@@ -118,4 +120,41 @@ export function chevronImage(colour: string): ImageData | null {
   ctx.stroke();
 
   return ctx.getImageData(0, 0, size, size);
+}
+
+
+/**
+ * Trails as a LineString collection.
+ *
+ * A SECOND source rather than a second layer on the first, because the
+ * geometries differ: MapLibre will not draw a line layer from point features,
+ * and stuffing both into one collection would mean every symbol re-evaluating a
+ * filter on every frame to ignore the lines.
+ *
+ * A trail is dropped below two points. A "line" of one point renders as nothing
+ * at all — which is correct — but it still costs a feature, a filter pass and a
+ * buffer upload per contact per frame, and on a busy circuit most contacts are
+ * newly heard.
+ */
+export function aircraftTrails(
+  aircraft: FleetAircraft[],
+): { type: "FeatureCollection"; features: unknown[] } {
+  const features: unknown[] = [];
+  for (const a of aircraft) {
+    const trail = a.trail;
+    if (!trail || trail.length < 2) continue;
+    // Guarded like the positions are, and for the same reason: one NaN reaching
+    // MapLibre throws "Invalid LngLat object" and takes the whole map down. A
+    // trail comes from the same frames, so it can carry the same hole.
+    const clean = trail.filter(
+      (p) => Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1]),
+    );
+    if (clean.length < 2) continue;
+    features.push({
+      type: "Feature",
+      geometry: { type: "LineString", coordinates: clean },
+      properties: { icao: a.icao },
+    });
+  }
+  return { type: "FeatureCollection", features };
 }
