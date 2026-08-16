@@ -97,6 +97,24 @@ class CameraPreview:
         #: Monotonic time until which somebody is considered to be watching.
         self._wanted_until = 0.0
         self._last_attempt = 0.0
+        #: The slowest cadence any current caller has asked for, in seconds.
+        #:
+        #: THE MECHANISM HAD NO CADENCE AT ALL. `request()` wrote one float — a
+        #: deadline — and the gate below was "inside the window, and at least
+        #: MIN_INTERVAL_S since the last attempt". There was nowhere to say how
+        #: OFTEN, so a caller wanting a frame a minute got one every two
+        #: seconds: thirty captures, twenty-nine of them thrown away, each an
+        #: ffmpeg spawn with an RTSP handshake, a keyframe wait, a decode and a
+        #: JPEG encode. On a board whose failure mode is sustained load that is
+        #: not a rounding error.
+        #:
+        #: The SLOWEST wins, deliberately. Two callers with different appetites
+        #: — the setup page wanting 2.5 s and the platform wanting 60 — must not
+        #: silently be served at the fast one's rate for ever: that is the bug
+        #: this field exists to close, in the one shape it could come back.
+        #: Reset when demand lapses, so a finished fast caller cannot leave the
+        #: camera running hot for the next slow one.
+        self._interval = MIN_INTERVAL_S
         self.captured = 0
         self.refused = 0
         self.failed = 0
@@ -143,22 +161,51 @@ class CameraPreview:
     @property
     def wanted(self) -> bool:
         """Whether anybody has asked for a picture recently enough to matter,
-        and whether enough time has passed since the last attempt."""
-        now = time.monotonic()
-        return (
-            now < self._wanted_until
-            and now - self._last_attempt >= MIN_INTERVAL_S
-        )
+        and whether enough time has passed since the last attempt.
 
-    def request(self) -> None:
+        The interval is whatever the current callers asked for, floored at
+        `MIN_INTERVAL_S` — a caller may ask for LESS often and never for more,
+        the same posture the station takes on stream bitrate. The link and the
+        power budget belong to the site, not to whoever is looking.
+        """
+        now = time.monotonic()
+        if now >= self._wanted_until:
+            # Demand has lapsed. Drop back to the floor so the next caller
+            # starts from the default rather than inheriting a slow interval
+            # somebody else asked for a minute ago.
+            self._interval = MIN_INTERVAL_S
+            return False
+        return now - self._last_attempt >= self._interval
+
+    def request(self, interval_s: float | None = None, *, window_s: float | None = None) -> None:
         """Somebody is looking. Keeps the preview warm for `DEMAND_WINDOW_S`.
 
         Called from `preview_state()`, which runs on the console's HTTP thread
-        — so it does no work beyond writing a float. The capture itself belongs
-        to the preview thread, because an 8-second `rpicam-jpeg` timeout inside
-        a status poll would hang the setup page it is meant to serve.
+        — so it does no work beyond writing two floats. The capture itself
+        belongs to the preview thread, because an 8-second `rpicam-jpeg` timeout
+        inside a status poll would hang the setup page it is meant to serve.
+
+        `interval_s` is a REQUEST, floored at `MIN_INTERVAL_S` and resolved
+        against any other current caller by taking the slower. Omitted, it means
+        "as often as you like", which is what the setup page has always meant
+        and keeps that path behaving exactly as it did.
+
+        `window_s` lets a caller whose own cadence is slower than
+        `DEMAND_WINDOW_S` hold the demand open between its own requests — a
+        platform asking once a minute would otherwise let the window lapse
+        fifty seconds before it asked again, and every capture would look like
+        a cold start.
         """
-        self._wanted_until = time.monotonic() + DEMAND_WINDOW_S
+        now = time.monotonic()
+        self._wanted_until = max(
+            self._wanted_until, now + (window_s or DEMAND_WINDOW_S)
+        )
+        if interval_s is not None:
+            wanted = max(MIN_INTERVAL_S, float(interval_s))
+            # Slowest wins while demand overlaps — see `_interval`.
+            self._interval = (
+                wanted if self._interval <= MIN_INTERVAL_S else max(self._interval, wanted)
+            )
 
     def cycle(self) -> bool:
         """One capture attempt. True if a new frame was taken.
@@ -272,6 +319,10 @@ class CameraPreview:
             "preview_refused": self.refused,
             "preview_failed": self.failed,
             "watching": time.monotonic() < self._wanted_until,
+            # Reported so the setup page and the platform can both see what
+            # cadence the camera is actually being driven at, rather than
+            # inferring it from how often frames happen to change.
+            "interval_s": round(self._interval, 1),
             "captured_at": (
                 self.last_frame.captured_at.isoformat() if self.last_frame else None
             ),
