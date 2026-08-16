@@ -12,6 +12,7 @@ import {
   chevronImage,
 } from "../fleetAircraftLayer";
 import { fitKey } from "../fleetStationFit";
+import { StationHoverCard } from "./StationHoverCard";
 import type { FleetAircraft, FleetStation, PlatformMapConfig } from "../types";
 
 /**
@@ -55,12 +56,33 @@ function FleetMapInner({
   config,
   stations,
   aircraft,
+  onSelect,
 }: {
   config: PlatformMapConfig;
   stations: FleetStation[];
   aircraft: FleetAircraft[];
+  /** Clicking a pin opens that station. Optional so the map still renders
+   *  wherever nothing wants the callback. */
+  onSelect?: (stationId: string) => void;
 }) {
   const holderRef = useRef<HTMLDivElement>(null);
+  /** Which pin the pointer is over, and where it is on screen.
+   *
+   *  Held as state because it renders, but ARMED through a ref timer: a mouse
+   *  crossing the map passes over many pins, and opening a card for each would
+   *  strobe. 120 ms of intent in, nothing on the way out — a card that lingers
+   *  after the pointer has left is worse than one that is slow to appear. */
+  const [hover, setHover] = useState<
+    { station: FleetStation; x: number; y: number; flipX: boolean; flipY: boolean } | null
+  >(null);
+  const hoverTimer = useRef<number | null>(null);
+  /** The latest station list, for the marker event handlers — they are attached
+   *  once per marker and would otherwise close over the first render's data and
+   *  show a station's opening state for ever. */
+  const stationsRef = useRef(stations);
+  stationsRef.current = stations;
+  const onSelectRef = useRef(onSelect);
+  onSelectRef.current = onSelect;
   const mapRef = useRef<maplibregl.Map | null>(null);
   const readyRef = useRef(false);
   /** Station markers by id, and aircraft markers by ICAO — reused across
@@ -126,6 +148,11 @@ function FleetMapInner({
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-left");
     // Same as AdsbMap: compact starts expanded until something moves the map.
     collapseMapCredit(map);
+
+    // Hovering and panning at once is not a real interaction, and re-projecting
+    // the card every frame would be work to keep something on screen that the
+    // operator has stopped looking at.
+    map.on("movestart", () => setHover(null));
 
     map.on("load", () => {
       readyRef.current = true;
@@ -251,6 +278,52 @@ function FleetMapInner({
           .setLngLat(pos)
           .addTo(map);
         existing.set(s.id, marker);
+
+        // Attached ONCE, when the element is created. Re-attaching on every
+        // poll would stack listeners on a marker that is deliberately reused
+        // across updates, and the leak would only show as the wall getting
+        // slower over a shift.
+        const id = s.id;
+        el.addEventListener("mouseenter", () => {
+          if (hoverTimer.current !== null) window.clearTimeout(hoverTimer.current);
+          hoverTimer.current = window.setTimeout(() => {
+            const current = stationsRef.current.find((x) => x.id === id);
+            const mapNow = mapRef.current;
+            const holder = holderRef.current;
+            if (!current || !mapNow || !holder) return;
+            if (
+              !Number.isFinite(current.latitude) ||
+              !Number.isFinite(current.longitude)
+            ) {
+              return;
+            }
+            const point = mapNow.project([
+              current.longitude as number,
+              current.latitude as number,
+            ]);
+            const box = holder.getBoundingClientRect();
+            setHover({
+              station: current,
+              x: point.x,
+              y: point.y,
+              // Flip near an edge so the card stays inside the map rather than
+              // being clipped by the column it lives in.
+              flipX: point.x > box.width - 230,
+              flipY: point.y > box.height - 150,
+            });
+          }, 120);
+        });
+        el.addEventListener("mouseleave", () => {
+          if (hoverTimer.current !== null) window.clearTimeout(hoverTimer.current);
+          setHover(null);
+        });
+        el.addEventListener("click", (event) => {
+          // Stopped, or the map's own click handler treats this as a click on
+          // the canvas behind the pin.
+          event.stopPropagation();
+          onSelectRef.current?.(id);
+        });
+        el.style.cursor = "pointer";
       } else {
         marker.setLngLat(pos);
       }
@@ -262,10 +335,9 @@ function FleetMapInner({
       }
       const name = el.querySelector(".fleet-name");
       if (name) name.textContent = s.name;
-      const where = [s.locality, s.organization_name].filter(Boolean).join(" · ");
-      el.title = `${s.name}${where ? " — " + where : ""}\n${
-        s.status === "never" ? "never connected" : s.dark ? "dark" : s.status
-      }`;
+      // No `title`. The browser tooltip and the hover card would both appear,
+      // one of them a second late and in the wrong place, saying less.
+      el.removeAttribute("title");
     }
 
     for (const [id, marker] of existing) {
@@ -331,6 +403,15 @@ function FleetMapInner({
   return (
     <div className="fleet-map">
       <div ref={holderRef} className="fleet-map-canvas" />
+      {hover && (
+        <StationHoverCard
+          station={hover.station}
+          x={hover.x}
+          y={hover.y}
+          flipX={hover.flipX}
+          flipY={hover.flipY}
+        />
+      )}
       {config.basemaps.length > 1 && (
         <div className="basemap-switch" role="group" aria-label="Basemap">
           {config.basemaps.map((b) => (

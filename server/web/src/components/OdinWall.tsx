@@ -218,6 +218,7 @@ export function OdinWall({
             config={mapConfig}
             stations={stations}
             aircraft={adsb?.aircraft ?? []}
+            onSelect={select}
           />
         ) : (
           <div className="odin-rail-empty">Map unavailable</div>

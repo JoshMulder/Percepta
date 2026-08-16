@@ -4157,7 +4157,9 @@ body {
 /* Fleet map + its markers */
 .fleet-map { position: relative; width: 100%; height: 100%; }
 .fleet-map-canvas { position: absolute; inset: 0; }
-.fleet-station { display: flex; align-items: center; gap: 5px; cursor: default; }
+/* `pointer`, not `default`: a pin opens that station's drawer. Nothing else on
+   the map is clickable, so without this nobody has a reason to try. */
+.fleet-station { display: flex; align-items: center; gap: 5px; cursor: pointer; }
 .fleet-dot {
   width: 11px; height: 11px; border-radius: 50%;
   border: 1.5px solid #0b1220; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45);
@@ -5119,6 +5121,82 @@ body {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .odin-tx-what { min-width: 0; overflow-wrap: anywhere; }
+
+/* ------------------------------------------------------ the map hover card */
+/* Positioned from the pin's projected pixel, inside the map holder. The holder
+   is the positioning context; the card is placed with left/top and then nudged
+   clear of the pin with a transform, so flipping near an edge is one class of
+   arithmetic rather than two.
+
+   POINTER-TRANSPARENT, and that is load-bearing. Without it, moving the mouse
+   toward the card takes the hover off the pin, which closes the card, which
+   puts the pointer back over the map — a flicker loop that reads as a broken
+   tooltip. Nothing here is interactive; anything worth clicking is in the
+   drawer. */
+.fleet-hover {
+  position: absolute;
+  z-index: 5;
+  pointer-events: none;
+  min-width: 11rem;
+  max-width: 14rem;
+  padding: 0.5rem 0.6rem;
+  background: var(--odin-panel, #0b1016);
+  border: 1px solid var(--odin-line, #1b2530);
+  border-left: 3px solid var(--odin-nominal, #46586a);
+  border-radius: 3px;
+  box-shadow: 0 0.5rem 1.25rem rgba(0, 0, 0, 0.55);
+  font: 12px/1.4 var(--sans);
+  color: #dde6ed;
+}
+.fleet-hover.warn { border-left-color: var(--odin-warn, #e8b04b); }
+.fleet-hover.bad { border-left-color: var(--odin-bad, #ff5c39); }
+
+.fleet-hover-head {
+  display: flex; align-items: baseline; gap: 0.5rem;
+}
+.fleet-hover-name {
+  font-size: 13px; font-weight: 600; flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.fleet-hover-status {
+  font: 600 9px/1 var(--mono);
+  letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--odin-nominal, #46586a); flex: none;
+}
+.fleet-hover-status.warn { color: var(--odin-warn, #e8b04b); }
+.fleet-hover-status.bad { color: var(--odin-bad, #ff5c39); }
+
+.fleet-hover-where {
+  font-size: 11px; color: var(--odin-nominal, #46586a);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  margin-top: 0.1rem;
+}
+.fleet-hover-cond {
+  margin-top: 0.35rem; font: 500 11px/1.3 var(--mono);
+  color: var(--odin-warn, #e8b04b);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* Wrapped, because a site can report wind, temperature, visibility and sky at
+   once and a single line would either clip or force the card wider than the
+   column it sits in. */
+.fleet-hover-wx {
+  display: flex; flex-wrap: wrap; gap: 0.15rem 0.6rem;
+  margin-top: 0.4rem;
+  font-variant-numeric: tabular-nums;
+}
+.fleet-hover-sky { color: var(--odin-nominal, #46586a); }
+.fleet-hover-power {
+  margin-top: 0.2rem; font-variant-numeric: tabular-nums;
+  color: var(--odin-nominal, #46586a);
+}
+.fleet-hover-more {
+  margin-top: 0.45rem; padding-top: 0.35rem;
+  border-top: 1px solid var(--odin-line, #1b2530);
+  font: 600 9px/1 var(--mono);
+  letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--odin-nominal, #46586a);
+}
+
 
 /* ------------------------------------------------ the deliberate live look */
 .odin-drawer-video { margin-top: 0.5rem; grid-column: 1 / -1; }
