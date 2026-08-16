@@ -166,10 +166,21 @@ class AgentConfig:
     #: does is about latency: a niced process on four cores draws exactly the
     #: same current, it just yields sooner.
     #:
-    #: Tunable rather than hard-coded because the right answer is per board — a
-    #: box with a bigger supply, or one not also running video and an SDR, can
-    #: afford more. 0 restores whisper's own default.
-    radio_whisper_threads: int = 2
+    #: DEFAULT 0 — whisper's own choice, which is every core.
+    #:
+    #: This shipped as 2 in v0.4.2 and was reverted the same day. The cap worked
+    #: exactly as intended on power, and the cost was measured rather than
+    #: guessed: a decode window went 12.9 s -> 20.6 s, which stayed inside the
+    #: 25 s budget so the selector kept small.en and accuracy was unaffected.
+    #: What it did cost was THROUGHPUT — about 2.9 overs a minute against peaks
+    #: of 4 — so a busy circuit would start dropping the oldest overs. That is a
+    #: bad trade while the transcript is the thing being worked on, and it does
+    #: not fix the board anyway: the supply still cannot hold the maximum draw,
+    #: and the remedy is the PSU and the cable.
+    #:
+    #: The dial stays, because it is the right lever if power ever has to win
+    #: over throughput. GSU_WHISPER_THREADS=2 restores the cap.
+    radio_whisper_threads: int = 0
     #: An initial prompt biasing whisper toward what this channel carries. Empty
     #: uses the built-in aviation vocabulary (`transcribe.AVIATION_PROMPT`); set
     #: GSU_WHISPER_PROMPT to add local aerodrome names and based-aircraft
@@ -266,7 +277,7 @@ class AgentConfig:
             radio_whisper_bin=_env("GSU_WHISPER_BIN", "whisper-cli"),
             radio_whisper_model=_env("GSU_WHISPER_MODEL"),
             radio_whisper_prompt=_env("GSU_WHISPER_PROMPT", ""),
-            radio_whisper_threads=int(_env("GSU_WHISPER_THREADS", "2")),
+            radio_whisper_threads=int(_env("GSU_WHISPER_THREADS", "0")),
             stream_sink=_env("GSU_STREAM_SINK"),
             video_keep_warm=_env("GSU_VIDEO_KEEP_WARM", "0")
             not in ("0", "false", "no", ""),

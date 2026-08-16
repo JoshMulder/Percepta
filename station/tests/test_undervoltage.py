@@ -109,17 +109,15 @@ def _rooted(root):
 
 # ---------------------------------------------------------- the thread cap
 
-def test_whisper_is_capped_below_the_core_count(tmp_path):
-    """The other half of the undervoltage story.
+def test_a_thread_cap_reaches_whispers_argv(tmp_path):
+    """The dial works, whatever the default happens to be.
 
-    whisper.cpp defaults to every core. On a Pi 5 that takes the SoC to its
-    maximum for the length of each over, and at three or four overs a minute the
-    board sits at maximum nearly continuously — which is the load that pulled the
-    core rail to 7.7 A and browned the board out. Capping the threads is what
-    keeps transcription off that ceiling.
-
-    Asserted on the ARGV rather than on a constant, because the constant being
-    right is worth nothing if it never reaches the command line.
+    A cap of 2 shipped in v0.4.2 and was reverted the same day — it cost
+    throughput without fixing the board — so the DEFAULT is now whisper's own
+    (every core). The mechanism stays, because it is the right lever if power
+    ever has to win over throughput, and this asserts it still reaches the
+    command line: a constant being right is worth nothing if it never gets
+    there.
     """
     from gsu.radio import transcribe
 

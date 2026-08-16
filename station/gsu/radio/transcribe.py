@@ -64,7 +64,14 @@ NICE = 10
 #: in the same second. That current is not anomalous; it is a BCM2712 with four
 #: cores saturated. The supply could not hold it.
 #:
-#: TWO IS A REAL TRADE, not a free win, and the arithmetic is worth stating
+#: DEFAULT 0 — whisper's own choice. A cap of 2 shipped in v0.4.2 and was
+#: reverted the same day: it cost throughput (a decode window 12.9 s -> 20.6 s,
+#: about 2.9 overs a minute against peaks of 4) without fixing the board, whose
+#: supply still cannot hold its maximum draw. Accuracy was NOT affected — the
+#: slower window stayed inside MAX_WINDOW_PROCESS_S so the selector kept
+#: small.en. The dial remains for the day power has to win.
+#:
+#: A CAP IS A REAL TRADE, not a free win, and the arithmetic is worth stating
 #: because it decides how a busy channel behaves. small.en measured 12.9 s per
 #: over on four threads. Whisper does not scale linearly, but roughly halving
 #: the threads roughly doubles the time — which puts a 30 s window near
@@ -79,7 +86,7 @@ NICE = 10
 #:
 #: What does not happen is the board browning out because transcription decided
 #: to use every core it could see.
-DEFAULT_THREADS = 2
+DEFAULT_THREADS = 0
 
 #: Shorter than this is a squelch tail or a click, not speech worth the CPU.
 MIN_OVER_SECONDS = 0.6
