@@ -181,6 +181,13 @@ class AgentConfig:
     #: The dial stays, because it is the right lever if power ever has to win
     #: over throughput. GSU_WHISPER_THREADS=2 restores the cap.
     radio_whisper_threads: int = 0
+    #: A directory to keep recent overs in, for building a ground-truth corpus.
+    #:
+    #: OFF unless set, and it should stay off in normal operation: it writes to
+    #: the SD card of an unattended box. Switch it on for a week when a change
+    #: to transcription needs measuring, rsync the directory off, hand-label the
+    #: sidecars, and switch it off again. See gsu/radio/corpus.py.
+    radio_over_capture: str | None = None
     #: An initial prompt biasing whisper toward what this channel carries. Empty
     #: uses the built-in aviation vocabulary (`transcribe.AVIATION_PROMPT`); set
     #: GSU_WHISPER_PROMPT to add local aerodrome names and based-aircraft
@@ -277,6 +284,7 @@ class AgentConfig:
             radio_whisper_bin=_env("GSU_WHISPER_BIN", "whisper-cli"),
             radio_whisper_model=_env("GSU_WHISPER_MODEL"),
             radio_whisper_prompt=_env("GSU_WHISPER_PROMPT", ""),
+            radio_over_capture=_env("GSU_OVER_CAPTURE"),
             radio_whisper_threads=int(_env("GSU_WHISPER_THREADS", "0")),
             stream_sink=_env("GSU_STREAM_SINK"),
             video_keep_warm=_env("GSU_VIDEO_KEEP_WARM", "0")

@@ -30,6 +30,8 @@ import wave
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+
+from . import corpus
 from typing import Callable
 
 log = logging.getLogger("gsu.radio")
@@ -157,6 +159,7 @@ class Transcriber:
         *,
         binary: str = "whisper-cli",
         threads: int = DEFAULT_THREADS,
+        capture_dir: str | None = None,
         model: str | None = None,
         prompt: str = "",
         enabled: bool = False,
@@ -173,6 +176,8 @@ class Transcriber:
         #: thread budget it will actually run at. Benchmarking on four cores and
         #: then running on two would choose a model that cannot keep up.
         self._threads = threads
+        #: Where to keep overs for hand-labelling, or None. See radio/corpus.py.
+        self._capture = Path(capture_dir) if capture_dir else None
         self._queue: "queue.Queue[_Over]" = queue.Queue(maxsize=QUEUE_MAX)
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -378,10 +383,24 @@ class Transcriber:
                 handle.setsampwidth(2)
                 handle.setframerate(WHISPER_RATE)
                 handle.writeframes(pcm)
-            return run_whisper(
+            text = run_whisper(
                 self._binary, self._model or "", wav_path, self._prompt,
                 threads=self._threads,
             )
+            if self._capture is not None:
+                # The FILTERED audio — the same signal whisper was given, not
+                # the raw receiver output. A corpus a human finds easier to hear
+                # than the model did would measure the wrong thing.
+                corpus.capture(
+                    self._capture,
+                    pcm,
+                    WHISPER_RATE,
+                    text=text,
+                    frequency_hz=over.freq_hz,
+                    duration_s=len(over.pcm) / 2 / over.rate,
+                    model=Path(self._model).name if self._model else "",
+                )
+            return text
 
     def shutdown(self) -> None:
         self._stop.set()

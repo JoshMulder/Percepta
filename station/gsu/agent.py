@@ -156,6 +156,9 @@ class Agent:
             # that is the load the board's supply could not hold. See
             # transcribe.DEFAULT_THREADS.
             threads=config.radio_whisper_threads,
+            # Normally None. An instrument, not a feature — see
+            # gsu/radio/corpus.py.
+            capture_dir=config.radio_over_capture,
             # The env override or the site toggle; the site one is the setup
             # page's switch and is re-read live in `_pump_radio`.
             enabled=config.radio_transcribe or self.site.radio_transcribe,
