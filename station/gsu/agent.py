@@ -43,7 +43,7 @@ from .radio.audio import AUDIO_RATE
 from .radio.receiver import RadioController
 from .radio.transcribe import Transcriber
 from .store import LocalStore, TRANSCRIPT_KIND
-from .system import SystemStats
+from .system import SystemStats, undervoltage_now
 from .update import UpdateCoordinator
 from .stream import StreamSession
 from .transport import (
@@ -140,6 +140,9 @@ class Agent:
         self.store = LocalStore(config.store_path, config.recordings_dir)
         self.updates = UpdateCoordinator(config.version, config.update_dir)
         self.system = SystemStats()
+        #: Latched: undervoltage is momentary and the board can die in the
+        #: same second, so once seen it stays raised for this process.
+        self._undervoltage_seen = False
         # Airband transcription, off unless configured and the binary and model
         # are both present. Reads captured overs on a low-priority thread; live
         # audio always wins. See gsu/radio/transcribe.py.
@@ -747,6 +750,8 @@ class Agent:
                 log.error("Device allocation: %s", conflict)
         else:
             self.health.clear("devices.conflict")
+
+        self._check_undervoltage()
 
         # Said once per rebuild, not once per caller: this method also runs on
         # every health frame and every status.json poll — which the Devices
@@ -1879,6 +1884,49 @@ class Agent:
         if report is None or not report.simulated:
             return payload
         return {**payload, "simulated": True}
+
+    def _check_undervoltage(self) -> None:
+        """Raise a condition the moment the board reports undervoltage, and
+        LATCH IT for the life of this process.
+
+        Latched on purpose, and it is the whole point. The hwmon alarm follows
+        the instantaneous state, and the failure this exists to report is a sag
+        that takes the SoC down within the same second — so by the time anybody
+        looks, the board has either recovered (alarm back to 0, nothing to see)
+        or stopped executing entirely (nothing to see either). A condition that
+        cleared itself would be raised and gone between two telemetry frames and
+        would reach nobody, which is exactly what happened three times.
+
+        So once seen, it stays until the box is restarted, and `since` records
+        when it was first seen — the age of the problem being the useful number,
+        the same rule raise_condition already applies.
+
+        CRITICAL, not warning. This is the only reading on the station that
+        predicts its own death: on 2026-08-15 the kernel logged undervoltage and
+        the board stopped in the same second, with the PHY still up, needing
+        somebody on site to power-cycle it. There is no more serious thing this
+        box can tell anybody.
+
+        Deliberately does NOT clear. `health.clear_all()` on a factory reset will
+        drop it, which is right — that describes a different installation.
+        """
+        state = undervoltage_now()
+        if state is None:
+            return  # not a Pi, or no rpi_volt device: nothing to say either way
+        if state:
+            self._undervoltage_seen = True
+        if not self._undervoltage_seen:
+            return
+        self.health.raise_condition(
+            "power.undervoltage",
+            "critical",
+            "The board reported undervoltage. Its 5V supply cannot hold the "
+            "current draw at peak, and the board can stop dead with the network "
+            "link still up — recoverable only by a physical power cycle. Check "
+            "the power supply, the cable and the connector. Latched: it stays "
+            "raised until the station restarts, because the event is momentary."
+            + ("" if state else " Not currently sagging."),
+        )
 
     def _publish(self, stream: str, payload: dict) -> bool:
         if self.transport is None:

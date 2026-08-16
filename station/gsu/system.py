@@ -137,3 +137,42 @@ def _memory() -> dict | None:
         out["used_mb"] = round(used / 1024)
         out["used_percent"] = round(100.0 * used / total, 1)
     return out
+
+
+def undervoltage_now() -> bool | None:
+    """Whether the board is reporting undervoltage RIGHT NOW.
+
+    `True`/`False` from the Pi's `rpi_volt` hwmon device; `None` where there is
+    no such device — a dev box, a non-Pi host — so a missing sensor reads as
+    "unknown" rather than as "fine".
+
+    THIS IS THE WARNING THAT PRECEDES DEATH. On 2026-08-15 the Kennels Road Pi 5
+    logged `hwmon hwmon3: Undervoltage detected!` and stopped executing in the
+    same second; the SoC lost its rail while the PHY stayed up, so the board sat
+    there with a link light needing a physical power cycle. The kernel knew.
+    Nobody was told, because nothing read this file.
+
+    Found by NAME, never by index. The message above says `hwmon3` and that is
+    exactly what this must not hard-code: hwmon numbering depends on probe order
+    and moves between boots and kernels, so an index that is right today points
+    at the fan tomorrow and reads a plausible zero for ever.
+
+    Read from sysfs rather than `vcgencmd get_throttled`, which is not available
+    to us: the firmware mailbox is not in the container (see the module
+    docstring). Same underlying bit, reachable.
+
+    INSTANTANEOUS, NOT LATCHED — the caller must remember it. The alarm follows
+    the current state, so a sag that kills the board a second later leaves this
+    reading 0 on the next boot. Whoever polls this owns the latch.
+    """
+    try:
+        for entry in sorted(Path("/sys/class/hwmon").iterdir()):
+            try:
+                if (entry / "name").read_text().strip() != "rpi_volt":
+                    continue
+                return (entry / "in0_lcrit_alarm").read_text().strip() == "1"
+            except OSError:
+                continue
+    except OSError:
+        return None
+    return None
