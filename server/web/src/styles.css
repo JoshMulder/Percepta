@@ -4664,6 +4664,11 @@ body {
   user-select: none;
   z-index: 0;
 }
+/* Three layers, three explicit z-indexes, because the first attempt gave the
+   picture and the scrim the same one and let DOM order decide — and DOM order
+   puts ::before FIRST, so the scrim painted UNDER the photograph and dimmed
+   nothing at all. It looked fine against a dark test frame and would have
+   failed in daylight, which is the only time it was needed. */
 /* Darkest at the top, where the name and organisation are. Without it a light
    sky — which is where a camera aimed at a horizon puts its brightest pixels —
    sits directly behind the two lines that have to be readable. */
@@ -4678,7 +4683,7 @@ body {
     rgba(9, 13, 17, 0.86) 100%
   );
   pointer-events: none;
-  z-index: 0;
+  z-index: 1;
 }
 /* Everything the tile actually says sits above both. Listed rather than done
    with a wrapper element because the tile's children ARE its layout — they are
@@ -4697,11 +4702,11 @@ body {
 .odin-tile > .odin-tile-wx,
 .odin-tile > .odin-tile-vitals {
   position: relative;
-  z-index: 1;
+  z-index: 2;
 }
 .odin-tile > .odin-tile-fault,
 .odin-tile > .odin-tile-halo {
-  z-index: 1;
+  z-index: 2;
 }
 
 .odin-tile-name {

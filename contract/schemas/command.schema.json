@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://percepta/contract/v2.1/command.schema.json",
-  "contractVersion": "2.1",
+  "$id": "https://percepta/contract/v2.2/command.schema.json",
+  "contractVersion": "2.2",
   "title": "Platform command to a ground station",
   "description": "One command - stream `c` on the relay, platform to station (transport.md). A command is a request, never a guarantee: the platform confirms nothing itself and waits to see the effect in the station's own telemetry. Every command below therefore has a field in a telemetry payload that reports its result - if you add a command, add that field too. Unknown commands must be ignored, not rejected: an older station and a newer platform have to coexist.\n\nThe leased commands (radio.audio, video.start) share one shape: the platform repeats the command while the demand exists, a repeat is a renewal rather than a second start, and the lease expiring is the stop signal. Silence has to be the off switch because most consumers never say goodbye - a closed laptop, a dropped link, a crashed platform - and every one of those must stop a station transmitting to nobody on a metered link.",
   "type": "object",

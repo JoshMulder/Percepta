@@ -898,35 +898,43 @@ def fleet(
         if isinstance(station.hardware, dict):
             candidate = station.hardware.get("model")
             model = candidate if isinstance(candidate, str) else None
-        stations.append(FleetStation(
-            id=str(station.id),
-            name=station.name,
-            organization_id=str(station.organization_id),
-            organization_name=org_name,
-            latitude=station.latitude,
-            longitude=station.longitude,
-            locality=station.locality,
-            region=station.region,
-            status=status,
-            dark=dark,
-            last_seen_at=station.last_seen_at.isoformat() if station.last_seen_at else None,
-            is_simulated=station.is_simulated,
-            model=model,
-            config_version=station.config_version,
-            health=v.get("health"),
-            worst_condition=v.get("worst_condition"),
-            condition_count=v.get("condition_count", 0),
-            uplink_connected=v.get("uplink_connected"),
-            uplink_offline_seconds=v.get("uplink_offline_seconds"),
-            soc_pct=v.get("soc_pct"),
-            on_battery=v.get("on_battery"),
-            load_w=v.get("load_w"),
-            slots=v.get("slots", {}),
-            simulated_slots=v.get("simulated_slots", []),
-            running_version=v.get("running_version"),
-            maintenance_until=windows.get(station.id, (None, None))[0],
-            maintenance_reason=windows.get(station.id, (None, None))[1],
-        ))
+        # **The vitals are MERGED, not re-listed by hand, and that is a fix.**
+        #
+        # This call used to name every projected field as its own keyword. It
+        # had therefore silently stopped carrying some: `_vitals` computed wind,
+        # gust, temperature, visibility and sky, and none of the five reached
+        # the response, because adding them to the projection and to the model
+        # did not add them here. The wall reads the pushed digest when its
+        # socket is up and this endpoint when it is not — so weather appeared on
+        # a healthy feed and vanished the moment it fell back to polling, which
+        # is the exact asymmetry `services/station_vitals` was written to make
+        # impossible, arriving through the one door it did not cover. `poster_at`
+        # would have been the next field to fall in.
+        #
+        # Filtered against `model_fields` rather than passed whole so a stray
+        # key in a projection cannot 500 the fleet view; every vitals field on
+        # the model carries a default, so an absent one is simply absent.
+        stations.append(FleetStation(**{
+            "id": str(station.id),
+            "name": station.name,
+            "organization_id": str(station.organization_id),
+            "organization_name": org_name,
+            "latitude": station.latitude,
+            "longitude": station.longitude,
+            "locality": station.locality,
+            "region": station.region,
+            "status": status,
+            "dark": dark,
+            "last_seen_at": (
+                station.last_seen_at.isoformat() if station.last_seen_at else None
+            ),
+            "is_simulated": station.is_simulated,
+            "model": model,
+            "config_version": station.config_version,
+            **{k: val for k, val in v.items() if k in FleetStation.model_fields},
+            "maintenance_until": windows.get(station.id, (None, None))[0],
+            "maintenance_reason": windows.get(station.id, (None, None))[1],
+        }))
 
     org_flags = db.execute(select(Organization.is_active)).scalars().all()
     since = now - timedelta(hours=24)

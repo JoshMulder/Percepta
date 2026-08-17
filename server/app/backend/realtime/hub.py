@@ -63,11 +63,18 @@ STREAM_CAPABILITY: dict[str, Capability] = {
 #: HTTP. `poster_set` is the only door, and it is ODIN-only.
 POSTER_STREAM = "poster"
 
-#: How many stations one wall may ask for stills from at once. The grid shows
-#: twenty-four; this is headroom over that and a bound on what a single
-#: message can commit a fleet of field stations to doing. Without it, one
-#: client could put every station it can see on camera duty in one frame.
-MAX_POSTER_STATIONS = 48
+#: How many stations one wall may ask for stills from at once. A bound on what
+#: a single message can commit a fleet of field stations to doing — without it,
+#: one client could put every station it can see on camera duty in one frame.
+#:
+#: ABOVE THE WALL'S OWN MAXIMUM, and that is the constraint to preserve. The
+#: grid collapses everything nominal once it is showing more than sixty tiles
+#: (`COLLAPSE_ABOVE` in web/src/components/TileWall.tsx), so sixty is the most
+#: any honest client asks for. This was set at 48 — under that — which on a
+#: fleet of 49 to 60 stations silently truncated the request and left the
+#: remainder blank for ever, always the same ones, looking exactly like a dozen
+#: broken cameras. A cap must be a bound on abuse, not a bound on normal use.
+MAX_POSTER_STATIONS = 72
 
 
 class AuthorizationError(Exception):
@@ -192,6 +199,14 @@ class Hub:
             # open on a station the tenant then deactivates would otherwise go
             # on receiving its readings, silently, until the sweep noticed.
             or c.attached == station_id
+            # ...and for the wall's stills, which is the WIDEST of the three:
+            # guarding audio and attaching a drawer are deliberate acts on one
+            # station, while a wall shows tiles for the whole fleet the moment
+            # it opens. A poster-only connection has station_id None, an empty
+            # visible set, an empty watch and no attach — so leaving this out
+            # meant the commonest cross-tenant reader was the one a tenant's
+            # stop lever could not reach.
+            or station_id in c.posters
         ]
 
     def close_connection(self, conn: Connection, *, reason: str) -> None:
@@ -873,7 +888,16 @@ class Hub:
                     organization_id=conn.organization_id,
                 )
             )
-            if conn.watch or conn.attached is not None:
+            # `conn.posters` is in this condition, and leaving it out was a real
+            # hole rather than a tidiness point. A wall SHOWS TILES BY DEFAULT
+            # and guarding a channel is a deliberate extra act, so the ordinary
+            # ODIN connection has an empty `watch` and no attach — it would have
+            # fallen straight through to the early return below and never been
+            # re-checked at all. An operator taken off the rota would then keep
+            # every camera on their wall capturing until they closed the tab,
+            # which is the exact failure the comment below already describes,
+            # arriving through the newest door.
+            if conn.watch or conn.posters or conn.attached is not None:
                 dropped = self._revalidate_watch(db, conn)
                 return True, frozenset(), dropped
 

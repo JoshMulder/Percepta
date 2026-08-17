@@ -19,6 +19,7 @@ files would mean the cache key's shape lived in two places.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime
 
@@ -40,6 +41,35 @@ from backend.realtime.bus import (
 from backend.services import enrolment
 
 router = APIRouter(tags=["media"])
+
+
+def _resolve_station(secret: str):
+    """The credential lookup, in a shape a worker thread can run.
+
+    Its own function because it opens and closes a session: handing
+    `asyncio.to_thread` a lambda over a session built on the event loop would
+    put the checkin on the wrong thread.
+    """
+    with PrivilegedSessionLocal() as db:
+        return enrolment.resolve(db, secret=secret)
+
+
+def _store(station_id: uuid.UUID, jpeg: bytes) -> bool:
+    """Picture and stamp, together, on one worker thread.
+
+    The stamp is written only if the picture was, and never the other way
+    round: a stamp with no image behind it is a tile that fetches a 404 once a
+    minute and shows nothing, which is worse than a tile that knows it has no
+    picture.
+    """
+    if not write_poster_sync(poster_key(station_id), jpeg):
+        return False
+    write_poster_sync(
+        poster_stamp_key(station_id),
+        datetime.now(UTC).isoformat(timespec="seconds").encode(),
+        ttl=POSTER_TTL,
+    )
+    return True
 
 #: Refused above this. The station bounds it too, at the same figure — this is
 #: the half that protects the platform from a station that has not been updated
@@ -67,39 +97,63 @@ async def put_poster(request: Request) -> Response:
     if not secret:
         raise HTTPException(status_code=401, detail="station credential required")
 
-    # Read with a cap BEFORE anything else touches it. Without a bound, a
-    # misconfigured or hostile station decides how much memory this worker uses.
-    body = await request.body()
-    if not body:
-        raise HTTPException(status_code=400, detail="empty body")
-    if len(body) > MAX_POSTER_BYTES:
-        raise HTTPException(status_code=413, detail="poster too large")
+    # **The declared length is refused before a byte is read.**
+    #
+    # `request.body()` buffers the WHOLE body into this worker's memory, so
+    # checking the size after reading it is checking the lock after the door.
+    # An unauthenticated caller — anyone who can reach the endpoint, since the
+    # credential has not been verified yet — could name a gigabyte and have us
+    # hold it. Content-Length can lie, but a lie in the direction of "small"
+    # is caught by the real check below, and a lie in the direction of "large"
+    # costs the caller the connection.
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            if int(declared) > MAX_POSTER_BYTES:
+                raise HTTPException(status_code=413, detail="poster too large")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="bad content-length") from None
 
-    with PrivilegedSessionLocal() as db:
-        station = enrolment.resolve(db, secret=secret)
+    # **Authenticated BEFORE the body is read**, so an anonymous caller cannot
+    # make this worker buffer anything at all. The DB round trip is one indexed
+    # lookup and it is the cheaper of the two things being ordered here.
+    #
+    # Off the event loop: this is an `async def`, so a synchronous DB call would
+    # block the loop that carries the whole fleet's ingest — and this path runs
+    # once a minute per watched station, which is exactly often enough to
+    # matter.
+    station = await asyncio.to_thread(_resolve_station, secret)
     if station is None:
         # 401 whether the secret is unknown, revoked, expired, or belongs to a
         # deactivated station. Telling those apart would let somebody probe
         # which is which.
         raise HTTPException(status_code=401, detail="station credential required")
 
-    if not write_poster_sync(poster_key(station.id), body):
-        # Redis down. Say so rather than 204 — the station's own log is the only
-        # place anybody will ever notice, and a silent success would have it
-        # cheerfully uploading into nothing for as long as the outage lasts.
-        raise HTTPException(status_code=503, detail="poster store unavailable")
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="empty body")
+    if len(body) > MAX_POSTER_BYTES:
+        # The real check. Content-Length is the caller's claim; this is the
+        # measurement, and a chunked upload never made the claim at all.
+        raise HTTPException(status_code=413, detail="poster too large")
 
+    # Both writes on one worker thread. `write_poster_sync` is a blocking
+    # round trip to Redis and this is an `async def`; two of them per station
+    # per minute on the loop that carries the fleet's ingest is a stall nobody
+    # would attribute to a picture.
+    #
     # The stamp is the PLATFORM's clock, not the station's header. A station
     # with a wrong clock (no RTC, no NTP yet — this fleet boots offline) would
     # otherwise emit a stamp from 1970 or from next year, and the tile's `?v=`
     # would either never change or never let a later frame look newer. What the
     # stamp is for is cache-busting and staleness, and both want a monotone
     # clock we control. `X-Captured-At` is still logged by the station itself.
-    write_poster_sync(
-        poster_stamp_key(station.id),
-        datetime.now(UTC).isoformat(timespec="seconds").encode(),
-        ttl=POSTER_TTL,
-    )
+    stored = await asyncio.to_thread(_store, station.id, body)
+    if not stored:
+        # Redis down. Say so rather than 204 — the station's own log is the only
+        # place anybody will ever notice, and a silent success would have it
+        # cheerfully uploading into nothing for as long as the outage lasts.
+        raise HTTPException(status_code=503, detail="poster store unavailable")
     return Response(status_code=204)
 
 

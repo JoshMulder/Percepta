@@ -39,7 +39,7 @@ from typing import Callable
 #: this station starts *emitting* something a 2.0 platform would not recognise
 #: — that is free and requires no coordination. Bumping the major is a fleet
 #: operation and is not a thing to do by editing this line.
-CONTRACT_VERSION = "2.1"
+CONTRACT_VERSION = "2.2"
 
 #: Relay stream codes, per `contract/transport.md`. A station publishes on the
 #: first three and only ever receives on the fourth.

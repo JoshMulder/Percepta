@@ -264,17 +264,73 @@ def test_the_same_picture_is_never_sent_twice(monkeypatch):
     """
     sends: list = []
     preview = _Preview(_frame())
-    publisher, _ = _publisher(monkeypatch, preview=preview, sends=sends)
-    publisher.request(lease_seconds=600)
+    publisher, clock = _publisher(monkeypatch, preview=preview, sends=sends)
+    publisher.request(lease_seconds=600, interval_s=60)
 
     assert publisher.tick() is True
-    assert publisher.tick() is False
-    assert publisher.tick() is False
+
+    # PAST THE INTERVAL EACH TIME, so the pacing gate is not what is being
+    # measured. Without advancing, every later tick returns False because the
+    # link is paced, and the test would pass while saying nothing about
+    # de-duplication — the property it is named for.
+    for _ in range(3):
+        clock.advance(61.0)
+        assert publisher.tick() is False, "the same picture went out twice"
     assert len(sends) == 1
 
+    clock.advance(61.0)
     preview.last_frame = _frame(datetime(2026, 8, 17, 3, 1, tzinfo=timezone.utc))
     assert publisher.tick() is True
     assert len(sends) == 2
+
+
+def test_a_fast_camera_does_not_become_a_fast_uplink(monkeypatch):
+    """The interval bounds the LINK, not only the camera.
+
+    This was a real hole. `interval_s` was handed to the preview and nowhere
+    else, so the only gate on sending was "a frame I have not sent before" —
+    and the preview runs at the FASTEST rate any caller wants, not ours. A
+    technician opening the setup page drives captures every two seconds, and
+    this thread cheerfully uploaded every one: thirty posters a minute instead
+    of one, on a metered link, for a tile that redraws once a minute. The whole
+    cost case for the feature was wrong by thirty times, and only while somebody
+    was standing at the site — the hardest moment to notice it.
+    """
+    sends: list = []
+    preview = _Preview(_frame())
+    publisher, clock = _publisher(monkeypatch, preview=preview, sends=sends)
+    publisher.request(lease_seconds=600, interval_s=60)
+
+    assert publisher.tick() is True          # the first one goes at once
+    assert len(sends) == 1
+
+    # The setup page is open, so the camera produces a new frame every 2s.
+    for second in range(1, 30):
+        clock.advance(2.0)
+        preview.last_frame = _frame(
+            datetime(2026, 8, 17, 3, 0, tzinfo=timezone.utc)
+            + timedelta(seconds=2 * second)
+        )
+        publisher.tick()
+
+    # 58 seconds of fresh frames, and still exactly one poster on the wire.
+    assert len(sends) == 1, f"uploaded {len(sends)} posters in under a minute"
+
+    clock.advance(5.0)
+    preview.last_frame = _frame(datetime(2026, 8, 17, 3, 2, tzinfo=timezone.utc))
+    assert publisher.tick() is True
+    assert len(sends) == 2
+
+
+def test_the_first_poster_of_a_lease_is_not_an_interval_late(monkeypatch):
+    # A wall that has just opened should not stare at a blank tile for a minute
+    # because the pacing clock started at "now" instead of at zero.
+    sends: list = []
+    publisher, _ = _publisher(
+        monkeypatch, preview=_Preview(_frame()), sends=sends)
+    publisher.request(lease_seconds=600, interval_s=60)
+    assert publisher.tick() is True
+    assert len(sends) == 1
 
 
 def test_a_failed_send_waits_for_the_next_frame(monkeypatch):
@@ -299,12 +355,13 @@ def test_a_failed_send_waits_for_the_next_frame(monkeypatch):
     assert "503" in publisher.last_reason
 
 
-def test_the_demand_window_covers_the_rest_of_the_lease(monkeypatch):
-    """A window of one interval would make every capture a cold start.
+def test_the_demand_window_outlives_the_gap_between_captures(monkeypatch):
+    """Comfortably longer than the renewal cadence, so the camera stays warm.
 
-    The preview's demand would lapse in the gap between its last capture and
-    this thread noticing it, so the camera would be let go and re-opened sixty
-    times an hour instead of held warm.
+    The demand is renewed on every poll, not once per interval, so the window
+    only has to outlast a tick. It is set well past that anyway — a window that
+    lapsed between captures would let the camera go and re-open it sixty times
+    an hour instead of holding it.
     """
     preview = _Preview(_frame())
     publisher, _ = _publisher(monkeypatch, preview=preview, sends=[])
@@ -313,7 +370,26 @@ def test_the_demand_window_covers_the_rest_of_the_lease(monkeypatch):
 
     interval, window = preview.demands["poster"]
     assert interval == 60
-    assert window >= 299
+    assert window > poster_mod.POLL_S * 4
+
+
+def test_the_demand_window_never_outlives_the_lease(monkeypatch):
+    """The camera must not stay warm past the platform's authority to ask.
+
+    This was `max(interval * 1.5, lease_left)`, so in the last seconds of a
+    lease the station asked the camera to hold on for another ninety — a
+    platform that stopped renewing still had a camera running a minute and a
+    half after it stopped being allowed to.
+    """
+    preview = _Preview(_frame())
+    publisher, clock = _publisher(monkeypatch, preview=preview, sends=[])
+    publisher.request(lease_seconds=300, interval_s=60)
+    publisher.tick()
+
+    clock.advance(295.0)                      # five seconds of lease left
+    publisher.tick()
+    _, window = preview.demands["poster"]
+    assert window <= 5.0, "demand outlived the lease that authorised it"
 
 
 def test_no_credential_means_no_post(monkeypatch):

@@ -830,6 +830,11 @@ class Agent:
             if self.console_proxy is not None:
                 self.console_proxy.stop()
             if self.poster is not None:
+                # `release` before `stop`, not `stop` alone. Stopping the thread
+                # leaves its demand standing on the preview until the window
+                # lapses, so a re-enrolment would keep the camera warm for a
+                # platform this station no longer has a credential for.
+                self.poster.release("re-enrolling")
                 self.poster.stop()
             self.enrolment = enrolment
 
@@ -1465,6 +1470,15 @@ class Agent:
         if self.power is not None:
             reading = self.power.read(dt, extra_load_w=light_load)
             self.last_power = reading
+        else:
+            # CLEARED when the sensor is gone, not merely left at its last
+            # value. A monitor that is unplugged or fails rediscovery would
+            # otherwise leave its final reading standing for ever, and anything
+            # gating on charge would act on it: a station that read 8% on the
+            # way out would refuse posters permanently, on a battery nobody can
+            # measure any more. Unknown is unknown, and the gate treats it as
+            # "do not refuse" precisely so this cannot happen quietly.
+            self.last_power = None
             # Duty cycling: the station sheds its own load rather than waiting
             # for a command that may never arrive.
             if (

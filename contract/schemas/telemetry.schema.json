@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://percepta/contract/v2.1/telemetry.schema.json",
-  "contractVersion": "2.1",
+  "$id": "https://percepta/contract/v2.2/telemetry.schema.json",
+  "contractVersion": "2.2",
   "title": "Ground station telemetry",
   "description": "One object per telemetry frame - stream `t` on the relay (transport.md). Discriminated by `kind`. Unknown fields are ignored by the platform, and unknown kinds are dropped rather than erroring - so a new sensor can be added station-side before the platform renders it.\n\nEvery stream shares the availability fields in $defs/availability: a payload may carry `available: false` to declare that the station has no source for that stream, and its usual fields are then not required, because there is nothing to put in them.",
   "type": "object",
@@ -1038,6 +1038,43 @@
                 }
               }
             },
+            "poster": {
+              "type": "object",
+              "description": "The wall's periodic still, and the reported effect of `video.poster` / `video.poster_stop`. Specified rather than free-form for the same reason `stream` is: a command with no observable effect is a command whose failure is invisible.\n\n**This is the one place a station's REFUSAL is reported.** Unlike every other command, a station may decline this one on its own authority when its battery is low - a capture is an RTSP handshake, a decode and a JPEG encode, and standing load is what browns out a solar site. It accepts the lease and sets `reason`; the refusal is a live condition of the site that can begin and end mid-lease, so a consumer must read this rather than infer from the lease. A refusing station is not a broken one.",
+              "required": [
+                "leased"
+              ],
+              "properties": {
+                "leased": {
+                  "type": "boolean",
+                  "description": "Whether a platform lease is live right now. False with a `reason` is the normal resting state of a station nobody is watching."
+                },
+                "interval_s": {
+                  "type": "number",
+                  "description": "The cadence in force, after the station's own clamp. The platform asks; this is what it got."
+                },
+                "sent": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Posters uploaded since start."
+                },
+                "failed": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Uploads attempted and failed - the link, not the battery."
+                },
+                "refused": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Posters the station declined to take, counted once per poster not once per check. Separate from `failed` on purpose: a station protecting its battery and a station that cannot reach the platform look identical in one counter and want opposite responses."
+                },
+                "reason": {
+                  "type": "string",
+                  "maxLength": 200,
+                  "description": "Why there is no picture, in the station's own words - \"battery at 11%, below the 20% poster floor\", \"not enrolled\", or an upload failure. Empty when posters are flowing."
+                }
+              }
+            },
             "camera": {
               "type": "object",
               "description": "The sensor and how it is being read.",
@@ -1300,9 +1337,19 @@
               "type": "object",
               "description": "Host memory. `used` is total minus the kernel's MemAvailable estimate, so file cache does not read as memory pressure.",
               "properties": {
-                "total_mb": { "type": "number", "minimum": 0 },
-                "used_mb": { "type": "number", "minimum": 0 },
-                "used_percent": { "type": "number", "minimum": 0, "maximum": 100 }
+                "total_mb": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "used_mb": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "used_percent": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 100
+                }
               }
             }
           }

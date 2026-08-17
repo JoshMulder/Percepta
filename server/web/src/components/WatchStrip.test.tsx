@@ -40,7 +40,6 @@ function watchApi(overrides: Partial<WatchApi> = {}): WatchApi {
   return {
     guarded: [],
     setGuarded: vi.fn(),
-    posterStations: [],
     setPosters: vi.fn(),
     talking: {},
     link: "open",

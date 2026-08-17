@@ -36,13 +36,16 @@ export interface WatchApi {
   guarded: string[];
   /** Replace the guard set. */
   setGuarded: (stationIds: string[]) => void;
-  /** Which stations the SERVER agreed to keep stills coming from. A tile whose
-   *  station is absent shows its placeholder rather than an image URL that
-   *  404s. */
-  posterStations: string[];
   /** Replace the set of stations the wall is showing tiles for. Whole set every
    *  time, like the guard set — the last message is the truth, so a roster
-   *  change and a reconnect are the same operation. */
+   *  change and a reconnect are the same operation.
+   *
+   *  There is deliberately no `posterStations` counterpart to `guarded`. The
+   *  server's acceptance is not something a tile needs: a station it refused
+   *  simply never gets a `poster_at` on the digest, so the tile shows its
+   *  placeholder for exactly the right reason and by the same code path as a
+   *  station whose camera has not sent one yet. A second source of truth for
+   *  that would be one more thing to keep in step for no visible gain. */
   setPosters: (stationIds: string[]) => void;
   /** Channels with audio in the last few hundred ms. Polled rather than pushed:
    *  see below. */
@@ -64,7 +67,6 @@ export function useWatchAudio(enabled: boolean): WatchApi {
   const [volume, setVolumeState] = useState(0);
   const [priority, setPriorityState] = useState<string | null>(null);
   const [talking, setTalking] = useState<Record<string, boolean>>({});
-  const [posterStations, setPosterStations] = useState<string[]>([]);
 
   const socketRef = useRef<WebSocket | null>(null);
   const retryRef = useRef(0);
@@ -136,10 +138,11 @@ export function useWatchAudio(enabled: boolean): WatchApi {
         return;
       }
       if (message.type === "posters") {
-        // The server's set again. A station absent from it is one the wall may
-        // not have a picture of, so its tile keeps its placeholder instead of
-        // waiting for an image that is never coming.
-        setPosterStations((message.stations as string[]) ?? []);
+        // Acknowledged and dropped. The frame is the server telling us which
+        // stations it accepted; the tiles do not need it, because a refused
+        // station simply never gains a `poster_at`. Matched here rather than
+        // left to fall through so a reader can see the message is expected
+        // and its silence is a decision.
         return;
       }
       if (message.type === "watch_revoked") {
@@ -271,7 +274,6 @@ export function useWatchAudio(enabled: boolean): WatchApi {
   return {
     guarded,
     setGuarded,
-    posterStations,
     setPosters,
     talking,
     link,

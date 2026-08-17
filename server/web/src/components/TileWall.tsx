@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { StationTile } from "./StationTile";
 import type { FleetStation } from "../types";
 
@@ -250,18 +250,26 @@ export function TileWall({
     return { tiled, collapsed: sorted.length - tiled.length };
   }, [sorted, selectedId]);
 
-  // SORTED AND JOINED, and the effect depends on that string alone.
+  // SORTED AND JOINED for the COMPARISON, sent in the wall's own order.
   //
   // `tiled` is a fresh array on every poll, so depending on it would re-declare
   // the set every three seconds — a burst of commands to every station on the
   // wall, for ever, to say what they were already told. The wall also reorders
   // constantly as ranks change, and a reorder is not a change of membership, so
-  // the ids are sorted before they are compared. The array handed to the caller
-  // is rebuilt from the key for the same reason: it makes the key the single
-  // source of both the comparison and the value.
-  const showingKey = tiled.map((s) => s.id).sort().join(",");
+  // the ids are sorted before they are compared.
+  //
+  // But the LIST that goes out keeps the wall's ordering, worst first, and the
+  // two used to be the same thing: the sorted key was split back into an array
+  // and sent, so the server saw the fleet in UUID order. That matters only
+  // where the server's cap bites — and when it does, "drop the tail" should
+  // mean the calmest stations, not whichever ones happen to sort last. A cap
+  // that discards at random is a cap that blanks a critical site.
+  const showing = tiled.map((s) => s.id);
+  const showingKey = [...showing].sort().join(",");
+  const showingRef = useRef(showing);
+  showingRef.current = showing;
   useEffect(() => {
-    onShowing?.(showingKey ? showingKey.split(",") : []);
+    onShowing?.(showingRef.current);
   }, [showingKey, onShowing]);
 
   return (

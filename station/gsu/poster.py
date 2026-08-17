@@ -230,6 +230,16 @@ class PosterPublisher:
         #: without this the wall would be shown the same minute-old still over
         #: and over as though it were current.
         self._last_sent_at = None
+        #: Monotonic time of the last upload ATTEMPT, which is what paces the
+        #: link. Distinct from `_last_sent_at` above: that one is the capture
+        #: timestamp and stops the same picture going twice, this one stops a
+        #: fast camera turning into a fast uplink. Zero so the first poster of a
+        #: lease goes out at once rather than an interval late.
+        self._sent_at = 0.0
+        #: The refusal counter's own pacer — see `tick`. Separate from
+        #: `_sent_at` so a refusal never delays the first picture after the
+        #: battery recovers.
+        self._refused_at = 0.0
         self.sent = 0
         self.failed = 0
         self.refused = 0
@@ -368,12 +378,29 @@ class PosterPublisher:
 
         shed = self.shed_reason()
         if shed:
-            # Counted, and the demand dropped rather than merely not renewed:
-            # the point of refusing is that the camera stops NOW.
-            self.refused += 1
+            # COUNTED ONCE PER REFUSED POSTER, not once per poll. This loop
+            # wakes twice a second; counting here unconditionally would have a
+            # station that spent one night on a flat battery reporting a hundred
+            # thousand "refusals" against a handful of sends, and the ratio is
+            # the only thing that number is for. Paced against the same clock a
+            # send uses, so `refused` counts the pictures the wall did not get.
+            now = time.monotonic()
+            with self._lock:
+                interval = self._interval
+            # Its OWN clock, not the send pacer. Sharing `_sent_at` would make
+            # every refusal push the next upload a full interval away, so a
+            # station whose battery recovered thirty seconds into a minute
+            # would sit on a good picture until the minute was up — the wall
+            # staying blank for a site that had just come back is the opposite
+            # of what the recovery is worth reporting.
+            if now - self._refused_at >= interval:
+                self._refused_at = now
+                self.refused += 1
             if self.last_reason != shed:
                 log.warning("Refusing posters: %s.", shed)
             self.last_reason = shed
+            # Dropped rather than merely not renewed: the point of refusing is
+            # that the camera stops NOW.
             self._drop_demand()
             return False
 
@@ -389,13 +416,39 @@ class PosterPublisher:
         # of exactly one interval would lapse in the instant between the
         # preview's last capture and this thread noticing it, and every single
         # capture would be a cold start against a camera that had just been let
-        # go. Bounded by the lease so a platform that stops asking still stops
-        # the camera.
+        # go.
+        #
+        # CAPPED AT THE LEASE, never `max`ed past it. It used to be
+        # `max(interval * 1.5, lease_left)`, which meant that in the last
+        # seconds of a lease the station asked the camera to stay warm for
+        # another ninety — so a platform that stopped renewing still had a
+        # camera running a minute and a half after its authority ran out. The
+        # floor now applies only while the lease has room for it.
+        window = min(max(interval * 1.5, POLL_S * 4), lease_left)
         preview.request(
             interval_s=interval,
-            window_s=max(interval * 1.5, lease_left),
+            window_s=window,
             caller=self.CALLER,
         )
+
+        # **The interval bounds the UPLINK, not just the camera.**
+        #
+        # This was the hole. `interval_s` was passed to the preview and nothing
+        # else, so the only gate on sending was "is this a frame I have not sent
+        # before" — and the preview's cadence is the FASTEST any caller wants,
+        # not ours. A technician opening the setup page drives captures every
+        # two seconds, and this thread would have faithfully uploaded all of
+        # them: thirty posters a minute instead of one, on a metered link, for
+        # a tile that redraws once a minute. The cost argument this whole
+        # feature rests on would have been wrong by thirty times, and only while
+        # somebody was standing at the site, which is the hardest time to
+        # notice it.
+        #
+        # Sharing captures with the setup page is still right — one capture
+        # serves everybody. Sharing its RATE is not.
+        since_sent = time.monotonic() - self._sent_at
+        if since_sent < interval:
+            return False
 
         frame = preview.last_frame
         if frame is None:
@@ -411,6 +464,25 @@ class PosterPublisher:
             self.last_reason = "not enrolled"
             return False
 
+        # STAMPED BEFORE THE ATTEMPT, not after. Everything below can raise —
+        # `_context()` calls `trust.context()`, which refuses outright when the
+        # pinned CA is missing — and an exception here would escape `tick` with
+        # the pacing clock never updated. The thread's own handler catches it
+        # and comes round in half a second, and the interval gate above would
+        # wave it straight through: an ffmpeg spawn and a traceback twice a
+        # second, for ever, on a board that browns out under load. Pacing has
+        # to survive the failure it is most needed for.
+        self._sent_at = time.monotonic()
+        self._last_sent_at = frame.captured_at
+
+        try:
+            context = self._context()
+        except Exception as exc:  # noqa: BLE001 - reported, never raised upward
+            self.failed += 1
+            self.last_reason = f"no usable TLS trust: {exc}"[:200]
+            log.warning("Poster not sent: %s", self.last_reason)
+            return False
+
         jpeg = scale(frame.jpeg, ffmpeg=self._ffmpeg())
         ok, reason = send(
             url=self.url,
@@ -419,12 +491,8 @@ class PosterPublisher:
             captured_at=frame.captured_at.isoformat(),
             width=frame.width,
             height=frame.height,
-            context=self._context(),
+            context=context,
         )
-        # Stamped whether or not it went, so a station that cannot reach the
-        # platform retries on the NEXT picture rather than hammering the same
-        # failed upload every half second until the camera happens to refresh.
-        self._last_sent_at = frame.captured_at
         if ok:
             self.sent += 1
             self.last_reason = ""
