@@ -4658,8 +4658,22 @@ body {
   /* Zero: the tile is a fixed shape and the camera's aspect ratio is not, so
      `cover` crops rather than letterboxes. A black bar down one side of a tile
      reads as a broken picture. */
-  opacity: 0.22;
-  filter: saturate(0.7);
+  /* **The scrim does the dimming, not this.**
+
+     This was 0.22, chosen while the scrim was painting UNDERNEATH the picture
+     and therefore doing nothing at all. Moving the scrim on top — the right fix
+     for that bug — turned the two into a product: 0.22 x (1 - 0.55..0.92)
+     leaves between 10% and 2% of the image's contrast, which is a photograph
+     nobody can see. It shipped that way and the wall looked unchanged.
+
+     Dimming lives in ONE place now, and it is the scrim, because the scrim is
+     the thing that knows WHERE the text is. Desaturated rather than dimmed for
+     the colour problem: this is the one element on the wall with no editorial
+     control over its content, and a red truck in frame must not compete with
+     the red that means a station is gone. Muting the hue solves that without
+     hiding the picture. */
+  opacity: 0.8;
+  filter: saturate(0.55) contrast(0.95);
   pointer-events: none;
   user-select: none;
   z-index: 0;
@@ -4676,11 +4690,20 @@ body {
   content: "";
   position: absolute;
   inset: 6px 0 0;
+  /* Opaque exactly where the words are, and out of the way in between.
+     The name and organisation sit at the top and the vitals row and fault
+     badge at the bottom, so those two bands stay heavy enough to read a
+     15px semibold label against a sunlit sky; the middle — which is the
+     part of the frame actually worth looking at — is left nearly clear.
+     A flat mid-strength wash over the whole tile is what made the picture
+     pointless before. */
   background: linear-gradient(
     180deg,
-    rgba(9, 13, 17, 0.92) 0%,
-    rgba(9, 13, 17, 0.55) 42%,
-    rgba(9, 13, 17, 0.86) 100%
+    rgba(9, 13, 17, 0.93) 0%,
+    rgba(9, 13, 17, 0.72) 18%,
+    rgba(9, 13, 17, 0.22) 42%,
+    rgba(9, 13, 17, 0.30) 66%,
+    rgba(9, 13, 17, 0.88) 100%
   );
   pointer-events: none;
   z-index: 1;
