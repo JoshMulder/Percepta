@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from "react";
+import { useDisplayPrefs } from "../displayPrefs";
+import { weatherDisplay } from "../format";
 import type { FleetStation } from "../types";
 
 /**
@@ -298,6 +300,10 @@ export function StationTile({
   selected: boolean;
   onSelect: (id: string) => void;
 }) {
+  // Above everything, including any early return added later: hooks run in a
+  // fixed order and `hookOrder.test.ts` exists because that rule was broken
+  // here before.
+  const prefs = useDisplayPrefs();
   const tone = bandTone(station);
 
   // State changed recently, so the tile pulses. Motion is the loudest channel
@@ -337,6 +343,28 @@ export function StationTile({
   // 0% does render, empty, because that is what it is.
   const soc = station.soc_pct == null ? null : clamp(station.soc_pct);
 
+  // Units are the operator's, not the wire's. The station reports knots and
+  // Celsius whatever these say; converting anywhere but at the point of drawing
+  // would make two screens disagree about one reading.
+  const wind = weatherDisplay("wind", prefs);
+  const temp = weatherDisplay("temp", prefs);
+  const hasWeather =
+    station.wind_kt != null ||
+    station.temperature_c != null ||
+    station.visibility_km != null;
+  // A gust is only worth the extra glyphs when it is actually gusting. A steady
+  // wind rendered as "12–12kt" is noise on a tile read at three metres.
+  const gusting = station.gust_kt != null && station.wind_kt != null
+    && station.gust_kt > station.wind_kt;
+  const weatherSummary = !hasWeather ? "" : [
+    station.wind_kt != null
+      ? `Wind ${station.wind_kt.toFixed(0)}${gusting ? ` gusting ${station.gust_kt!.toFixed(0)}` : ""} kt`
+      : "",
+    station.temperature_c != null ? `${station.temperature_c.toFixed(1)}°C` : "",
+    station.visibility_km != null ? `${station.visibility_km.toFixed(0)} km visibility` : "",
+    station.sky ?? "",
+  ].filter(Boolean).join(", ");
+
   const where = [station.locality, station.region].filter(Boolean).join(", ");
   const summary = [
     `${station.name} — ${station.organization_name}`,
@@ -363,6 +391,10 @@ export function StationTile({
     station.is_simulated ? "simulated station" : "",
     soc != null ? `${Math.round(soc)} per cent charge` : "",
     conditions > 0 ? `${conditions} open condition${conditions === 1 ? "" : "s"}` : "",
+    // Read aloud the weather is three bare numbers with unit glyphs, which is
+    // not what it says. Spelled out here for the same reason the rest of this
+    // label exists.
+    weatherSummary,
   ]
     .filter(Boolean)
     .join(", ");
@@ -436,6 +468,41 @@ export function StationTile({
               has one: a measured value has to reach the DOM as a number, and
               there is no class that carries 63%. */}
           <span className="odin-tile-soc-fill" style={{ width: `${soc}%` }} />
+        </span>
+      )}
+
+      {/* The sky over the site. Rendered ONLY when the station has a weather
+          head — a row of dashes says "this sensor is failing", which is a
+          different and more alarming claim than "there is no sensor here", and
+          the wall's whole discipline is not making those look alike.
+
+          Three numbers, not seven. Wind with its gust because the gust is what
+          decides whether anybody flies or works at height, temperature because
+          it is the number every operator reaches for first, and visibility
+          because nothing else on the tile answers "can they see". Pressure,
+          humidity, wind direction and rainfall are all real and all on the
+          station's own page; a tile has room for a glance. */}
+      {hasWeather && (
+        <span className="odin-tile-wx" title={weatherSummary}>
+          {station.wind_kt != null && (
+            <span className="odin-tile-wx-wind">
+              {wind.convert(station.wind_kt).toFixed(wind.digits)}
+              {gusting && `–${wind.convert(station.gust_kt!).toFixed(wind.digits)}`}
+              <em>{wind.suffix}</em>
+            </span>
+          )}
+          {station.temperature_c != null && (
+            <span>
+              {temp.convert(station.temperature_c).toFixed(temp.digits)}
+              <em>{temp.suffix}</em>
+            </span>
+          )}
+          {station.visibility_km != null && (
+            <span>
+              {station.visibility_km.toFixed(0)}
+              <em>km</em>
+            </span>
+          )}
         </span>
       )}
 

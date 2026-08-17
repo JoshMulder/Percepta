@@ -5122,6 +5122,35 @@ body {
 }
 .odin-tx-what { min-width: 0; overflow-wrap: anywhere; }
 
+/* ----------------------------------------------- the tile's weather line */
+/* One line, three numbers, read at three metres. Tabular figures because a
+   column of tiles whose digits shift width is a column that shimmers on every
+   poll — and motion is the alarm channel on this wall, so it must not be spent
+   on the wind changing by a knot. */
+.odin-tile-wx {
+  display: flex;
+  gap: 0.55rem;
+  padding: 0 0.5rem;
+  font: 500 11px/1.3 var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--odin-nominal);
+  white-space: nowrap;
+  overflow: hidden;
+}
+/* The unit, one step quieter than the number. The reading is what is being
+   scanned for; the suffix is only there so it cannot be misread. */
+.odin-tile-wx em {
+  font-style: normal;
+  opacity: 0.6;
+  margin-left: 0.1em;
+}
+/* Wind first and slightly brighter — it is the reading that decides whether
+   anybody flies or works at height, and the gust inside it is the part that
+   actually hurts. Deliberately NOT a semantic colour: this wall rations those
+   for attention states, and a permanently-coloured weather row would spend
+   that budget on a number that is usually unremarkable. */
+.odin-tile-wx-wind { color: #9fb2c2; }
+
 /* ------------------------------------------------------ the map hover card */
 /* Positioned from the pin's projected pixel, inside the map holder. The holder
    is the positioning context; the card is placed with left/top and then nudged
