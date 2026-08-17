@@ -415,7 +415,12 @@ class PreviewCacheTests(AgentFixture):
     def test_demand_expires_so_a_closed_laptop_stops_the_camera(self):
         self.video.preview_state()
         self.assertTrue(self.video.wanted)
-        self.video._wanted_until -= 999
+        # Age every live demand past its deadline, the way wall-clock time
+        # would. Reaching into `_demands` rather than sleeping ten seconds.
+        self.video._demands = {
+            name: (interval, until - 999)
+            for name, (interval, until) in self.video._demands.items()
+        }
         self.assertFalse(self.video.wanted)
 
     def test_a_failed_capture_leaves_the_cached_frame_standing(self):

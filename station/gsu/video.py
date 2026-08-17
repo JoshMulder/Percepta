@@ -94,10 +94,9 @@ class CameraPreview:
         self.agent = agent
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        #: Monotonic time until which somebody is considered to be watching.
-        self._wanted_until = 0.0
         self._last_attempt = 0.0
-        #: The slowest cadence any current caller has asked for, in seconds.
+        #: Who currently wants a picture and how often: name -> (interval_s,
+        #: monotonic deadline). Each caller's demand expires on its own.
         #:
         #: THE MECHANISM HAD NO CADENCE AT ALL. `request()` wrote one float — a
         #: deadline — and the gate below was "inside the window, and at least
@@ -108,13 +107,29 @@ class CameraPreview:
         #: JPEG encode. On a board whose failure mode is sustained load that is
         #: not a rounding error.
         #:
-        #: The SLOWEST wins, deliberately. Two callers with different appetites
-        #: — the setup page wanting 2.5 s and the platform wanting 60 — must not
-        #: silently be served at the fast one's rate for ever: that is the bug
-        #: this field exists to close, in the one shape it could come back.
-        #: Reset when demand lapses, so a finished fast caller cannot leave the
-        #: camera running hot for the next slow one.
-        self._interval = MIN_INTERVAL_S
+        #: PER CALLER, NOT ONE NUMBER, and that is the correction to the first
+        #: fix. A single shared interval cannot answer both callers, whichever
+        #: way it resolves them: take the slowest, and a human opening the setup
+        #: page while the wall is watching gets one frame a minute and concludes
+        #: the camera is broken; take the fastest, and a wall watching alone
+        #: drives the camera at the setup page's rate, which is the original bug
+        #: wearing a hat.
+        #:
+        #: The question is not "what rate do we owe each caller" but "what rate
+        #: must the CAMERA run at to satisfy them all" — and one capture serves
+        #: everybody, so it is the fastest rate anybody is CURRENTLY asking for.
+        #: A wall watching alone costs a frame a minute; a human joining costs
+        #: what the setup page has always cost and the wall gets fresher
+        #: pictures for nothing; the human closing the page expires their
+        #: demand and the camera drops straight back to the wall's cadence,
+        #: because their appetite was never written anywhere shared.
+        self._demands: dict[str, tuple[float, float]] = {}
+        #: `_demands` is written from the console's HTTP thread and the broker's
+        #: command thread and read from the preview thread. The two floats it
+        #: replaced were each written atomically; a dict is not, and iterating
+        #: one mid-write raises. Held across a handful of comparisons, never
+        #: across a capture.
+        self._lock = threading.Lock()
         self.captured = 0
         self.refused = 0
         self.failed = 0
@@ -158,37 +173,64 @@ class CameraPreview:
                 log.exception("Preview cycle failed; continuing.")
             self._stop.wait(POLL_S)
 
+    def _cadence(self, now: float) -> float | None:
+        """The interval the camera must run at right now, or None if nobody is
+        looking. Drops callers whose demand has expired as it goes, so a closed
+        laptop lid stops costing frames without anybody having to say goodbye.
+        """
+        with self._lock:
+            live = {
+                name: demand
+                for name, demand in self._demands.items()
+                if demand[1] > now
+            }
+            # Written back so an abandoned caller is forgotten rather than
+            # re-filtered for the life of the process.
+            self._demands = live
+            if not live:
+                return None
+            return min(interval for interval, _ in live.values())
+
     @property
     def wanted(self) -> bool:
         """Whether anybody has asked for a picture recently enough to matter,
         and whether enough time has passed since the last attempt.
 
-        The interval is whatever the current callers asked for, floored at
-        `MIN_INTERVAL_S` — a caller may ask for LESS often and never for more,
-        the same posture the station takes on stream bitrate. The link and the
-        power budget belong to the site, not to whoever is looking.
+        Every interval is floored at `MIN_INTERVAL_S` on the way in — a caller
+        may ask for LESS often and never for more, the same posture the station
+        takes on stream bitrate. The link and the power budget belong to the
+        site, not to whoever is looking.
         """
         now = time.monotonic()
-        if now >= self._wanted_until:
-            # Demand has lapsed. Drop back to the floor so the next caller
-            # starts from the default rather than inheriting a slow interval
-            # somebody else asked for a minute ago.
-            self._interval = MIN_INTERVAL_S
+        interval = self._cadence(now)
+        if interval is None:
             return False
-        return now - self._last_attempt >= self._interval
+        return now - self._last_attempt >= interval
 
-    def request(self, interval_s: float | None = None, *, window_s: float | None = None) -> None:
+    def request(
+        self,
+        interval_s: float | None = None,
+        *,
+        window_s: float | None = None,
+        caller: str = "console",
+    ) -> None:
         """Somebody is looking. Keeps the preview warm for `DEMAND_WINDOW_S`.
 
-        Called from `preview_state()`, which runs on the console's HTTP thread
-        — so it does no work beyond writing two floats. The capture itself
-        belongs to the preview thread, because an 8-second `rpicam-jpeg` timeout
-        inside a status poll would hang the setup page it is meant to serve.
+        Called from `preview_state()` on the console's HTTP thread and from the
+        poster lease on the broker's — so it does no work beyond writing one
+        dict entry. The capture itself belongs to the preview thread, because an
+        8-second `rpicam-jpeg` timeout inside a status poll would hang the setup
+        page it is meant to serve.
 
-        `interval_s` is a REQUEST, floored at `MIN_INTERVAL_S` and resolved
-        against any other current caller by taking the slower. Omitted, it means
-        "as often as you like", which is what the setup page has always meant
-        and keeps that path behaving exactly as it did.
+        `caller` NAMES THE APPETITE, and it is what makes two watchers possible:
+        each one's interval and deadline are its own, so neither inherits the
+        other's and neither has to be told when the other leaves. Two callers
+        sharing a name would overwrite each other, which is correct — the setup
+        page polling twice is one appetite, not two.
+
+        `interval_s` is a REQUEST, floored at `MIN_INTERVAL_S`. Omitted, it
+        means "as often as you like", which is what the setup page has always
+        meant and keeps that path behaving exactly as it did.
 
         `window_s` lets a caller whose own cadence is slower than
         `DEMAND_WINDOW_S` hold the demand open between its own requests — a
@@ -196,16 +238,24 @@ class CameraPreview:
         fifty seconds before it asked again, and every capture would look like
         a cold start.
         """
-        now = time.monotonic()
-        self._wanted_until = max(
-            self._wanted_until, now + (window_s or DEMAND_WINDOW_S)
+        interval = MIN_INTERVAL_S if interval_s is None else max(
+            MIN_INTERVAL_S, float(interval_s)
         )
-        if interval_s is not None:
-            wanted = max(MIN_INTERVAL_S, float(interval_s))
-            # Slowest wins while demand overlaps — see `_interval`.
-            self._interval = (
-                wanted if self._interval <= MIN_INTERVAL_S else max(self._interval, wanted)
-            )
+        until = time.monotonic() + (window_s or DEMAND_WINDOW_S)
+        with self._lock:
+            self._demands[caller] = (interval, until)
+
+    def release(self, caller: str) -> None:
+        """This caller has stopped looking, and says so.
+
+        Not required — every demand expires on its own, and the whole design
+        assumes nobody ever says goodbye, because mostly nobody does. This is
+        for the one case that CAN be explicit: the station refusing its own
+        poster on low battery, where waiting out the window would keep the
+        camera running for the very seconds the refusal exists to protect.
+        """
+        with self._lock:
+            self._demands.pop(caller, None)
 
     def cycle(self) -> bool:
         """One capture attempt. True if a new frame was taken.
@@ -306,6 +356,10 @@ class CameraPreview:
         """What the preview is doing. Costs nothing on the link by
         construction, so there is no bitrate here to report — that number was
         the snapshot channel's, and the snapshot channel is gone."""
+        now = time.monotonic()
+        cadence = self._cadence(now)
+        with self._lock:
+            watchers = sorted(self._demands)
         return {
             # Named so that a reader of the health frame cannot mistake this
             # for the old snapshot channel merely being idle.
@@ -318,11 +372,17 @@ class CameraPreview:
             "preview_frames": self.captured,
             "preview_refused": self.refused,
             "preview_failed": self.failed,
-            "watching": time.monotonic() < self._wanted_until,
+            "watching": cadence is not None,
             # Reported so the setup page and the platform can both see what
             # cadence the camera is actually being driven at, rather than
             # inferring it from how often frames happen to change.
-            "interval_s": round(self._interval, 1),
+            "interval_s": None if cadence is None else round(cadence, 1),
+            # WHO is looking, not just that somebody is. With two independent
+            # watchers, "the camera is running at 2 s" does not tell you whether
+            # that is a colleague on the setup page or the wall gone wrong, and
+            # that is the first question anybody asks of a board drawing more
+            # than it should.
+            "watchers": watchers,
             "captured_at": (
                 self.last_frame.captured_at.isoformat() if self.last_frame else None
             ),

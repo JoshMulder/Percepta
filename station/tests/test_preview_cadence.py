@@ -76,20 +76,64 @@ def test_the_setup_page_still_gets_frames_as_fast_as_before(monkeypatch):
     assert preview.wanted is True
 
 
-def test_the_slowest_caller_wins_while_both_are_watching(monkeypatch):
-    """Two callers, different appetites.
+def test_a_human_at_the_setup_page_is_not_slowed_by_the_wall(monkeypatch):
+    """Two callers, different appetites, and the human is not made to wait.
 
-    The setup page wants 2.5s and the platform wants 60. Serving both at the
-    fast rate is the bug coming back through the other door — so the slower
-    wins, and the fast caller simply gets frames less often than it asked.
+    This is the whole reason demand is per caller. The wall watches every
+    station permanently at a frame a minute; if that one number were shared, an
+    installer who opens the setup page to aim a camera would see it update once
+    a minute and reasonably conclude the camera was broken. One capture serves
+    both callers, so the camera runs at the faster of the two and the wall gets
+    fresher pictures for nothing.
     """
     preview, clock = _preview(monkeypatch)
-    preview.request(interval_s=2.5)
-    preview.request(interval_s=60, window_s=90)
+    preview.request(interval_s=60, window_s=90, caller="poster")
+    preview.request(caller="console")
 
     preview._last_attempt = clock.t
-    clock.advance(5.0)
+    clock.advance(video.MIN_INTERVAL_S + 0.1)
+    assert preview.wanted is True, "the wall must not slow the setup page down"
+
+
+def test_the_wall_alone_is_served_at_its_own_slow_rate(monkeypatch):
+    """And the converse, which is the original bug.
+
+    The moment the human leaves, their appetite must leave with them. Nothing
+    tells the station they closed the tab — the demand simply expires — and the
+    camera has to fall back to a frame a minute rather than staying hot.
+    """
+    preview, clock = _preview(monkeypatch)
+    preview.request(interval_s=60, window_s=300, caller="poster")
+    preview.request(window_s=10, caller="console")
+
+    preview._last_attempt = clock.t
+    clock.advance(20.0)                       # the console's demand lapses
+    assert preview.wanted is False, "the console's appetite outlived the console"
+
+    clock.advance(45.0)                       # 65 s since the last capture
+    assert preview.wanted is True
+
+
+def test_releasing_a_demand_stops_it_before_the_window_runs_out(monkeypatch):
+    # The station refusing its own poster on low battery cannot afford to wait
+    # out a 90-second window: those are the exact seconds the refusal exists to
+    # protect.
+    preview, clock = _preview(monkeypatch)
+    preview.request(interval_s=60, window_s=300, caller="poster")
+    assert preview.wanted is True
+
+    preview.release("poster")
     assert preview.wanted is False
+
+
+def test_two_requests_from_one_caller_are_one_appetite(monkeypatch):
+    # The setup page polls every 2.5 s. Each poll is the same watcher saying so
+    # again, not a new one — otherwise the dict would grow without bound for as
+    # long as anybody left the page open.
+    preview, clock = _preview(monkeypatch)
+    preview.request(caller="console")
+    preview.request(caller="console")
+    assert preview.stats()["watchers"] == ["console"]
 
 
 def test_an_interval_below_the_floor_is_raised_to_it(monkeypatch):
@@ -105,20 +149,21 @@ def test_an_interval_below_the_floor_is_raised_to_it(monkeypatch):
     assert preview.wanted is True
 
 
-def test_a_lapsed_window_resets_the_interval(monkeypatch):
+def test_a_lapsed_caller_leaves_nothing_behind(monkeypatch):
     """A finished slow caller must not leave the camera slow for the next one.
 
-    Without the reset, one platform request for a frame a minute would make the
-    setup page useless for the following minute — an installer aiming a camera
-    and seeing it update once.
+    Without expiry per caller, one platform request for a frame a minute would
+    make the setup page useless for the following minute — an installer aiming
+    a camera and seeing it update once.
     """
     preview, clock = _preview(monkeypatch)
-    preview.request(interval_s=60, window_s=10)
+    preview.request(interval_s=60, window_s=10, caller="poster")
 
-    clock.advance(20.0)                       # demand lapses
-    assert preview.wanted is False            # and resets the interval
+    clock.advance(20.0)                       # the poster's demand lapses
+    assert preview.wanted is False
+    assert preview.stats()["watchers"] == []
 
-    preview.request()                         # the setup page comes back
+    preview.request(caller="console")         # the setup page comes back
     preview._last_attempt = clock.t
     clock.advance(video.MIN_INTERVAL_S + 0.1)
     assert preview.wanted is True
@@ -131,10 +176,10 @@ def test_a_long_window_holds_demand_open_between_slow_requests(monkeypatch):
     next request arrived, and every capture would be a cold start.
     """
     preview, clock = _preview(monkeypatch)
-    preview.request(interval_s=60, window_s=90)
+    preview.request(interval_s=60, window_s=90, caller="poster")
 
     clock.advance(70.0)
-    assert clock.t < preview._wanted_until
+    assert preview.stats()["watching"] is True
 
 
 def test_the_stats_say_what_cadence_is_in_force(monkeypatch):

@@ -54,6 +54,21 @@ STREAM_CAPABILITY: dict[str, Capability] = {
     "audio": Capability.RADIO_LISTEN,
 }
 
+#: The suffix of the group a wall joins to say it wants a station's stills.
+#:
+#: DELIBERATELY ABSENT FROM `STREAM_CAPABILITY` above. That table is the
+#: tenant `subscribe` path's door, and nothing is ever published to a poster
+#: group — a console that got in through it would create demand at a station,
+#: pay for the captures, and receive nothing, because the pictures go over
+#: HTTP. `poster_set` is the only door, and it is ODIN-only.
+POSTER_STREAM = "poster"
+
+#: How many stations one wall may ask for stills from at once. The grid shows
+#: twenty-four; this is headroom over that and a bound on what a single
+#: message can commit a fleet of field stations to doing. Without it, one
+#: client could put every station it can see on camera duty in one frame.
+MAX_POSTER_STATIONS = 48
+
 
 class AuthorizationError(Exception):
     """Refused. The message is deliberately vague on the wire - see endpoint.py."""
@@ -350,6 +365,124 @@ class Hub:
             ground_station_id=station_id,
         )
         return group
+
+    async def poster_set(
+        self, conn: Connection, station_ids: list[uuid.UUID]
+    ) -> list[uuid.UUID]:
+        """Which stations this wall wants a periodic still from. Replaces the set.
+
+        A SET, NOT A TOGGLE, because that is what the caller actually has. The
+        grid view wants every tile it is showing and nothing else; expressing
+        that as joins and leaves would make the client responsible for diffing a
+        list it re-derives on every roster change, and the failure mode of
+        getting that wrong is a station left capturing for a tile nobody is
+        looking at. Sending the whole set means the last message is the truth.
+
+        REUSES THE GROUP MECHANISM THOUGH NOTHING IS EVER PUBLISHED TO THESE
+        GROUPS, and that is deliberate rather than lazy. The posters themselves
+        go over HTTP — they are far too big for the socket, which is the entire
+        reason this feature is stills and not video. What is wanted here is a
+        REGISTRY of who wants what, and the group registry already solves the
+        three hard parts of that: `stations_subscribed_to` parses group names
+        positionally, so lease renewal needs no new code (exactly the argument
+        `watch_join` makes above); membership dies with the connection, so a
+        closed laptop stops the capture without anybody having to say goodbye;
+        and the revalidation sweep already empties the groups of an operator
+        taken off the rota. A parallel registry would have to reimplement all
+        three, and the one that matters most is the one nobody remembers.
+
+        Authorised per station on an elevated read, like `watch_join`, and the
+        org in the group name comes from the station row rather than from
+        anything the client said — a client that could name its own org could
+        name somebody else's. Stations that do not pass are dropped silently
+        rather than failing the message: a wall showing twenty-four tiles must
+        not go blank because one of them was deactivated a second ago.
+        """
+        from backend.auth.odin import odin_capabilities_for_all
+
+        wanted = list(dict.fromkeys(station_ids))[:MAX_POSTER_STATIONS]
+
+        def _resolve() -> dict[uuid.UUID, uuid.UUID]:
+            with SessionLocal() as db:
+                self._bind_org(db, conn)
+                if not self._is_watch_staff(db, conn):
+                    return {}
+                # Elevated for exactly two reads, then the session closes and
+                # the pool's checkin wipes the context — the same narrow window
+                # `watch_join` opens, for the same reason.
+                set_request_org_context(
+                    db, organization_id=conn.organization_id, bypass=True
+                )
+                allowed = odin_capabilities_for_all(db, station_ids=wanted)
+                live = [s for s in wanted if allowed.get(s)]
+                if not live:
+                    return {}
+                # ONE statement for the whole set, not one per station: a wall
+                # re-sends this on every roster change, and twenty-four queries
+                # a time for a question whose answer is one row each is how a
+                # cheap feature becomes an expensive one.
+                rows = db.execute(
+                    select(GroundStation.id, GroundStation.organization_id).where(
+                        GroundStation.id.in_(live)
+                    )
+                ).all()
+                return {row[0]: row[1] for row in rows}
+
+        orgs = await asyncio.to_thread(_resolve)
+
+        groups = {
+            station_group(org, station_id, POSTER_STREAM): station_id
+            for station_id, org in orgs.items()
+        }
+        # Leave first, so a wall that has scrolled a station off screen stops
+        # paying for it in the same message that starts paying for its
+        # replacement. The other order briefly holds both.
+        for group in list(self.groups.groups_of(conn)):
+            if group.endswith(f":{POSTER_STREAM}") and group not in groups:
+                await self._leave(conn, group)
+        for group in groups:
+            await self._join(conn, group)
+        # Recorded on the connection as well as in the registry, so the
+        # revalidation sweep has something to re-check. Group membership alone
+        # would be invisible to it, and an operator taken off the rota mid-shift
+        # would go on holding a fleet of cameras open until they closed the tab.
+        conn.posters = set(groups.values())
+
+        # Ask now rather than waiting up to a renewal period. A tile blank for
+        # the first thirty seconds of a shift reads as a broken camera, which is
+        # the one thing this feature exists to disprove.
+        try:
+            from backend.services import poster_demand
+
+            for station_id in groups.values():
+                poster_demand.request(station_id)
+        except Exception:  # noqa: BLE001 - a slow first tile, not a failure
+            log.debug("Could not prompt posters.", exc_info=True)
+
+        # NO AUDIT ROW, and the asymmetry with `watch_join` is the point.
+        #
+        # Listening is a disclosure: staff can hear a customer's site, so the
+        # tenant gets a row in a log they can read. A poster is the same picture
+        # the station already streams to that tenant's own console, at a far
+        # lower rate, shown to the same staff who can already open that stream.
+        # A row per grid render would put thousands of entries a shift into a
+        # tenant's audit trail and bury the joins that do mean something.
+        return list(groups.values())
+
+    async def poster_leave(self, conn: Connection, station_id: uuid.UUID) -> None:
+        """Stop asking one station for stills.
+
+        Exists for the revocation path, not the client's — a wall changing what
+        it shows sends the whole set through `poster_set`. This is the half of
+        revocation that actually stops a camera: clearing `conn.posters` alone
+        would stop the connection COUNTING as a watcher while its group
+        membership went on renewing the lease, and the renewal reads group
+        names, not that field.
+        """
+        conn.posters.discard(station_id)
+        for group in list(self.groups.groups_of(conn)):
+            if group.endswith(f":gsu:{station_id}:{POSTER_STREAM}"):
+                await self._leave(conn, group)
 
     async def watch_leave(self, conn: Connection, station_id: uuid.UUID) -> None:
         """Stop guarding one station.
@@ -669,18 +802,21 @@ class Hub:
         """
         from backend.auth.odin import odin_capabilities_for_all
 
-        # Both the audio guard set and the telemetry attach, re-checked
-        # together. They are separate fields because they are separate ideas,
-        # but they are revoked by exactly the same two facts — is this person
-        # still watch staff, and is that station still active — so asking twice
-        # would be two chances to answer differently.
-        was = frozenset(conn.watch) | (
-            {conn.attached} if conn.attached is not None else set()
+        # The audio guard set, the telemetry attach and the wall's poster set,
+        # re-checked together. They are separate fields because they are
+        # separate ideas, but they are revoked by exactly the same two facts —
+        # is this person still watch staff, and is that station still active —
+        # so asking three times would be three chances to answer differently.
+        was = (
+            frozenset(conn.watch)
+            | frozenset(conn.posters)
+            | ({conn.attached} if conn.attached is not None else set())
         )
 
         if not self._is_watch_staff(db, conn):
             conn.watch = set()
             conn.attached = None
+            conn.posters = set()
             return was
 
         # RLS BYPASSED, DELIBERATELY AND NARROWLY. The guarded stations belong to
@@ -694,6 +830,7 @@ class Hub:
             allowed = odin_capabilities_for_all(db, station_ids=sorted(was))
             live = {sid for sid, caps in allowed.items() if caps}
             conn.watch = conn.watch & live
+            conn.posters = conn.posters & live
             if conn.attached is not None and conn.attached not in live:
                 conn.attached = None
         finally:
@@ -704,8 +841,10 @@ class Hub:
             set_request_org_context(
                 db, organization_id=conn.organization_id, bypass=False
             )
-        still = frozenset(conn.watch) | (
-            {conn.attached} if conn.attached is not None else frozenset()
+        still = (
+            frozenset(conn.watch)
+            | frozenset(conn.posters)
+            | ({conn.attached} if conn.attached is not None else frozenset())
         )
         return was - still
 
@@ -777,6 +916,7 @@ class Hub:
             # apply to, and calling only the one the code THINKS applies is how
             # a group outlives the field that recorded it.
             await self.watch_leave(conn, station_id)
+            await self.poster_leave(conn, station_id)
             if conn.attached == station_id or conn.attached is None:
                 await self._detach(conn)
         if dropped_watch:

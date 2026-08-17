@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import { StationTile } from "./StationTile";
 import type { FleetStation } from "../types";
 
@@ -200,6 +200,7 @@ export function TileWall({
   selectedId,
   onSelect,
   alerts,
+  onShowing,
 }: {
   stations: FleetStation[];
   /** The station whose drawer is open, or null. */
@@ -209,6 +210,12 @@ export function TileWall({
    *  sorts sensibly on reachability alone if the rail has not loaded — a tile
    *  in the wrong order is better than a wall that does not render. */
   alerts?: Record<string, StationAlertSummary>;
+  /** Told which stations actually have a tile on screen, so the wall can ask
+   *  those — and only those — for a periodic still. The collapsed nominal
+   *  stations are deliberately excluded: they have no tile to put a picture on,
+   *  and asking them anyway would put a fleet of field cameras on duty for a
+   *  row that says "14 nominal". */
+  onShowing?: (stationIds: string[]) => void;
 }) {
   // Two memos rather than one, and the split is the point: the comparator runs
   // over the whole fleet and must not be re-run because somebody clicked a tile.
@@ -242,6 +249,20 @@ export function TileWall({
     const tiled = sorted.filter((s) => s.id === selectedId || !isNominal(s));
     return { tiled, collapsed: sorted.length - tiled.length };
   }, [sorted, selectedId]);
+
+  // SORTED AND JOINED, and the effect depends on that string alone.
+  //
+  // `tiled` is a fresh array on every poll, so depending on it would re-declare
+  // the set every three seconds — a burst of commands to every station on the
+  // wall, for ever, to say what they were already told. The wall also reorders
+  // constantly as ranks change, and a reorder is not a change of membership, so
+  // the ids are sorted before they are compared. The array handed to the caller
+  // is rebuilt from the key for the same reason: it makes the key the single
+  // source of both the comparison and the value.
+  const showingKey = tiled.map((s) => s.id).sort().join(",");
+  useEffect(() => {
+    onShowing?.(showingKey ? showingKey.split(",") : []);
+  }, [showingKey, onShowing]);
 
   return (
     <div className="odin-wall-grid" role="group" aria-label="Stations, worst first">

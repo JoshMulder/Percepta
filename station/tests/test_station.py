@@ -16,6 +16,7 @@ from jsonschema import Draft202012Validator
 
 from gsu.agent import Agent
 from gsu.commands import CommandRouter, build_handlers
+from gsu.poster import PosterPublisher
 from gsu.config import AgentConfig
 from gsu.credentials import CredentialStore, Enrolment
 from gsu.devices import registry
@@ -352,11 +353,16 @@ class CommandTests(unittest.TestCase):
     def setUp(self):
         self._dir = tempfile.TemporaryDirectory()
         self.agent = agent_in(self._dir.name)
+        # The poster publisher is built at enrolment (it needs the credential),
+        # and this agent is not enrolled — so one is made here rather than
+        # letting `video.poster` look like a command with no handler. It sends
+        # nothing without a URL.
+        self.agent.poster = PosterPublisher(self.agent, url=None)
         self.router = CommandRouter(
             build_handlers(
                 self.agent.radio, self.agent.light, self.agent._apply_config,
                 self.agent.stream, updates=self.agent.updates,
-                renew=self.agent._renew_from_command,
+                renew=self.agent._renew_from_command, poster=self.agent.poster,
             ),
         )
 

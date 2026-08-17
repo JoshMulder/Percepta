@@ -73,6 +73,21 @@ class Connection:
     #: what keeps the cost bounded — the stream is undifferentiated, so an attach
     #: carries that site's whole ADS-B feed as well as its readings.
     attached: uuid.UUID | None = None
+
+    #: The stations this wall is showing a tile for, and so asking a still from
+    #: every minute.
+    #:
+    #: A THIRD field rather than a reuse of `watch`, and the reason is the
+    #: numbers. An operator guards two or three channels they are listening for
+    #: and shows two dozen tiles they are glancing at; driving the stills off
+    #: `watch` would leave every tile but the guarded ones blank, and driving
+    #: the audio off this would put a fleet's worth of Opus on the link. Two
+    #: appetites, two fields — the same argument `attached` makes above.
+    #:
+    #: Recorded here as well as in the group registry so the revalidation sweep
+    #: can re-check it. The sweep works from the connection's own record of what
+    #: it holds, and a set it does not know about is a set it cannot revoke.
+    posters: set = field(default_factory=set)
     closed: bool = False
 
     @property

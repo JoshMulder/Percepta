@@ -286,6 +286,33 @@ def authenticate(
     return station, credential
 
 
+def resolve(db: Session, *, secret: str) -> GroundStation | None:
+    """Resolve a presented secret to a station WITHOUT stamping it.
+
+    The same two tests `authenticate` applies — the credential is valid and the
+    station is active — and deliberately not `authenticate` itself, for exactly
+    the reason `still_usable` exists: that function writes `last_used_at`, which
+    is right once at the start of a long-lived socket and wrong on a call that
+    repeats on a timer. A poster every sixty seconds from every watched station
+    would be an UPDATE and a COMMIT on one hot row per station, for ever, to
+    record something no more true than the last one.
+
+    `still_usable` cannot serve here because it takes a credential id and this
+    path has only the secret.
+    """
+    credential = db.execute(
+        select(StationCredential).where(
+            StationCredential.secret_hash == lookup_hash(secret)
+        )
+    ).scalar_one_or_none()
+    if credential is None or not is_valid(credential):
+        return None
+    station = db.get(GroundStation, credential.ground_station_id)
+    if station is None or not station.is_active:
+        return None
+    return station
+
+
 def is_valid(credential: StationCredential, *, at: datetime | None = None) -> bool:
     now = at or _now()
     if credential.revoked_at is not None:

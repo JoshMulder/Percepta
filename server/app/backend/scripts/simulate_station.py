@@ -246,6 +246,10 @@ class StationSim:
         #: camera here, and "unavailable, and why" is what a station with no
         #: camera owes the platform. Silence would look like a wedged encoder.
         self.stream_state = "unavailable"
+        #: And the same for `video.poster`, for the same reason: a wall asking
+        #: this station for a still gets told there is no camera, rather than
+        #: getting a tile that stays blank with no explanation anywhere.
+        self.poster_reason = "simulated station: no camera"
         self.config_version = 1
         self.uptime_s = 0.0
         self.health_due = 0.0
@@ -307,6 +311,17 @@ class StationSim:
             self.stream_state = "unavailable"
         elif kind == "video.stop":
             self.stream_state = "unavailable"
+        elif kind in ("video.poster", "video.poster_stop"):
+            # Accepted and answered, never acted on. A simulated station has no
+            # camera to photograph, and the honest report of that is a poster
+            # state carrying the reason — the same rule `video.start` follows
+            # two branches up. Ignoring it would leave a developer's wall
+            # showing blank tiles with nothing anywhere saying why.
+            self.poster_reason = (
+                "simulated station: no camera"
+                if kind == "video.poster"
+                else "stopped by the platform"
+            )
         elif kind == "config.set":
             # Apply what is recognised, persist, and report the new version in
             # health. The platform never assumes the change took.
@@ -541,6 +556,7 @@ class StationSim:
                     "state": self.stream_state,
                     "reason": "this is a simulator and has no camera",
                 },
+                "poster": {"leased": False, "reason": self.poster_reason},
             },
         }
 

@@ -46,6 +46,7 @@ from backend.realtime.bus import (
 from backend.realtime.revocation import organization_changed, revoke_user
 from backend.realtime.bus import (
     health_snapshot_key,
+    poster_stamp_key,
     power_snapshot_key,
     weather_snapshot_key,
     read_latest_sync,
@@ -198,6 +199,14 @@ class FleetStation(BaseModel):
     visibility_km: float | None = None
     #: The station's own present-weather word, not inferred from the numbers.
     sky: str | None = None
+    #: When this station's most recent still was stored, if there is one. The
+    #: PICTURE is not here — it is fetched per tile from
+    #: /api/odin/stations/{id}/poster, because two dozen JPEGs inline would make
+    #: the digest larger than everything else the wall does put together. This
+    #: is what tells a tile its picture has changed: an <img> exposes no
+    #: response headers to the page and never re-fetches a stable src, so the
+    #: tile appends this as `?v=` and lets the browser do the rest.
+    poster_at: str | None = None
     #: An active maintenance window, if any. Present on BOTH this and the pushed
     #: digest: the client swaps between the two sources, and a field in one and
     #: not the other is not a gap, it is a crash — see the position fields, which
@@ -828,6 +837,22 @@ def _vitals(station_ids: list[uuid.UUID]) -> dict[uuid.UUID, dict]:
         except (ValueError, TypeError):
             continue
         out[sid].update(project_weather(frame))
+
+    # The STAMP only, never the picture. This runs for the whole fleet on every
+    # poll, and MGETing two dozen JPEGs to read a date off each would make the
+    # digest cost more than the images it describes. The tile fetches the image
+    # from /api/odin/stations/{id}/poster and uses this as the `?v=` that makes
+    # it re-fetch: an <img> shows the page no response headers, and a stable src
+    # is never re-requested, so without a changing URL a tile would hold its
+    # first picture until somebody reloaded.
+    for sid, blob in zip(
+        station_ids, read_latest_sync([poster_stamp_key(s) for s in station_ids])
+    ):
+        if not blob:
+            continue
+        out[sid]["poster_at"] = (
+            blob.decode() if isinstance(blob, bytes) else str(blob)
+        )
     return out
 
 

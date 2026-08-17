@@ -673,6 +673,15 @@ export interface FleetStation {
    *  thing to the person on shift. */
   maintenance_until?: string | null;
   maintenance_reason?: string | null;
+
+  /** When this station's most recent camera still was stored, if there is one.
+   *  Not the picture — that is fetched per tile from
+   *  `/api/odin/stations/{id}/poster`. This is the cache-buster: an `<img>`
+   *  exposes no response headers to the page and never re-fetches a stable
+   *  `src`, so a tile that did not append this would hold its very first
+   *  picture until somebody reloaded the wall. Absent means no recent
+   *  picture — the tile shows its placeholder rather than a stale frame. */
+  poster_at?: string | null;
 }
 
 export interface FleetEvent {

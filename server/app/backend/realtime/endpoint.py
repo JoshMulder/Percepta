@@ -7,6 +7,7 @@ client -> server (JSON text frames):
     {"type": "subscribe",      "stream": "status|telemetry|video|audio"}
     {"type": "unsubscribe",    "stream": "..."}
     {"type": "watch_set",      "stations": ["<uuid>", ...]}   (Odin watch only)
+    {"type": "poster_set",     "stations": ["<uuid>", ...]}   (Odin watch only)
     {"type": "attach_station", "ground_station_id": "<uuid>"|null}  (Odin watch)
     {"type": "ping"}
 
@@ -19,6 +20,7 @@ server -> client:
     {"type": "status",           "station_id", "payload"}
     {"type": "station_revoked",  "reason"}
     {"type": "watching",         "stations": [...]}
+    {"type": "posters",          "stations": [...]}
     {"type": "attached",         "ground_station_id": <uuid>|null}
     {"type": "watch_revoked",    "stations": [...]}
     {"type": "revoked",          "reason"}
@@ -172,6 +174,32 @@ async def _handle_message(conn: Connection, message: dict) -> None:
         # to be guarded because the request was accepted in bulk.
         conn.enqueue(
             {"type": "watching", "stations": sorted(str(s) for s in guarded)}
+        )
+        return
+
+    if kind == "poster_set":
+        raw = message.get("stations")
+        if not isinstance(raw, list):
+            conn.enqueue(
+                {"type": "error", "code": "bad_request",
+                 "message": "stations must be a list of uuids"}
+            )
+            return
+        try:
+            station_ids = [uuid.UUID(str(r)) for r in raw]
+        except (TypeError, ValueError):
+            conn.enqueue(
+                {"type": "error", "code": "bad_request",
+                 "message": "stations must be a list of uuids"}
+            )
+            return
+        showing = await hub.poster_set(conn, station_ids)
+        # The SERVER'S set again, for the same reason `watching` is: a station
+        # that was refused is simply absent, and a tile whose station is not in
+        # this list knows to keep its placeholder rather than waiting for a
+        # picture that is never coming.
+        conn.enqueue(
+            {"type": "posters", "stations": sorted(str(s) for s in showing)}
         )
         return
 

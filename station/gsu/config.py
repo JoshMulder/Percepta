@@ -502,6 +502,14 @@ class SiteConfig:
     #: Duty cycling: the floodlight is the first load shed, and it is shed by
     #: the station itself rather than by a command that may never arrive.
     shed_light_below_soc_pct: float = 12.0
+    #: The second load shed, and the second thing this station does on its own
+    #: authority: wall posters stop below this. HIGHER than the floodlight's
+    #: threshold on purpose — a poster is somebody idly watching a tile, while
+    #: the floodlight may be the reason somebody can work at the site at all, so
+    #: the cheaper thing to lose goes first and goes earlier. A capture is an
+    #: RTSP handshake, a decode and a JPEG encode: small, but standing, and this
+    #: board has already stopped executing once with its core rail at 7.7 A.
+    shed_poster_below_soc_pct: float = 20.0
 
     wind_alarm_kt: float = 45.0
 

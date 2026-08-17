@@ -4631,6 +4631,79 @@ body {
 .odin-tile-band.bad { background: var(--odin-bad); }
 .odin-tile-band.neutral { background: #2a3542; }
 
+/* The site itself, behind everything else on the tile.
+
+   BEHIND, AND DIMMED HARD. This is the one element on the wall with no
+   editorial control over what it contains: it is whatever the camera saw. A
+   sunlit gravel yard is near-white and a floodlit forecourt is near-white in
+   the middle, and text laid over either at full strength is unreadable — from
+   three metres, which is the brief, it is unreadable a good while before it
+   looks unreadable close up. So the picture is context, not content: heavily
+   dimmed, desaturated a little so a red truck in the frame cannot compete with
+   the wall's own red, and covered by a gradient that is darkest exactly where
+   the name and the org sit.
+
+   The tile stays legible with NO picture at all, and that is the test this
+   styling has to pass: a poster is something the tile gains, never something it
+   depends on. */
+.odin-tile-poster {
+  position: absolute;
+  /* Below the 6px band rather than under it — the band is the one carrier of
+     station state and must never be tinted by a bright frame behind it. */
+  top: 6px;
+  left: 0;
+  width: 100%;
+  height: calc(100% - 6px);
+  object-fit: cover;
+  /* Zero: the tile is a fixed shape and the camera's aspect ratio is not, so
+     `cover` crops rather than letterboxes. A black bar down one side of a tile
+     reads as a broken picture. */
+  opacity: 0.22;
+  filter: saturate(0.7);
+  pointer-events: none;
+  user-select: none;
+  z-index: 0;
+}
+/* Darkest at the top, where the name and organisation are. Without it a light
+   sky — which is where a camera aimed at a horizon puts its brightest pixels —
+   sits directly behind the two lines that have to be readable. */
+.odin-tile:has(.odin-tile-poster)::before {
+  content: "";
+  position: absolute;
+  inset: 6px 0 0;
+  background: linear-gradient(
+    180deg,
+    rgba(9, 13, 17, 0.92) 0%,
+    rgba(9, 13, 17, 0.55) 42%,
+    rgba(9, 13, 17, 0.86) 100%
+  );
+  pointer-events: none;
+  z-index: 0;
+}
+/* Everything the tile actually says sits above both. Listed rather than done
+   with a wrapper element because the tile's children ARE its layout — they are
+   flex items with their own spacing, and wrapping them to win a stacking
+   context would collapse the gaps this wall was tuned with.
+
+   SPLIT IN TWO, and the split is load-bearing. `z-index` needs a positioned
+   element, but `.odin-tile-fault` and `.odin-tile-halo` are already
+   `position: absolute` and giving them `relative` would drop them into flow —
+   the badge would stop sitting in its corner and the halo would become a block
+   in the middle of the tile. Only the static flex items get a position. */
+.odin-tile > .odin-tile-band,
+.odin-tile > .odin-tile-name,
+.odin-tile > .odin-tile-org,
+.odin-tile > .odin-tile-soc,
+.odin-tile > .odin-tile-wx,
+.odin-tile > .odin-tile-vitals {
+  position: relative;
+  z-index: 1;
+}
+.odin-tile > .odin-tile-fault,
+.odin-tile > .odin-tile-halo {
+  z-index: 1;
+}
+
 .odin-tile-name {
   font-size: 15px;          /* legible at three metres, which is the brief */
   font-weight: 600;

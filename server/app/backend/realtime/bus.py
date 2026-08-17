@@ -164,9 +164,6 @@ def health_snapshot_key(station_id) -> str:
     return f"latest:health:{station_id}"
 
 
-#: Power is published once a second, so a stale frame is worthless and a short
-#: TTL is the honest failure: an Odin tile with no battery reading says "unknown"
-#: rather than a number from twenty minutes ago. Longer than health's cadence
 #: Weather is published at 0.2 Hz, so a frame is at most five seconds old and a
 #: gap of two minutes means the head has stopped rather than that the wind has.
 #: Longer than the power TTL for that reason: a slower sensor needs a wider
@@ -192,6 +189,9 @@ def weather_snapshot_key(station_id) -> str:
     return f"percepta:weather:{station_id}"
 
 
+#: Power is published once a second, so a stale frame is worthless and a short
+#: TTL is the honest failure: an Odin tile with no battery reading says "unknown"
+#: rather than a number from twenty minutes ago. Longer than health's cadence
 #: gap, short enough that a station gone quiet stops claiming a state of charge.
 POWER_SNAPSHOT_TTL = 90
 
@@ -209,6 +209,72 @@ def power_snapshot_key(station_id) -> str:
     so it gets the same answer rather than a new one.
     """
     return f"percepta:power:{station_id}"
+
+
+#: How long a poster is worth showing. Posters arrive once a minute while
+#: somebody is watching, so this survives two missed captures — a station
+#: restarting its camera, a retried upload — and then the tile goes back to its
+#: placeholder. That is the honest answer: a five-minute-old picture of a place
+#: is not what the site looks like now, and a wall exists to be believed.
+POSTER_TTL = 180
+
+
+def poster_key(station_id) -> str:
+    """Redis key holding one station's most recent camera still.
+
+    In Redis rather than on disk or in the database for the reason every other
+    snapshot here is: ANY worker must be able to serve it. The live video relay
+    in `api/media.py` holds its frames in process memory, which is precisely why
+    that path cannot run behind more than one worker — the poster path is the
+    deliberate opposite, and a wall of twenty-four tiles is only affordable
+    because of it.
+
+    Not in the database: a JPEG a minute per watched station is a write rate no
+    row wants, for data whose whole value expires in three minutes.
+    """
+    return f"percepta:poster:{station_id}"
+
+
+def poster_stamp_key(station_id) -> str:
+    """When this station's poster was captured — the JPEG's timestamp, alone.
+
+    A SEPARATE KEY FROM THE PICTURE, and that is the whole reason it exists. The
+    wall's digest needs to tell each tile that its poster changed, for up to
+    twenty-four stations at a time; if the stamp lived with the image, building
+    one digest would mean dragging every JPEG in the fleet out of Redis to read
+    a date off each. This key is about thirty bytes and rides along in the
+    digest's existing MGET with power and weather.
+
+    The tile then asks for the image itself with `?v=<stamp>` — an `<img>` shows
+    no response headers to the page, and a stable `src` is never re-fetched, so
+    without a changing URL a tile would hold its first picture until the page
+    was reloaded.
+    """
+    return f"percepta:poster_at:{station_id}"
+
+
+def write_poster_sync(key: str, jpeg: bytes, *, ttl: int = POSTER_TTL) -> bool:
+    """Store one station's poster. Binary-safe, fail-soft.
+
+    BINARY-SAFE MATTERS HERE. Every other value on this bus is JSON, and the
+    client is built WITHOUT `decode_responses`, so bytes go in and come back out
+    untouched. If anyone ever adds that flag for convenience, this is what
+    breaks and it will break as a corrupt image rather than an exception — hence
+    this note next to the only binary value in the system.
+
+    SETEX, not SET-then-EXPIRE: one round trip, and no window in which a poster
+    exists with no expiry at all. A key that missed its EXPIRE would pin a
+    station's last picture in Redis for ever and show it as current.
+    """
+    client = _get_sync_client()
+    if client is None:
+        return False
+    try:
+        client.setex(key, ttl, jpeg)
+        return True
+    except Exception:
+        log.warning("Redis poster write to %s failed.", key, exc_info=True)
+        return False
 
 
 def read_latest_sync(keys: list[str]) -> list:

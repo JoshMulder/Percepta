@@ -25,7 +25,8 @@ from backend.api.odin_alerts import router as odin_alerts_router
 from backend.api.odin_audit import router as odin_audit_router
 from backend.api.odin_events import router as odin_events_router
 from backend.api.odin_transcripts import router as odin_transcripts_router
-from backend.services import audio_demand, station_watch
+from backend.api.posters import router as posters_router
+from backend.services import audio_demand, poster_demand, station_watch
 from backend.api.organization import router as organization_router
 from backend.api.platform import router as platform_router
 from backend.api.releases import router as releases_router
@@ -108,6 +109,10 @@ async def lifespan(app: FastAPI):
     # who closes their laptop never says so, and a station transmitting to
     # nobody is the most expensive thing on the link.
     audio = asyncio.create_task(audio_demand.renew())
+    # And for the wall's stills. Cheapest of the three by an order of magnitude
+    # — a scaled JPEG a minute — but the same rule for the same reason: a closed
+    # tab must stop a field station opening its camera.
+    posters = asyncio.create_task(poster_demand.renew())
     # Notices a station that has gone dark and says so. The broker announces a
     # clean disconnect at once; this is for the silent death it cannot see — a
     # box that just stops and never reconnects, on a site nobody is watching.
@@ -117,6 +122,7 @@ async def lifespan(app: FastAPI):
     finally:
         leases.cancel()
         audio.cancel()
+        posters.cancel()
         dark.cancel()
         await event_retention.stop()
         await power_history.stop()
@@ -144,6 +150,7 @@ app.include_router(odin_events_router)
 app.include_router(odin_audit_router)
 app.include_router(organization_router)
 app.include_router(platform_router)
+app.include_router(posters_router)
 app.include_router(releases_router)
 app.include_router(registry_router)
 app.include_router(station_config_router)

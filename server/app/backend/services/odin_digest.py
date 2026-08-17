@@ -47,7 +47,7 @@ from backend.services.station_vitals import (
 )
 from backend.database.models.platform_alert import StationMaintenance
 from backend.database.session import PrivilegedSessionLocal
-from backend.realtime.bus import publish_sync
+from backend.realtime.bus import poster_stamp_key, publish_sync, read_latest_sync
 from backend.realtime.odin import WALL_CHANNEL
 from backend.services.alerts import store as alert_store
 from backend.services.station_status import status_for
@@ -87,6 +87,10 @@ class OdinDigest:
         #: station_id -> last_seen, so the digest can derive liveness without
         #: asking the database for it every frame.
         self._seen: dict[uuid.UUID, datetime] = {}
+        #: station_id -> when its newest still was stored. Refreshed from Redis
+        #: just before each publish rather than noted on the hot path, because
+        #: posters do not arrive on the hot path — see `_read_poster_stamps`.
+        self._posters: dict[uuid.UUID, str] = {}
         self._task: asyncio.Task | None = None
         self._roster_task: asyncio.Task | None = None
         self._running = False
@@ -313,6 +317,7 @@ class OdinDigest:
         for sid, identity in self._roster.items():
             status, dark = status_for(self._seen.get(sid), now=now)
             last_seen = self._seen.get(sid)
+            poster_at = self._posters.get(sid)
             stations.append({
                 "id": str(sid),
                 **identity,
@@ -320,12 +325,44 @@ class OdinDigest:
                 "dark": dark,
                 "last_seen_at": last_seen.isoformat() if last_seen else None,
                 **self._vitals.get(sid, {}),
+                # Omitted rather than nulled when there is no picture, so it
+                # reads the same on both feeds — the polled digest only sets the
+                # key for stations that have one.
+                **({"poster_at": poster_at} if poster_at else {}),
             })
         return {
             "type": "odin.digest",
             "at": now.isoformat(),
             "stations": stations,
             "alerts": self._alerts,
+        }
+
+    def _read_poster_stamps(self, station_ids: list[uuid.UUID]) -> dict[uuid.UUID, str]:
+        """When each station's newest still was stored. The STAMP, not the JPEG.
+
+        Read from the cache rather than noted on the hot path like everything
+        else here, because a poster does not arrive on the hot path: it is an
+        HTTP POST to `/media/poster`, which may land on any worker — which is
+        the entire reason the picture lives in Redis rather than in a relay's
+        memory.
+
+        A separate small key per station, so this is an MGET of about thirty
+        bytes each. Reading the images themselves to date-stamp them would make
+        a digest that costs more than the pictures it describes.
+
+        For the whole roster and not scoped to who is watching: demand is per
+        worker, and a digest carrying `poster_at` only for stations with a wall
+        on THIS worker would give the pushed feed a field the polled one has —
+        the exact asymmetry `station_vitals` exists to make impossible, arriving
+        from a third direction.
+        """
+        if not station_ids:
+            return {}
+        found = read_latest_sync([poster_stamp_key(s) for s in station_ids])
+        return {
+            sid: (blob.decode() if isinstance(blob, bytes) else str(blob))
+            for sid, blob in zip(station_ids, found)
+            if blob
         }
 
     async def _publish(self) -> None:
@@ -336,7 +373,15 @@ class OdinDigest:
         fails soft when Redis is absent, and the encode plus the round trip is
         exactly the kind of work that belongs off this loop — which is the same
         loop the whole fleet's ingest runs on.
+
+        The poster stamps are read on a thread too, and BEFORE the frame is
+        built rather than inside it: `_frame` walks `_roster` and `_vitals`,
+        which are owned by this loop and unlocked precisely because nothing else
+        touches them.
         """
+        self._posters = await asyncio.to_thread(
+            self._read_poster_stamps, list(self._roster)
+        )
         frame = self._frame()
         await asyncio.to_thread(publish_sync, WALL_CHANNEL, frame)
 

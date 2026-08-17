@@ -317,6 +317,13 @@ export function StationTile({
   const previous = useRef(stateKey);
   const [changedAt, setChangedAt] = useState<number | null>(null);
 
+  // The picture 404'd. Cleared whenever a new stamp arrives, because a new
+  // stamp means a new picture genuinely is in the cache — latching this for the
+  // life of the tile would let one expired key blank a station's poster for the
+  // rest of the shift.
+  const [posterFailed, setPosterFailed] = useState(false);
+  useEffect(() => setPosterFailed(false), [station.poster_at]);
+
   useEffect(() => {
     // Seeded with the first state we ever saw, so opening the wall does not
     // light up every tile on it. A halo has to mean "this just happened", and a
@@ -412,6 +419,44 @@ export function StationTile({
       title={summary}
     >
       <span className={`odin-tile-band ${tone}`} aria-hidden="true" />
+
+      {/* What the site actually looks like, behind everything else.
+
+          NOT KEYED, deliberately. Changing `src` on the same element leaves the
+          old picture on screen until the new one has decoded; remounting on
+          every stamp would blank the tile for the length of a fetch, once a
+          minute, on every tile at once — a wall that flickers in unison every
+          sixty seconds.
+
+          `?v=` IS THE ONLY THING THAT MAKES IT REFRESH. An <img> exposes no
+          response headers to the page, so the tile cannot see Last-Modified or
+          an ETag, and a stable src is never re-requested — the wall would hold
+          its first picture until somebody reloaded it. The stamp comes from the
+          digest, which is where the platform records that a new one arrived.
+
+          Absent stamp, no element: a station whose poster has aged out of the
+          cache (three minutes, so a station that stopped sending, or refused on
+          low battery) goes back to the empty face rather than showing a
+          picture that has stopped being true. A wall exists to be believed.
+
+          `alt=""` and aria-hidden because the tile's own label already says
+          what this station is; a screen reader announcing "image" here adds
+          nothing it can act on. */}
+      {station.poster_at && !posterFailed && (
+        <img
+          className="odin-tile-poster"
+          src={`/api/odin/stations/${station.id}/poster?v=${encodeURIComponent(station.poster_at)}`}
+          alt=""
+          aria-hidden="true"
+          draggable={false}
+          // The stamp and the picture come from two different Redis keys with
+          // the same TTL, so there is a window where one has expired and the
+          // other has not. Hiding on error is what keeps that from showing as a
+          // broken-image glyph on an otherwise fine tile; the next stamp clears
+          // it, because a new `poster_at` means a new picture really is there.
+          onError={() => setPosterFailed(true)}
+        />
+      )}
 
       {/* Keyed on the moment of change so a second change inside the window
           remounts the element and restarts the decay from full. Without the key

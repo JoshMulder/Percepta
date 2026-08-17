@@ -36,6 +36,14 @@ export interface WatchApi {
   guarded: string[];
   /** Replace the guard set. */
   setGuarded: (stationIds: string[]) => void;
+  /** Which stations the SERVER agreed to keep stills coming from. A tile whose
+   *  station is absent shows its placeholder rather than an image URL that
+   *  404s. */
+  posterStations: string[];
+  /** Replace the set of stations the wall is showing tiles for. Whole set every
+   *  time, like the guard set — the last message is the truth, so a roster
+   *  change and a reconnect are the same operation. */
+  setPosters: (stationIds: string[]) => void;
   /** Channels with audio in the last few hundred ms. Polled rather than pushed:
    *  see below. */
   talking: Record<string, boolean>;
@@ -56,12 +64,20 @@ export function useWatchAudio(enabled: boolean): WatchApi {
   const [volume, setVolumeState] = useState(0);
   const [priority, setPriorityState] = useState<string | null>(null);
   const [talking, setTalking] = useState<Record<string, boolean>>({});
+  const [posterStations, setPosterStations] = useState<string[]>([]);
 
   const socketRef = useRef<WebSocket | null>(null);
   const retryRef = useRef(0);
   const timerRef = useRef<number | null>(null);
   /** What the operator wants, replayed on every reconnect. */
   const desiredRef = useRef<string[]>([]);
+  /** Which stations the wall is currently showing a tile for, replayed the same
+   *  way and for the same reason. Separate from the guard set because they are
+   *  different appetites: an operator guards two channels they are listening
+   *  for and shows twenty-four tiles they are glancing at. Conflating them
+   *  would either put a fleet's worth of audio on the link or leave the tiles
+   *  the operator is actually looking at without pictures. */
+  const postersRef = useRef<string[]>([]);
 
   useEffect(() => engine.onState(setAudioState), [engine]);
 
@@ -75,6 +91,13 @@ export function useWatchAudio(enabled: boolean): WatchApi {
     // is not one.
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
     socket.send(JSON.stringify({ type: "watch_set", stations: stationIds }));
+  }, []);
+
+  const sendPosters = useCallback((stationIds: string[]) => {
+    const socket = socketRef.current;
+    // The same explicit `!socket` as above, for the same reason — see there.
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    socket.send(JSON.stringify({ type: "poster_set", stations: stationIds }));
   }, []);
 
   const connect = useCallback(() => {
@@ -92,6 +115,11 @@ export function useWatchAudio(enabled: boolean): WatchApi {
       // The whole set, immediately. This is the reconnect path as much as the
       // first connect — there is no separate resume.
       send(desiredRef.current);
+      // And the tiles. A wall that reconnected without this would keep showing
+      // the pictures it already had while every station quietly stopped taking
+      // new ones, so the whole grid would freeze rather than go blank — the
+      // worse of the two failures, because it looks like nothing is wrong.
+      sendPosters(postersRef.current);
     };
 
     socket.onmessage = (raw) => {
@@ -105,6 +133,13 @@ export function useWatchAudio(enabled: boolean): WatchApi {
         const stations = (message.stations as string[]) ?? [];
         setGuardedState(stations);
         engine.setChannels(stations);
+        return;
+      }
+      if (message.type === "posters") {
+        // The server's set again. A station absent from it is one the wall may
+        // not have a picture of, so its tile keeps its placeholder instead of
+        // waiting for an image that is never coming.
+        setPosterStations((message.stations as string[]) ?? []);
         return;
       }
       if (message.type === "watch_revoked") {
@@ -140,7 +175,7 @@ export function useWatchAudio(enabled: boolean): WatchApi {
       retryRef.current += 1;
       timerRef.current = window.setTimeout(connect, delay);
     };
-  }, [enabled, engine, send]);
+  }, [enabled, engine, send, sendPosters]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -195,6 +230,19 @@ export function useWatchAudio(enabled: boolean): WatchApi {
     [engine, send],
   );
 
+  const setPosters = useCallback(
+    (stationIds: string[]) => {
+      // Not optimistic, unlike `setGuarded`. A guard lamp lights on the click
+      // because the operator just clicked it and the delay would read as a
+      // dropped press; a tile has nothing to show until a picture actually
+      // arrives, so claiming the station early would only mean rendering an
+      // image URL that 404s.
+      postersRef.current = stationIds;
+      sendPosters(stationIds);
+    },
+    [sendPosters],
+  );
+
   const setVolume = useCallback(
     (v: number) => {
       setVolumeState(v);
@@ -223,6 +271,8 @@ export function useWatchAudio(enabled: boolean): WatchApi {
   return {
     guarded,
     setGuarded,
+    posterStations,
+    setPosters,
     talking,
     link,
     audioState,

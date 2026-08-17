@@ -50,6 +50,7 @@ from .transport import (
     AUDIO, CONTRACT_VERSION, EVENTS, TELEMETRY,
     Transport, build_transport, redact_url,
 )
+from .poster import PosterPublisher, poster_url
 from .transport.console_proxy import ConsoleProxy, console_ingest_url
 from .transport.host_shell import HostShellCoordinator, host_ingest_url
 from .video import CameraPreview
@@ -195,12 +196,25 @@ class Agent:
         #: a host shell itself (sandboxed by design); this only records the
         #: request. Off unless the box has opted in with GSU_HOST_SHELL.
         self.host_shell: HostShellCoordinator | None = None
+        #: Sends the wall a small still on a lease (`poster.py`). Needs the
+        #: credential, so it exists only once enrolled — like the console proxy
+        #: and for the same reason.
+        self.poster: PosterPublisher | None = None
 
         # Devices exist before enrolment does. A box waiting for a technician to
         # type a code is still a box on a hillside with sensors on it.
         self.adsb = None
         self.weather = None
         self.power = None
+        #: The most recent power reading, kept because the sensing loop is not
+        #: the only thing that needs it. The loop reads the sensor once a second
+        #: and used the answer inside that tick; anything running on its own
+        #: thread — the poster's battery gate — would otherwise have to read the
+        #: sensor a second time, and a second reader is how the load-shedding
+        #: decision and the telemetry come to disagree about the same battery.
+        #: `None` until the first tick, and on a station with no monitoring at
+        #: all: unknown, which is not the same as low.
+        self.last_power = None
         self.light = None
         self.camera = None
         self.radio: RadioController | None = None
@@ -815,6 +829,8 @@ class Agent:
                 self.transport.stop()
             if self.console_proxy is not None:
                 self.console_proxy.stop()
+            if self.poster is not None:
+                self.poster.stop()
             self.enrolment = enrolment
 
             self._persist_ca(enrolment)
@@ -909,11 +925,24 @@ class Agent:
                 enrolment.credential.secret,
                 enabled=self.config.host_shell,
             )
+            # Wall posters. Built here rather than beside the devices because it
+            # needs the credential — it POSTs to the platform's API like the
+            # media uplink does, not through the broker, since a JPEG is bulk
+            # data and the broker carries control that must not queue behind it.
+            # Its thread is idle until a `video.poster` lease arrives, so a
+            # station nobody is watching pays a clock comparison twice a second.
+            self.poster = PosterPublisher(
+                self,
+                url=poster_url(self.config, enrolment),
+                secret=enrolment.credential.secret,
+                trust=self.api_trust,
+            )
+            self.poster.start()
             handlers = build_handlers(
                 self.radio, self.light, self._apply_config, self.stream,
                 self.events, updates=self.updates,
                 console_proxy=self.console_proxy, host_shell=self.host_shell,
-                renew=self._renew_from_command,
+                renew=self._renew_from_command, poster=self.poster,
             )
             self.router = CommandRouter(handlers)
             if self.transport is not None:
@@ -991,6 +1020,13 @@ class Agent:
             if self.console_proxy is not None:
                 self.console_proxy.stop()
                 self.console_proxy = None
+            if self.poster is not None:
+                # Stops the thread AND drops the preview demand with it, so a
+                # de-authed station is not left holding the camera open for a
+                # platform it can no longer post to.
+                self.poster.release("station detached")
+                self.poster.stop()
+                self.poster = None
             if self.host_shell is not None:
                 # Leave no standing host-session request behind for the helper.
                 self.host_shell.close()
@@ -1077,6 +1113,10 @@ class Agent:
         if self.host_shell is not None:
             # Written into the next host.open request rather than a live socket.
             self.host_shell.update_secret(enrolment.credential.secret)
+        if self.poster is not None:
+            # Read on the next POST. A station that renewed at 3am must not
+            # start failing its posters at 4am.
+            self.poster.update_secret(enrolment.credential.secret)
         self.store.record_event(
             "credential.renewed", "info",
             f"Credential renewed; expires {enrolment.credential.expires_at.isoformat()}.",
@@ -1424,6 +1464,7 @@ class Agent:
         reading = None
         if self.power is not None:
             reading = self.power.read(dt, extra_load_w=light_load)
+            self.last_power = reading
             # Duty cycling: the station sheds its own load rather than waiting
             # for a command that may never arrive.
             if (
@@ -1770,6 +1811,14 @@ class Agent:
         state["stream"] = self.stream.state_payload()
         state["camera"] = self._camera_backend()
         state["sensor"] = self.sensor_lease.state()
+        # The wall's stills. Reported even before enrolment builds the
+        # publisher, because "no posters and here is why" is the answer somebody
+        # is looking for when a tile is blank — an absent key would leave them
+        # unable to tell a station that refuses from one too old to know how.
+        state["poster"] = (
+            self.poster.stats() if self.poster is not None
+            else {"leased": False, "reason": "not enrolled"}
+        )
         return state
 
     def _camera_backend(self) -> dict:
@@ -1868,6 +1917,22 @@ class Agent:
         self._radio_gate = (bool(payload.get("squelch_open")),
                             bool(payload.get("monitor")))
         return self._publish_telemetry(payload)
+
+    def sensor_is_simulated(self, kind: str) -> bool:
+        """Whether this slot's readings are a demo sensor's invention.
+
+        The same question `_stamp_simulated` asks of a payload, asked of a slot
+        instead, because one caller needs it before there is a payload: the
+        poster's battery gate. Refusing a REAL camera capture on the strength of
+        a SIMULATED battery is the "part real" station getting the worst of
+        both halves — and that station is not hypothetical, it is the field box
+        at Kennels Road, which has a live camera and a demo power head.
+
+        False when nothing is known, which matches the stamp's posture: a slot
+        with no report is not asserted to be fake.
+        """
+        report = self._reports().get(kind)
+        return bool(report is not None and report.simulated)
 
     def _stamp_simulated(self, payload: dict) -> dict:
         """Mark a stream whose source is a demo sensor.
@@ -2503,6 +2568,8 @@ class Agent:
             self.transport.stop()
         if self.console_proxy is not None:
             self.console_proxy.stop()
+        if self.poster is not None:
+            self.poster.stop()
         if self.host_shell is not None:
             self.host_shell.close()
         self.store.close()

@@ -207,6 +207,47 @@
     },
     {
       "type": "object",
+      "description": "Somebody is watching this station on a multi-station wall: send a small still every interval_seconds for lease_seconds. Leased exactly like video.start, and for the same reason - silence is the stop signal, so a closed tab cannot leave a station capturing for nobody.\n\n**This is not video, and the difference is the whole point.** A live stream is megabits a second through an in-process relay; a scaled JPEG a minute is a few kilobits and can be served from a cache by any worker. A wall of two dozen stations is affordable in the second form and is a different system in the first.\n\n**The station may refuse, and refusal is not failure.** Unlike every other command here, a station is expected to decline this one on its own authority when its battery is low: a capture is an RTSP handshake, a decode and a JPEG encode, and standing load is what browns a solar site out. It accepts the lease and reports the refusal live in health.video.poster.reason, because the refusal is a condition of the site that can begin and end mid-lease, not a property of the request. The platform must not treat a refusing station as broken.\n\nThe still itself goes over HTTP to /media/poster with the station's own credential, not through the relay: the relay carries control and telemetry that must not queue behind bulk data (transport.md). Reported back in health.video.poster.",
+      "properties": {
+        "kind": {
+          "const": "video.poster"
+        },
+        "lease_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "How long this request is good for. Optional: transport.md's timings table states the default a station applies when the platform names none, and the clamp it applies either way.",
+          "maximum": 86400
+        },
+        "interval_seconds": {
+          "type": "number",
+          "minimum": 1,
+          "description": "How often a still is wanted. A REQUEST, not an instruction: the station floors it at its own minimum and may serve faster if something else on the box (a technician on the setup page) is already driving the camera harder, since one capture serves every watcher. It will never serve slower than asked on purpose.",
+          "maximum": 3600
+        }
+      },
+      "required": [
+        "kind"
+      ]
+    },
+    {
+      "type": "object",
+      "description": "Nobody is watching the wall any more. A courtesy that stops the stills sooner than the lease would; the lease expiring remains the guarantee, so a station that never hears this still stops. Reported back in health.video.poster.",
+      "properties": {
+        "kind": {
+          "const": "video.poster_stop"
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 200,
+          "description": "For the station's log, so 'stopped by the platform' can say why."
+        }
+      },
+      "required": [
+        "kind"
+      ]
+    },
+    {
+      "type": "object",
       "description": "Apply site configuration. Defined so both sides agree on the shape, and currently never sent: the platform holds no site policy of its own, and the settings it does share with the station (position, elevation) must not be editable from two ends - see enrolment.md §7 for when this changes. The station applies what it recognises, persists, and reports back as health.config_version; it never assumes the platform saw the change take.",
       "properties": {
         "kind": {

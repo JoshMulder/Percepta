@@ -76,7 +76,7 @@ class CommandRouter:
 
 def build_handlers(radio, light, on_config, stream=None,
                    events=None, updates=None, console_proxy=None,
-                   host_shell=None, renew=None) -> dict[str, Handler]:
+                   host_shell=None, renew=None, poster=None) -> dict[str, Handler]:
     """Wire the contract's commands to the things that carry them out.
 
     Every entry here has a matching field in a telemetry payload — that pairing
@@ -217,6 +217,32 @@ def build_handlers(radio, light, on_config, stream=None,
         # camera is a state of `unavailable` and a reason, not silence.
         handlers["video.start"] = video_start
         handlers["video.stop"] = video_stop
+
+    def poster_start(payload: dict) -> str:
+        """`video.poster`: the wall would like a still every so often.
+
+        Leased like audio and video, and REPLACING rather than extending for
+        the same reason: a shorter renewal has to be able to shorten the lease,
+        or the platform cannot change its mind faster than it once promised.
+
+        This is the one leased command the station may refuse on its own
+        authority — below `shed_poster_below_soc_pct` it stops capturing and
+        says why in `health.video.poster.reason`. The platform asks; the site
+        decides. Accepting here and refusing there is deliberate: the refusal
+        is a live condition of the site, not a property of the request, and it
+        can begin and end in the middle of a lease.
+        """
+        # -> health.video.poster.{leased,sent,refused,reason}
+        return poster.request(
+            payload.get("lease_seconds"), payload.get("interval_seconds"))
+
+    def poster_stop(payload: dict) -> str:
+        return poster.release(
+            str(payload.get("reason") or "stopped by the platform"))
+
+    if poster is not None:
+        handlers["video.poster"] = poster_start
+        handlers["video.poster_stop"] = poster_stop
 
     if on_config is not None:
         # Defined in command.schema.json and currently never sent — the

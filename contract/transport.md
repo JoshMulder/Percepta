@@ -531,6 +531,8 @@ choose something reasonable and not match.
 | `radio.audio` lease, when `lease_seconds` is absent | 30 s | station default |
 | `video.start` lease, when the platform states none | 10 s | station default |
 | `radio.spectrum` lease, when `lease_seconds` is absent | 15 s | station default |
+| `video.poster` lease, when the platform states none | 180 s | station default |
+| `video.poster` interval, when the platform states none | 60 s | station default |
 | Any lease the station will honour | clamped to **5–300 s** | station |
 | …except `video.start`, clamped to | **5–30 s** | station |
 | Renewal, for every lease | at or before **one third** of the lease | platform |
@@ -546,7 +548,24 @@ choose something reasonable and not match.
 | Credential overlap after renewal | 24 h | platform |
 | Revocation takes effect within | 30 s | platform |
 
-Four rules go with the table, because the numbers alone do not settle it.
+Five rules go with the table, because the numbers alone do not settle it.
+
+**The poster lease is the long one, for the mirror image of video's reason.**
+Video's lease is short because the tail after an abandoned view costs
+megabytes. A poster costs about 20 kB a minute, so the tail is worth
+approximately nothing — and a lease shorter than the interval would be actively
+wrong, because it would expire between captures and make every single capture a
+cold start against a camera that had just been released. Three intervals is the
+smallest number that survives two lost renewals, which is the same one-third
+rule the rest of the table follows, read from the other end.
+
+**And the poster is the one lease a station is expected to refuse.** Every other
+command here is a request the station carries out if it can; this one it
+declines on its own authority when its battery is low, because a capture is
+standing load and standing load is what browns out a solar site. It accepts the
+lease and reports the refusal in `health.video.poster.reason`, which can begin
+and end in the middle of a lease — a refusing station is not a broken one, and
+the platform must not treat it as one.
 
 **Video's lease is the short one because video is the expensive one.** Every
 other stream costs tens of kilobits per second and video costs megabits, so the

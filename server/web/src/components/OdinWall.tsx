@@ -210,6 +210,11 @@ export function OdinWall({
         selectedId={selectedId}
         onSelect={select}
         alerts={alertsByStation}
+        // The tiles on screen are exactly the stations worth a picture, so the
+        // wall's layout IS the demand signal. Nothing else has to be kept in
+        // step with it — a station that collapses into the nominal count stops
+        // being asked in the same render that removes its tile.
+        onShowing={watch.setPosters}
       />
 
       <div className="odin-map">
