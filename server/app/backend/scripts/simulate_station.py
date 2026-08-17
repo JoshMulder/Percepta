@@ -250,6 +250,10 @@ class StationSim:
         #: this station for a still gets told there is no camera, rather than
         #: getting a tile that stays blank with no explanation anywhere.
         self.poster_reason = "simulated station: no camera"
+        #: Whether the platform currently holds a poster lease here. See
+        #: the command handler for why this is tracked rather than nailed
+        #: to false.
+        self.poster_leased = False
         self.config_version = 1
         self.uptime_s = 0.0
         self.health_due = 0.0
@@ -317,6 +321,13 @@ class StationSim:
             # state carrying the reason — the same rule `video.start` follows
             # two branches up. Ignoring it would leave a developer's wall
             # showing blank tiles with nothing anywhere saying why.
+            #
+            # `leased` tracks the command, because the contract names it as the
+            # observable for `video.poster` and a field that is always false is
+            # not an observable — a lease that never registers here would let a
+            # broken demand path look identical to a working one against the
+            # only station most development ever runs against.
+            self.poster_leased = kind == "video.poster"
             self.poster_reason = (
                 "simulated station: no camera"
                 if kind == "video.poster"
@@ -556,7 +567,10 @@ class StationSim:
                     "state": self.stream_state,
                     "reason": "this is a simulator and has no camera",
                 },
-                "poster": {"leased": False, "reason": self.poster_reason},
+                "poster": {
+                    "leased": self.poster_leased,
+                    "reason": self.poster_reason,
+                },
             },
         }
 

@@ -452,11 +452,20 @@ class Hub:
         # Leave first, so a wall that has scrolled a station off screen stops
         # paying for it in the same message that starts paying for its
         # replacement. The other order briefly holds both.
+        dropped: list[uuid.UUID] = []
         for group in list(self.groups.groups_of(conn)):
             if group.endswith(f":{POSTER_STREAM}") and group not in groups:
                 await self._leave(conn, group)
+                # `:gsu:{station}:poster` — the same positional parse the group
+                # registry does, so the id comes back out the way it went in.
+                parts = group.split(":")
+                try:
+                    dropped.append(uuid.UUID(parts[-2]))
+                except (IndexError, ValueError):  # pragma: no cover - defensive
+                    continue
         for group in groups:
             await self._join(conn, group)
+        self._stop_unwanted(dropped)
         # Recorded on the connection as well as in the registry, so the
         # revalidation sweep has something to re-check. Group membership alone
         # would be invisible to it, and an operator taken off the rota mid-shift
@@ -484,6 +493,32 @@ class Hub:
         # tenant's audit trail and bury the joins that do mean something.
         return list(groups.values())
 
+    def _stop_unwanted(self, station_ids: list[uuid.UUID]) -> None:
+        """Tell a station to stop, once NOBODY on this worker still wants it.
+
+        The lease expiring is still the guarantee — a station that never hears
+        this stops on its own, which is what makes the design survive a crashed
+        platform. This is the courtesy that makes it prompt: without it a wall
+        can scroll a station off screen and leave its camera running for the
+        rest of a three-minute lease, and a wall being resized or re-sorted does
+        that repeatedly.
+
+        CHECKED AGAINST THE WHOLE REGISTRY, not just this connection. Two
+        operators can have the same station on their walls, and one of them
+        closing a tab must not stop the other's picture.
+        """
+        if not station_ids:
+            return
+        try:
+            from backend.services import poster_demand
+
+            still_wanted = set(self.groups.stations_subscribed_to(POSTER_STREAM))
+            for station_id in station_ids:
+                if station_id not in still_wanted:
+                    poster_demand.request(station_id, on=False)
+        except Exception:  # noqa: BLE001 - the lease is the guarantee, not this
+            log.debug("Could not stop posters promptly.", exc_info=True)
+
     async def poster_leave(self, conn: Connection, station_id: uuid.UUID) -> None:
         """Stop asking one station for stills.
 
@@ -498,6 +533,7 @@ class Hub:
         for group in list(self.groups.groups_of(conn)):
             if group.endswith(f":gsu:{station_id}:{POSTER_STREAM}"):
                 await self._leave(conn, group)
+        self._stop_unwanted([station_id])
 
     async def watch_leave(self, conn: Connection, station_id: uuid.UUID) -> None:
         """Stop guarding one station.
