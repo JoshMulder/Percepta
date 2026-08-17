@@ -391,6 +391,39 @@ class CommandTests(unittest.TestCase):
         }
         self.assertTrue(kinds <= set(self.router.handlers), kinds - set(self.router.handlers))
 
+    def test_the_rediscovery_rebuild_keeps_every_handler(self):
+        """The SECOND call site, which is the one that reaches the field.
+
+        `_attach` builds the handler table once at enrolment, and
+        `build_devices` REPLACES it wholesale whenever devices are
+        rediscovered — which happens on startup. So a handler wired into
+        `_attach` alone is registered for a moment and then silently dropped
+        before the station ever answers a command.
+
+        That shipped. v0.4.4 went to a field station reporting
+        `health.video.poster` in its health frame — proving the publisher was
+        constructed — while answering `video.poster` with "Ignoring unknown
+        command (station is older than the platform)", because this rebuild did
+        not pass it. The test above passed throughout, because it only ever
+        looked at the table `_attach` produced.
+
+        Asserted against the SCHEMA rather than against a remembered list, so
+        the next command added is covered without anybody remembering to come
+        back here.
+        """
+        kinds = {
+            option["properties"]["kind"]["const"] for option in COMMANDS["oneOf"]
+        }
+        self.agent.router = self.router
+        self.agent.build_devices()
+
+        missing = kinds - set(self.agent.router.handlers)
+        self.assertFalse(
+            missing,
+            f"the rediscovery rebuild dropped {sorted(missing)} — every argument "
+            f"_attach passes to build_handlers must be passed there too",
+        )
+
     def test_config_refresh_triggers_an_immediate_renewal(self):
         """`config.refresh` is how a platform name/timezone edit reaches the box:
         it wakes the renewer so the station re-fetches its enrolment record now,

@@ -729,11 +729,24 @@ class Agent:
         self._log_unconfigured = True
 
         if self.router is not None:
+            # EVERY argument `_attach` passes has to be passed here too.
+            #
+            # This rebuild exists so a device discovered after enrolment gets
+            # its commands; it REPLACES the table wholesale, so anything left
+            # off is silently unregistered the first time discovery runs — and
+            # discovery runs on startup, so "left off here" means "never worked
+            # in the field", however carefully it was wired in `_attach`.
+            #
+            # That is not hypothetical: `poster` was added to `_attach` and not
+            # to this call, so v0.4.4 shipped a station that reported
+            # `health.video.poster` — proving the publisher existed — and
+            # answered `video.poster` with "unknown command". Two call sites,
+            # one of them tested.
             self.router.handlers = build_handlers(
                 self.radio, self.light, self._apply_config,
                 getattr(self, "stream", None), self.events, updates=self.updates,
                 console_proxy=self.console_proxy, host_shell=self.host_shell,
-                renew=self._renew_from_command,
+                renew=self._renew_from_command, poster=self.poster,
             )
 
         self._report_capabilities()
