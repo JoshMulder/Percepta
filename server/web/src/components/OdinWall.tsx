@@ -7,8 +7,9 @@ import { useWatchAudio } from "../useWatchAudio";
 import { AlertRail } from "./AlertRail";
 import { FleetMap } from "./FleetMap";
 import { OdinStatusBar } from "./OdinStatusBar";
+import { StanceWall } from "./StanceWall";
 import { StationPreviewDrawer } from "./StationPreviewDrawer";
-import { TileWall, alertIndex } from "./TileWall";
+import { TileWall, alertIndex, byWorst } from "./TileWall";
 import { TranscriptFeed } from "./TranscriptFeed";
 import { WatchStrip } from "./WatchStrip";
 
@@ -63,6 +64,41 @@ export function OdinWall({
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
+  /**
+   * Which wall layout is on screen. A PROTOTYPE TOGGLE, not a setting.
+   *
+   * `stance` is an experiment: the wall as an allocator that spends its area on
+   * the stations that earned it, rather than a grid that gives every station the
+   * same tile and sizes itself for a fleet that does not exist. It is behind a
+   * switch because the argument against it is real — the layout reshapes as the
+   * fleet's state changes, and escalation is exactly when an operator has no
+   * spare attention for a screen that has rearranged itself. That is a claim
+   * about people, and the only way to settle it is to watch a real one use it.
+   *
+   * Kept in localStorage rather than in `displayPrefs` deliberately: prefs are
+   * synced and durable, and this is neither. It should be cheap to delete.
+   */
+  const [layout, setLayout] = useState<"grid" | "stance">(() => {
+    try {
+      return localStorage.getItem("odin.layout") === "stance" ? "stance" : "grid";
+    } catch {
+      // Private browsing, or storage disabled. The grid is the safe default and
+      // an unavailable preference is not worth failing a render over.
+      return "grid";
+    }
+  });
+  const toggleLayout = useCallback(() => {
+    setLayout((was) => {
+      const next = was === "grid" ? "stance" : "grid";
+      try {
+        localStorage.setItem("odin.layout", next);
+      } catch {
+        /* nothing to do; the toggle still works for this session */
+      }
+      return next;
+    });
+  }, []);
+
   // The push feed, with the poll behind it. `link` is surfaced on the status
   // bar rather than kept internal: a wall that quietly drops from live to
   // polling still looks alive, and the operator only discovers the difference
@@ -110,6 +146,9 @@ export function OdinWall({
   /** Open alerts indexed by station, so the tile sort can read them without a
    *  linear scan inside the comparator. */
   const alertsByStation = useMemo(() => alertIndex(alerts), [alerts]);
+  // One comparator, shared. Two sorts on one screen is two answers to "which
+  // station is worst", and whichever layout is on shows a different lead.
+  const ranker = useMemo(() => byWorst(alertsByStation), [alertsByStation]);
 
   const unacked = useMemo(
     () => alerts.filter((a) => a.state === "open").length,
@@ -205,17 +244,32 @@ export function OdinWall({
         onChanged={refreshAlerts}
       />
 
-      <TileWall
-        stations={stations}
-        selectedId={selectedId}
-        onSelect={select}
-        alerts={alertsByStation}
-        // The tiles on screen are exactly the stations worth a picture, so the
-        // wall's layout IS the demand signal. Nothing else has to be kept in
-        // step with it — a station that collapses into the nominal count stops
-        // being asked in the same render that removes its tile.
-        onShowing={watch.setPosters}
-      />
+      {layout === "stance" ? (
+        <StanceWall
+          stations={stations}
+          selectedId={selectedId}
+          onSelect={select}
+          alerts={alertsByStation}
+          onShowing={watch.setPosters}
+          rank={ranker}
+        />
+      ) : (
+        <TileWall
+          stations={stations}
+          selectedId={selectedId}
+          onSelect={select}
+          alerts={alertsByStation}
+          // The tiles on screen are exactly the stations worth a picture, so the
+          // wall's layout IS the demand signal. Nothing else has to be kept in
+          // step with it — a station that collapses into the nominal count stops
+          // being asked in the same render that removes its tile.
+          onShowing={watch.setPosters}
+        />
+      )}
+      <button type="button" className="odin-layout-toggle" onClick={toggleLayout}
+        title="Switch wall layout (prototype)">
+        {layout === "stance" ? "stance" : "grid"}
+      </button>
 
       <div className="odin-map">
         {mapConfig ? (

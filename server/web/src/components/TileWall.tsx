@@ -195,6 +195,26 @@ function isNominal(s: FleetStation): boolean {
   return true;
 }
 
+/**
+ * The wall's order, as a comparator the other layouts can borrow.
+ *
+ * Exported rather than duplicated: two sorts on one screen is two answers to
+ * "which station is worst", and the disagreement would surface as a station
+ * that leads one layout and sits mid-list in the other — with no way to tell
+ * which was right.
+ */
+export function byWorst(alerts?: Record<string, StationAlertSummary>) {
+  return (a: FleetStation, b: FleetStation) => {
+    const byRank = rank(a, alerts?.[a.id]) - rank(b, alerts?.[b.id]);
+    if (byRank !== 0) return byRank;
+    const byOrg = byText.compare(a.organization_name, b.organization_name);
+    if (byOrg !== 0) return byOrg;
+    const byName = byText.compare(a.name, b.name);
+    if (byName !== 0) return byName;
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  };
+}
+
 export function TileWall({
   stations,
   selectedId,
@@ -226,18 +246,12 @@ export function TileWall({
       // Copied before sorting. `stations` belongs to the caller's fleet state and
       // is handed to the map and the rail as well; sorting in place would reorder
       // what they are rendering from, mid-poll, from inside a memo.
-      [...stations].sort((a, b) => {
-        const byRank = rank(a, alerts?.[a.id]) - rank(b, alerts?.[b.id]);
-        if (byRank !== 0) return byRank;
-        const byOrg = byText.compare(a.organization_name, b.organization_name);
-        if (byOrg !== 0) return byOrg;
-        const byName = byText.compare(a.name, b.name);
-        if (byName !== 0) return byName;
-        // Names repeat across a fleet ("Ridge", "North Mast"), including inside
-        // one organisation. Without a last resort those two tiles trade places
-        // on every poll, which is the exact flicker the sort exists to prevent.
-        return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
-      }),
+      //
+      // Names repeat across a fleet ("Ridge", "North Mast"), including inside one
+      // organisation, so `byWorst` ends on the id — without a last resort those
+      // two tiles trade places on every poll, which is the exact flicker the sort
+      // exists to prevent.
+      [...stations].sort(byWorst(alerts)),
     [stations, alerts],
   );
 

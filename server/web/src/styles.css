@@ -5442,3 +5442,181 @@ body {
    font-size - the same number, said relative to the thing it belongs to. */
 .pdash-tab { padding: 0.43em 1em; }
 .pdash-tabs { gap: 0.143em; }
+
+/* ---------------------------------------------------------------- stance ---
+   The wall as an allocator: four forms, area handed out worst-first.
+
+   The through-line, and the reason this is not the old tile with bigger
+   numbers: NOTHING IS DRAWN ON TOP OF A PICTURE. Every form puts the still in a
+   bounded region with the words beside or beneath it, so there is no scrim
+   anywhere below this line and no text whose legibility depends on what a
+   camera happened to be pointing at. The picture is also never scaled past its
+   source — 480x270 — because a 900px render of a 480px JPEG is the same site,
+   blurrier, and pretending otherwise is the one lie a wall must not tell. */
+.stance-wall {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 10px;
+  padding: 10px;
+  overflow-y: auto;
+}
+.stance-strip, .stance-panel, .stance-card, .stance-chip {
+  position: relative;
+  display: flex;
+  padding: 0;
+  text-align: left;
+  background: var(--odin-panel);
+  border: 1px solid var(--odin-line);
+  border-radius: 3px;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  overflow: hidden;
+}
+.stance-strip.warn, .stance-panel.warn, .stance-card.warn, .stance-chip.warn { background: #100e0a; }
+.stance-strip.bad, .stance-panel.bad, .stance-card.bad, .stance-chip.bad { background: #140a08; }
+.stance-strip:hover, .stance-panel:hover, .stance-card:hover, .stance-chip:hover { border-color: #2c3d4b; }
+.stance-strip:focus-visible, .stance-panel:focus-visible,
+.stance-card:focus-visible, .stance-chip:focus-visible {
+  outline: 2px solid var(--brand); outline-offset: 1px;
+}
+.stance-strip[aria-current="true"], .stance-panel[aria-current="true"],
+.stance-card[aria-current="true"], .stance-chip[aria-current="true"] { border-color: var(--brand); }
+
+/* The state band, rotated to the left edge and run full height. Six pixels
+   along the top of a 1280px strip is a hairline nobody sees from three metres;
+   the same six pixels down 290px of height stacks three stations into one
+   vertical colour column read in a single glance. */
+.stance-edge { width: 6px; flex: none; background: #2a3542; }
+.stance-edge.warn { background: var(--odin-warn); }
+.stance-edge.bad { background: var(--odin-bad); }
+
+.stance-strip { width: 100%; flex-direction: row; }
+.stance-panel { width: calc(50% - 5px); flex-direction: column; }
+.stance-card { width: 250px; flex-grow: 1; max-width: 320px; flex-direction: column; }
+.stance-chip { width: calc(25% - 8px); min-width: 260px; flex-grow: 1; align-items: center; height: 30px; gap: 8px; }
+
+/* The picture. `contain` on the strip so a 16:9 still is never cropped when it
+   has the room to be whole; `cover` on the smaller forms where it is a band by
+   intent. Desaturated everywhere, which is the one thing carried over from the
+   old tile and for its original reason: this is the only element on the wall
+   with no editorial control over its content, and a red truck in shot must not
+   compete with the red that means a station is gone. */
+.stance-shot {
+  display: block;
+  flex: none;
+  background: #0c1116;
+  object-fit: cover;
+  filter: saturate(0.55);
+  user-select: none;
+}
+.stance-shot.strip { width: 515px; max-width: 46%; align-self: stretch; object-fit: cover; }
+.stance-shot.panel { width: 100%; aspect-ratio: 16 / 9; }
+.stance-shot.card { width: 100%; aspect-ratio: 16 / 9; }
+
+/* No picture is a DIFFERENT fact from a dark picture, and a genuine night frame
+   is also nearly black — so absence is carried by a texture no camera produces
+   rather than by darkness. */
+.stance-shot.empty {
+  display: flex; align-items: center; justify-content: center;
+  color: #3d4d5c; font: 11px/1 var(--mono);
+  background-image: repeating-linear-gradient(45deg,
+    transparent 0 6px, rgba(255,255,255,0.035) 6px 12px);
+}
+
+.stance-ledger {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 10px 12px; min-width: 0; flex: 1;
+}
+.stance-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.stance-name {
+  font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.stance-strip .stance-name { font-size: 30px; }
+.stance-panel .stance-name { font-size: 20px; }
+.stance-card .stance-name { font-size: 14px; }
+.stance-org {
+  color: #6c8092; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.stance-strip .stance-org { font-size: 14px; }
+.stance-panel .stance-org, .stance-card .stance-org { font-size: 11px; }
+
+/* The state in PLAIN WORDS, at a size that carries. "offline for 2h" is a
+   sentence somebody can act on; a status glyph plus a timestamp elsewhere is
+   two things to assemble at a distance. */
+.stance-state { color: #8fa6b8; }
+.stance-strip .stance-state { font-size: 20px; margin-top: 2px; }
+.stance-panel .stance-state { font-size: 14px; }
+.stance-state.warn { color: var(--odin-warn); }
+.stance-state.bad { color: var(--odin-bad); }
+
+.stance-soc { display: flex; align-items: center; gap: 8px; }
+.stance-soc-track {
+  height: 8px; flex: 1; max-width: 240px; background: #16202a;
+  border-radius: 2px; overflow: hidden;
+}
+.stance-chip .stance-soc-track { height: 4px; max-width: 60px; }
+.stance-soc-fill { display: block; height: 100%; background: var(--odin-nominal); }
+.stance-soc-track.warn .stance-soc-fill {
+  background-image: repeating-linear-gradient(45deg, transparent 0 3px,
+    rgba(255,255,255,0.22) 3px 6px);
+}
+.stance-soc em {
+  font: 17px/1 var(--mono); font-variant-numeric: tabular-nums;
+  color: #8fa6b8; font-style: normal;
+}
+.stance-wx { font: 13px/1.3 var(--mono); color: #7d93a8; }
+.stance-row { display: flex; align-items: center; gap: 12px; margin-top: auto; }
+.stance-vitals { display: flex; gap: 8px; }
+.stance-glyph {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 1.5rem; height: 1.5rem; border-radius: 2px;
+  background: #131c25; color: #55697a;
+}
+.stance-card .stance-glyph { width: 1.15rem; height: 1.15rem; }
+.stance-glyph.absent { opacity: 0.28; }
+.stance-glyph.warn { color: var(--odin-warn); background: rgba(232, 176, 75, 0.12); }
+.stance-fault {
+  display: flex; align-items: baseline; gap: 6px;
+  font: 15px/1 var(--mono); font-variant-numeric: tabular-nums;
+  padding: 3px 7px; border-radius: 2px;
+}
+.stance-fault.warn { color: var(--odin-warn); background: rgba(232, 176, 75, 0.12); }
+.stance-fault.bad { color: var(--odin-bad); background: rgba(255, 92, 57, 0.12); }
+.stance-fault em { font-size: 11px; font-style: normal; opacity: 0.8; }
+.stance-mark {
+  font: 9px/1 var(--mono); padding: 2px 4px; border-radius: 2px; flex: none;
+}
+.stance-mark.hush { color: #7d93a8; background: #16202a; }
+.stance-mark.demo { color: var(--odin-warn); background: rgba(232, 176, 75, 0.14); }
+
+.stance-chip-name {
+  font-size: 12px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; flex: 1; padding-left: 4px;
+}
+.stance-chip-state { font: 10px/1 var(--mono); color: #6c8092; flex: none; }
+.stance-chip .stance-soc { padding-right: 8px; }
+
+/* The stations the wall ran out of room for. Not a control: there is nothing
+   behind it to open, and the sites it stands for are the ones nobody needs to
+   look at. Tabular figures because the count changes between polls and a digit
+   that reflows is motion, which on this wall means something is wrong. */
+.stance-rest {
+  display: flex; align-items: center; padding: 0 12px; height: 30px;
+  font: 11px/1 var(--mono); font-variant-numeric: tabular-nums;
+  color: #55697a; border: 1px dashed var(--odin-line); border-radius: 3px;
+}
+
+/* The prototype layout switch. Deliberately small and dim: it is a developer's
+   handle on an experiment, not a control an operator on shift is meant to
+   reach for, and it must never compete with anything on the wall that means
+   something. Bottom-left of the wall region, out of the reading path — trouble
+   is top-left and nothing may sit where trouble goes. */
+.odin-layout-toggle {
+  position: absolute; left: 10px; bottom: 8px; z-index: 3;
+  padding: 2px 8px; font: 10px/1.6 var(--mono);
+  color: #55697a; background: rgba(10, 14, 19, 0.85);
+  border: 1px solid var(--odin-line); border-radius: 2px; cursor: pointer;
+}
+.odin-layout-toggle:hover { color: #8fa6b8; border-color: #2c3d4b; }
