@@ -264,6 +264,7 @@ export function OdinWall({
         onChanged={refreshAlerts}
       />
 
+      <div className="odin-wall-slot">
       {layout === "quiet" ? (
         <QuietWall
           stations={stations}
@@ -299,10 +300,16 @@ export function OdinWall({
           onShowing={watch.setPosters}
         />
       )}
+      {/* Inside the wall's own slot, not floating over the whole page. It was
+          absolutely positioned against `.odin`, which is the ENTIRE grid
+          including the 9.5rem watch strip — so "bottom left" put a 10px grey
+          label underneath the watch strip at the foot of the screen, where it
+          was rendered, correct, and invisible. */}
       <button type="button" className="odin-layout-toggle" onClick={toggleLayout}
-        title="Switch wall layout (prototype)">
-        {layout}
+        title="Switch wall layout (prototype): grid, stance, quiet">
+        layout: <b>{layout}</b>
       </button>
+      </div>
 
       <div className="odin-map">
         {mapConfig ? (

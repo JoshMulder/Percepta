@@ -5614,12 +5614,13 @@ body {
    something. Bottom-left of the wall region, out of the reading path — trouble
    is top-left and nothing may sit where trouble goes. */
 .odin-layout-toggle {
-  position: absolute; left: 10px; bottom: 8px; z-index: 3;
-  padding: 2px 8px; font: 10px/1.6 var(--mono);
-  color: #55697a; background: rgba(10, 14, 19, 0.85);
-  border: 1px solid var(--odin-line); border-radius: 2px; cursor: pointer;
+  position: absolute; right: 10px; top: 8px; z-index: 4;
+  padding: 4px 10px; font: 11px/1.5 var(--mono);
+  color: #8fa6b8; background: rgba(10, 14, 19, 0.92);
+  border: 1px solid #2c3d4b; border-radius: 2px; cursor: pointer;
 }
-.odin-layout-toggle:hover { color: #8fa6b8; border-color: #2c3d4b; }
+.odin-layout-toggle b { color: var(--brand); font-weight: 600; }
+.odin-layout-toggle:hover { color: #e8eef4; border-color: var(--brand); }
 
 /* ----------------------------------------------------------------- quiet ---
    NOTHING TO REPORT: the wall is what is wrong, not a register of the fleet.
@@ -5792,3 +5793,28 @@ body {
 }
 .quiet-group-chip:hover { border-color: #2c3d4b; color: #e8eef4; }
 .quiet-group-names em { font: 10px/1 var(--mono); color: #55697a; font-style: normal; }
+
+/* The wall's own cell, so the layout toggle has something to anchor to.
+   `.odin` is the WHOLE page grid — status bar, rail, wall, map, and a 9.5rem
+   watch strip along the bottom — so a control positioned against it at
+   "bottom left" landed under the watch strip at the foot of the screen. It was
+   rendered and correct and nobody could find it. */
+.odin-wall-slot {
+  grid-column: 2;
+  grid-row: 2;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+/* All three walls fill the slot. `.odin-wall-grid` carried `grid-column: 2`
+   from when it was a grid child itself; the stance and quiet walls never had
+   it, which left them auto-placed into whatever cell happened to be free. */
+.odin-wall-slot > .odin-wall-grid,
+.odin-wall-slot > .stance-wall,
+.odin-wall-slot > .quiet-wall {
+  flex: 1;
+  min-height: 0;
+  grid-column: auto;
+}
