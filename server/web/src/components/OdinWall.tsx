@@ -7,6 +7,7 @@ import { useWatchAudio } from "../useWatchAudio";
 import { AlertRail } from "./AlertRail";
 import { FleetMap } from "./FleetMap";
 import { OdinStatusBar } from "./OdinStatusBar";
+import { QuietWall } from "./QuietWall";
 import { StanceWall } from "./StanceWall";
 import { StationPreviewDrawer } from "./StationPreviewDrawer";
 import { TileWall, alertIndex, byWorst } from "./TileWall";
@@ -44,6 +45,24 @@ import { WatchStrip } from "./WatchStrip";
  * (api/auth.py), which would destroy the thing the operator is watching in order
  * to glance at one site in it.
  */
+/**
+ * The wall layouts on offer. Two are PROTOTYPES sitting beside the shipped grid
+ * so they can be judged against real data rather than a mockup:
+ *
+ *   grid    one tile per station, the wall as a register of the fleet
+ *   stance  an allocator: area handed out worst-first in four forms
+ *   quiet   the wall as the list of what is wrong, empty when nothing is
+ *
+ * They disagree about something real, which is why both exist. STANCE keeps
+ * every station on the wall and varies how much room each gets; QUIET takes the
+ * harder position that a healthy station should not be on the wall at all. The
+ * argument between them is about whether an operator needs to see the calm
+ * fleet in order to trust the screen, and that is a question about people —
+ * it cannot be settled by reading either implementation.
+ */
+const LAYOUTS = ["grid", "stance", "quiet"] as const;
+type Layout = (typeof LAYOUTS)[number];
+
 export function OdinWall({
   fleet,
   adsb,
@@ -78,9 +97,10 @@ export function OdinWall({
    * Kept in localStorage rather than in `displayPrefs` deliberately: prefs are
    * synced and durable, and this is neither. It should be cheap to delete.
    */
-  const [layout, setLayout] = useState<"grid" | "stance">(() => {
+  const [layout, setLayout] = useState<Layout>(() => {
     try {
-      return localStorage.getItem("odin.layout") === "stance" ? "stance" : "grid";
+      const saved = localStorage.getItem("odin.layout");
+      return LAYOUTS.includes(saved as Layout) ? (saved as Layout) : "grid";
     } catch {
       // Private browsing, or storage disabled. The grid is the safe default and
       // an unavailable preference is not worth failing a render over.
@@ -89,7 +109,7 @@ export function OdinWall({
   });
   const toggleLayout = useCallback(() => {
     setLayout((was) => {
-      const next = was === "grid" ? "stance" : "grid";
+      const next = LAYOUTS[(LAYOUTS.indexOf(was) + 1) % LAYOUTS.length];
       try {
         localStorage.setItem("odin.layout", next);
       } catch {
@@ -244,7 +264,20 @@ export function OdinWall({
         onChanged={refreshAlerts}
       />
 
-      {layout === "stance" ? (
+      {layout === "quiet" ? (
+        <QuietWall
+          stations={stations}
+          selectedId={selectedId}
+          onSelect={select}
+          alerts={alertsByStation}
+          onShowing={watch.setPosters}
+          rank={ranker}
+          // The heartbeat is driven by real frame arrival, so it stops when the
+          // feed does. A beat on its own timer would go on reassuring an empty
+          // room that a dead wall was fine.
+          lastFrameAt={lastFrameAt}
+        />
+      ) : layout === "stance" ? (
         <StanceWall
           stations={stations}
           selectedId={selectedId}
@@ -268,7 +301,7 @@ export function OdinWall({
       )}
       <button type="button" className="odin-layout-toggle" onClick={toggleLayout}
         title="Switch wall layout (prototype)">
-        {layout === "stance" ? "stance" : "grid"}
+        {layout}
       </button>
 
       <div className="odin-map">

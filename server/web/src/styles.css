@@ -5620,3 +5620,175 @@ body {
   border: 1px solid var(--odin-line); border-radius: 2px; cursor: pointer;
 }
 .odin-layout-toggle:hover { color: #8fa6b8; border-color: #2c3d4b; }
+
+/* ----------------------------------------------------------------- quiet ---
+   NOTHING TO REPORT: the wall is what is wrong, not a register of the fleet.
+
+   The resting state is a single band and nothing else, so the alarm channel
+   becomes "there is something on the wall at all" — an order of magnitude more
+   contrast than any recolouring within a grid can buy, and it costs no colour.
+   Text is never laid over a picture here either: the still is a panel with the
+   words beside it. */
+.quiet-wall {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 10px; overflow-y: auto;
+}
+.quiet-band {
+  display: flex; align-items: center; gap: 16px; flex: none;
+  padding: 12px 14px; min-height: 64px;
+  background: var(--odin-panel); border: 1px solid var(--odin-line); border-radius: 3px;
+}
+.quiet-band.cases, .quiet-band.storm { min-height: 30px; padding: 4px 14px; order: 99; }
+.quiet-band-left { display: flex; align-items: center; gap: 10px; flex: none; }
+.quiet-band-count { font: 12px/1.4 var(--mono); color: #8fa6b8; }
+.quiet-band.cases .quiet-band-count, .quiet-band.storm .quiet-band-count { font-size: 10px; }
+
+/* The heartbeat. One pulse per digest frame, keyed on that frame arriving and
+   never on a timer — a timer would go on beating happily while the feed was
+   dead, which is the exact failure the beat exists to disprove. It runs ONLY
+   while nothing is wrong, so a new case is the only moving thing in the room. */
+.quiet-beat {
+  width: 8px; height: 8px; border-radius: 50%; flex: none;
+  background: var(--odin-live); animation: quiet-pulse 3s ease-out 1;
+}
+@keyframes quiet-pulse {
+  0% { opacity: 1; transform: scale(1.25); }
+  18% { opacity: 0.85; transform: scale(1); }
+  100% { opacity: 0.35; transform: scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .quiet-beat { animation: none; opacity: 0.8; }
+}
+
+/* One mark per station, fixed order, never coloured. A countable fleet is the
+   thing a blank screen cannot give you: it is the difference between "nothing
+   is wrong" and "nothing is connected". */
+.quiet-muster { display: flex; flex-wrap: wrap; gap: 3px; flex: 1; align-content: center; }
+.quiet-mark { width: 6px; height: 6px; background: #2a3542; display: block; }
+.quiet-muster em { font: 11px/1 var(--mono); color: #55697a; font-style: normal; }
+.quiet-band-right { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; flex: none; }
+.quiet-for {
+  font: 12px/1.3 var(--mono); font-variant-numeric: tabular-nums; color: #7d93a8;
+}
+.quiet-for.warn { color: var(--odin-warn); }
+.quiet-memory { font: 10px/1.3 var(--mono); color: #55697a; }
+
+/* The lead: the worst thing, given the panel. */
+.quiet-lead {
+  display: flex; gap: 16px; padding: 0; text-align: left;
+  background: var(--odin-panel); border: 1px solid var(--odin-line);
+  border-radius: 3px; color: inherit; font: inherit; cursor: pointer;
+  overflow: hidden; flex: none;
+}
+.quiet-lead.warn { background: #100e0a; border-color: #2b2418; }
+.quiet-lead.bad { background: #140a08; border-color: #35190f; }
+.quiet-lead:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
+/* 640 wide is 1.33x the 480px source and the ceiling. Past that the JPEG shows
+   at three metres, and the extra pixels are a lie about how much of the site
+   you can actually see. */
+.quiet-lead-shot {
+  width: 640px; max-width: 46%; align-self: stretch; flex: none;
+  object-fit: cover; background: #0c1116; filter: saturate(0.55);
+}
+.quiet-lead-shot.empty {
+  display: flex; align-items: center; justify-content: center; min-height: 340px;
+  color: #3d4d5c; font: 12px/1 var(--mono);
+  background-image: repeating-linear-gradient(45deg,
+    transparent 0 6px, rgba(255,255,255,0.035) 6px 12px);
+}
+.quiet-lead-body {
+  display: flex; flex-direction: column; gap: 6px; padding: 16px 18px 14px; min-width: 0; flex: 1;
+}
+.quiet-lead-name { font-size: 32px; font-weight: 600; line-height: 1.1; }
+.quiet-lead-org { font-size: 15px; color: #6c8092; }
+.quiet-lead-state { font-size: 24px; margin: 6px 0 2px; color: #8fa6b8; }
+.quiet-lead-state.warn { color: var(--odin-warn); }
+.quiet-lead-state.bad { color: var(--odin-bad); }
+
+/* The device sentences written out, not hidden on hover: a wall display
+   frequently has no pointer, and "not fitted" against "stopped answering" is
+   the difference between doing nothing and driving four hours. */
+.quiet-devices { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 4px 0; }
+.quiet-device { font: 12px/1.5 var(--mono); color: #55697a; }
+.quiet-device em { color: #7d93a8; font-style: normal; margin-right: 6px; }
+.quiet-device.warn { color: var(--odin-warn); }
+.quiet-device.warn em { color: var(--odin-warn); }
+
+.quiet-lead-foot {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-top: auto;
+  font: 12px/1.4 var(--mono);
+}
+.quiet-soc { display: flex; align-items: center; gap: 8px; }
+.quiet-soc-track { width: 160px; height: 12px; background: #16202a; border-radius: 2px; overflow: hidden; }
+.quiet-soc-fill { display: block; height: 100%; background: var(--odin-nominal); }
+.quiet-soc-track.warn .quiet-soc-fill {
+  background-image: repeating-linear-gradient(45deg, transparent 0 3px,
+    rgba(255,255,255,0.22) 3px 6px);
+}
+.quiet-soc em { font-style: normal; font-size: 16px; color: #8fa6b8; font-variant-numeric: tabular-nums; }
+.quiet-wx { color: #7d93a8; }
+.quiet-alert, .quiet-cond {
+  padding: 3px 8px; border-radius: 2px; display: inline-flex; gap: 6px; align-items: baseline;
+}
+.quiet-alert.warn, .quiet-cond { color: var(--odin-warn); background: rgba(232, 176, 75, 0.12); }
+.quiet-alert.bad { color: var(--odin-bad); background: rgba(255, 92, 57, 0.12); }
+.quiet-cond em { font-style: normal; font-size: 11px; opacity: 0.85; }
+.quiet-ver { color: #55697a; }
+.quiet-demo { color: var(--odin-warn); background: rgba(232, 176, 75, 0.14); padding: 3px 8px; border-radius: 2px; }
+
+/* A case that is not the worst. */
+.quiet-file {
+  display: flex; align-items: center; gap: 12px; padding: 0 12px 0 0; flex: none;
+  height: 96px; text-align: left; background: var(--odin-panel);
+  border: 1px solid var(--odin-line); border-radius: 3px;
+  color: inherit; font: inherit; cursor: pointer; overflow: hidden;
+}
+.quiet-file.warn { background: #100e0a; }
+.quiet-file.bad { background: #140a08; }
+.quiet-file:focus-visible { outline: 2px solid var(--brand); outline-offset: 1px; }
+.quiet-file-edge { width: 5px; align-self: stretch; flex: none; background: #2a3542; }
+.quiet-file-edge.warn { background: var(--odin-warn); }
+.quiet-file-edge.bad { background: var(--odin-bad); }
+.quiet-file-shot {
+  width: 160px; height: 90px; flex: none; object-fit: cover;
+  background: #0c1116; filter: saturate(0.55); border-radius: 2px;
+}
+.quiet-file-shot.empty {
+  display: flex; align-items: center; justify-content: center;
+  color: #3d4d5c; font: 10px/1 var(--mono);
+  background-image: repeating-linear-gradient(45deg,
+    transparent 0 5px, rgba(255,255,255,0.035) 5px 10px);
+}
+.quiet-file-body { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; }
+.quiet-file-name { font-size: 18px; font-weight: 600; }
+.quiet-file-org { font-size: 11px; color: #6c8092; }
+.quiet-file-state { font: 15px/1 var(--mono); color: #8fa6b8; flex: none; }
+.quiet-file-state.warn { color: var(--odin-warn); }
+.quiet-file-state.bad { color: var(--odin-bad); }
+
+/* A storm, grouped by cause. "14 offline, Meridian Air, all since 03:11" is ONE
+   case, not fourteen — and an operator who reads fourteen starts fourteen
+   investigations. */
+.quiet-storm { display: flex; flex-direction: column; gap: 6px; }
+.quiet-group {
+  display: flex; align-items: center; gap: 14px; height: 64px; padding-right: 12px;
+  background: var(--odin-panel); border: 1px solid var(--odin-line); border-radius: 3px;
+  overflow: hidden;
+}
+.quiet-group.warn { background: #100e0a; }
+.quiet-group.bad { background: #140a08; }
+.quiet-group-count {
+  font: 26px/1 var(--mono); font-variant-numeric: tabular-nums;
+  color: #e8eef4; min-width: 48px; text-align: right;
+}
+.quiet-group-body { display: flex; flex-direction: column; gap: 3px; flex: none; min-width: 220px; }
+.quiet-group-cause { font-size: 15px; color: #e8eef4; }
+.quiet-group-when { font: 11px/1 var(--mono); color: #7d93a8; }
+.quiet-group-names { display: flex; flex-wrap: wrap; gap: 4px; flex: 1; align-items: center; }
+.quiet-group-chip {
+  font: 10px/1 var(--mono); color: #8fa6b8; background: #131c25;
+  border: 1px solid var(--odin-line); border-radius: 2px;
+  padding: 3px 6px; cursor: pointer;
+}
+.quiet-group-chip:hover { border-color: #2c3d4b; color: #e8eef4; }
+.quiet-group-names em { font: 10px/1 var(--mono); color: #55697a; font-style: normal; }
